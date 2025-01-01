@@ -1,0 +1,3 @@
+[submodule "libs/hal"]
+	path = libs/hal
+	url = git@github.com:matgla/yasos_hal.zig.git
