@@ -1,0 +1,8 @@
+path add $ORIGIN/../libs/hal/renode/Renode_RP2040
+$global.FIRMWARE=$ORIGIN/../zig-out/bin/yasos_kernel
+include @run_firmware.resc
+
+machine StartGdbServer 3333 true sysbus.cpu0
+machine StartGdbServer 3333 true sysbus.cpu1
+
+showAnalyzer sysbus.uart0

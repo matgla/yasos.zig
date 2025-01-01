@@ -1,5 +1,5 @@
 //
-// main.zig
+// kernel_log.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,23 +18,24 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
+
 const board = @import("board");
 
-const log = @import("log/kernel_log.zig").kernel_log;
+const KernelLog = struct {
+    pub fn print(self: KernelLog, comptime str: []const u8, comptime args: anytype) void {
+        // Writing to kernel log is not critical and if not working
+        // there is no alternative implemented
+        _ = self.writer.print(str, args) catch {};
+    }
 
-fn initialize_board() void {
-    try board.uart.uart0.init(.{
-        .baudrate = 115200,
-    });
-}
+    pub fn write(self: KernelLog, comptime str: []const u8) void {
+        _ = self.writer.write(str) catch {};
+    }
 
-pub export fn main() void {
-    initialize_board();
+    writer: @TypeOf(board.uart.uart0).Writer,
+};
 
-    log.print("-----------------------------------------\n", .{});
-    log.print("-               YASOS                   -\n", .{});
-    log.print("-----------------------------------------\n", .{});
-    log.write("Kernel booted\n");
-
-    while (true) {}
-}
+pub var kernel_log = KernelLog{
+    .writer = board.uart.uart0.writer(),
+};

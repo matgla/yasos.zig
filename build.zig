@@ -1,28 +1,20 @@
 const std = @import("std");
+const hal = @import("yasos_hal");
 
-const stm32target = @import("hal/cortex-m3/stm32f103/build.zig").target;
+pub fn build(b: *std.Build) !void {
+    const optimize = b.standardOptimizeOption(.{});
+    const board = b.option([]const u8, "board", "a board for which the HAL is used") orelse "host";
+    const cmake = b.option([]const u8, "cmake", "path to CMake executable") orelse "";
+    const gcc = b.option([]const u8, "gcc", "path to arm-none-eabi-gcc executable") orelse "";
 
-pub fn build(b: *std.Build) void {
-    // const exe = b.addExecutable(.{
-    //     .name = "yasos.zig",
-    //     .root_source_file = b.path("source/main.zig"),
-    //     .target = b.host,
-    // });
-    // b.installArtifact(exe);
-    // const hostBoard = b.addModule("board", .{
-    //     .root_source_file = b.path("bsp/host/board.zig"),
-    // });
-    // exe.root_module.addImport("board", hostBoard);
-
-    const rpiExe = b.addExecutable(.{
-        .name = "yasos_rpi.zig",
-        .root_source_file = b.path("bsp/raspberry_pico/board.zig"),
-        .target = b.resolveTargetQuery(stm32target),
+    const boardDep = b.dependency("yasos_hal", .{
+        .board = board,
+        .root_file = @as([]const u8, b.pathFromRoot("source/main.zig")),
+        .optimize = optimize,
+        .name = @as([]const u8, "yasos_kernel"),
+        .cmake = cmake,
+        .gcc = gcc,
     });
-    rpiExe.setLinkerScript(b.path("hal/cortex-m3/stm32f103/memory.ld"));
-    b.installArtifact(rpiExe);
-    const picoBoard = b.addModule("app", .{
-        .root_source_file = b.path("source/main.zig"),
-    });
-    rpiExe.root_module.addImport("app", picoBoard);
+    b.installArtifact(boardDep.artifact("yasos_kernel"));
+    _ = boardDep.module("board");
 }
