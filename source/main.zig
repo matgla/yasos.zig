@@ -20,21 +20,28 @@
 
 const board = @import("board");
 
-const log = @import("log/kernel_log.zig").kernel_log;
+const kernel_log = @import("log/kernel_log.zig");
+const log: *@TypeOf(kernel_log.kernel_log) = &kernel_log.kernel_log;
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
         .baudrate = 115200,
     });
+    _ = board.uart.uart0.write_some("Hello\n") catch {};
 }
 
 pub export fn main() void {
     initialize_board();
-
-    log.print("-----------------------------------------\n", .{});
-    log.print("-               YASOS                   -\n", .{});
-    log.print("-----------------------------------------\n", .{});
-    log.write("Kernel booted\n");
+    log.*.attach_to(.{
+        .state = &board.uart.uart0,
+        .method = @TypeOf(board.uart.uart0).write_some_opaque,
+    });
+    _ = board.uart.uart0.write_some("From main\n") catch {};
+    _ = board.uart.uart0.writer().print("address of log object: {*}\n", .{log}) catch {};
+    log.*.print("-----------------------------------------\n", .{});
+    // log.*.print("-               YASOS                   -\n", .{});
+    // log.*.print("-----------------------------------------\n", .{});
+    // log.*.write("Kernel booted\n");
 
     while (true) {}
 }
