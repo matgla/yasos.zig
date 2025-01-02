@@ -34,7 +34,6 @@ const KernelLog = struct {
     const Writer = std.io.Writer(KernelLog, WriteError, write_some);
 
     pub fn writer(self: KernelLog) Writer {
-        _ = board.uart.uart0.writer().write("No elo\n") catch {};
         return Writer{
             .context = self,
         };
@@ -44,9 +43,7 @@ const KernelLog = struct {
     }
 
     fn write_some(self: KernelLog, buffer: []const u8) WriteError!usize {
-        _ = board.uart.uart0.writer().write("write_some\n") catch {};
         if (self.writeFn) |writeFn| {
-            _ = board.uart.uart0.writer().write("calling\n") catch {};
             return writeFn.method(writeFn.state, buffer);
         }
         return 0;
@@ -60,12 +57,8 @@ const Logger = struct {
     pub fn print(self: *const Logger, comptime str: []const u8, comptime args: anytype) void {
         // Writing to kernel log is not critical and if not working
         // there is no alternative implemented
-        _ = board.uart.uart0.writer().print("Printing: {*}\n", .{&self.writer}) catch {};
         if (self.writer) |writer| {
-            _ = board.uart.uart0.writer().write("Found writer\n") catch {};
             _ = writer.print(str, args) catch {};
-        } else {
-            _ = board.uart.uart0.writer().print("yyyy\n", .{}) catch {};
         }
     }
 
@@ -78,20 +71,13 @@ const Logger = struct {
     pub fn attach_to(self: *Logger, write_fn: FatPointer) void {
         self.log.attach_to(write_fn);
         self.writer = self.log.writer();
-        if (self.writer) |writer| {
-            _ = writer.print("I am initilized\n", .{}) catch {};
-        } else {
-            _ = board.uart.uart0.writer().print("Cant initialize writer\n", .{}) catch {};
-        }
-        _ = board.uart.uart0.writer().print("address: {*}\n", .{&self.writer}) catch {};
-
         // context in GenericWrite is lifetime of pointer for write callback
         // for me it should be KernelLog + write_some function
         // self.writer = Writer{ .context = writeFn };
     }
 };
 
-pub var kernel_log = Logger{
+pub const kernel_log = Logger{
     .log = KernelLog{
         .writeFn = null,
     },
