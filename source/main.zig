@@ -26,6 +26,7 @@ fn initialize_board() void {
     try board.uart.uart0.init(.{
         .baudrate = 115200,
     });
+
     log.attach_to(.{
         .state = &board.uart.uart0,
         .method = @TypeOf(board.uart.uart0).write_some_opaque,
