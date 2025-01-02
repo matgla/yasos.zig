@@ -71,9 +71,6 @@ const Logger = struct {
     pub fn attach_to(self: *Logger, write_fn: FatPointer) void {
         self.log.attach_to(write_fn);
         self.writer = self.log.writer();
-        // context in GenericWrite is lifetime of pointer for write callback
-        // for me it should be KernelLog + write_some function
-        // self.writer = Writer{ .context = writeFn };
     }
 };
 
