@@ -2,3 +2,4 @@ zig-out/
 .zig-cache/
 .config
 .config.old
+yasos_venv/
