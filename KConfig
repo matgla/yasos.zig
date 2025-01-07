@@ -20,8 +20,5 @@
 
 mainmenu "Yet Another Simple Operating System"
 
-source "./libs/hal/boards/KConfig"
+source "./libs/hal/KConfig"
 
-menu "Boards"
-
-endmenu 
