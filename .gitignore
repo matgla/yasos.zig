@@ -3,3 +3,5 @@ zig-out/
 .config
 .config.old
 yasos_venv/
+config/
+.gdb_history
