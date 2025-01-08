@@ -1,11 +1,10 @@
 const std = @import("std");
 const hal = @import("yasos_hal");
-
 var cmake: ?[]const u8 = null;
 var gcc: ?[]const u8 = null;
 
 fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
-    const create_venv_args = [_][]const u8{ "python", "-m", "venv", "yasos_venv" };
+    const create_venv_args = [_][]const u8{ "python3", "-m", "venv", "yasos_venv" };
     const create_venv_command = b.addSystemCommand(&create_venv_args);
     const install_requirements_args = [_][]const u8{ "./yasos_venv/bin/pip", "install", "-r", "kconfiglib/requirements.txt" };
     const install_requirements_args_command = b.addSystemCommand(&install_requirements_args);
@@ -48,9 +47,6 @@ fn load_config(b: *std.Build) !Config {
 }
 
 pub fn build(b: *std.Build) !void {
-    cmake = b.option([]const u8, "cmake", "path to CMake executable") orelse "";
-    gcc = b.option([]const u8, "gcc", "path to arm-none-eabi-gcc executable") orelse "";
-
     const venv = prepare_venv(b);
     const configure = configure_kconfig(b);
     const generate = generate_config(b);
@@ -73,6 +69,7 @@ pub fn build(b: *std.Build) !void {
     };
 
     if (config_exists.kind == .file) {
+        const config_path = try config_directory.realpathAlloc(b.allocator, "config.json");
         const optimize = b.standardOptimizeOption(.{});
         const config = try load_config(b);
         const boardDep = b.dependency("yasos_hal", .{
@@ -80,8 +77,7 @@ pub fn build(b: *std.Build) !void {
             .root_file = @as([]const u8, b.pathFromRoot("source/main.zig")),
             .optimize = optimize,
             .name = @as([]const u8, "yasos_kernel"),
-            .cmake = cmake.?,
-            .gcc = gcc.?,
+            .config_file = @as([]const u8, config_path),
         });
         b.installArtifact(boardDep.artifact("yasos_kernel"));
         _ = boardDep.module("board");
