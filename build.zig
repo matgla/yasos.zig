@@ -47,9 +47,16 @@ fn load_config(b: *std.Build) !Config {
 }
 
 pub fn build(b: *std.Build) !void {
+    const clean = b.option(bool, "clean", "clean before configuration") orelse false;
     const venv = prepare_venv(b);
     const configure = configure_kconfig(b);
     const generate = generate_config(b);
+
+    if (clean) {
+        std.fs.cwd().deleteTree("config") catch {};
+        std.fs.cwd().deleteFile(".config") catch {};
+    }
+
     configure.step.dependOn(&venv.step);
     generate.step.dependOn(&venv.step);
 
