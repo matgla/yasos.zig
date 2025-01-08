@@ -18,9 +18,11 @@
 
 import argparse
 import os
+import sys
 from pathlib import Path
+import json
 
-from kconfiglib import Kconfig, MENU, COMMENT
+from kconfiglib import Kconfig, MENU, COMMENT, BOOL, STRING
 
 parser = argparse.ArgumentParser(description = "CMake configuration generator based on KConfig")
 parser.add_argument("-i", "--input", dest="input_file", action="store", help="Path to input file", required=True)
@@ -39,15 +41,17 @@ def main():
     to_file = []
     print ("Writing configuration file to:", args.output_file)
     with open(args.output_file, "w") as output:
-        output.write("{\n")
+        config = {} 
         for node in kconf.unique_defined_syms:
             if node.user_value:
-                #output.write("  \"" + node.name.lower() + "\": \"" + str(node.user_value) + "\",\n")
-                to_file.append({"name": node.name.lower(), "value": str(node.user_value)}) 
+                if node.type == BOOL:
+                    config[node.name.lower()] = node.str_value == "y"
+                elif node.type == STRING:
+                    config[node.name.lower()] = node.str_value
+                else:
+                    print("Can't handle type: " + node.type + ", please update me!")
+                    sys.exit(-1)
                 continue
-        for i in range(0, len(to_file) - 1):
-            output.write("  \"" + to_file[i]["name"] + "\": \"" + to_file[i]["value"] + "\",\n")
-        output.write("  \"" + to_file[-1]["name"] + "\": \"" + to_file[-1]["value"] + "\"\n")
-        output.write("}\n")
-
+        
+        output.write(json.dumps(config))
 main()
