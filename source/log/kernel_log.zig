@@ -54,7 +54,7 @@ const Logger = struct {
     log: KernelLog,
     writer: ?KernelLog.Writer,
 
-    pub fn print(self: *const Logger, comptime str: []const u8, comptime args: anytype) void {
+    pub fn print(self: *const Logger, comptime str: []const u8, args: anytype) void {
         // Writing to kernel log is not critical and if not working
         // there is no alternative implemented
         if (self.writer) |writer| {

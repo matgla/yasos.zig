@@ -22,6 +22,8 @@ const board = @import("board");
 
 var log = @import("log/kernel_log.zig").kernel_log;
 
+const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
+
 fn initialize_board() void {
     try board.uart.uart0.init(.{
         .baudrate = 115200,
@@ -36,8 +38,10 @@ fn initialize_board() void {
 pub export fn main() void {
     initialize_board();
     log.print("-----------------------------------------\n", .{});
-    log.print("-               YASOS                   -\n", .{});
+    log.print("|               YASOS                   |\n", .{});
     log.print("-----------------------------------------\n", .{});
+    DumpHardware.print_hardware(log);
+
     log.write("Kernel booted\n");
 
     while (true) {}
