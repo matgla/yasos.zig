@@ -28,6 +28,7 @@ pub const DumpHardware = struct {
         log.print("|   CPU: {s: <10}  FREQ: {s: <12} |\n", .{ cpu.name(), format_frequency(cpu.frequency()) });
         log.print("| Cores: {d: <2}                             |\n", .{cpu.number_of_cores()});
         log.print("-----------------------------------------\n", .{});
+        log.print("CPU implementer: {x}\n", .{cpu.regs().scb.cpuid.read().implementer});
     }
 
     fn format_frequency(freq: u64) []const u8 {
