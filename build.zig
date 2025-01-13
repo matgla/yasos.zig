@@ -76,6 +76,9 @@ pub fn build(b: *std.Build) !void {
     };
 
     const optimize = b.standardOptimizeOption(.{});
+    const config_module = b.addModule("config", .{
+        .root_source_file = b.path("config/config.zig"),
+    });
     if (config_exists.kind == .file) {
         const config_path = try config_directory.realpathAlloc(b.allocator, "config.json");
         const config = try load_config(b);
@@ -87,6 +90,7 @@ pub fn build(b: *std.Build) !void {
             .config_file = @as([]const u8, config_path),
         });
         b.installArtifact(boardDep.artifact("yasos_kernel"));
+        boardDep.artifact("yasos_kernel").root_module.addImport("config", config_module);
         _ = boardDep.module("board");
     } else {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
@@ -100,6 +104,7 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(tests);
     tests.linkLibC();
+    tests.root_module.addImport("config", config_module);
 
     const run_tests_step = b.step("tests", "Run Yasos tests");
     const run_tests = b.addRunArtifact(tests);

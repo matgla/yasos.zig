@@ -24,7 +24,7 @@ const c = @cImport({
     @cInclude("sys/types.h");
 });
 
-const config = @import("config/config.zig");
+const config = @import("config");
 
 var pid_counter: c.pid_t = 0;
 

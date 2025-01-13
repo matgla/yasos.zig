@@ -76,17 +76,24 @@ def main():
     config = {}
     with open(args.output + "/config.json", "w") as output:
         for node in kconf.unique_defined_syms:
+            if node.name is None:
+                continue
+
+            if not node.name.lower().startswith("config_"):
+                continue
+
+            name = node.name.lower().replace("config_", "")
             if node.str_value:
                 if node.type == BOOL:
-                    config[node.name.lower()] = node.str_value == "y"
+                    config[name] = node.str_value == "y"
                 elif node.type == STRING:
-                    config[node.name.lower()] = node.str_value
+                    config[name] = node.str_value
                 elif node.type == TRISTATE:
                     raise RuntimeError("Tristate support not added")
                 elif node.type == INT:
-                    config[node.name.lower()] = str(node.str_value)
+                    config[name] = str(node.str_value)
                 elif node.type == HEX:
-                    config[node.name.lower()] = str(node.str_value)
+                    config[name] = str(node.str_value)
                 elif node.type == UNKNOWN:
                     raise RuntimeError("Node: " + node.name + " -> has unknown type")
                 else:
