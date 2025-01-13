@@ -22,3 +22,21 @@ mainmenu "Yet Another Simple Operating System"
 
 source "./libs/hal/KConfig"
 
+menu "Process Options"
+
+config PROCESS_USE_MPU_STACK_PROTECTION
+  bool "Use MPU Stack Protection"
+  help 
+    Use hardware unit for stack protection of process
+  depends on CPU_HAS_MPU
+
+config PROCESS_USE_STACK_OVERFLOW_DETECTION
+  bool "Use stack overflow detection"
+  default n
+  help 
+    Software stack overflow detection. 
+    This is detection, not prevention. If stack overflow occured memory may be corrupted!
+    For prevention MPU must be used in hardware's that supports it.
+
+
+endmenu

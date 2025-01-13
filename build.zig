@@ -19,7 +19,7 @@ fn configure_kconfig(b: *std.Build) *std.Build.Step.Run {
 }
 
 fn generate_config(b: *std.Build) *std.Build.Step.Run {
-    const argv = [_][]const u8{ "./yasos_venv/bin/python", "./kconfiglib/generate.py", "--input", ".config", "-k", "KConfig", "-o", "config/config.json" };
+    const argv = [_][]const u8{ "./yasos_venv/bin/python", "./kconfiglib/generate.py", "--input", ".config", "-k", "KConfig", "-o", "config" };
     const command = b.addSystemCommand(&argv);
     return command;
 }
@@ -75,9 +75,9 @@ pub fn build(b: *std.Build) !void {
         return;
     };
 
+    const optimize = b.standardOptimizeOption(.{});
     if (config_exists.kind == .file) {
         const config_path = try config_directory.realpathAlloc(b.allocator, "config.json");
-        const optimize = b.standardOptimizeOption(.{});
         const config = try load_config(b);
         const boardDep = b.dependency("yasos_hal", .{
             .board = @as([]const u8, config.board),
@@ -91,4 +91,17 @@ pub fn build(b: *std.Build) !void {
     } else {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
     }
+
+    const tests = b.addTest(.{
+        .name = "yasos_tests",
+        .target = b.standardTargetOptions(.{}),
+        .optimize = optimize,
+        .root_source_file = b.path("tests.zig"),
+    });
+    b.installArtifact(tests);
+    tests.linkLibC();
+
+    const run_tests_step = b.step("tests", "Run Yasos tests");
+    const run_tests = b.addRunArtifact(tests);
+    run_tests_step.dependOn(&run_tests.step);
 }
