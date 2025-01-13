@@ -32,7 +32,7 @@ config PROCESS_USE_MPU_STACK_PROTECTION
 
 config PROCESS_USE_STACK_OVERFLOW_DETECTION
   bool "Use stack overflow detection"
-  default n
+  default y
   help 
     Software stack overflow detection. 
     This is detection, not prevention. If stack overflow occured memory may be corrupted!
