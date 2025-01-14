@@ -125,10 +125,10 @@ def main():
                 section = key
                 if started:
                     output.write("};\n\n")
-                output.write("const " + section + " = struct {\n")
+                output.write("pub const " + section + " = struct {\n")
                 started = True
             field_key = field[0].replace(key + "_", "")
-            output.write("  const " + field_key + " = " + convert(field[1]) + ";\n")
+            output.write("  pub const " + field_key + " = " + convert(field[1]) + ";\n")
 
         if started:
             output.write("};\n\n")
