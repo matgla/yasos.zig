@@ -49,7 +49,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         pub fn create(allocator: std.mem.Allocator, stack_size: u32) !Self {
             const stack = try allocator.alloc(usize, stack_size / @sizeOf(usize));
             if (comptime config.process.use_stack_overflow_detection) {
-                stack[stack.len - 1] = 0xdeadbeef;
+                stack[0] = 0xdeadbeef;
             }
             pid_counter += 1;
             return Self{
@@ -68,7 +68,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
 
         pub fn validate_stack(self: Self) bool {
             if (!config.process.use_stack_overflow_detection) @compileError("Stack overflow detection is disabled in config!");
-            return self.stack[self.stack.len - 1] == 0xdeadbeef;
+            return self.stack[0] == 0xdeadbeef;
         }
     };
 }
@@ -90,7 +90,6 @@ test "initialize process" {
     try std.testing.expectEqual(process.state, Process.State.Ready);
     try std.testing.expectEqual(process.priority, 0);
     try std.testing.expectEqual(process.stack.len * @sizeOf(usize), stack_size);
-    try std.testing.expectEqual(process.stack[process.stack.len - 1], 0xdeadbeef);
     defer process.deinit();
 
     const second_process = try Process.create(allocator, stack_size);
@@ -98,7 +97,6 @@ test "initialize process" {
     try std.testing.expectEqual(second_process.state, Process.State.Ready);
     try std.testing.expectEqual(second_process.priority, 0);
     try std.testing.expectEqual(second_process.stack.len * @sizeOf(usize), stack_size);
-    try std.testing.expectEqual(second_process.stack[second_process.stack.len - 1], 0xdeadbeef);
 
     defer second_process.deinit();
 }
@@ -114,6 +112,6 @@ test "detect stack overflow" {
     const process = try Process.create(allocator, stack_size);
     defer process.deinit();
     try std.testing.expect(process.validate_stack());
-    process.stack[process.stack.len - 1] = 0x12345678;
+    process.stack[0] = 0x12345678;
     try std.testing.expect(!process.validate_stack());
 }

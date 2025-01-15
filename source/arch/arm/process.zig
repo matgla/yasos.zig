@@ -18,6 +18,8 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const config = @import("config");
+
 pub const HardwareStoredRegisters = packed struct {
     r0: usize,
     r1: usize,
