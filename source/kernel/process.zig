@@ -25,18 +25,29 @@ const c = @cImport({
 });
 
 const config = @import("config");
+const arch_process = @import("arch").process;
 
 var pid_counter: c.pid_t = 0;
+
+fn exit_handler() void {
+    while (true) {}
+}
+
+pub fn init() void {
+    arch_process.init();
+}
 
 pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
+        const stack_marker: u32 = 0xdeadbeef;
 
         state: State,
         priority: u8,
         impl: implementation,
         pid: c.pid_t,
-        stack: []usize,
+        stack: []align(8) u8,
+        stack_position: usize,
         _allocator: std.mem.Allocator,
 
         pub const State = enum(u2) {
@@ -46,18 +57,20 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             Killed,
         };
 
-        pub fn create(allocator: std.mem.Allocator, stack_size: u32) !Self {
-            const stack = try allocator.alloc(usize, stack_size / @sizeOf(usize));
+        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype) !Self {
+            const stack: []align(8) u8 = try allocator.alignedAlloc(u8, 8, stack_size);
             if (comptime config.process.use_stack_overflow_detection) {
-                stack[0] = 0xdeadbeef;
+                @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
             pid_counter += 1;
+            const stack_position = arch_process.prepare_process_stack(stack, &exit_handler, &process_entry);
             return Self{
                 .state = State.Ready,
                 .priority = 0,
                 .impl = .{},
                 .pid = pid_counter,
                 .stack = stack,
+                .stack_position = stack_position,
                 ._allocator = allocator,
             };
         }
@@ -68,7 +81,20 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
 
         pub fn validate_stack(self: Self) bool {
             if (!config.process.use_stack_overflow_detection) @compileError("Stack overflow detection is disabled in config!");
-            return self.stack[0] == 0xdeadbeef;
+            return std.mem.eql(u8, self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
+        }
+
+        pub fn stack_pointer(self: Self) *const usize {
+            if (config.process.use_stack_overflow_detection) {
+                if (!self.validate_stack()) {
+                    if (!config.process.use_mpu_stack_protection) {
+                        @panic("Stack overlflow occured, please reset");
+                    } else {
+                        @panic("TODO: implement process kill here");
+                    }
+                }
+            }
+            return &self.stack[self.stack_position];
         }
     };
 }
@@ -76,6 +102,8 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
 const ProcessTester = struct {};
 
 const Process = ProcessInterface(ProcessTester);
+
+fn process_init() void {}
 
 test "initialize process" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -85,18 +113,18 @@ test "initialize process" {
         if (deinit_status == .leak) std.testing.expect(false) catch @panic("Test Failed");
     }
     const stack_size = 1024;
-    const process = try Process.create(allocator, stack_size);
+    const process = try Process.create(allocator, stack_size, process_init);
     try std.testing.expectEqual(process.pid, 1);
     try std.testing.expectEqual(process.state, Process.State.Ready);
     try std.testing.expectEqual(process.priority, 0);
-    try std.testing.expectEqual(process.stack.len * @sizeOf(usize), stack_size);
+    try std.testing.expectEqual(process.stack.len, stack_size);
     defer process.deinit();
 
-    const second_process = try Process.create(allocator, stack_size);
+    const second_process = try Process.create(allocator, stack_size, process_init);
     try std.testing.expectEqual(second_process.pid, 2);
     try std.testing.expectEqual(second_process.state, Process.State.Ready);
     try std.testing.expectEqual(second_process.priority, 0);
-    try std.testing.expectEqual(second_process.stack.len * @sizeOf(usize), stack_size);
+    try std.testing.expectEqual(second_process.stack.len, stack_size);
 
     defer second_process.deinit();
 }
@@ -109,9 +137,9 @@ test "detect stack overflow" {
         if (deinit_status == .leak) std.testing.expect(false) catch @panic("Test Failed");
     }
     const stack_size = 1024;
-    const process = try Process.create(allocator, stack_size);
+    const process = try Process.create(allocator, stack_size, process_init);
     defer process.deinit();
     try std.testing.expect(process.validate_stack());
-    process.stack[0] = 0x12345678;
+    process.stack[0] = 0x12;
     try std.testing.expect(!process.validate_stack());
 }

@@ -60,6 +60,8 @@ def convert(value):
         return "true" if value else "false"
     elif type(value) is str:
         return '"' + value + '"'
+    elif type(value) is int:
+        return str(value)
     else:
         raise RuntimeError("Unknown type: " + str(type(value)))
 
@@ -91,7 +93,7 @@ def main():
                 elif node.type == TRISTATE:
                     raise RuntimeError("Tristate support not added")
                 elif node.type == INT:
-                    config[name] = str(node.str_value)
+                    config[name] = int(node.str_value)
                 elif node.type == HEX:
                     config[name] = str(node.str_value)
                 elif node.type == UNKNOWN:

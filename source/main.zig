@@ -18,11 +18,17 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
+
 const board = @import("board");
+const config = @import("config");
 
 var log = @import("log/kernel_log.zig").kernel_log;
 
 const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
+
+const spawn = @import("arch").spawn;
+const process = @import("kernel/process.zig");
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
@@ -35,6 +41,33 @@ fn initialize_board() void {
     });
 }
 
+fn kernel_process() void {
+    while (true) {
+        log.write("Kernel process is running\n");
+    }
+}
+
+pub fn panic(msg: []const u8, stack_trace: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+    @branchHint(.cold);
+    log.write("****************** PANIC **********************\n");
+    log.print("KERNEL PANIC: {s}.\n", .{msg});
+
+    if (stack_trace) |trace| {
+        var frames_left: usize = @min(trace.index, trace.instruction_addresses.len);
+        var frame_index: usize = 0;
+        log.print("Frames: {d}\n", .{frames_left});
+        while (frames_left != 0) : ({
+            frames_left -= 1;
+            frame_index = (frame_index + 1) % trace.instruction_addresses.len;
+        }) {
+            const address = trace.instruction_addresses[frame_index];
+            log.print("  {d}: 0x{x}\n", .{ frame_index, address - 1 });
+        }
+    }
+    log.write("***********************************************\n");
+    while (true) {}
+}
+
 pub export fn main() void {
     initialize_board();
     log.print("-----------------------------------------\n", .{});
@@ -43,6 +76,9 @@ pub export fn main() void {
     DumpHardware.print_hardware(log);
 
     log.write("Kernel booted\n");
+    process.init();
+
+    spawn.root_process(&kernel_process, null, config.process.root_stack_size);
 
     while (true) {}
 }
