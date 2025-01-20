@@ -26,8 +26,9 @@ pub fn root_process(entry: anytype, arg: anytype, stack_size: usize) void {
     // schedule
     // start context switching
     // syscall start root
-    hal.irq.disable(.systick);
+    hal.time.systick.disable();
     _ = entry;
     _ = arg;
     _ = stack_size;
+    hal.time.systick.enable();
 }

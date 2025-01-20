@@ -27,7 +27,7 @@ const c = @cImport({
 const config = @import("config");
 const arch_process = @import("arch").process;
 
-var pid_counter: c.pid_t = 0;
+var pid_counter: u32 = 0;
 
 fn exit_handler() void {
     while (true) {}
@@ -45,7 +45,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         state: State,
         priority: u8,
         impl: implementation,
-        pid: c.pid_t,
+        pid: u32,
         stack: []align(8) u8,
         stack_position: usize,
         _allocator: std.mem.Allocator,
@@ -57,13 +57,13 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             Killed,
         };
 
-        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype) !Self {
+        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype) !Self {
             const stack: []align(8) u8 = try allocator.alignedAlloc(u8, 8, stack_size);
             if (comptime config.process.use_stack_overflow_detection) {
                 @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
             pid_counter += 1;
-            const stack_position = arch_process.prepare_process_stack(stack, &exit_handler, &process_entry);
+            const stack_position = implementation.prepare_process_stack(stack, &exit_handler, &process_entry);
             return Self{
                 .state = State.Ready,
                 .priority = 0,
@@ -99,9 +99,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
     };
 }
 
-const ProcessTester = struct {};
-
-const Process = ProcessInterface(ProcessTester);
+pub const Process = ProcessInterface(arch_process);
 
 fn process_init() void {}
 

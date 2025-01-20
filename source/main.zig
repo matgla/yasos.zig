@@ -48,17 +48,16 @@ fn kernel_process() void {
 }
 
 pub fn panic(msg: []const u8, stack_trace: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-    @branchHint(.cold);
     log.write("****************** PANIC **********************\n");
     log.print("KERNEL PANIC: {s}.\n", .{msg});
 
     if (stack_trace) |trace| {
-        var frames_left: usize = @min(trace.index, trace.instruction_addresses.len);
+        var frames_left: usize = trace.instruction_addresses.len;
         var frame_index: usize = 0;
         log.print("Frames: {d}\n", .{frames_left});
         while (frames_left != 0) : ({
             frames_left -= 1;
-            frame_index = (frame_index + 1) % trace.instruction_addresses.len;
+            frame_index += 1;
         }) {
             const address = trace.instruction_addresses[frame_index];
             log.print("  {d}: 0x{x}\n", .{ frame_index, address - 1 });
