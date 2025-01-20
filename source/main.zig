@@ -29,6 +29,9 @@ const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
 
 const spawn = @import("arch").spawn;
 const process = @import("kernel/process.zig");
+const ProcessManager = @import("kernel/process_manager.zig").ProcessManager;
+
+const malloc_allocator = @import("kernel/malloc.zig").malloc_allocator;
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
@@ -47,21 +50,14 @@ fn kernel_process() void {
     }
 }
 
-pub fn panic(msg: []const u8, stack_trace: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     log.write("****************** PANIC **********************\n");
     log.print("KERNEL PANIC: {s}.\n", .{msg});
 
-    if (stack_trace) |trace| {
-        var frames_left: usize = trace.instruction_addresses.len;
-        var frame_index: usize = 0;
-        log.print("Frames: {d}\n", .{frames_left});
-        while (frames_left != 0) : ({
-            frames_left -= 1;
-            frame_index += 1;
-        }) {
-            const address = trace.instruction_addresses[frame_index];
-            log.print("  {d}: 0x{x}\n", .{ frame_index, address - 1 });
-        }
+    var index: usize = 0;
+    var stack = std.debug.StackIterator.init(@returnAddress(), null);
+    while (stack.next()) |address| : (index += 1) {
+        log.print("  {d: >3}: 0x{X:0>8}\n", .{ index, address - 1 });
     }
     log.write("***********************************************\n");
     while (true) {}
@@ -76,8 +72,10 @@ pub export fn main() void {
 
     log.write("Kernel booted\n");
     process.init();
-
-    spawn.root_process(&kernel_process, null, config.process.root_stack_size);
+    const data = malloc_allocator.alloc(u32, 100) catch @panic("Malloc test failed");
+    malloc_allocator.free(data);
+    var process_manager = ProcessManager.create();
+    spawn.root_process(malloc_allocator, &kernel_process, null, config.process.root_stack_size, &process_manager) catch @panic("Can't spawn root process: ");
 
     while (true) {}
 }

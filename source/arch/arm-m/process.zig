@@ -94,7 +94,7 @@ pub const SoftwareStoredRegisters = extern struct {
     s31: void_or_register(),
 };
 
-pub fn create_default_hardware_registers(comptime exit_handler: *const fn () void, comptime process_entry: anytype) HardwareStoredRegisters {
+pub fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
     return .{
         .r0 = 0,
         .r1 = 0,
@@ -157,7 +157,7 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
     };
 }
 
-pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, comptime process_entry: anytype) usize {
+pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype) usize {
     const hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
     // const software_pushed_registers = create_default_software_registers();
     const stack_start: usize = if (stack.len % 8 == 0) stack.len else stack.len - stack.len % 8;

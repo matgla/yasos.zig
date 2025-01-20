@@ -27,23 +27,23 @@ pub const ProcessManager = struct {
 
     pub fn create() ProcessManager {
         return ProcessManager{
-            .processes = {},
+            .processes = .{},
         };
     }
 
-    pub fn create_process(self: ProcessManager, allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, args: anytype) !*Process {
-        const node = allocator.alloc(ContainerType.Node, 1);
-        node.data = Process.create(allocator, stack_size, process_entry, args);
-        return try self.processes.append(node);
+    pub fn create_process(self: *ProcessManager, allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, args: anytype) !void {
+        var node = try allocator.create(ContainerType.Node);
+        node.data = try Process.create(allocator, stack_size, process_entry, args);
+        return self.processes.append(node);
     }
 
-    pub fn delete_process(self: ProcessManager, pid: u32) void {
+    pub fn delete_process(self: *ProcessManager, pid: u32) void {
         for (self.processes) |process| {
             if (process.data.pid == pid) {
                 const allocator = process.data.allocator;
                 process.data.deinit();
                 self.processes.remove(process);
-                allocator.free(process);
+                allocator.destroy(process);
                 break;
             }
         }

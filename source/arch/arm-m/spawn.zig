@@ -18,17 +18,16 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
 const hal = @import("hal").hal;
 
-pub fn root_process(entry: anytype, arg: anytype, stack_size: usize) void {
+pub fn root_process(allocator: std.mem.Allocator, entry: anytype, arg: anytype, stack_size: usize, manager: anytype) !void {
     // disable systick when implemented
     // add process
     // schedule
     // start context switching
     // syscall start root
     hal.time.systick.disable();
-    _ = entry;
-    _ = arg;
-    _ = stack_size;
-    hal.time.systick.enable();
+    defer hal.time.systick.enable();
+    try manager.create_process(allocator, stack_size, entry, arg);
 }
