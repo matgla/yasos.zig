@@ -22,13 +22,15 @@ const std = @import("std");
 
 const cpu = @import("hal").cpu;
 
+const kernel_log = @import("../log/kernel_log.zig");
+const log = &kernel_log.kernel_log;
+
 pub const DumpHardware = struct {
-    pub fn print_hardware(log: anytype) void {
+    pub fn print_hardware() void {
         log.print("-----------------------------------------\n", .{});
         log.print("|   CPU: {s: <10}  FREQ: {s: <12} |\n", .{ cpu.name(), format_frequency(cpu.frequency()) });
         log.print("| Cores: {d: <2}                             |\n", .{cpu.number_of_cores()});
         log.print("-----------------------------------------\n", .{});
-        log.print("CPU implementer: {x}\n", .{@TypeOf(cpu).Registers.scb.cpuid.read().implementer});
     }
 
     fn format_frequency(freq: u64) []const u8 {

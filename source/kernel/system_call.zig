@@ -1,5 +1,5 @@
 //
-// spawn.zig
+// system_call.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,20 +18,25 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const std = @import("std");
-const hal = @import("hal");
+const irq = @import("hal").irq;
 
-const system_call = @import("../../kernel/system_call.zig");
+extern fn switch_to_next_task() void;
+extern fn store_and_switch_to_next_task() void;
 
-const process_manager = @import("../../kernel/process_manager.zig");
-
-pub fn root_process(allocator: std.mem.Allocator, entry: anytype, arg: anytype, stack_size: usize) !void {
-    try process_manager.instance.create_process(allocator, stack_size, entry, arg);
-    if (process_manager.instance.scheduler.schedule_next()) {
-        process_manager.instance.initialize_context_switching();
-        hal.time.systick.enable();
-        system_call.trigger(.start_root_process);
+export fn irq_svcall(number: u32) void {
+    switch (@as(SystemCall, @enumFromInt(number))) {
+        .start_root_process => switch_to_next_task(),
     }
+}
 
-    @panic("Can't initialize root process");
+export fn irq_pendsv() void {
+    store_and_switch_to_next_task();
+}
+
+pub const SystemCall = enum(u32) {
+    start_root_process = 1,
+};
+
+pub fn trigger(number: SystemCall) void {
+    irq.trigger_supervisor_call(@intFromEnum(number));
 }

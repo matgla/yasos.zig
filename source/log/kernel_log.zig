@@ -74,7 +74,7 @@ const Logger = struct {
     }
 };
 
-pub const kernel_log = Logger{
+pub var kernel_log = Logger{
     .log = KernelLog{
         .writeFn = null,
     },

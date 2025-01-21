@@ -80,10 +80,6 @@ pub fn build(b: *std.Build) !void {
     const config_module = b.addModule("config", .{
         .root_source_file = b.path("config/config.zig"),
     });
-    const arch_module = b.addModule("arch", .{
-        .root_source_file = b.path("source/arch/arch.zig"),
-    });
-    arch_module.addImport("config", config_module);
 
     if (config_exists.kind == .file) {
         const config_path = try config_directory.realpathAlloc(b.allocator, "config.json");
@@ -98,8 +94,8 @@ pub fn build(b: *std.Build) !void {
         b.installArtifact(boardDep.artifact("yasos_kernel"));
         boardDep.artifact("yasos_kernel").root_module.addImport("config", config_module);
 
-        arch_module.addImport("hal", boardDep.module("hal"));
-        boardDep.artifact("yasos_kernel").root_module.addImport("arch", arch_module);
+        boardDep.artifact("yasos_kernel").addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
+
         _ = boardDep.module("board");
     } else {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});

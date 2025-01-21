@@ -25,7 +25,7 @@ const c = @cImport({
 });
 
 const config = @import("config");
-const arch_process = @import("arch").process;
+const arch_process = @import("../arch/arch.zig").process;
 
 var pid_counter: u32 = 0;
 
@@ -47,7 +47,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         impl: implementation,
         pid: u32,
         stack: []align(8) u8,
-        stack_position: usize,
+        stack_position: *const u8,
         _allocator: std.mem.Allocator,
 
         pub const State = enum(u2) {
@@ -63,7 +63,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
             pid_counter += 1;
-            const stack_position = implementation.prepare_process_stack(stack, &exit_handler, &process_entry);
+            const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry);
             return Self{
                 .state = State.Ready,
                 .priority = 0,
@@ -84,7 +84,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             return std.mem.eql(u8, self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
         }
 
-        pub fn stack_pointer(self: Self) *const usize {
+        pub fn stack_pointer(self: Self) *const u8 {
             if (config.process.use_stack_overflow_detection) {
                 if (!self.validate_stack()) {
                     if (!config.process.use_mpu_stack_protection) {
@@ -94,9 +94,21 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                     }
                 }
             }
-            return &self.stack[self.stack_position];
+            return self.stack_position;
+        }
+
+        pub fn set_stack_pointer(self: *Self, ptr: *const u8) void {
+            self.stack_position = ptr;
+        }
+
+        pub fn stack_usage(self: Self) usize {
+            return self.stack.len - (@intFromPtr(&self.stack[self.stack.len]) - @intFromPtr(self.stack_position));
         }
     };
+}
+
+pub fn initialize_context_switching() void {
+    arch_process.initialize_context_switching();
 }
 
 pub const Process = ProcessInterface(arch_process);

@@ -22,7 +22,7 @@ const std = @import("std");
 const config = @import("config");
 const exc_return = @import("exc_return.zig");
 
-const hal = @import("hal").hal;
+const hal = @import("hal");
 
 fn void_or_register() type {
     if (config.cpu.has_fpu and config.cpu.use_fpu) {
@@ -67,15 +67,15 @@ pub const HardwareStoredRegisters = extern struct {
 };
 
 pub const SoftwareStoredRegisters = extern struct {
-    r4: u32,
-    r5: u32,
-    r6: u32,
-    r7: u32,
     r8: u32,
     r9: u32,
     r10: u32,
     r11: u32,
     lr: u32,
+    r4: u32,
+    r5: u32,
+    r6: u32,
+    r7: u32,
     s16: void_or_register(),
     s17: void_or_register(),
     s18: void_or_register(),
@@ -96,13 +96,13 @@ pub const SoftwareStoredRegisters = extern struct {
 
 pub fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
     return .{
-        .r0 = 0,
-        .r1 = 0,
-        .r2 = 0,
-        .r3 = 0,
-        .r12 = 0,
-        .lr = @intCast(@intFromPtr(exit_handler)),
-        .pc = @intCast(@intFromPtr(process_entry)),
+        .r0 = 0xdeadbeef,
+        .r1 = 0xdeadbeef,
+        .r2 = 0xdeadbeef,
+        .r3 = 0xdeadbeef,
+        .r12 = 0xdeadbeef,
+        .lr = @as(u32, @intCast(@intFromPtr(exit_handler))),
+        .pc = @as(u32, @intCast(@intFromPtr(process_entry))),
         .psr = 0x21000000,
         .s0 = void_or_value(0),
         .s1 = void_or_value(0),
@@ -157,35 +157,32 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
     };
 }
 
-pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype) usize {
+pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype) *const u8 {
     const hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
     // const software_pushed_registers = create_default_software_registers();
     const stack_start: usize = if (stack.len % 8 == 0) stack.len else stack.len - stack.len % 8;
-    const hw_registers_size = if (@sizeOf(HardwareStoredRegisters) % 8 == 0) @sizeOf(HardwareStoredRegisters) else @sizeOf(HardwareStoredRegisters) + 8 - @sizeOf(HardwareStoredRegisters) % 8;
+    const hw_registers_size = @sizeOf(HardwareStoredRegisters);
     const hw_registers_place = stack_start - hw_registers_size;
     @memcpy(stack[hw_registers_place .. hw_registers_place + @sizeOf(HardwareStoredRegisters)], std.mem.asBytes(&hardware_pushed_registers));
 
-    const sw_registers_size = if (@sizeOf(SoftwareStoredRegisters) % 8 == 0) @sizeOf(SoftwareStoredRegisters) else @sizeOf(SoftwareStoredRegisters) + 8 - @sizeOf(SoftwareStoredRegisters) % 8;
+    const sw_registers_size = @sizeOf(SoftwareStoredRegisters);
     const sw_registers_place = stack_start - sw_registers_size - hw_registers_size;
 
     const software_pushed_registers = create_default_software_registers();
     @memcpy(stack[sw_registers_place .. sw_registers_place + @sizeOf(SoftwareStoredRegisters)], std.mem.asBytes(&software_pushed_registers));
 
-    return sw_registers_place;
+    return &stack[sw_registers_place];
 }
-
-const ticks_per_event = 1000;
-var tick_counter: u64 = 0;
 
 pub fn init() void {
-    hal.time.systick.init(125000000 / ticks_per_event) catch @panic("Unable to initialize systick");
+    hal.time.systick.init(@intCast(hal.cpu.frequency() / 1000)) catch @panic("Unable to initialize systick");
     hal.time.systick.disable();
-    hal.time.systick.enable();
 }
 
-export fn irq_systick() void {
-    const tick_counter_ptr: *volatile u64 = &tick_counter;
-    tick_counter_ptr.* += ticks_per_event;
+pub fn initialize_context_switching() void {
+    hal.irq.set_priority(.systick, 0x00);
+    hal.irq.set_priority(.supervisor_call, 0xfe);
+    hal.irq.set_priority(.pendsv, 0xff);
 }
 
 fn test_entry() void {}

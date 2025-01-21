@@ -19,33 +19,64 @@
 //
 const std = @import("std");
 
-const Process = @import("process.zig").Process;
+const RoundRobinScheduler = @import("round_robin.zig").RoundRobin;
+const process = @import("process.zig");
+const Process = process.Process;
 
 pub const ProcessManager = struct {
-    const ContainerType = std.DoublyLinkedList(Process);
-    processes: ContainerType,
+    pub const ContainerType = std.DoublyLinkedList(Process);
+    pub const ProcessType = Process;
+    const Self = @This();
 
-    pub fn create() ProcessManager {
-        return ProcessManager{
+    processes: ContainerType,
+    scheduler: RoundRobinScheduler(Self),
+
+    pub fn create() Self {
+        return Self{
             .processes = .{},
+            .scheduler = .{},
         };
     }
 
-    pub fn create_process(self: *ProcessManager, allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, args: anytype) !void {
+    pub fn set_scheduler(self: *Self, scheduler: RoundRobinScheduler(Self)) void {
+        self.scheduler = scheduler;
+    }
+
+    pub fn create_process(self: *Self, allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, args: anytype) !void {
         var node = try allocator.create(ContainerType.Node);
         node.data = try Process.create(allocator, stack_size, process_entry, args);
         return self.processes.append(node);
     }
 
-    pub fn delete_process(self: *ProcessManager, pid: u32) void {
-        for (self.processes) |process| {
-            if (process.data.pid == pid) {
-                const allocator = process.data.allocator;
-                process.data.deinit();
-                self.processes.remove(process);
-                allocator.destroy(process);
+    pub fn delete_process(self: *Self, pid: u32) void {
+        for (self.processes) |p| {
+            if (p.data.pid == pid) {
+                const allocator = p.data.allocator;
+                p.data.deinit();
+                self.processes.remove(p);
+                allocator.destroy(p);
                 break;
             }
         }
     }
+
+    pub fn dump_processes(self: Self, out_stream: anytype) void {
+        var it = self.processes.first;
+        out_stream.print("  PID     STATE      PRIO     STACK\n", .{});
+        while (it) |node| : (it = node.next) {
+            out_stream.print("{d: >5}     {s: <8}   {d: <4}  {: >6}/{: <6}\n", .{
+                node.data.pid,
+                std.enums.tagName(Process.State, node.data.state) orelse "?",
+                node.data.priority,
+                std.fmt.fmtIntSizeBin(node.data.stack_usage()),
+                std.fmt.fmtIntSizeBin(node.data.stack.len),
+            });
+        }
+    }
+
+    pub fn initialize_context_switching(_: Self) void {
+        process.initialize_context_switching();
+    }
 };
+
+pub var instance = ProcessManager.create();

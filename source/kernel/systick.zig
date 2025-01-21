@@ -1,5 +1,5 @@
 //
-// spawn.zig
+// systick.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,20 +18,21 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const std = @import("std");
+const config = @import("config");
+const process_manager = @import("process_manager.zig");
 const hal = @import("hal");
 
-const system_call = @import("../../kernel/system_call.zig");
+var tick_counter: u64 = 0;
+const ticks_per_event = 1000;
+var last_time: u64 = 0;
 
-const process_manager = @import("../../kernel/process_manager.zig");
-
-pub fn root_process(allocator: std.mem.Allocator, entry: anytype, arg: anytype, stack_size: usize) !void {
-    try process_manager.instance.create_process(allocator, stack_size, entry, arg);
-    if (process_manager.instance.scheduler.schedule_next()) {
-        process_manager.instance.initialize_context_switching();
-        hal.time.systick.enable();
-        system_call.trigger(.start_root_process);
+export fn irq_systick() void {
+    const tick_counter_ptr: *volatile u64 = &tick_counter;
+    tick_counter_ptr.* += ticks_per_event;
+    if (tick_counter_ptr.* - last_time >= config.process.context_switch_period * ticks_per_event) {
+        if (process_manager.instance.scheduler.schedule_next()) {
+            hal.irq.trigger(.pendsv);
+        }
+        last_time = tick_counter_ptr.*;
     }
-
-    @panic("Can't initialize root process");
 }
