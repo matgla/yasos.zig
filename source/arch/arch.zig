@@ -23,4 +23,3 @@ const std = @import("std");
 const config = @import("config");
 
 pub const process = if (std.mem.eql(u8, config.cpu.arch, "armv6-m")) @import("arm-m/process.zig");
-pub const spawn = if (std.mem.eql(u8, config.cpu.arch, "armv6-m")) @import("arm-m/spawn.zig");

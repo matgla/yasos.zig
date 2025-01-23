@@ -20,6 +20,8 @@
 
 const Process = @import("process.zig").Process;
 
+const cpu = @import("hal").cpu;
+
 pub fn RoundRobin(comptime ManagerType: anytype) type {
     return struct {
         const ProcessManagerType = ManagerType;
@@ -34,6 +36,9 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
             }
 
             if (self.current == null) {
+                if (self.manager.processes.first) |process| {
+                    process.data.set_core(@intCast(cpu.coreid()));
+                }
                 self.next = self.manager.processes.first;
                 return true;
             }
@@ -43,6 +48,9 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
             while (it) |node| : (it = node.next) {
                 // search for the next ready process
                 if (node.data.state == Process.State.Ready) {
+                    if (it) |process| {
+                        process.data.set_core(@intCast(cpu.coreid()));
+                    }
                     self.next = it;
                     return true;
                 }
@@ -56,6 +64,9 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
                 }
                 // search for the next ready process
                 if (node.data.state == Process.State.Ready) {
+                    if (it) |process| {
+                        process.data.set_core(@intCast(cpu.coreid()));
+                    }
                     self.next = it;
                     return true;
                 }

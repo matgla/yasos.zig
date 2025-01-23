@@ -21,16 +21,31 @@
 const std = @import("std");
 const hal = @import("hal");
 
-const system_call = @import("../../kernel/system_call.zig");
+const system_call = @import("interrupts/system_call.zig");
 
-const process_manager = @import("../../kernel/process_manager.zig");
+const process_manager = @import("process_manager.zig");
 
-pub fn root_process(allocator: std.mem.Allocator, entry: anytype, arg: anytype, stack_size: usize) !void {
+pub fn spawn(allocator: std.mem.Allocator, entry: anytype, arg: ?*const anyopaque, stack_size: u32) error{ProcessCreationFailed}!void {
+    const context = system_call.CreateProcessCall{
+        .allocator = allocator,
+        .entry = @ptrCast(entry),
+        .stack_size = stack_size,
+        .arg = arg,
+    };
+
+    var result: bool = false;
+    system_call.trigger(.create_process, &context, &result);
+    if (!result) {
+        return error.ProcessCreationFailed;
+    }
+}
+
+pub fn root_process(allocator: std.mem.Allocator, entry: anytype, arg: ?*const anyopaque, stack_size: usize) !void {
     try process_manager.instance.create_process(allocator, stack_size, entry, arg);
     if (process_manager.instance.scheduler.schedule_next()) {
         process_manager.instance.initialize_context_switching();
         hal.time.systick.enable();
-        system_call.trigger(.start_root_process);
+        system_call.trigger(.start_root_process, arg, null);
     }
 
     @panic("Can't initialize root process");

@@ -19,20 +19,32 @@
 //
 
 const config = @import("config");
-const process_manager = @import("process_manager.zig");
+
 const hal = @import("hal");
+
+const process_manager = @import("../process_manager.zig");
 
 var tick_counter: u64 = 0;
 const ticks_per_event = 1000;
 var last_time: u64 = 0;
 
 export fn irq_systick() void {
+    hal.hw_atomic.lock(2);
+    defer hal.hw_atomic.unlock(2);
+    // modify from core 0 only
     const tick_counter_ptr: *volatile u64 = &tick_counter;
-    tick_counter_ptr.* += ticks_per_event;
-    if (tick_counter_ptr.* - last_time >= config.process.context_switch_period * ticks_per_event) {
+    tick_counter_ptr.* += 1;
+    if (tick_counter_ptr.* - last_time >= config.process.context_switch_period) {
         if (process_manager.instance.scheduler.schedule_next()) {
             hal.irq.trigger(.pendsv);
         }
         last_time = tick_counter_ptr.*;
     }
+}
+
+pub fn get_system_ticks() u64 {
+    hal.hw_atomic.lock(2);
+    defer hal.hw_atomic.unlock(2);
+    const ptr: *const volatile u64 = &tick_counter;
+    return ptr.*;
 }

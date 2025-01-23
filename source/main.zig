@@ -22,20 +22,25 @@ const std = @import("std");
 
 const board = @import("board");
 const config = @import("config");
+const hal = @import("hal");
 
 var log = &@import("log/kernel_log.zig").kernel_log;
 
 const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
 
-const spawn = @import("arch/arch.zig").spawn;
+const spawn = @import("kernel/spawn.zig");
 const process = @import("kernel/process.zig");
 const process_manager = @import("kernel/process_manager.zig");
 const RoundRobinScheduler = @import("kernel/round_robin.zig").RoundRobin;
 
 const malloc_allocator = @import("kernel/malloc.zig").malloc_allocator;
 
+const time = @import("kernel/time.zig");
+
+const Mutex = @import("kernel/mutex.zig").Mutex;
+
 comptime {
-    _ = @import("kernel/systick.zig");
+    _ = @import("kernel/interrupts/systick.zig");
 }
 
 fn initialize_board() void {
@@ -49,6 +54,7 @@ fn initialize_board() void {
     });
 }
 
+// must be in root module file, otherwise won't be used
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     log.write("****************** PANIC **********************\n");
     log.print("KERNEL PANIC: {s}.\n", .{msg});
@@ -62,23 +68,28 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     while (true) {}
 }
 
+var mutex: Mutex = .{};
+
+export fn some_other_process() void {
+    while (true) {
+        time.sleep_ms(50);
+        mutex.lock();
+        log.write("Other process working\n");
+        process_manager.instance.dump_processes(log);
+        mutex.unlock();
+    }
+    log.write("Died\n");
+}
+
 export fn kernel_process() void {
     log.write("Kernel process is running\n");
-    while (true) {}
-}
-
-export fn get_next_task() *const u8 {
-    if (process_manager.instance.scheduler.get_next()) |task| {
-        process_manager.instance.scheduler.update_current();
-        return task.stack_pointer();
-    }
-
-    @panic("Context switch called without tasks available");
-}
-
-export fn update_stack_pointer(ptr: *const u8) void {
-    if (process_manager.instance.scheduler.get_current()) |task| {
-        task.set_stack_pointer(ptr);
+    spawn.spawn(malloc_allocator, &some_other_process, null, 4096) catch @panic("Can't spawn child process");
+    while (true) {
+        time.sleep_ms(20);
+        mutex.lock();
+        log.write("Kernel is running\n");
+        process_manager.instance.dump_processes(log);
+        mutex.unlock();
     }
 }
 

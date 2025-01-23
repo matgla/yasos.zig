@@ -62,16 +62,22 @@ pub const ProcessManager = struct {
 
     pub fn dump_processes(self: Self, out_stream: anytype) void {
         var it = self.processes.first;
-        out_stream.print("  PID     STATE      PRIO     STACK\n", .{});
+        out_stream.print("  PID     STATE      PRIO     STACK    CPU  \n", .{});
         while (it) |node| : (it = node.next) {
-            out_stream.print("{d: >5}     {s: <8}   {d: <4}  {: >6}/{: <6}\n", .{
+            out_stream.print("{d: >5}     {s: <8}   {d: <4}  {d}/{d} B   {d}\n", .{
                 node.data.pid,
                 std.enums.tagName(Process.State, node.data.state) orelse "?",
                 node.data.priority,
-                std.fmt.fmtIntSizeBin(node.data.stack_usage()),
-                std.fmt.fmtIntSizeBin(node.data.stack.len),
+                node.data.stack_usage(),
+                node.data.stack.len,
+                node.data.current_core,
             });
         }
+    }
+
+    // This must take asking core into consideration since, more than one processes are going in the parallel
+    pub fn get_current_process(self: Self) ?*Process {
+        return self.scheduler.get_current();
     }
 
     pub fn initialize_context_switching(_: Self) void {
@@ -80,3 +86,20 @@ pub const ProcessManager = struct {
 };
 
 pub var instance = ProcessManager.create();
+
+// C interface for context switching assembly code
+
+export fn get_next_task() *const u8 {
+    if (instance.scheduler.get_next()) |task| {
+        instance.scheduler.update_current();
+        return task.stack_pointer();
+    }
+
+    @panic("Context switch called without tasks available");
+}
+
+export fn update_stack_pointer(ptr: *const u8) void {
+    if (instance.scheduler.get_current()) |task| {
+        task.set_stack_pointer(ptr);
+    }
+}

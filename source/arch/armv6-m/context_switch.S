@@ -42,12 +42,15 @@ switch_to_next_task:
   ldmia r0!, {r4-r7}
   msr psp, r0
   cpsie i
+  push {r0, r1}
+  bl unlock_pendsv_spinlock
+  pop {r0, r1}
   bx r1
 
 .global store_and_switch_to_next_task
 .thumb_func
 store_and_switch_to_next_task:
-  cpsid i
+  cpsid i // better to not interrupt that operation from nested IRQ
   mrs r0, psp 
   subs r0, r0, #0x10
   stm r0!, {r4-r7}

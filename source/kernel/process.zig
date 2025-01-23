@@ -27,6 +27,8 @@ const c = @cImport({
 const config = @import("config");
 const arch_process = @import("../arch/arch.zig").process;
 
+const Semaphore = @import("semaphore.zig").Semaphore;
+
 var pid_counter: u32 = 0;
 
 fn exit_handler() void {
@@ -49,6 +51,8 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         stack: []align(8) u8,
         stack_position: *const u8,
         _allocator: std.mem.Allocator,
+        current_core: u8,
+        waiting_for: ?*const Semaphore = null,
 
         pub const State = enum(u2) {
             Ready,
@@ -72,6 +76,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .stack = stack,
                 .stack_position = stack_position,
                 ._allocator = allocator,
+                .current_core = 0,
             };
         }
 
@@ -102,7 +107,28 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         }
 
         pub fn stack_usage(self: Self) usize {
-            return self.stack.len - (@intFromPtr(&self.stack[self.stack.len]) - @intFromPtr(self.stack_position));
+            return @intFromPtr(&self.stack[self.stack.len - 1]) - @intFromPtr(self.stack_position);
+        }
+
+        pub fn block(self: *Self, semaphore: *const Semaphore) void {
+            self.waiting_for = semaphore;
+            self.state = Process.State.Blocked;
+        }
+
+        pub fn is_blocked_by(self: *Self, semaphore: *const Semaphore) bool {
+            if (self.waiting_for) |blocker| {
+                return blocker == semaphore;
+            }
+            return false;
+        }
+
+        pub fn unblock(self: *Self) void {
+            self.waiting_for = null;
+            self.state = Process.State.Ready;
+        }
+
+        pub fn set_core(self: *Self, coreid: u8) void {
+            self.current_core = coreid;
         }
     };
 }

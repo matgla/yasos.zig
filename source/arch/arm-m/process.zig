@@ -193,7 +193,6 @@ test "prepare process initial stack" {
     var stack align(8) = [_]u8{0} ** 1024;
     const offset = prepare_process_stack(&stack, &test_exit_handler, &test_entry);
     _ = try std.testing.expect(offset % 8 == 0);
-    // const registers_sizeof = @sizeOf(HardwareStoredRegisters) + @sizeOf(SoftwareStoredRegisters);
     if (config.cpu.has_fpu and config.cpu.use_fpu) {} else {
         const test_entry_address: u32 = @intCast(@intFromPtr(&test_entry));
         const test_exit_handler_address: u32 = @intCast(@intFromPtr(&test_exit_handler));

@@ -1,5 +1,5 @@
 //
-// mpu.zig
+// mutex.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,6 +18,16 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const MpuRegister = packed struct {
-    const mpu_type: *volatile u32;
+const Semaphore = @import("semaphore.zig").Semaphore;
+
+pub const Mutex = struct {
+    semaphore: Semaphore = Semaphore.create(1),
+
+    pub fn lock(self: *Mutex) void {
+        self.semaphore.acquire();
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        self.semaphore.release();
+    }
 };
