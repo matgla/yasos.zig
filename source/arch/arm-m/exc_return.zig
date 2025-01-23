@@ -1,5 +1,5 @@
 //
-// process.zig
+// exc_return.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,25 +18,9 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-pub const HardwareStoredRegisters = packed struct {
-    r0: usize,
-    r1: usize,
-    r2: usize,
-    r3: usize,
-    r12: usize,
-    lr: usize,
-    pc: usize,
-    psr: usize,
-};
-
-pub const SoftwareStoredRegisters = packed struct {
-    r4: usize,
-    r5: usize,
-    r6: usize,
-    r7: usize,
-    r8: usize,
-    r9: usize,
-    r10: usize,
-    r11: usize,
-    lr: usize,
-};
+pub const return_to_handler_msp: u32 = 0xfffffff1;
+pub const return_to_thread_msp: u32 = 0xfffffff9;
+pub const return_to_thread_psp: u32 = 0xfffffffd;
+pub const return_to_handler_mode_with_fp_msp: u32 = 0xffffffe1;
+pub const return_to_thread_mode_with_fp_msp: u32 = 0xffffffe1;
+pub const return_to_thread_mode_with_fp_psp: u32 = 0xffffffe1;

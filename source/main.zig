@@ -18,11 +18,30 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const board = @import("board");
+const std = @import("std");
 
-var log = @import("log/kernel_log.zig").kernel_log;
+const board = @import("board");
+const config = @import("config");
+const hal = @import("hal");
+
+var log = &@import("log/kernel_log.zig").kernel_log;
 
 const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
+
+const spawn = @import("kernel/spawn.zig");
+const process = @import("kernel/process.zig");
+const process_manager = @import("kernel/process_manager.zig");
+const RoundRobinScheduler = @import("kernel/round_robin.zig").RoundRobin;
+
+const malloc_allocator = @import("kernel/malloc.zig").malloc_allocator;
+
+const time = @import("kernel/time.zig");
+
+const Mutex = @import("kernel/mutex.zig").Mutex;
+
+comptime {
+    _ = @import("kernel/interrupts/systick.zig");
+}
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
@@ -35,14 +54,58 @@ fn initialize_board() void {
     });
 }
 
+// must be in root module file, otherwise won't be used
+pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+    log.write("****************** PANIC **********************\n");
+    log.print("KERNEL PANIC: {s}.\n", .{msg});
+
+    var index: usize = 0;
+    var stack = std.debug.StackIterator.init(@returnAddress(), null);
+    while (stack.next()) |address| : (index += 1) {
+        log.print("  {d: >3}: 0x{X:0>8}\n", .{ index, address - 1 });
+    }
+    log.write("***********************************************\n");
+    while (true) {}
+}
+
+var mutex: Mutex = .{};
+
+export fn some_other_process() void {
+    while (true) {
+        time.sleep_ms(50);
+        mutex.lock();
+        log.write("Other process working\n");
+        process_manager.instance.dump_processes(log);
+        mutex.unlock();
+    }
+    log.write("Died\n");
+}
+
+export fn kernel_process() void {
+    log.write("Kernel process is running\n");
+    spawn.spawn(malloc_allocator, &some_other_process, null, 4096) catch @panic("Can't spawn child process");
+    while (true) {
+        time.sleep_ms(20);
+        mutex.lock();
+        log.write("Kernel is running\n");
+        process_manager.instance.dump_processes(log);
+        mutex.unlock();
+    }
+}
+
 pub export fn main() void {
     initialize_board();
     log.print("-----------------------------------------\n", .{});
     log.print("|               YASOS                   |\n", .{});
-    log.print("-----------------------------------------\n", .{});
-    DumpHardware.print_hardware(log);
+    DumpHardware.print_hardware();
 
-    log.write("Kernel booted\n");
+    log.write("Kernel started successfully\n");
 
+    process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
+        .manager = &process_manager.instance,
+    });
+    process.init();
+
+    spawn.root_process(malloc_allocator, &kernel_process, null, config.process.root_stack_size) catch @panic("Can't spawn root process: ");
     while (true) {}
 }
