@@ -1,5 +1,5 @@
 //
-// mpu.zig
+// time.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -17,3 +17,22 @@
 // Public License along with this program. If not, see
 // <https://www.gnu.org/licenses/>.
 //
+
+const systick = @import("interrupts/systick.zig");
+
+pub fn sleep(seconds: u32) void {
+    sleep_ms(seconds * 1000);
+}
+
+pub fn sleep_ms(ms: u32) void {
+    const start = systick.get_system_ticks();
+    // 1000 - ticks = 1 ms
+    var elapsed: u64 = 0;
+    const ptr: *volatile u64 = &elapsed;
+    while (ptr.* < ms) {
+        ptr.* = systick.get_system_ticks() - start;
+        asm volatile (
+            \\ wfi
+        );
+    }
+}

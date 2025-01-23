@@ -38,5 +38,16 @@ config CONFIG_PROCESS_USE_STACK_OVERFLOW_DETECTION
     This is detection, not prevention. If stack overflow occured memory may be corrupted!
     For prevention MPU must be used in hardware's that supports it.
 
+config CONFIG_PROCESS_CONTEXT_SWITCH_PERIOD
+  int "Context switch period in milliseconds"
+  default 20 
+  help 
+    Context switch period in milliseconds, process may be interrupted earlier if blocked on IO 
+
+config CONFIG_PROCESS_ROOT_STACK_SIZE 
+  int "Root process stack size"
+  default 4096
+  help
+    Size of kernel root process stack size
 
 endmenu
