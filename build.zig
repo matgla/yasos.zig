@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
             .target = boardDep.artifact("yasos_kernel").root_module.resolved_target.?,
         });
-        boardDep.artifact("yasos_kernel").root_module.linkLibrary(yasld.artifact("yasld"));
+        boardDep.artifact("yasos_kernel").root_module.addImport("yasld", yasld.module("yasld"));
 
         _ = boardDep.module("board");
     } else {

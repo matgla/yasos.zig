@@ -94,6 +94,4 @@ include(ConvertElfToYasiff)
 convert_elf_to_yasiff(
   TARGET hello_app 
   TYPE executable
-  LIBRARIES 
-    yasos_libc
 )

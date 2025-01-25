@@ -39,6 +39,8 @@ const time = @import("kernel/time.zig");
 
 const Mutex = @import("kernel/mutex.zig").Mutex;
 
+const yasld = @import("yasld");
+
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
 }
@@ -82,14 +84,34 @@ export fn some_other_process() void {
 }
 
 export fn kernel_process() void {
-    log.write("Kernel process is running\n");
-    spawn.spawn(malloc_allocator, &some_other_process, null, 4096) catch @panic("Can't spawn child process");
+    log.write(" - loading yasld\n");
+    const loader: yasld.Loader = yasld.Loader.create(malloc_allocator);
+
+    const executable_memory: *anyopaque = @ptrFromInt(0x10080000);
+    const maybeExecutable: ?yasld.Executable = loader.load_executable(
+        executable_memory,
+        log,
+    ) catch |err| blk: {
+        log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
+        break :blk null;
+    };
+
+    if (maybeExecutable) |executable| {
+        const args: []const []const u8 = &.{
+            "arg1",
+            "arg2",
+            "arg3",
+            "10",
+            "12",
+        };
+        _ = executable.main(args, args.len);
+    }
     while (true) {
         time.sleep_ms(20);
-        mutex.lock();
-        log.write("Kernel is running\n");
-        process_manager.instance.dump_processes(log);
-        mutex.unlock();
+        // mutex.lock();
+        // log.write("Kernel is running\n");
+        // process_manager.instance.dump_processes(log);
+        // mutex.unlock();
     }
 }
 
@@ -99,7 +121,8 @@ pub export fn main() void {
     log.print("|               YASOS                   |\n", .{});
     DumpHardware.print_hardware();
 
-    log.write("Kernel started successfully\n");
+    log.write(" - initializing process manager\n");
+    log.write(" - scheduler: round robin\n");
 
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
@@ -109,3 +132,16 @@ pub export fn main() void {
     spawn.root_process(malloc_allocator, &kernel_process, null, config.process.root_stack_size) catch @panic("Can't spawn root process: ");
     while (true) {}
 }
+
+comptime {
+    _ = ShellData.data;
+}
+
+const ShellData = struct {
+    fn prepare_file(comptime binary: []const u8) [binary.len]u8 {
+        var out: [binary.len]u8 = .{0xff} ** binary.len;
+        @memcpy(out[0..binary.len], binary);
+        return out;
+    }
+    export const data: [@embedFile("hello_app.yaff").len]u8 linksection(".romfs") = prepare_file(@embedFile("hello_app.yaff"));
+};
