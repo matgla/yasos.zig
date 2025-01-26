@@ -45,6 +45,9 @@ const Mutex = @import("kernel/mutex.zig").Mutex;
 
 const yasld = @import("yasld");
 
+const fs = @import("kernel/fs/fs.zig");
+const ramfs = @import("fs/ramfs/ramfs.zig");
+
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
     _ = @import("kernel/system_stubs.zig");
@@ -93,6 +96,9 @@ fn file_resolver(_: []const u8) ?*anyopaque {
 }
 
 export fn kernel_process() void {
+    log.write(" - creating virtual file system");
+    fs.vfs.mount("/", &ramfs);
+
     log.write(" - loading yasld\n");
     const symbols = [_]yasld.SymbolEntry{
         .{ .address = @intFromPtr(&c.puts), .name = "puts" },
