@@ -1,11 +1,12 @@
 .{
-  .name = "yasos.zig",
-  .version = "0.0.1",
-  .dependencies = .{
-    .yasos_hal = .{ .path = "libs/hal" },
-  },
-  .paths = .{
-    "build.zig",
-    "build.zig.zon",
-  }
+    .name = "yasos.zig",
+    .version = "0.0.1",
+    .dependencies = .{
+        .yasos_hal = .{ .path = "libs/hal" },
+        .yasld = .{ .path = "libs/yasld.zig" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
 }
