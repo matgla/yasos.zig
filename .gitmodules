@@ -1,3 +1,6 @@
 [submodule "libs/hal"]
 	path = libs/hal
 	url = git@github.com:matgla/yasos_hal.zig.git
+[submodule "libs/yasld.zig"]
+	path = libs/yasld.zig
+	url = git@github.com:matgla/yasld.zig.git
