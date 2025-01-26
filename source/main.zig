@@ -18,6 +18,10 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const c = @cImport({
+    @cInclude("stdio.h");
+});
+
 const std = @import("std");
 
 const board = @import("board");
@@ -43,6 +47,7 @@ const yasld = @import("yasld");
 
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
+    _ = @import("kernel/system_stubs.zig");
 }
 
 fn initialize_board() void {
@@ -83,9 +88,19 @@ export fn some_other_process() void {
     log.write("Died\n");
 }
 
+fn file_resolver(_: []const u8) ?*anyopaque {
+    return null;
+}
+
 export fn kernel_process() void {
     log.write(" - loading yasld\n");
-    const loader: yasld.Loader = yasld.Loader.create(malloc_allocator);
+    const symbols = [_]yasld.SymbolEntry{
+        .{ .address = @intFromPtr(&c.puts), .name = "puts" },
+    };
+    const environment = yasld.Environment{
+        .symbols = &symbols,
+    };
+    const loader: yasld.Loader = yasld.Loader.create(malloc_allocator, environment, &file_resolver);
 
     const executable_memory: *anyopaque = @ptrFromInt(0x10080000);
     const maybeExecutable: ?yasld.Executable = loader.load_executable(
@@ -97,14 +112,16 @@ export fn kernel_process() void {
     };
 
     if (maybeExecutable) |executable| {
-        const args: []const []const u8 = &.{
+        const args: []const [*:0]const u8 = &.{
             "arg1",
             "arg2",
             "arg3",
             "10",
             "12",
         };
-        _ = executable.main(args, args.len);
+        _ = executable.main(args.ptr, args.len) catch |err| {
+            log.print("Cannot execute main: {s}\n", .{@errorName(err)});
+        };
     }
     while (true) {
         time.sleep_ms(20);
