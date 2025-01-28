@@ -23,13 +23,44 @@ const IFileSystem = @import("ifilesystem.zig").IFileSystem;
 
 const config = @import("config");
 
-pub const MountPoint = struct {
+const MountPoint = struct {
     pub const List = std.DoublyLinkedList(MountPoint);
-
     path_buffer: [config.fs.max_mount_point_size]u8,
     path: []u8,
     filesystem: IFileSystem,
     children: List,
+
+    pub fn appendChild(self: *MountPoint, allocator: std.mem.Allocator, path: []const u8, filesystem: IFileSystem) !void {
+        const node = try allocator.create(MountPoint.List.Node);
+        node.data = .{
+            .path_buffer = undefined,
+            .path = undefined,
+            .filesystem = filesystem,
+            .children = .{},
+        };
+        @memcpy(node.data.path_buffer[0..path.len], path);
+        node.data.path = node.data.path_buffer[0..path.len];
+        self.children.append(node);
+    }
+
+    pub fn removeChild(self: *MountPoint, allocator: std.mem.Allocator, child_path: []const u8) void {
+        var it = self.children.first;
+        while (it) |child| : (it = child.next) {
+            if (std.mem.eql(u8, child_path, child.data.path)) {
+                self.children.remove(child);
+                allocator.destroy(child);
+                return;
+            }
+        }
+    }
+
+    pub fn deinit(self: *MountPoint, allocator: std.mem.Allocator) void {
+        var it = self.children.pop();
+        while (it) |child| : (it = self.children.pop()) {
+            child.data.deinit(allocator);
+            allocator.destroy(child);
+        }
+    }
 };
 
 pub const MountPointError = error{
@@ -38,6 +69,7 @@ pub const MountPointError = error{
     RootNotMounted,
     MountPointInUse,
     PathNotExists,
+    NotMounted,
 };
 
 pub const MountPoints = struct {
@@ -50,15 +82,27 @@ pub const MountPoints = struct {
         };
     }
 
-    fn find_longest_matching_point(self: *MountPoints, path: []const u8) struct { left: []const u8, point: *MountPoint } {
+    pub fn deinit(self: *MountPoints) void {
+        if (self.root) |*root| {
+            root.deinit(self.allocator);
+        }
+    }
+
+    fn find_longest_matching_point(self: *MountPoints, path: []const u8) struct {
+        left: []const u8,
+        point: *MountPoint,
+        parent: ?*MountPoint,
+    } {
         if (self.root == null) {
             return .{
                 .left = &.{},
                 .point = undefined,
+                .parent = null,
             };
         }
         var maybe_node: ?*MountPoint = &self.root.?;
         var last_matched_point: *MountPoint = &self.root.?;
+        var parent: *MountPoint = &self.root.?;
         // skip root searching, already checked
         var left: []const u8 = std.mem.trim(u8, path, "/");
         while (maybe_node) |node| {
@@ -84,6 +128,7 @@ pub const MountPoints = struct {
             }
 
             if (bestchild) |child| {
+                parent = node;
                 left = std.mem.trimLeft(u8, left[child.path.len..], "/");
                 last_matched_point = child;
             }
@@ -92,6 +137,7 @@ pub const MountPoints = struct {
         return .{
             .left = left,
             .point = last_matched_point,
+            .parent = parent,
         };
     }
 
@@ -130,22 +176,30 @@ pub const MountPoints = struct {
 
         // verify if path exists in FS and mount if so
         if (longest_matching_point.point.filesystem.has_path(longest_matching_point.left)) {
-            const node = try self.allocator.create(MountPoint.List.Node);
-            node.data = .{
-                .path_buffer = undefined,
-                .path = undefined,
-                .filesystem = filesystem,
-                .children = .{},
-            };
-            @memcpy(node.data.path_buffer[0..longest_matching_point.left.len], longest_matching_point.left);
-            node.data.path = node.data.path_buffer[0..longest_matching_point.left.len];
-            longest_matching_point.point.children.append(node);
+            try longest_matching_point.point.appendChild(self.allocator, longest_matching_point.left, filesystem);
         } else {
             return MountPointError.PathNotExists;
         }
     }
+
+    pub fn umount(self: *MountPoints, path: []const u8) !void {
+        const longest_matching_point = self.find_longest_matching_point(path);
+        if (longest_matching_point.left.len != 0) {
+            return MountPointError.NotMounted;
+        }
+
+        longest_matching_point.point.deinit(self.allocator);
+        if (longest_matching_point.parent) |parent| {
+            parent.removeChild(self.allocator, longest_matching_point.point.path);
+        }
+
+        if (std.mem.eql(u8, path, "/")) {
+            self.root = null;
+        }
+    }
 };
 
+// Unit Tests
 const FileSystemStub = struct {
     has_file: bool = true,
 
@@ -169,17 +223,13 @@ const FileSystemStub = struct {
 };
 
 test "error when root not mounted" {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = allocator.allocator();
-    var sut = MountPoints.init(gpa);
+    var sut = MountPoints.init(std.testing.allocator);
     var fsstub = FileSystemStub{};
     try std.testing.expectError(MountPointError.RootNotMounted, sut.mount_filesystem("/a", fsstub.ifilesystem()));
 }
 
 test "mount root" {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = allocator.allocator();
-    var sut = MountPoints.init(gpa);
+    var sut = MountPoints.init(std.testing.allocator);
     var fsstub = FileSystemStub{};
     try sut.mount_filesystem("/", fsstub.ifilesystem());
     try std.testing.expect(sut.root != null);
@@ -187,27 +237,22 @@ test "mount root" {
 }
 
 test "reject too long path" {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = allocator.allocator();
-    var sut = MountPoints.init(gpa);
+    var sut = MountPoints.init(std.testing.allocator);
     var fsstub = FileSystemStub{};
     try sut.mount_filesystem("/", fsstub.ifilesystem());
     try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem("/" ** (config.fs.max_mount_point_size + 1), fsstub.ifilesystem()));
 }
 
 test "reject root if already mounted" {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = allocator.allocator();
-    var sut = MountPoints.init(gpa);
+    var sut = MountPoints.init(std.testing.allocator);
     var fsstub = FileSystemStub{};
     try sut.mount_filesystem("/", fsstub.ifilesystem());
     try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.ifilesystem()));
 }
 
 test "mount childs" {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = allocator.allocator();
-    var sut = MountPoints.init(gpa);
+    var sut = MountPoints.init(std.testing.allocator);
+    defer sut.deinit();
     var fsstub = FileSystemStub{};
     try sut.mount_filesystem("/", fsstub.ifilesystem());
     try sut.mount_filesystem("/a/b", fsstub.ifilesystem());
@@ -279,9 +324,8 @@ test "mount childs" {
 }
 
 test "report error when trying to mount relative path" {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = allocator.allocator();
-    var sut = MountPoints.init(gpa);
+    var sut = MountPoints.init(std.testing.allocator);
+    defer sut.deinit();
     var fsstub = FileSystemStub{};
     try sut.mount_filesystem("/", fsstub.ifilesystem());
     try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("otherfs/smth", fsstub.ifilesystem()));
@@ -289,9 +333,8 @@ test "report error when trying to mount relative path" {
 }
 
 test "handle not existing path" {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = allocator.allocator();
-    var sut = MountPoints.init(gpa);
+    var sut = MountPoints.init(std.testing.allocator);
+    defer sut.deinit();
     var fsstub = FileSystemStub{ .has_file = false };
     try sut.mount_filesystem("/", fsstub.ifilesystem());
     try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c", fsstub.ifilesystem()));
@@ -299,4 +342,33 @@ test "handle not existing path" {
     try sut.mount_filesystem("/a/c", fsstub.ifilesystem());
     fsstub.has_file = false;
     try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c/d", fsstub.ifilesystem()));
+}
+
+test "remove childs" {
+    var sut = MountPoints.init(std.testing.allocator);
+    defer sut.deinit();
+    var fsstub = FileSystemStub{};
+    try sut.mount_filesystem("/", fsstub.ifilesystem());
+    try sut.mount_filesystem("/a/b", fsstub.ifilesystem());
+    try sut.mount_filesystem("/a/c", fsstub.ifilesystem());
+    try sut.mount_filesystem("/a/c/a/c/", fsstub.ifilesystem());
+    try sut.mount_filesystem("/a/c/e", fsstub.ifilesystem());
+    try sut.mount_filesystem("/a/c/e/c/f", fsstub.ifilesystem());
+
+    try std.testing.expectEqual(2, sut.root.?.children.len);
+    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
+    try std.testing.expectEqual(2, sut.root.?.children.last.?.data.children.len);
+    try std.testing.expectEqual(0, sut.root.?.children.last.?.data.children.first.?.data.children.len);
+    try std.testing.expectEqual(1, sut.root.?.children.last.?.data.children.last.?.data.children.len);
+
+    try std.testing.expectError(MountPointError.NotMounted, sut.umount("/x/d"));
+    try sut.umount("/a/c/e");
+    try std.testing.expectEqual(2, sut.root.?.children.len);
+    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
+    try std.testing.expectEqual(1, sut.root.?.children.last.?.data.children.len);
+    try sut.umount("/a/b");
+    try std.testing.expectEqual(1, sut.root.?.children.len);
+    try std.testing.expectEqual(1, sut.root.?.children.last.?.data.children.len);
+    try sut.umount("/");
+    try std.testing.expect(sut.root == null);
 }
