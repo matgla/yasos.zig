@@ -18,5 +18,6 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-pub const FileSystem = @import("filesystem.zig");
+pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
 pub const File = @import("file.zig");
+pub const VirtualFileSystem = @import("vfs.zig").VirtualFileSystem;

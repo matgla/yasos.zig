@@ -1,5 +1,5 @@
 //
-// tests.zig
+// filesystem.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,7 +18,20 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-comptime {
-    // _ = @import("source/kernel/process.zig");
-    _ = @import("source/kernel/fs/mount_points.zig");
-}
+pub const IFileSystem = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        mount: *const fn (ctx: *anyopaque) void,
+        has_path: *const fn (ctx: *anyopaque, path: []const u8) bool,
+    };
+
+    pub fn mount(self: IFileSystem) void {
+        self.vtable.mount(self.ptr);
+    }
+
+    pub fn has_path(self: IFileSystem, path: []const u8) bool {
+        return self.vtable.has_path(self.ptr, path);
+    }
+};

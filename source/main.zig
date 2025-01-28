@@ -46,7 +46,7 @@ const Mutex = @import("kernel/mutex.zig").Mutex;
 const yasld = @import("yasld");
 
 const fs = @import("kernel/fs/fs.zig");
-const ramfs = @import("fs/ramfs/ramfs.zig");
+const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
@@ -96,8 +96,12 @@ fn file_resolver(_: []const u8) ?*anyopaque {
 }
 
 export fn kernel_process() void {
-    log.write(" - creating virtual file system");
-    fs.vfs.mount("/", &ramfs);
+    log.write(" - creating virtual file system\n");
+    var vfs = fs.VirtualFileSystem.init(malloc_allocator);
+    var ramfs = RamFs{};
+    vfs.mount_filesystem("/", ramfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/' with type 'romfs': {s}\n", .{@errorName(err)});
+    };
 
     log.write(" - loading yasld\n");
     const symbols = [_]yasld.SymbolEntry{
@@ -152,7 +156,7 @@ pub export fn main() void {
     });
     process.init();
 
-    spawn.root_process(malloc_allocator, &kernel_process, null, config.process.root_stack_size) catch @panic("Can't spawn root process: ");
+    spawn.root_process(malloc_allocator, &kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
     while (true) {}
 }
 

@@ -51,3 +51,11 @@ config CONFIG_PROCESS_ROOT_STACK_SIZE
     Size of kernel root process stack size
 
 endmenu
+
+menu "Filesystem Options"
+  config CONFIG_FS_MAX_MOUNT_POINT_SIZE
+  int "Maximum mount point name length in bytes"
+  default 64 
+  help 
+    This is not maximum mounting in terms of depth, since mounting points are linked list
+endmenu

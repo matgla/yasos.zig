@@ -1,5 +1,5 @@
 //
-// filesystem.zig
+// path.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,5 +18,20 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-pub const FileSystem = @import("filesystem.zig");
-pub const File = @import("file.zig");
+const std = @import("std");
+
+pub const Path = struct {
+    allocator: std.mem.Allocator,
+    path: []u8,
+
+    pub fn init(allocator: std.mem.Allocator, path: []const u8) !Path {
+        return .{
+            .allocator = allocator,
+            .path = try allocator.alloc(u8, path.len),
+        };
+    }
+
+    pub fn deinit(self: *Path) void {
+        self.allocator.free(self.path);
+    }
+};

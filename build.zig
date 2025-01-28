@@ -106,18 +106,17 @@ pub fn build(b: *std.Build) !void {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
     }
 
-    // const tests = b.addTest(.{
-    //     .name = "yasos_tests",
-    //     .target = b.standardTargetOptions(.{}),
-    //     .optimize = optimize,
-    //     .root_source_file = b.path("tests.zig"),
-    // });
-    // b.installArtifact(tests);
-    // tests.linkLibC();
-    // tests.root_module.addImport("config", config_module);
-    // tests.root_module.addImport("arch", arch_module);
+    const tests = b.addTest(.{
+        .name = "yasos_tests",
+        .target = b.standardTargetOptions(.{}),
+        .optimize = optimize,
+        .root_source_file = b.path("tests.zig"),
+    });
+    b.installArtifact(tests);
+    tests.linkLibC();
+    tests.root_module.addImport("config", config_module);
 
-    // const run_tests_step = b.step("tests", "Run Yasos tests");
-    // const run_tests = b.addRunArtifact(tests);
-    // run_tests_step.dependOn(&run_tests.step);
+    const run_tests_step = b.step("tests", "Run Yasos tests");
+    const run_tests = b.addRunArtifact(tests);
+    run_tests_step.dependOn(&run_tests.step);
 }

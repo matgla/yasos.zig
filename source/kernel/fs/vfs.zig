@@ -18,4 +18,20 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-pub const VirtualFileSystem = struct {};
+const std = @import("std");
+
+const IFileSystem = @import("ifilesystem.zig").IFileSystem;
+const MountPoints = @import("mount_points.zig").MountPoints;
+
+pub const VirtualFileSystem = struct {
+    mount_points: MountPoints,
+
+    pub fn init(allocator: std.mem.Allocator) VirtualFileSystem {
+        return .{
+            .mount_points = MountPoints.init(allocator),
+        };
+    }
+    pub fn mount_filesystem(self: *VirtualFileSystem, path: []const u8, fs: IFileSystem) !void {
+        try self.mount_points.mount_filesystem(path, fs);
+    }
+};

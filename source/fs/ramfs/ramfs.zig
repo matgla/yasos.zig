@@ -18,17 +18,25 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const FileSystem = @import("../../kernel/fs.zig").FileSystem;
+const IFileSystem = @import("../../kernel/fs/fs.zig").IFileSystem;
+
+const log = &@import("../../log/kernel_log.zig").kernel_log;
 
 pub const RamFs = struct {
-    child: FileSystem,
-    
-    pub fn filesystem(self: *RamFs) FileSystem {
+    const VTable = IFileSystem.VTable{
+        .mount = mount,
+    };
+
+    pub fn ifilesystem(self: *RamFs) IFileSystem {
         return .{
             .ptr = self,
             .vtable = &.{
-                 
-            }
-        }
+                .mount = mount,
+            },
+        };
     }
-}
+
+    fn mount(_: *anyopaque) void {
+        log.write("Mounting RamFS\n");
+    }
+};
