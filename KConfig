@@ -1,7 +1,7 @@
 #
 # KConfig
 #
-# Copyright (C) 2023 Mateusz Stadnik <matgla@live.com>
+# Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 #
 # This program is free software: you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -58,4 +58,6 @@ menu "Filesystem Options"
   default 64 
   help 
     This is not maximum mounting in terms of depth, since mounting points are linked list
+
+  rsource "source/fs/KConfig"
 endmenu

@@ -1,5 +1,5 @@
 //
-// tests.zig
+// ramfs_file.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,8 +18,4 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-comptime {
-    // _ = @import("source/kernel/process.zig");
-    _ = @import("source/kernel/fs/mount_points.zig");
-    _ = @import("source/tests.zig");
-}
+const RamFsFile = struct {};
