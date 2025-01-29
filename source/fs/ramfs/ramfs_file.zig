@@ -26,9 +26,11 @@ const c = @cImport({
 });
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+
 const RamFsData = @import("ramfs_data.zig").RamFsData;
 
-const RamFsFile = struct {
+pub const RamFsFile = struct {
     /// VTable for IFile interface
     const VTable = IFile.VTable{
         .read = read,
@@ -41,10 +43,12 @@ const RamFsFile = struct {
         .name = name,
         .ioctl = ioctl,
         .stat = stat,
+        .filetype = filetype,
     };
 
     /// Pointer to data instance, data is kept by filesystem
     data: *RamFsData,
+    allocator: ?std.mem.Allocator = null,
 
     /// Current position in file
     position: usize = 0,
@@ -116,11 +120,16 @@ const RamFsFile = struct {
         return 0;
     }
 
-    pub fn close(_: *anyopaque) i32 {
+    pub fn close(ctx: *anyopaque) i32 {
+        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+        if (self.allocator) |allocator| {
+            allocator.destroy(self);
+        }
         return 0;
     }
 
     pub fn sync(_: *anyopaque) i32 {
+        // always in sync
         return 0;
     }
 
@@ -129,19 +138,38 @@ const RamFsFile = struct {
         return @intCast(self.position);
     }
 
-    pub fn size(_: *const anyopaque) isize {
-        return 0;
+    pub fn size(ctx: *const anyopaque) isize {
+        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+        return @intCast(@sizeOf(RamFsData) + self.data.data.items.len);
     }
 
-    pub fn name(_: *const anyopaque) []const u8 {
-        return "";
+    pub fn name(ctx: *const anyopaque) []const u8 {
+        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+        return self.data.name();
     }
 
     pub fn ioctl(_: *anyopaque, _: u32, _: *const anyopaque) i32 {
         return 0;
     }
 
-    pub fn stat(_: *const anyopaque, _: *c.struct_stat) void {}
+    pub fn stat(ctx: *const anyopaque, buf: *c.struct_stat) void {
+        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+        buf.st_dev = 0;
+        buf.st_ino = 0;
+        buf.st_mode = 0;
+        buf.st_nlink = 0;
+        buf.st_uid = 0;
+        buf.st_gid = 0;
+        buf.st_rdev = 0;
+        buf.st_size = @intCast(self.data.data.items.len + @sizeOf(RamFsData));
+        buf.st_blksize = 1;
+        buf.st_blocks = 1;
+    }
+
+    pub fn filetype(ctx: *const anyopaque) FileType {
+        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+        return self.data.type;
+    }
 };
 
 test "Read and write file" {
@@ -150,6 +178,8 @@ test "Read and write file" {
 
     var sut = RamFsFile.create(&data);
     const file = sut.ifile();
+
+    try std.testing.expectEqualStrings("test_file", file.name());
     try std.testing.expectEqual(22, file.write("Some data inside file\n"));
     try std.testing.expectEqual(4, file.write("test"));
     var buf: [8]u8 = undefined;
@@ -198,4 +228,8 @@ test "Seek file" {
     try std.testing.expectEqual(0, file.tell());
     try std.testing.expectEqual(0, file.seek(132, c.SEEK_SET));
     try std.testing.expectEqual(132, file.tell());
+
+    try std.testing.expectEqual(32 + @sizeOf(RamFsData), file.size());
+
+    _ = file.close();
 }

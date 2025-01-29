@@ -23,10 +23,7 @@ const std = @import("std");
 
 const config = @import("config");
 
-const FileType = enum(u4) {
-    File = 1,
-    Directory = 2,
-};
+const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
 pub const RamFsDataError = error{
     FileNameTooLong,
@@ -40,7 +37,7 @@ pub const RamFsData = struct {
 
     /// Buffer for filename, do not use it except of this module, instead please use: `RamFsData.name`
     _name_buffer: [config.ramfs.max_filename]u8,
-    fn create(allocator: std.mem.Allocator, filename: []const u8, filetype: FileType) !RamFsData {
+    pub fn create(allocator: std.mem.Allocator, filename: []const u8, filetype: FileType) !RamFsData {
         if (filename.len + 1 >= config.ramfs.max_filename) {
             return RamFsDataError.FileNameTooLong;
         }
@@ -67,7 +64,7 @@ pub const RamFsData = struct {
         return create(allocator, filename, FileType.Directory);
     }
 
-    pub fn name(self: RamFsData) []const u8 {
+    pub fn name(self: *const RamFsData) []const u8 {
         return std.mem.sliceTo(&self._name_buffer, 0);
     }
 };

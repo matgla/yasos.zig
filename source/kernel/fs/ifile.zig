@@ -23,6 +23,11 @@ const c = @cImport({
     @cInclude("sys/stat.h");
 });
 
+pub const FileType = enum(u4) {
+    File = 1,
+    Directory = 2,
+};
+
 pub const IFile = struct {
     const Self = @This();
 
@@ -40,44 +45,50 @@ pub const IFile = struct {
         name: *const fn (ctx: *anyopaque) []const u8,
         ioctl: *const fn (ctx: *anyopaque, cmd: u32, arg: *anyopaque) i32,
         stat: *const fn (ctx: *anyopaque, data: *c.struct_stat) void,
+        filetype: *const fn (ctx: *const anyopaque) FileType,
     };
 
-    pub inline fn read(self: IFile, buf: []u8) isize {
+    pub fn read(self: IFile, buf: []u8) isize {
         return self.vtable.read(self.ptr, buf);
     }
 
-    pub inline fn write(self: IFile, buf: []const u8) isize {
+    pub fn write(self: IFile, buf: []const u8) isize {
         return self.vtable.write(self.ptr, buf);
     }
-    pub inline fn seek(self: IFile, offset: c.off_t, base: i32) c.off_t {
+
+    pub fn seek(self: IFile, offset: c.off_t, base: i32) c.off_t {
         return self.vtable.seek(self.ptr, offset, base);
     }
 
-    pub inline fn close(self: IFile) i32 {
+    pub fn close(self: IFile) i32 {
         return self.vtable.close(self.ptr);
     }
 
-    pub inline fn sync(self: IFile) i32 {
+    pub fn sync(self: IFile) i32 {
         return self.vtable.sync(self.ptr);
     }
 
-    pub inline fn tell(self: IFile) c.off_t {
+    pub fn tell(self: IFile) c.off_t {
         return self.vtable.tell(self.ptr);
     }
 
-    pub inline fn size(self: IFile) isize {
+    pub fn size(self: IFile) isize {
         return self.vtable.size(self.ptr);
     }
 
-    pub inline fn name(self: IFile) []const u8 {
+    pub fn name(self: IFile) []const u8 {
         return self.vtable.name(self.ptr);
     }
 
-    pub inline fn ioctl(self: IFile, cmd: u32, arg: *anyopaque) i32 {
+    pub fn ioctl(self: IFile, cmd: u32, arg: *anyopaque) i32 {
         return self.vtable.ioctl(self.ptr, cmd, arg);
     }
 
-    pub inline fn stat(self: IFile, data: *c.struct_stat) void {
+    pub fn stat(self: IFile, data: *c.struct_stat) void {
         return self.vtable.stat(self.ptr, data);
+    }
+
+    pub fn filetype(self: IFile) FileType {
+        return self.vtable.filetype(self.ptr);
     }
 };

@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const IFileSystem = @import("ifilesystem.zig").IFileSystem;
+const IFile = @import("ifile.zig").IFile;
 
 const config = @import("config");
 
@@ -205,6 +206,13 @@ const FileSystemStub = struct {
 
     const VTable = IFileSystem.VTable{
         .mount = mount,
+        .umount = umount,
+        .create = create,
+        .mkdir = mkdir,
+        .remove = remove,
+        .name = name,
+        .traverse = traverse,
+        .get = get,
         .has_path = has_path,
     };
 
@@ -215,7 +223,35 @@ const FileSystemStub = struct {
         };
     }
 
-    fn mount(_: *anyopaque) void {}
+    fn mount(_: *anyopaque) i32 {
+        return 0;
+    }
+    fn umount(_: *anyopaque) i32 {
+        return 0;
+    }
+    fn create(_: *anyopaque, _: []const u8, _: i32) i32 {
+        return 0;
+    }
+    fn mkdir(_: *anyopaque, _: []const u8, _: i32) i32 {
+        return 0;
+    }
+
+    pub fn remove(_: *anyopaque, _: []const u8) i32 {
+        return 0;
+    }
+
+    pub fn name(_: *const anyopaque) []const u8 {
+        return "";
+    }
+
+    pub fn traverse(_: *const anyopaque, _: []const u8, _: *const fn (file: *IFile) void) i32 {
+        return 0;
+    }
+
+    pub fn get(_: *const anyopaque, _: []const u8) ?IFile {
+        return null;
+    }
+
     fn has_path(ctx: *anyopaque, _: []const u8) bool {
         const self: *const FileSystemStub = @ptrCast(@alignCast(ctx));
         return self.has_file;

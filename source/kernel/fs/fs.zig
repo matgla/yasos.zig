@@ -19,5 +19,5 @@
 //
 
 pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
-pub const File = @import("file.zig");
+pub const IFile = @import("ifile.zig").IFile;
 pub const VirtualFileSystem = @import("vfs.zig").VirtualFileSystem;

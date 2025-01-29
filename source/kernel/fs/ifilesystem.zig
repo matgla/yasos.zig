@@ -18,17 +18,55 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const IFile = @import("ifile.zig").IFile;
+
 pub const IFileSystem = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
-        mount: *const fn (ctx: *anyopaque) void,
+        mount: *const fn (ctx: *anyopaque) i32,
+        umount: *const fn (ctx: *anyopaque) i32,
+        create: *const fn (ctx: *anyopaque, path: []const u8, flags: i32) i32,
+        mkdir: *const fn (ctx: *anyopaque, path: []const u8, mode: i32) i32,
+        remove: *const fn (ctx: *anyopaque, path: []const u8) i32,
+        name: *const fn (ctx: *const anyopaque) []const u8,
+        traverse: *const fn (ctx: *const anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32,
+        get: *const fn (ctx: *anyopaque, path: []const u8) ?IFile,
+
         has_path: *const fn (ctx: *anyopaque, path: []const u8) bool,
     };
 
     pub fn mount(self: IFileSystem) void {
         self.vtable.mount(self.ptr);
+    }
+
+    pub fn umount(self: IFileSystem) i32 {
+        return self.vtable.umount(self.ptr);
+    }
+
+    pub fn create(self: IFileSystem, path: []const u8, flags: i32) i32 {
+        return self.vtable.create(self.ptr, path, flags);
+    }
+
+    pub fn mkdir(self: IFileSystem, path: []const u8, mode: i32) i32 {
+        return self.vtable.mkdir(self.ptr, path, mode);
+    }
+
+    pub fn remove(self: IFileSystem, path: []const u8) i32 {
+        return self.vtable.remove(self.ptr, path);
+    }
+
+    pub fn name(self: IFileSystem) []const u8 {
+        return self.vtable.name(self.ptr);
+    }
+
+    pub fn traverse(self: IFileSystem, path: []const u8, callback: *const fn (file: *IFile) void) i32 {
+        return self.vtable.traverse(self.ptr, path, callback);
+    }
+
+    pub fn get(self: IFileSystem, path: []const u8) ?IFile {
+        return self.vtable.get(self.ptr, path);
     }
 
     pub fn has_path(self: IFileSystem, path: []const u8) bool {

@@ -21,4 +21,5 @@
 comptime {
     _ = @import("ramfs_data.zig");
     _ = @import("ramfs_file.zig");
+    _ = @import("ramfs.zig");
 }
