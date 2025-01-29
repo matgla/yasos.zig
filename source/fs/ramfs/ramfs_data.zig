@@ -28,11 +28,11 @@ const FileType = enum(u4) {
     Directory = 2,
 };
 
-const RamFsError = error{
+pub const RamFsDataError = error{
     FileNameTooLong,
 };
 
-const RamFsData = struct {
+pub const RamFsData = struct {
     /// File type, users may use that field
     type: FileType,
     /// File contents
@@ -42,7 +42,7 @@ const RamFsData = struct {
     _name_buffer: [config.ramfs.max_filename]u8,
     fn create(allocator: std.mem.Allocator, filename: []const u8, filetype: FileType) !RamFsData {
         if (filename.len + 1 >= config.ramfs.max_filename) {
-            return RamFsError.FileNameTooLong;
+            return RamFsDataError.FileNameTooLong;
         }
         var obj = RamFsData{
             .type = filetype,
@@ -87,4 +87,14 @@ test "create nodes" {
     try std.testing.expectEqualStrings("dira", dir.name());
     try std.testing.expectEqual(FileType.Directory, dir.type);
     defer dir.deinit();
+}
+
+test "write content to file" {
+    var file1 = try RamFsData.create_file(std.testing.allocator, "file1");
+    try file1.data.appendSlice("This is test content");
+    try std.testing.expectEqualStrings("file1", file1.name());
+    try std.testing.expectEqual(FileType.File, file1.type);
+    try std.testing.expectEqualStrings("This is test content", file1.data.items);
+
+    defer file1.deinit();
 }
