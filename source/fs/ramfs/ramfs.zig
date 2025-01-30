@@ -161,8 +161,21 @@ pub const RamFs = struct {
         return "ramfs";
     }
 
-    fn traverse(_: *const anyopaque, _: []const u8, _: *const fn (file: *IFile) void) i32 {
-        return 0;
+    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32 {
+        const self: *RamFs = @ptrCast(@alignCast(ctx));
+        const maybe_node = self.get_node(path) catch return -1;
+        if (maybe_node) |node| {
+            if (node.node.type == FileType.Directory) {
+                var it = node.children.first;
+                while (it) |child| : (it = child.next) {
+                    var file: RamFsFile = RamFsFile.create(&child.data.node);
+                    var ifile = file.ifile();
+                    callback(&ifile);
+                }
+                return 0;
+            }
+        }
+        return -1;
     }
 
     fn get(ctx: *anyopaque, path: []const u8) ?IFile {
@@ -199,6 +212,26 @@ pub const RamFs = struct {
     }
 };
 
+const ExpectationList = std.DoublyLinkedList([]const u8);
+var expected_directories: ExpectationList = undefined;
+var did_error: anyerror!void = {};
+
+fn traverse_dir(file: *IFile) void {
+    did_error catch return;
+    did_error = std.testing.expect(expected_directories.first != null);
+    did_error catch {
+        std.debug.print("Expectation not found for: '{s}'\n", .{file.name()});
+        return;
+    };
+    const expectation = expected_directories.popFirst().?;
+    did_error = std.testing.expectEqualStrings(expectation.data, file.name());
+    did_error catch {
+        std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation.data, file.name() });
+
+        return;
+    };
+}
+
 test "Create files in ramfs" {
     var fs = try RamFs.init(std.testing.allocator);
     const sut = fs.ifilesystem();
@@ -230,13 +263,32 @@ test "Create files in ramfs" {
     try std.testing.expectEqual(true, sut.has_path("/test/file.txt"));
     try std.testing.expectEqual(true, sut.has_path("/test/dir/nested/file"));
 
+    var test_dir = ExpectationList.Node{ .data = "test" };
+    expected_directories.append(&test_dir);
+    var other_dir = ExpectationList.Node{ .data = "other" };
+    expected_directories.append(&other_dir);
+
+    try std.testing.expectEqual(-1, sut.traverse("/test/file.txt", traverse_dir));
+    try std.testing.expectEqual(0, sut.traverse("/", traverse_dir));
+    try did_error;
+    try std.testing.expectEqual(0, expected_directories.len);
+
+    var dir_dir = ExpectationList.Node{ .data = "dir" };
+    expected_directories.append(&dir_dir);
+    var file_file = ExpectationList.Node{ .data = "file.txt" };
+    expected_directories.append(&file_file);
+
+    try std.testing.expectEqual(0, sut.traverse("/test", traverse_dir));
+    try did_error;
+    try std.testing.expectEqual(0, expected_directories.len);
+
     // reject non empty directory removal
     try std.testing.expectEqual(-1, sut.remove("/test"));
     const maybe_file = sut.get("/test/file.txt");
     try std.testing.expect(maybe_file != null);
     if (maybe_file) |file| {
-        //try std.testing.expectEqual(20, file.write("Some data for file"));
-        _ = file.close();
+        defer _ = file.close();
+        try std.testing.expectEqual(18, file.write("Some data for file"));
     }
 
     try std.testing.expectEqual(0, sut.remove("/test/file.txt"));

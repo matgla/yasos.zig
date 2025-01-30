@@ -50,6 +50,15 @@ config CONFIG_PROCESS_ROOT_STACK_SIZE
   help
     Size of kernel root process stack size
 
+config CONFIG_PROCESS_HW_SPINLOCK_NUMBER
+  int "HW spinlock number for process synchronization"
+  default 5
+
+config CONFIG_PROCESS_CONTEXT_SWITCH_HW_SPINLOCK_NUMBER
+  int "HW spinlock number for context switch"
+  default 6 
+
+
 endmenu
 
 menu "Filesystem Options"

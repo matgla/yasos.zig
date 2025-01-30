@@ -89,7 +89,7 @@ pub const MountPoints = struct {
         }
     }
 
-    fn find_longest_matching_point(self: *MountPoints, path: []const u8) struct {
+    pub fn find_longest_matching_point(self: *MountPoints, path: []const u8) struct {
         left: []const u8,
         point: *MountPoint,
         parent: ?*MountPoint,

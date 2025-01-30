@@ -1,5 +1,5 @@
 //
-// mutex.zig
+// main.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,17 +18,12 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const Semaphore = @import("semaphore.zig").Semaphore;
-const config = @import("config");
+const std = @import("std");
 
-pub const Mutex = struct {
-    semaphore: Semaphore = Semaphore.create(config.process.hw_spinlock_number),
+const c = @cImport({
+    @cInclude("stdio.h");
+});
 
-    pub fn lock(self: *Mutex) void {
-        self.semaphore.acquire();
-    }
-
-    pub fn unlock(self: *Mutex) void {
-        self.semaphore.release();
-    }
-};
+export fn main() void {
+    _ = c.puts("Hello\n");
+}

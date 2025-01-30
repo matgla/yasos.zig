@@ -31,7 +31,7 @@ pub const IFileSystem = struct {
         mkdir: *const fn (ctx: *anyopaque, path: []const u8, mode: i32) i32,
         remove: *const fn (ctx: *anyopaque, path: []const u8) i32,
         name: *const fn (ctx: *const anyopaque) []const u8,
-        traverse: *const fn (ctx: *const anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32,
+        traverse: *const fn (ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32,
         get: *const fn (ctx: *anyopaque, path: []const u8) ?IFile,
 
         has_path: *const fn (ctx: *anyopaque, path: []const u8) bool,

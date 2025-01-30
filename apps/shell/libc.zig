@@ -1,5 +1,5 @@
 //
-// mutex.zig
+// libc.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,17 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const Semaphore = @import("semaphore.zig").Semaphore;
-const config = @import("config");
+export fn puts(_: [*:0]const u8) void {
+    // trigger syscall?
 
-pub const Mutex = struct {
-    semaphore: Semaphore = Semaphore.create(config.process.hw_spinlock_number),
-
-    pub fn lock(self: *Mutex) void {
-        self.semaphore.acquire();
-    }
-
-    pub fn unlock(self: *Mutex) void {
-        self.semaphore.release();
-    }
-};
+}

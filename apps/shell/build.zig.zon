@@ -1,7 +1,7 @@
 //
-// mutex.zig
+// build.zig.zon
 //
-// Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
+// Copyright (C) 2024 Mateusz Stadnik <matgla@live.com>
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU General Public License
@@ -18,17 +18,16 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const Semaphore = @import("semaphore.zig").Semaphore;
-const config = @import("config");
-
-pub const Mutex = struct {
-    semaphore: Semaphore = Semaphore.create(config.process.hw_spinlock_number),
-
-    pub fn lock(self: *Mutex) void {
-        self.semaphore.acquire();
-    }
-
-    pub fn unlock(self: *Mutex) void {
-        self.semaphore.release();
-    }
-};
+.{
+    .name = "yasos_shell",
+    .version = "0.0.1",
+    .dependencies = .{
+        .toolchains = .{
+            .path = "../../libs/hal/toolchains",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}

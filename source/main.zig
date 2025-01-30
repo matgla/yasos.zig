@@ -98,9 +98,13 @@ fn file_resolver(_: []const u8) ?*anyopaque {
 export fn kernel_process() void {
     log.write(" - creating virtual file system\n");
     var vfs = fs.VirtualFileSystem.init(malloc_allocator);
-    var ramfs = RamFs{};
+    var ramfs = RamFs.init(malloc_allocator) catch |err| {
+        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
+        return;
+    };
     vfs.mount_filesystem("/", ramfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/' with type 'romfs': {s}\n", .{@errorName(err)});
+        log.print("Can't mount '/' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+        return;
     };
 
     log.write(" - loading yasld\n");
@@ -170,5 +174,5 @@ const ShellData = struct {
         @memcpy(out[0..binary.len], binary);
         return out;
     }
-    export const data: [@embedFile("hello_app.yaff").len]u8 linksection(".romfs") = prepare_file(@embedFile("hello_app.yaff"));
+    export const data: [@embedFile("yasos_shell.yaff").len]u8 linksection(".romfs") = prepare_file(@embedFile("yasos_shell.yaff"));
 };
