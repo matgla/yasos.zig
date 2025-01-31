@@ -4,3 +4,6 @@
 [submodule "libs/yasld.zig"]
 	path = libs/yasld.zig
 	url = git@github.com:matgla/yasld.zig.git
+[submodule "libs/ElfToYaff"]
+	path = libs/ElfToYaff
+	url = git@github.com:matgla/ElfToYaff.git
