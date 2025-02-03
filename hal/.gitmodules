@@ -1,0 +1,6 @@
+[submodule "renode/Renode_RP2040"]
+	path = renode/Renode_RP2040
+	url = git@github.com:matgla/Renode_RP2040.git
+[submodule "libs/pico-sdk"]
+	path = libs/pico-sdk
+	url = https://github.com/raspberrypi/pico-sdk.git

@@ -29,9 +29,6 @@ set (CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library (c SHARED)
 
-set(CMAKE_C_FLAGS "-fPIE -fPIC -mcpu=cortex-m33 -nodefaultlibs -nostdlib")
-set(CMAKE_EXE_LINKER_FLAGS "-fPIE -fPIC -nodefaultlibs -nostartfiles -nostdlib -mno-pic-data-is-text-relative")
-
 target_sources (c
   PRIVATE 
     syscalls.c
@@ -42,15 +39,16 @@ target_include_directories(c
     ${PROJECT_SOURCE_DIR}/include
 )
 
-set (linker_script ${PROJECT_SOURCE_DIR}/../libs/ElfToYaff/arch/arm-m/linker_script.ld)
 
 set_target_properties (c
   PROPERTIES LINK_DEPENDS ${linker_script})
 
 target_link_libraries(c
   PRIVATE -Wl,--whole-archive libc.a -Wl,--no-whole-archive
-  gcc supc++
+  gcc supc++ 
 )
+
+
 
 target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../source)
 
@@ -60,4 +58,8 @@ target_link_options (c PRIVATE
   -nodefaultlibs 
   -nostartfiles
   -nostdlib
+  -u__cxa_begin_cleanup
+  -u__cxa_pure_virtual
+  -u__gnu_Unwind_Find_exidx
+
 )
