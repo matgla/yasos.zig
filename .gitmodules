@@ -7,3 +7,6 @@
 [submodule "libs/ElfToYaff"]
 	path = libs/ElfToYaff
 	url = git@github.com:matgla/ElfToYaff.git
+[submodule "libs/genromfs"]
+	path = libs/genromfs
+	url = https://github.com/chexum/genromfs.git
