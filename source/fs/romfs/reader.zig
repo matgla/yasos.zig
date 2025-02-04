@@ -1,5 +1,5 @@
 //
-// make_rootfs.zig
+// reader.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,4 +18,6 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const std = @import("std");
+const Reader = struct {
+    
+};

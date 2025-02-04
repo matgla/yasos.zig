@@ -18,15 +18,8 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-ptr: *anyopaque,
-vtable: *const VTable,
-
-const BlockDevice = @This();
-
-pub const VTable = struct {
-    init: *const fn (ctx: *anyopaque) void,
+pub const IBlockDevice = struct {
+    pub const VTable = struct {
+        init: *const fn (ctx: *anyopaque) void,
+    };
 };
-
-pub fn init(self: BlockDevice) void {
-    self.vtable.init(self.ptr);
-}

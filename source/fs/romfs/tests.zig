@@ -1,5 +1,5 @@
 //
-// make_rootfs.zig
+// tests.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,4 +18,6 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const std = @import("std");
+comptime {
+    _ = @import("file_system_header.zig");
+}

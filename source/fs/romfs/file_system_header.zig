@@ -1,5 +1,5 @@
 //
-// make_rootfs.zig
+// file_system_header.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -19,3 +19,20 @@
 //
 
 const std = @import("std");
+
+const FileSystemHeader = packed struct {
+    marker: [8]u8,
+    size: u32,
+    checksum: u32,
+    
+};
+
+comptime {
+    const std = @import("std");
+    var buf: [30]u8 = undefined;
+    if (@sizeOf(FileSystemHeader) != 12) @compileError("FileSystemHeader has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(FileSystemHeader)}) catch "unknown"));
+}
+
+test "Parse filesystem header" {
+    const test_data = @embedFile("test_img.romfs");
+}
