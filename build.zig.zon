@@ -3,7 +3,7 @@
     .version = "0.0.1",
     .dependencies = .{
         .yasos_hal = .{ .path = "hal" },
-        .yasld = .{ .path = "libs/yasld.zig" },
+        .yasld = .{ .path = "dynamic_loader" },
     },
     .paths = .{
         "build.zig",
