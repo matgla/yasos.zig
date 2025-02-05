@@ -6,3 +6,4 @@ yasos_venv/
 config/
 .gdb_history
 .vscode/
+.DS_Store

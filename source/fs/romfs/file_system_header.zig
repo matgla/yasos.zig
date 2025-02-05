@@ -46,13 +46,13 @@ const FileSystemHeader = struct {
     }
 
     pub fn calculate_checksum(self: FileSystemHeader) u32 {
-        const length = @min(self.memory.len, 512);
-        var i: u32 = 0;
+        const length = @min(self.memory.len + 16, 512);
+        var i: u32 = 16;
         var checksum_value: u32 = 0;
         while (i < length) {
-            const d = FileSystemHeader.read(i32, self.memory[i .. i + 4]);
-            checksum_value +%= FileSystemHeader.read(u32, self.memory[i .. i + 4]);
-            std.debug.print("{d} 0x{x} | 0x{x}\n", .{ i, checksum_value, d });
+            const d = FileSystemHeader.read(u32, self.memory[i .. i + 4]);
+            checksum_value +%= d;
+            std.debug.print("{d} 0x{x} | 0x{x} \n", .{ i, checksum_value, d });
             i += 4;
         }
         return checksum_value;
