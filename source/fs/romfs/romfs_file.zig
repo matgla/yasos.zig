@@ -52,10 +52,9 @@ pub const RomFsFile = struct {
     /// Current position in file
     position: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, data: FileHeader) RomFsFile {
+    pub fn init(data: FileHeader) RomFsFile {
         return .{
             .data = data,
-            .allocator = allocator,
         };
     }
 

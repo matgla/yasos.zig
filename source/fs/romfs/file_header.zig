@@ -99,10 +99,10 @@ pub const FileHeader = struct {
     }
 
     pub fn next(self: FileHeader) ?FileHeader {
-        const next_file_header = FileHeader.read(u32, self.memory[self.start_index .. self.start_index + 4]);
+        const next_file_header = FileHeader.read(u32, self.memory[self.start_index .. self.start_index + 4]) & 0xfffffff0;
         if (next_file_header == 0) {
             return null;
         }
-        return FileHeader.init(self.memory, next_file_header & 0xfffffff0);
+        return FileHeader.init(self.memory, next_file_header);
     }
 };

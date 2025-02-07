@@ -25,6 +25,7 @@ const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
 
 const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
+const FileHeader = @import("file_header.zig").FileHeader;
 
 const std = @import("std");
 
@@ -93,12 +94,25 @@ pub const RomFs = struct {
         return "romfs";
     }
 
-    fn traverse(_: *anyopaque, _: []const u8, _: *const fn (file: *IFile) void) i32 {
+    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32 {
+        const self: *RomFs = @ptrCast(@alignCast(ctx));
+        const maybe_node = self.get_file_header(path);
+        if (maybe_node) |node| {
+            std.debug.print("TT: {s}\n", .{node.name()});
+            if (node.filetype() == FileType.Directory) {
+                var it: ?FileHeader = node;
+                while (it) |child| : (it = child.next()) {
+                    var file: RomFsFile = RomFsFile.init(child);
+                    var ifile = file.ifile();
+                    callback(&ifile);
+                }
+                return 0;
+            }
+        }
         return -1;
     }
 
-    fn get(ctx: *anyopaque, path: []const u8) ?IFile {
-        const self: *RomFs = @ptrCast(@alignCast(ctx));
+    fn get_file_header(self: RomFs, path: []const u8) ?FileHeader {
         var it = try std.fs.path.componentIterator(path);
         var component = it.first();
         var node = self.root.first_file_header();
@@ -115,28 +129,70 @@ pub const RomFs = struct {
                 return null;
             }
         }
-
-        // return file
-        const file = self.allocator.create(RomFsFile) catch return null;
-        file.* = RomFsFile.init(self.allocator, node);
-        return file.ifile();
+        std.debug.print("Retruns: {s}\n", .{node.name()});
+        return node;
     }
 
-    fn has_path(_: *anyopaque, _: []const u8) bool {
-        return false;
+    fn get(ctx: *anyopaque, path: []const u8) ?IFile {
+        const self: *RomFs = @ptrCast(@alignCast(ctx));
+        const maybe_node = self.get_file_header(path);
+        const file = self.allocator.create(RomFsFile) catch return null;
+        if (maybe_node) |node| {
+            file.* = RomFsFile.init(node);
+            file.allocator = self.allocator;
+            return file.ifile();
+        }
+        return null;
+    }
+
+    fn has_path(ctx: *anyopaque, path: []const u8) bool {
+        const self: *RomFs = @ptrCast(@alignCast(ctx));
+        const file = self.get_file_header(path);
+        return file != null;
     }
 };
 
+const ExpectationList = std.ArrayList([]const u8);
+var expected_directories: ExpectationList = undefined;
+var did_error: anyerror!void = {};
+
+fn traverse_dir(file: *IFile) void {
+    did_error catch return;
+    did_error = std.testing.expect(expected_directories.items.len != 0);
+    did_error catch {
+        std.debug.print("Expectation not found for: '{s}'\n", .{file.name()});
+        return;
+    };
+    const expectation = expected_directories.items[0];
+    did_error = std.testing.expectEqualStrings(expectation, file.name());
+    did_error catch {
+        std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation, file.name() });
+        return;
+    };
+    _ = expected_directories.orderedRemove(0);
+}
+
 test "Parsing filesystem" {
     const test_data = @embedFile("test.romfs");
+    expected_directories = std.ArrayList([]const u8).init(std.testing.allocator);
+    defer expected_directories.deinit();
     var maybe_fs = RomFs.init(std.testing.allocator, test_data);
     if (maybe_fs) |*fs| {
         const ifs = fs.ifilesystem();
+
+        try std.testing.expectEqual(ifs.name(), "romfs");
         const maybe_root_directory = ifs.get("/");
         try std.testing.expect(maybe_root_directory != null);
         if (maybe_root_directory) |root_directory| {
             defer _ = root_directory.close();
             try std.testing.expectEqualStrings(root_directory.name(), ".");
         }
+        _ = try expected_directories.appendSlice(&.{ ".", "..", "dev", "subdir", "file.txt" });
+        try std.testing.expectEqual(0, ifs.traverse(".", &traverse_dir));
+        try did_error;
+
+        _ = try expected_directories.appendSlice(&.{ ".", "..", "file.1", "b", "c" });
+        try std.testing.expectEqual(0, ifs.traverse("/dev", &traverse_dir));
+        try did_error;
     }
 }
