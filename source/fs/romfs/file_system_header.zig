@@ -20,7 +20,10 @@
 
 const std = @import("std");
 
-const FileSystemHeader = struct {
+const FileHeader = @import("file_header.zig").FileHeader;
+const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+
+pub const FileSystemHeader = struct {
     memory: []const u8,
 
     pub fn init(memory: []const u8) ?FileSystemHeader {
@@ -45,26 +48,49 @@ const FileSystemHeader = struct {
         return FileSystemHeader.read(u32, self.memory[12..16]);
     }
 
-    pub fn calculate_checksum(self: FileSystemHeader) u32 {
-        const length = @min(self.memory.len + 16, 512);
-        var i: u32 = 16;
+    // genromfs sets checksum field as 0 before calculation and returns -sum as a result
+    // if result is equal to 0, then checksum is correct
+    pub fn validate_checksum(self: FileSystemHeader) bool {
+        const length = @min(self.memory.len, 512);
+        var i: u32 = 0;
         var checksum_value: u32 = 0;
         while (i < length) {
-            const d = FileSystemHeader.read(u32, self.memory[i .. i + 4]);
-            checksum_value +%= d;
-            std.debug.print("{d} 0x{x} | 0x{x} \n", .{ i, checksum_value, d });
+            checksum_value +%= FileSystemHeader.read(u32, self.memory[i .. i + 4]);
             i += 4;
         }
-        return checksum_value;
+        return checksum_value == 0;
+    }
+
+    pub fn name(self: FileSystemHeader) []const u8 {
+        return std.mem.sliceTo(self.memory[16..], 0);
+    }
+
+    pub fn first_file_header(self: FileSystemHeader) FileHeader {
+        const file_header_index = 16 + self.name().len;
+        const remainder = file_header_index % 16;
+        const padded_index = if (remainder == 0) file_header_index else (file_header_index + (16 - remainder));
+        return FileHeader.init(self.memory, padded_index);
     }
 };
 
 test "Parse filesystem header" {
-    const test_data = @embedFile("test_img.romfs");
+    const test_data = @embedFile("test.romfs");
     const maybe_fs = FileSystemHeader.init(test_data);
     try std.testing.expect(maybe_fs != null);
     if (maybe_fs) |fs| {
-        try std.testing.expectEqual(fs.size(), 376752);
-        try std.testing.expectEqual(fs.checksum(), fs.calculate_checksum());
+        try std.testing.expectEqual(fs.size(), 1040);
+        try std.testing.expect(fs.validate_checksum());
+        try std.testing.expectEqualStrings("ROMFS_TEST", fs.name());
+        try std.testing.expectEqualStrings(fs.first_file_header().name(), ".");
+        try std.testing.expectEqual(fs.first_file_header().filetype(), FileType.Directory);
+
+        try std.testing.expectEqualStrings(fs.first_file_header().next().?.name(), "..");
+        const maybe_file = fs.first_file_header().next().?.next().?.next().?.next();
+        if (maybe_file) |file| {
+            try std.testing.expectEqualStrings(file.name(), "file.txt");
+            try std.testing.expect(file.validate_checksum());
+            try std.testing.expectEqualStrings(file.data()[0..20], "THis is testing file");
+            try std.testing.expectEqual(file.filetype(), FileType.File);
+        }
     }
 }

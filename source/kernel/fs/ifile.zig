@@ -23,9 +23,15 @@ const c = @cImport({
     @cInclude("sys/stat.h");
 });
 
-pub const FileType = enum(u4) {
-    File = 1,
-    Directory = 2,
+pub const FileType = enum(u8) {
+    HardLink = 0,
+    Directory = 1,
+    File = 2,
+    SymbolicLink = 3,
+    BlockDevice = 4,
+    CharDevice = 5,
+    Socket = 6,
+    Fifo = 7,
 };
 
 pub const IFile = struct {
