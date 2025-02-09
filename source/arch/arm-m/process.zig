@@ -32,7 +32,7 @@ fn void_or_register() type {
 }
 
 fn void_or_value(comptime value: anytype) void_or_register() {
-    if (config.cpu.has_fpu and config.cpu_use_fpu) {
+    if (config.cpu.has_fpu and config.cpu.use_fpu) {
         return value;
     }
     return {};

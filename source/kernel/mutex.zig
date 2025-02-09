@@ -19,9 +19,10 @@
 //
 
 const Semaphore = @import("semaphore.zig").Semaphore;
+const config = @import("config");
 
 pub const Mutex = struct {
-    semaphore: Semaphore = Semaphore.create(1),
+    semaphore: Semaphore = Semaphore.create(config.process.hw_spinlock_number),
 
     pub fn lock(self: *Mutex) void {
         self.semaphore.acquire();

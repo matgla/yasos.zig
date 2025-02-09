@@ -25,6 +25,7 @@ const hal = @import("hal");
 const process_manager = @import("../process_manager.zig");
 const Semaphore = @import("../semaphore.zig").Semaphore;
 const KernelSemaphore = @import("kernel_semaphore.zig").KernelSemaphore;
+const config = @import("config");
 
 extern fn switch_to_next_task() void;
 extern fn store_and_switch_to_next_task() void;
@@ -42,8 +43,8 @@ pub const SemaphoreEvent = struct {
 
 export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
     // those operations must be secure since both cores may be executing that code in the same time
-    hal.hw_atomic.lock(1);
-    defer hal.hw_atomic.unlock(1);
+    hal.hw_atomic.lock(config.process.hw_spinlock_number);
+    defer hal.hw_atomic.unlock(config.process.hw_spinlock_number);
     switch (@as(SystemCall, @enumFromInt(number))) {
         .start_root_process => {
             switch_to_next_task();
@@ -69,11 +70,11 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
 }
 
 export fn unlock_pendsv_spinlock() void {
-    hal.hw_atomic.unlock(1);
+    hal.hw_atomic.unlock(config.process.hw_spinlock_number);
 }
 
 export fn irq_pendsv() void {
-    hal.hw_atomic.lock(1);
+    hal.hw_atomic.lock(config.process.hw_spinlock_number);
     store_and_switch_to_next_task();
 }
 
