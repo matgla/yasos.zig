@@ -25,6 +25,10 @@ const system_call = @import("interrupts/system_call.zig");
 
 const process_manager = @import("process_manager.zig");
 
+const c = @cImport({
+    @cInclude("kernel/syscalls.h");
+});
+
 pub fn spawn(allocator: std.mem.Allocator, entry: anytype, arg: ?*const anyopaque, stack_size: u32) error{ProcessCreationFailed}!void {
     const context = system_call.CreateProcessCall{
         .allocator = allocator,
@@ -45,7 +49,7 @@ pub fn root_process(allocator: std.mem.Allocator, entry: anytype, arg: ?*const a
     if (process_manager.instance.scheduler.schedule_next()) {
         process_manager.instance.initialize_context_switching();
         hal.time.systick.enable();
-        system_call.trigger(.start_root_process, arg, null);
+        system_call.trigger(c.sys_start_root_process, arg, null);
     }
 
     @panic("Can't initialize root process");

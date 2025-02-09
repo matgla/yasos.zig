@@ -25,6 +25,10 @@ const syscall = @import("interrupts/system_call.zig");
 
 const atomic = @import("hal").atomic;
 
+const c = @cImport({
+    @cInclude("kernel/syscalls.h");
+});
+
 pub const Semaphore = struct {
     counter: atomic.Atomic(u32),
 
@@ -40,7 +44,7 @@ pub const Semaphore = struct {
         };
         var result: bool = false;
         while (!result) {
-            syscall.trigger(.semaphore_acquire, &event, &result);
+            syscall.trigger(c.sys_semaphore_acquire, &event, &result);
         }
     }
 
@@ -48,6 +52,6 @@ pub const Semaphore = struct {
         const event = syscall.SemaphoreEvent{
             .object = self,
         };
-        syscall.trigger(.semaphore_release, &event, null);
+        syscall.trigger(c.sys_semaphore_release, &event, null);
     }
 };

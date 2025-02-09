@@ -50,7 +50,7 @@ target_link_libraries(c
 
 
 
-target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../source)
+target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../source/kernel)
 
 target_link_options (c PRIVATE 
   -Wl,--no-warn-rwx-segments

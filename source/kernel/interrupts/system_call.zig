@@ -22,6 +22,10 @@ const std = @import("std");
 
 const hal = @import("hal");
 
+const c = @cImport({
+    @cInclude("kernel/syscalls.h");
+});
+
 const process_manager = @import("../process_manager.zig");
 const Semaphore = @import("../semaphore.zig").Semaphore;
 const KernelSemaphore = @import("kernel_semaphore.zig").KernelSemaphore;
@@ -45,11 +49,11 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
     // those operations must be secure since both cores may be executing that code in the same time
     hal.hw_atomic.lock(config.process.hw_spinlock_number);
     defer hal.hw_atomic.unlock(config.process.hw_spinlock_number);
-    switch (@as(SystemCall, @enumFromInt(number))) {
-        .start_root_process => {
+    switch (number) {
+        c.sys_start_root_process => {
             switch_to_next_task();
         },
-        .create_process => {
+        c.sys_create_process => {
             const context: *const volatile CreateProcessCall = @ptrCast(@alignCast(arg));
             const result: *volatile bool = @ptrCast(out);
             process_manager.instance.create_process(context.allocator, context.stack_size, context.entry, context.arg) catch {
@@ -57,15 +61,17 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             };
             result.* = true;
         },
-        .semaphore_acquire => {
-            const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
-            const result: *volatile bool = @ptrCast(@alignCast(out));
-            result.* = KernelSemaphore.acquire(context.object);
-        },
-        .semaphore_release => {
-            const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
-            KernelSemaphore.release(context.object);
-        },
+
+        // .semaphore_acquire => {
+        //     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
+        //     const result: *volatile bool = @ptrCast(@alignCast(out));
+        //     result.* = KernelSemaphore.acquire(context.object);
+        // },
+        // .semaphore_release => {
+        //     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
+        //     KernelSemaphore.release(context.object);
+        // },
+        else => {},
     }
 }
 
@@ -78,14 +84,7 @@ export fn irq_pendsv() void {
     store_and_switch_to_next_task();
 }
 
-pub const SystemCall = enum(u32) {
-    start_root_process = 1,
-    create_process = 2,
-    semaphore_acquire = 3,
-    semaphore_release = 4,
-};
-
-pub fn trigger(number: SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) void {
+pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) void {
     var svc_arg: *const anyopaque = undefined;
     var svc_out: *anyopaque = undefined;
 
@@ -96,5 +95,5 @@ pub fn trigger(number: SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) voi
         svc_out = o;
     }
 
-    hal.irq.trigger_supervisor_call(@intFromEnum(number), svc_arg, svc_out);
+    hal.irq.trigger_supervisor_call(number, svc_arg, svc_out);
 }
