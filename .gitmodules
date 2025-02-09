@@ -1,6 +1,3 @@
-[submodule "libs/hal"]
-	path = libs/hal
-	url = git@github.com:matgla/yasos_hal.zig.git
-[submodule "libs/yasld.zig"]
-	path = libs/yasld.zig
-	url = git@github.com:matgla/yasld.zig.git
+[submodule "hal/libs/pico-sdk"]
+	path = hal/libs/pico-sdk
+	url = https://github.com/raspberrypi/pico-sdk.git

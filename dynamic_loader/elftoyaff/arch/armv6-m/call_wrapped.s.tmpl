@@ -1,0 +1,68 @@
+.thumb 
+.syntax unified 
+.arch armv6-m
+.cpu cortex-m0plus 
+
+.text 
+
+{% for name in names %}
+
+.global {{ name }}_yasld_wrapper
+.thumb_func
+.extern {{ name }}_yasld_wrapper
+.align 4
+.type {{ name }}_yasld_wrapper, %function 
+{{ name }}_yasld_wrapper:
+  // store manipulated registers  
+  push {r0, r1}
+ 
+  // prepare arguments for store service call 
+  // stored arguments are link register, r4, r9, 
+  // r8 dummy to fill alignment requirement
+  mov r0, pc 
+  mov r1, r9
+  push {r0, r1, r4, lr}
+  movs r0, #0xa
+  mov r1, sp
+  svc #0
+
+  // retrieve r9 value
+  pop {r0}
+
+  // discard 3 elements from stack
+  add sp, sp, #12
+  mov r9, r0
+
+  // calculate relocation
+  adr r4, {{ name }}_original_symbol 
+  ldr r4, [r4]
+  ldr r4, [r0, r4]
+ 
+  // restore original stack 
+  pop {r0, r1}
+
+  // execute call 
+  blx r4
+ 
+  // prepare arguments for restore service call
+  mov r2, r0
+  mov r3, r1
+
+  mov r0, pc 
+  push {r0, r1, r4, r6}
+  mov r1, sp 
+  movs r0, #0xb
+  svc #0
+  // restored arguments on stack lr, r9, r4, r5
+  
+  pop {r0, r1, r4, r6} 
+  
+  mov r9, r1 
+  mov r1, r3 
+  mov r3, r0 
+  mov r0, r2
+  mov pc, r3
+
+{{ name }}_original_symbol:
+  .word {{ name }}(GOT) 
+{% endfor %}

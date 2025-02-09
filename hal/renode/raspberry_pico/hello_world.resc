@@ -1,0 +1,8 @@
+path add $ORIGIN/../Renode_RP2040
+$global.FIRMWARE=$ORIGIN/../../examples/hello_uart/zig-out/bin/hello_uart
+include @run_firmware.resc
+
+machine StartGdbServer 3333 true sysbus.cpu0
+machine StartGdbServer 3333 true sysbus.cpu1
+
+showAnalyzer sysbus.uart0

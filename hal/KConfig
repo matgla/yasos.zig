@@ -1,0 +1,52 @@
+# KConfig
+#
+# Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
+#
+# This program is free software: you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation, either version
+# 3 of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be
+# useful, but WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+# PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General
+# Public License along with this program. If not, see
+# <https://www.gnu.org/licenses/>.
+#
+
+rsource "./boards/KConfig"
+rsource "./source/KConfig"
+
+menu "Build options"
+config CONFIG_BUILD_LINKER_SCRIPT_PATH
+    string "Linker script"
+    help 
+        Path to custom linker script for executable linking
+
+
+config CONFIG_BUILD_BUNDLE_COMPILER_RT 
+    bool "Bundle compiler RT" 
+    help 
+        Bundle compiler RT. Compiler RT may not be compatible with GCC based environment, i.e. for newlib nano
+endmenu
+
+menu "Memory"
+
+config FIRMWARE_IN_FLASH
+    bool
+
+config CPU_HAS_MPU
+    bool
+
+config FLASH_MEMORY_ADDRESS
+    string "Flash memory start address for firmware"
+    depends on FIRMWARE_IN_FLASH 
+
+config FLASH_MEMORY_SIZE
+    string "Flash memory size in format like: 1024K" 
+    depends on FIRMWARE_IN_FLASH
+
+endmenu

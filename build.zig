@@ -1,3 +1,22 @@
+//
+// build.zig
+//
+// Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
+//
+// This program is free software: you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation, either version
+// 3 of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be
+// useful, but WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+// PURPOSE. See the GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General
+// Public License along with this program. If not, see
+// <https://www.gnu.org/licenses/>.
+//
 const std = @import("std");
 const hal = @import("yasos_hal");
 var cmake: ?[]const u8 = null;
@@ -106,18 +125,17 @@ pub fn build(b: *std.Build) !void {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
     }
 
-    // const tests = b.addTest(.{
-    //     .name = "yasos_tests",
-    //     .target = b.standardTargetOptions(.{}),
-    //     .optimize = optimize,
-    //     .root_source_file = b.path("tests.zig"),
-    // });
-    // b.installArtifact(tests);
-    // tests.linkLibC();
-    // tests.root_module.addImport("config", config_module);
-    // tests.root_module.addImport("arch", arch_module);
+    const tests = b.addTest(.{
+        .name = "yasos_tests",
+        .target = b.standardTargetOptions(.{}),
+        .optimize = optimize,
+        .root_source_file = b.path("tests.zig"),
+    });
+    b.installArtifact(tests);
+    tests.linkLibC();
+    tests.root_module.addImport("config", config_module);
 
-    // const run_tests_step = b.step("tests", "Run Yasos tests");
-    // const run_tests = b.addRunArtifact(tests);
-    // run_tests_step.dependOn(&run_tests.step);
+    const run_tests_step = b.step("tests", "Run Yasos tests");
+    const run_tests = b.addRunArtifact(tests);
+    run_tests_step.dependOn(&run_tests.step);
 }
