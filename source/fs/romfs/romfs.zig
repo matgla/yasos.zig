@@ -133,12 +133,14 @@ pub const RomFs = struct {
 
             // if symbolic link then fetch target node
             if (node.filetype() == FileType.SymbolicLink) {
+                std.debug.print("Symbolic link, path: {s}, name: {s}\n", .{ part.path, part.name });
                 // iterate through link
-                var link_it = try std.fs.path.componentIterator(node.data());
-                var link_component = link_it.first();
-                while (link_component) |link_part| : (link_component = link_it.next()) {
-                    std.debug.print("Part is: {s}\n", .{link_part.name});
-                }
+                const linkpath = std.fs.path.join(self.allocator, &.{ part.path, "..", node.data() }) catch return null;
+                defer self.allocator.free(linkpath);
+                std.debug.print("Link: {s}\n", .{linkpath});
+                const realpathink = std.fs.realpathAlloc(self.allocator, linkpath) catch return null;
+                defer self.allocator.free(realpathink);
+                std.debug.print("Path to symbolic link: {s}\n", .{realpathink});
             }
 
             // if last component then return
