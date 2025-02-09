@@ -83,7 +83,7 @@ typedef struct fstat_context {
   struct stat *buf;
 } fstat_context;
 
-typedef enum syscall_id {
+typedef enum SystemCall {
   sys_start_root_process = 1,
   sys_create_process = 2,
   sys_semaphore_acquire = 3,
@@ -108,4 +108,4 @@ typedef enum syscall_id {
   sys_lseek = 23,
   sys_wait = 24,
   sys_times = 25,
-} syscall_id;
+} SystemCall;
