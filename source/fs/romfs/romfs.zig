@@ -98,38 +98,63 @@ pub const RomFs = struct {
         const self: *RomFs = @ptrCast(@alignCast(ctx));
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
-            std.debug.print("TT: {s}\n", .{node.name()});
             if (node.filetype() == FileType.Directory) {
-                var it: ?FileHeader = node;
+                var it: ?FileHeader = FileHeader.init(node.memory, node.specinfo());
                 while (it) |child| : (it = child.next()) {
                     var file: RomFsFile = RomFsFile.init(child);
                     var ifile = file.ifile();
                     callback(&ifile);
                 }
                 return 0;
+            } else if (node.filetype() == FileType.SymbolicLink) {
+                std.debug.print("Size: {d}, {d}, {s}\n", .{ node.size(), node.data().len, node.data() });
             }
         }
         return -1;
     }
 
     fn get_file_header(self: RomFs, path: []const u8) ?FileHeader {
+        std.debug.print("Fetching file header\n", .{});
+        const path_without_trailing_separator = std.mem.trimRight(u8, path, "/");
         var it = try std.fs.path.componentIterator(path);
         var component = it.first();
         var node = self.root.first_file_header();
         while (component) |part| : (component = it.next()) {
+            std.debug.print("Processing: {s}, {s}\n", .{ part.name, part.path });
             while (!std.mem.eql(u8, node.name(), part.name)) {
+                std.debug.print("Node: {s}({d}), part: {s}({d})\n", .{ node.name(), node.name().len, part.name, part.name.len });
                 const maybe_node = node.next();
                 if (maybe_node == null) {
+                    std.debug.print("Return from there\n", .{});
                     return null;
                 }
                 node = maybe_node.?;
             }
-            // TODO: symbolic link support
-            if (node.filetype() != FileType.Directory) {
-                return null;
+
+            // if symbolic link then fetch target node
+            if (node.filetype() == FileType.SymbolicLink) {
+                // iterate through link
+                var link_it = try std.fs.path.componentIterator(node.data());
+                var link_component = link_it.first();
+                while (link_component) |link_part| : (link_component = link_it.next()) {
+                    std.debug.print("Part is: {s}\n", .{link_part.name});
+                }
+            }
+
+            // if last component then return
+            if (path_without_trailing_separator.len == part.path.len) {
+                std.debug.print("Returning: {s}\n", .{node.name()});
+                return node;
+            }
+
+            if (node.filetype() == FileType.Directory) {
+                std.debug.print("This is directory: {s}\n", .{node.name()});
+                node = FileHeader.init(node.memory, node.specinfo());
+            } else if (node.filetype() == FileType.SymbolicLink) {
+                std.debug.print("symbolic link: size of node: {d}\n", .{node.data().len});
+                // node = FileHeader.init(node.memory, node.data());
             }
         }
-        std.debug.print("Retruns: {s}\n", .{node.name()});
         return node;
     }
 
@@ -191,8 +216,22 @@ test "Parsing filesystem" {
         try std.testing.expectEqual(0, ifs.traverse(".", &traverse_dir));
         try did_error;
 
-        _ = try expected_directories.appendSlice(&.{ ".", "..", "file.1", "b", "c" });
+        _ = try expected_directories.appendSlice(&.{ ".", "test.socket", "pipe1", "fc1", "..", "fb1" });
         try std.testing.expectEqual(0, ifs.traverse("/dev", &traverse_dir));
+
+        _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "other_dir", "f2.txt", "dir", ".." });
+        try std.testing.expectEqual(0, ifs.traverse("/subdir", &traverse_dir));
+
+        _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
+        try std.testing.expectEqual(0, ifs.traverse("/subdir/dir", &traverse_dir));
+
+        _ = try expected_directories.appendSlice(&.{ ".", "dir", "..", "a.txt", "b.txt" });
+        try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir", &traverse_dir));
+
+        std.debug.print("-=-=-=-=-=-=-=-=-=-=-=-=\n", .{});
+        _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
+        try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir/dir", &traverse_dir));
+
         try did_error;
     }
 }
