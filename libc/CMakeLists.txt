@@ -39,7 +39,6 @@ target_include_directories(c
     ${PROJECT_SOURCE_DIR}/include
 )
 
-
 set_target_properties (c
   PROPERTIES LINK_DEPENDS ${linker_script})
 
@@ -47,8 +46,6 @@ target_link_libraries(c
   PRIVATE -Wl,--whole-archive libc.a -Wl,--no-whole-archive
   gcc supc++ 
 )
-
-
 
 target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../source/kernel)
 

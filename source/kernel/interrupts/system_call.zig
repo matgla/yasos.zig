@@ -62,15 +62,15 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             result.* = true;
         },
 
-        // .semaphore_acquire => {
-        //     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
-        //     const result: *volatile bool = @ptrCast(@alignCast(out));
-        //     result.* = KernelSemaphore.acquire(context.object);
-        // },
-        // .semaphore_release => {
-        //     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
-        //     KernelSemaphore.release(context.object);
-        // },
+        .semaphore_acquire => {
+            const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
+            const result: *volatile bool = @ptrCast(@alignCast(out));
+            result.* = KernelSemaphore.acquire(context.object);
+        },
+        .semaphore_release => {
+            const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
+            KernelSemaphore.release(context.object);
+        },
         else => {},
     }
 }
