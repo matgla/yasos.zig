@@ -40,7 +40,7 @@ target_link_libraries (yasos_shell
     c
 )
 
-set (linker_script ${PROJECT_SOURCE_DIR}/../../libs/ElfToYaff/arch/arm-m/linker_script.ld)
+set (linker_script ${PROJECT_SOURCE_DIR}/../../dynamic_loader/elftoyaff/arch/arm-m/linker_script.ld)
 
 set_target_properties (yasos_shell
   PROPERTIES LINK_DEPENDS ${linker_script})
