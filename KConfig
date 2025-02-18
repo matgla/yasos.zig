@@ -20,7 +20,7 @@
 
 mainmenu "Yet Another Simple Operating System"
 
-source "./libs/hal/KConfig"
+source "./hal/KConfig"
 
 menu "Process Options"
 

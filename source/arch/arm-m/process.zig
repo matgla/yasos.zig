@@ -24,6 +24,9 @@ const exc_return = @import("exc_return.zig");
 
 const hal = @import("hal");
 
+// This must be reimplemented for armv6-m
+// TODO!
+
 fn void_or_register() type {
     if (config.cpu.has_fpu and config.cpu.use_fpu) {
         return u32;
@@ -67,15 +70,16 @@ pub const HardwareStoredRegisters = extern struct {
 };
 
 pub const SoftwareStoredRegisters = extern struct {
-    r8: u32,
-    r9: u32,
-    r10: u32,
-    r11: u32,
     lr: u32,
     r4: u32,
     r5: u32,
     r6: u32,
     r7: u32,
+    r8: u32,
+    r9: u32,
+    r10: u32,
+    r11: u32,
+    r12: u32,
     s16: void_or_register(),
     s17: void_or_register(),
     s18: void_or_register(),
@@ -126,6 +130,10 @@ pub fn create_default_hardware_registers(comptime exit_handler: *const fn () voi
 
 pub fn create_default_software_registers() SoftwareStoredRegisters {
     return .{
+        // for now handler msp mode is reserved for kernel
+        // interrupts handlers, but in the future kernel process
+        // may also use thread/handler msp mode
+        .lr = exc_return.return_to_thread_psp,
         .r4 = 0,
         .r5 = 0,
         .r6 = 0,
@@ -134,10 +142,7 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
         .r9 = 0,
         .r10 = 0,
         .r11 = 0,
-        // for now handler msp mode is reserved for kernel
-        // interrupts handlers, but in the future kernel process
-        // may also use thread/handler msp mode
-        .lr = exc_return.return_to_thread_psp,
+        .r12 = 0,
         .s16 = void_or_value(0),
         .s17 = void_or_value(0),
         .s18 = void_or_value(0),

@@ -22,9 +22,6 @@
 .cpu cortex-m33
 .thumb
 
-// armv6-m do not have FPU, so only CPU registers must be stored
-// callee saved registers are r4-r11 according to aapcs
-
 // This functionality should be called from PendSV IRQ,
 // thank's to that we are on MSP with privilege mode
 .global switch_to_next_task
@@ -33,13 +30,8 @@ switch_to_next_task:
   // call scheduler to configure next task for the execution 
   bl get_next_task
   // load task context
-  ldmia r0!, {r3-r7}
-  mov r8, r3 
-  mov r9, r4
-  mov r10, r5
-  mov r11, r6
-  mov r1, r7 
-  ldmia r0!, {r4-r7}
+  ldmia r0!, {r1, r4-r12}
+  vldmia r0!, {s16-s31}
   msr psp, r0
   cpsie i
   push {r0, r1}
@@ -52,16 +44,8 @@ switch_to_next_task:
 store_and_switch_to_next_task:
   cpsid i // better to not interrupt that operation from nested IRQ
   mrs r0, psp 
-  subs r0, r0, #0x10
-  stm r0!, {r4-r7}
-  mov r3, r8 
-  mov r4, r9
-  mov r5, r10
-  mov r6, r11
-  mov r7, lr
-  subs r0, r0, #0x24
-  stm r0!, {r3-r7}
-  subs r0, r0, #0x14
+  mov r1, lr
+  stmia r0!, {r1, r4-r12}
   
   bl update_stack_pointer
   b switch_to_next_task

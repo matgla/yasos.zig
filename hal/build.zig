@@ -123,6 +123,12 @@ pub const Builder = struct {
             _ = try toolchain.decorateModuleWithArmToolchain(b, exe.root_module, target);
             exe.root_module.addImport("board", boardModule);
             exe.root_module.addImport("hal", mcu.module("hal"));
+            const config_module = b.addModule("config", .{
+                .root_source_file = b.path("../config/config.zig"),
+            });
+            mcu.module("hal").addImport("config", config_module);
+            exe.root_module.addImport("config", config_module);
+
             if (config.build_linker_script_path) |linker_script| {
                 const linker = replace_tokens(b, linker_script);
                 const path = std.Build.LazyPath{

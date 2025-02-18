@@ -32,6 +32,8 @@ add_library (c SHARED)
 target_sources (c
   PRIVATE 
     syscalls.c
+    semaphore.c
+    path.c
 )
 
 target_include_directories(c
@@ -47,9 +49,14 @@ target_link_libraries(c
   gcc supc++ 
 )
 
-target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../source/kernel)
+target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../../source/kernel)
+
+target_compile_options(c PRIVATE 
+  -fPIC
+)
 
 target_link_options (c PRIVATE 
+  -fPIC
   -Wl,--no-warn-rwx-segments
   -T${linker_script}
   -nodefaultlibs 
@@ -58,5 +65,16 @@ target_link_options (c PRIVATE
   -u__cxa_begin_cleanup
   -u__cxa_pure_virtual
   -u__gnu_Unwind_Find_exidx
+)
 
+install (
+  TARGETS
+    c
+)
+
+install (
+  DIRECTORY
+    include/
+  DESTINATION 
+    usr/include 
 )
