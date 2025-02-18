@@ -96,9 +96,6 @@ pub fn build(b: *std.Build) !void {
     };
 
     const optimize = b.standardOptimizeOption(.{});
-    const config_module = b.addModule("config", .{
-        .root_source_file = b.path("config/config.zig"),
-    });
 
     if (config_exists.kind == .file) {
         const config_path = try config_directory.realpathAlloc(b.allocator, "config.json");
@@ -111,7 +108,6 @@ pub fn build(b: *std.Build) !void {
             .config_file = @as([]const u8, config_path),
         });
         b.installArtifact(boardDep.artifact("yasos_kernel"));
-        boardDep.artifact("yasos_kernel").root_module.addImport("config", config_module);
         boardDep.artifact("yasos_kernel").addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
         boardDep.artifact("yasos_kernel").addIncludePath(b.path("source"));
         const yasld = b.dependency("yasld", .{
@@ -133,6 +129,10 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(tests);
     tests.linkLibC();
+    const config_module = b.addModule("test_config", .{
+        .root_source_file = b.path("config/config.zig"),
+    });
+
     tests.root_module.addImport("config", config_module);
 
     const run_tests_step = b.step("tests", "Run Yasos tests");

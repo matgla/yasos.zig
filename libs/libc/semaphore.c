@@ -1,5 +1,5 @@
 /**
- * main.c
+ * semaphore.c
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -18,11 +18,44 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#include <stdio.h>
+#include "semaphore.h"
 
-int main() {
-  puts("Hello from Yasos Shell\n");
-  puts(">\n");
+#include <stdlib.h>
 
+int    sem_close(sem_t *)
+{
+  return 0;
+}
+
+int    sem_destroy(sem_t *)
+{
+  return 0;
+}
+int    sem_getvalue(sem_t *, int *)
+{
+  return 0;
+}
+int    sem_init(sem_t *, int, unsigned int)
+{
+  return 0;
+}
+sem_t *sem_open(const char *, int, ...)
+{
+  return NULL;
+}
+int    sem_post(sem_t *)
+{
+  return 0;
+}
+int    sem_trywait(sem_t *)
+{
+  return 0;
+}
+int    sem_unlink(const char *)
+{
+  return 0;
+}
+int    sem_wait(sem_t *)
+{
   return 0;
 }

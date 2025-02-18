@@ -24,7 +24,11 @@ const c = @cImport({
     @cInclude("pico/runtime_init.h");
 });
 
+const config = @import("config").cpu;
+
 const sio = @import("../source/sio.zig").sio;
+
+const cpu = @import("arch").Registers;
 
 extern var __data_start__: u8;
 extern var __data_end__: u8;
@@ -72,6 +76,14 @@ export fn crt_init() void {
     initialize_libc_constructors();
 
     c.runtime_init_clocks();
+
+    if (config.has_fpu and config.use_fpu) {
+        cpu.cpacr.cpacr.update(.{
+            .cp0 = 0x3,
+            .cp4 = 0x3,
+            .cp10 = 0x3,
+        });
+    }
     // release all spinlocks
     for (&sio.spinlocks) |*lock| {
         lock.write(1);

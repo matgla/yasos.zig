@@ -64,16 +64,25 @@ pub fn Mmio(comptime RegisterFieldDescription: type) type {
             clear_alias.raw = value;
         }
 
-        pub inline fn update(self: *volatile Self, fields: anytype) void {
+        pub inline fn update_alias(self: *volatile Self, fields: anytype) void {
             // clear modified fields and then set them
-            var set: RegisterFieldDescription = {};
-            var clear: RegisterFieldDescription = {};
+            var set: RegisterFieldDescription = std.mem.zeroInit(RegisterFieldDescription, .{});
+            var clear: RegisterFieldDescription = std.mem.zeroInit(RegisterFieldDescription, .{});
             inline for (@typeInfo(@TypeOf(fields)).Struct.fields) |field| {
                 @field(set, field.name) = @field(fields, field.name);
                 @field(clear, field.name) = ~@field(fields, field.name);
             }
             self.clear_raw(@bitCast(clear));
             self.set_raw(@bitCast(set));
+        }
+
+        pub inline fn update(self: *volatile Self, fields: anytype) void {
+            // clear modified fields and then set them
+            var original = self.read();
+            inline for (std.meta.fields(@TypeOf(fields))) |field| {
+                @field(original, field.name) = @field(fields, field.name);
+            }
+            self.write(original);
         }
     };
 }

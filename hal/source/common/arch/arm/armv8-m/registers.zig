@@ -38,6 +38,23 @@ pub const SysTick = extern struct {
     calib: mmio.Mmio(u32),
 };
 
+pub const CpuCpacr = extern struct {
+    cpacr: mmio.Mmio(packed struct(u32) {
+        cp0: u2,
+        cp1: u2,
+        cp2: u2,
+        cp3: u2,
+        cp4: u2,
+        cp5: u2,
+        cp6: u2,
+        cp7: u2,
+        _res1: u4,
+        cp10: u2,
+        cp11: u2,
+        _res2: u8,
+    }),
+};
+
 pub const Registers = struct {
     pub const ppb_base: u32 = 0xe0000000;
     pub const scb_base: u32 = ppb_base + 0xed00;
@@ -47,4 +64,6 @@ pub const Registers = struct {
 
     pub const systick_base: u32 = scs_base + 0x0010;
     pub const systick: *volatile SysTick = @ptrFromInt(systick_base);
+
+    pub const cpacr: *volatile CpuCpacr = @ptrFromInt(ppb_base + 0xed88);
 };

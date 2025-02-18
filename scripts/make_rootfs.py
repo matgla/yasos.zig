@@ -19,21 +19,26 @@
 # <https://www.gnu.org/licenses/>.
 #
 
-import os 
+import os
 import argparse
 import subprocess
-from pathlib import Path 
+from pathlib import Path
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-o", "--output", help="Output file with rootfs image", required=True)
-parser.add_argument("-w", "--workdir", help="Working directory to create filesystem tree", required=True)
+parser.add_argument(
+    "-o", "--output", help="Output file with rootfs image", required=True
+)
+parser.add_argument(
+    "-w", "--workdir", help="Working directory to create filesystem tree", required=True
+)
 
 args, _ = parser.parse_known_args()
 
-print ("  Creating rootfs:", args.output)
-print ("Working directory:", args.workdir)
+print("  Creating rootfs:", args.output)
+print("Working directory:", args.workdir)
 
 cwd = os.getcwd()
+
 
 def create_filesystem():
     os.makedirs(args.workdir, exist_ok=True)
@@ -51,16 +56,34 @@ def create_filesystem():
     os.makedirs("proc", exist_ok=True)
     os.makedirs("root", exist_ok=True)
 
+
 script_dir = Path(__file__).parent
+
 
 def prepare_genromfs():
     subprocess.run(["make", "genromfs"], cwd=script_dir.parent / "libs" / "genromfs")
 
-def build_image():
-    subprocess.run(["./genromfs", "-d", args.workdir, "-V", "rootfs", "-f", cwd + "/" + args.output], cwd=script_dir.parent / "libs" / "genromfs")
 
+def prepare_libc():
+    subprocess.run(["cmake", "genromfs"], cwd=script_dir.parent / "libc" / "build")
+
+
+def build_image():
+    subprocess.run(
+        [
+            "./genromfs",
+            "-d",
+            args.workdir,
+            "-V",
+            "rootfs",
+            "-f",
+            cwd + "/" + args.output,
+        ],
+        cwd=script_dir.parent / "libs" / "genromfs",
+    )
 
 
 create_filesystem()
 prepare_genromfs()
 build_image()
+

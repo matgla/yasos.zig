@@ -163,16 +163,3 @@ pub export fn main() void {
     spawn.root_process(malloc_allocator, &kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
     while (true) {}
 }
-
-comptime {
-    _ = ShellData.data;
-}
-
-const ShellData = struct {
-    fn prepare_file(comptime binary: []const u8) [binary.len]u8 {
-        var out: [binary.len]u8 = .{0xff} ** binary.len;
-        @memcpy(out[0..binary.len], binary);
-        return out;
-    }
-    export const data: [@embedFile("yasos_shell.yaff").len]u8 linksection(".romfs") = prepare_file(@embedFile("yasos_shell.yaff"));
-};

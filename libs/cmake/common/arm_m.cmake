@@ -1,5 +1,5 @@
 #
-# CMakeLists.txt
+# arm_m.cmake
 #
 # Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 #
@@ -18,38 +18,11 @@
 # <https://www.gnu.org/licenses/>.
 #
 
-cmake_minimum_required(VERSION 3.20)
+include (${CMAKE_CURRENT_LIST_DIR}/../../../dynamic_loader/elftoyaff/cmake/toolchains/yasld_toolchain.cmake)
 
-project (yasos_shell C CXX)
-
-add_executable (yasos_shell)
-
-set(CMAKE_C_FLAGS "-fpie -mcpu=cortex-m33 -nodefaultlibs -nostdlib")
-set(CMAKE_EXE_LINKER_FLAGS "-pie -nodefaultlibs -nostartfiles -nostdlib -z now")
-
-
-target_sources (yasos_shell
-  PRIVATE 
-    main.c
-)
-
-target_link_directories (yasos_shell PRIVATE ${PROJECT_SOURCE_DIR}/../../libc/build)
-
-target_link_libraries (yasos_shell
-  PRIVATE 
-    c
-)
+set (CMAKE_C_FLAGS "-nodefaultlibs -nostdlib")
+set (CMAKE_EXE_LINKER_FLAGS "-nodefaultlibs -nostartfiles -nostdlib")
+set (CMAKE_C_FLAGS_RELEASE "-Os")
 
 set (linker_script ${PROJECT_SOURCE_DIR}/../../dynamic_loader/elftoyaff/arch/arm-m/linker_script.ld)
 
-set_target_properties (yasos_shell
-  PROPERTIES LINK_DEPENDS ${linker_script})
-
-target_link_options (yasos_shell PRIVATE 
-  -Wl,--no-warn-rwx-segments
-  -T${linker_script}
-  -e main
-  -nodefaultlibs 
-  -nostartfiles
-  -nostdlib
-)

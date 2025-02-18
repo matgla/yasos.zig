@@ -27,24 +27,24 @@ const log = &kernel_log.kernel_log;
 
 pub const DumpHardware = struct {
     pub fn print_hardware() void {
+        var buffer: [8]u8 = undefined;
         log.print("-----------------------------------------\n", .{});
-        log.print("|   CPU: {s: <10}  FREQ: {s: <12} |\n", .{ cpu.name(), format_frequency(cpu.frequency()) });
+        log.print("|   CPU: {s: <10}  FREQ: {s: <12} |\n", .{ cpu.name(), format_frequency(cpu.frequency(), &buffer) });
         log.print("| Cores: {d: <2}                             |\n", .{cpu.number_of_cores()});
         log.print("-----------------------------------------\n", .{});
     }
 
-    fn format_frequency(freq: u64) []const u8 {
-        var buffer: [8]u8 = undefined;
+    fn format_frequency(freq: u64, buffer: []u8) []const u8 {
         if (freq >= 1000000000000) {
-            return std.fmt.bufPrint(&buffer, "{d: <4} ---", .{freq / 1000000000000}) catch buffer[0..];
+            return std.fmt.bufPrint(buffer, "{d: <4} ---", .{freq / 1000000000000}) catch buffer[0..];
         } else if (freq >= 1000000000) {
-            return std.fmt.bufPrint(&buffer, "{d: <4} GHz", .{freq / 1000000000}) catch buffer[0..];
+            return std.fmt.bufPrint(buffer, "{d: <4} GHz", .{freq / 1000000000}) catch buffer[0..];
         } else if (freq >= 1000000) {
-            return std.fmt.bufPrint(&buffer, "{d: <4} MHz", .{freq / 1000000}) catch buffer[0..];
+            return std.fmt.bufPrint(buffer, "{d: <4} MHz", .{freq / 1000000}) catch buffer[0..];
         } else if (freq >= 1000) {
-            return std.fmt.bufPrint(&buffer, "{d: <4} KHz", .{freq / 1000}) catch buffer[0..];
+            return std.fmt.bufPrint(buffer, "{d: <4} KHz", .{freq / 1000}) catch buffer[0..];
         } else {
-            return std.fmt.bufPrint(&buffer, "{d: <4} Hz", .{freq}) catch buffer[0..];
+            return std.fmt.bufPrint(buffer, "{d: <4} Hz", .{freq}) catch buffer[0..];
         }
 
         return buffer;

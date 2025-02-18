@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     hal_armv8_m.addImport("hal", hal);
+    hal.addImport("arch", hal_armv8_m);
     cortex_m.addImport("arch", hal_armv8_m);
     hal.addImport("cortex-m", cortex_m);
 
