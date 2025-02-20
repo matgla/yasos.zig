@@ -48,6 +48,13 @@ pub const VirtualFileSystem = struct {
         try self.mount_points.mount_filesystem(path, fs);
     }
 
+    pub fn ifilesystem(self: *VirtualFileSystem) IFileSystem {
+        return .{
+            .ptr = self,
+            .vtable = &VTable,
+        };
+    }
+
     fn mount(_: *anyopaque) i32 {
         return 0;
     }
@@ -72,7 +79,7 @@ pub const VirtualFileSystem = struct {
         return maybe_node.point.filesystem.remove(maybe_node.left);
     }
 
-    fn name(_: *anyopaque) []const u8 {
+    fn name(_: *const anyopaque) []const u8 {
         return "vfs";
     }
 
