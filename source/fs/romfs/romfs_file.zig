@@ -129,7 +129,7 @@ pub const RomFsFile = struct {
 
     pub fn size(ctx: *const anyopaque) isize {
         const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
-        return self.data.size();
+        return @intCast(self.data.size());
     }
 
     pub fn name(ctx: *const anyopaque) []const u8 {

@@ -1,7 +1,7 @@
 #!/bin/sh
 
-OPTIONS=c
-LONGOPTIONS=clear
+OPTIONS=co:
+LONGOPTIONS=clear,output:
 
 PARSED=$(getopt --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
 if [[ $? -ne 0 ]]; then
@@ -13,6 +13,7 @@ eval set -- "$PARSED"
 
 # Default value
 CLEAR=false
+BUILD_IMAGE=false
 
 # Process the options
 while true; do
@@ -20,6 +21,11 @@ while true; do
         -c|--clear)
             CLEAR=true
             shift
+            ;;
+        -o|--output)
+            BUILD_IMAGE=true
+            OUTPUT_FILE=$2
+            shift 2
             ;;
         --)
             shift
@@ -44,6 +50,7 @@ fi
 mkdir -p rootfs
 mkdir -p rootfs/lib
 mkdir -p rootfs/usr/include
+mkdir -p rootfs/tmp
 
 cd libs 
 
@@ -61,3 +68,20 @@ build_lib()
 build_lib libc
 build_lib libdl
 build_lib pthread
+
+cd ..
+
+if $BUILD_IMAGE; then
+  echo "Outputing file to: $OUTPUT_FILE"
+ 
+  cd rootfs
+  for file in **/*.so
+  do
+    if [ -f "$file" ]; then  # Check if it's a file
+      ../dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file --type shared_library -o $(dirname $file)/$(basename "$file" .so).yso
+      rm $file 
+    fi
+  done
+  cd ..
+  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs 
+fi

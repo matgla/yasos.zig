@@ -45,7 +45,9 @@ const Mutex = @import("kernel/mutex.zig").Mutex;
 
 const yasld = @import("yasld");
 
+const IFile = @import("kernel/fs/fs.zig").IFile;
 const fs = @import("kernel/fs/fs.zig");
+const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 
 comptime {
@@ -95,18 +97,31 @@ fn file_resolver(_: []const u8) ?*anyopaque {
     return null;
 }
 
+fn traverse_directory(file: *IFile) void {
+    log.print("file: {s}\n", .{file.name()});
+}
+
 export fn kernel_process() void {
     log.write(" - creating virtual file system\n");
-    var vfs = fs.VirtualFileSystem.init(malloc_allocator);
+    var vfs_instance = fs.VirtualFileSystem.init(malloc_allocator);
+    const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..0x100000]);
+
+    if (maybe_romfs == null) {
+        log.print("RomFS not found at: 0x{x}\n", .{0x10080000});
+        return;
+    }
+
+    var romfs = maybe_romfs.?;
     var ramfs = RamFs.init(malloc_allocator) catch |err| {
         log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
         return;
     };
-    vfs.mount_filesystem("/", ramfs.ifilesystem()) catch |err| {
+    vfs_instance.mount_filesystem("/", romfs.ifilesystem()) catch |err| {
         log.print("Can't mount '/' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
         return;
     };
-
+    var vfs = vfs_instance.ifilesystem();
+    _ = vfs.traverse("/", traverse_directory);
     log.write(" - loading yasld\n");
     const symbols = [_]yasld.SymbolEntry{
         .{ .address = @intFromPtr(&c.puts), .name = "puts" },
