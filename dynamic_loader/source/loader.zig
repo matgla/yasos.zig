@@ -28,6 +28,7 @@ const Parser = @import("parser.zig").Parser;
 const Type = @import("header.zig").Type;
 const Environment = @import("environment.zig").Environment;
 const Section = @import("section.zig").Section;
+const Symbol = @import("symbol.zig").Symbol;
 
 const LoaderError = error{
     DataProcessingFailure,
@@ -46,7 +47,7 @@ export fn resolver() void {
 
 pub const Loader = struct {
     // OS should provide pointer to XIP region, it must be copied to RAM if needed
-    pub const FileResolver = *const fn (name: []const u8) ?*anyopaque;
+    pub const FileResolver = *const fn (name: []const u8) ?*const anyopaque;
 
     allocator: std.mem.Allocator,
     file_resolver: FileResolver,
@@ -137,6 +138,7 @@ pub const Loader = struct {
         var got = module.get_got_plt();
         const text = module.get_text();
         const module_start = @intFromPtr(text.ptr);
+
         for (0..got.len) |i| {
             const address = module_start + got[i];
             stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
@@ -144,18 +146,24 @@ pub const Loader = struct {
         }
 
         for (parser.symbol_table_relocations.relocations) |rel| {
-            const maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
+            var maybe_symbol: ?*const Symbol = null;
+            if (rel.is_exported_symbol == 1) {
+                maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
+            } else {
+                maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
+            }
             if (maybe_symbol) |symbol| {
                 const maybe_address = self.find_symbol(module, symbol.name());
                 if (maybe_address) |address| {
-                    stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ rel.index, address });
+                    stdout.print("[yasld] Setting GOT[{d}] to: 0x{x} [{s}], exported: {d}\n", .{ rel.index, address, symbol.name(), rel.is_exported_symbol });
                     got[rel.index] = address;
                 } else {
                     stdout.print("[yasld] Can't find symbol: '{s}'\n", .{symbol.name()});
                     return LoaderError.SymbolNotFound;
                 }
             } else {
-                return LoaderError.SymbolNotFound;
+                stdout.print("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}\n", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
+                // return LoaderError.SymbolNotFound;
             }
         }
     }

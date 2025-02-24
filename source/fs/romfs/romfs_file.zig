@@ -28,6 +28,8 @@ const c = @cImport({
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 const FileHeader = @import("file_header.zig").FileHeader;
+const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
+const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
 
 pub const RomFsFile = struct {
     /// VTable for IFile interface
@@ -137,7 +139,18 @@ pub const RomFsFile = struct {
         return self.data.name();
     }
 
-    pub fn ioctl(_: *anyopaque, _: u32, _: *const anyopaque) i32 {
+    pub fn ioctl(ctx: *anyopaque, cmd: u32, data: *anyopaque) i32 {
+        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
+        switch (cmd) {
+            @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
+                var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
+                attr.is_memory_mapped = true;
+                attr.mapped_address_r = self.data.data().ptr;
+            },
+            else => {
+                return -1;
+            },
+        }
         return 0;
     }
 

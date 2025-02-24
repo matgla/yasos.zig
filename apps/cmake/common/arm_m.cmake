@@ -20,9 +20,12 @@
 
 include (${CMAKE_CURRENT_LIST_DIR}/../../../dynamic_loader/elftoyaff/cmake/toolchains/yasld_toolchain.cmake)
 
-set (CMAKE_C_FLAGS "-fPIE -fPIC -nodefaultlibs -nostdlib")
-set (CMAKE_EXE_LINKER_FLAGS "-fPIE -fPIC -nodefaultlibs -nostartfiles -nostdlib -mno-pic-data-is-text-relative")
+set (CMAKE_C_FLAGS "-nodefaultlibs -nostdlib -fPIE -fvisibility=hidden")
+set (CMAKE_EXE_LINKER_FLAGS "-nodefaultlibs -nostartfiles -nostdlib -fPIE -Wl,--entry=main")
 set (CMAKE_C_FLAGS_RELEASE "-Os")
 
-set (linker_script ${PROJECT_SOURCE_DIR}/../dynamic_loader/elftoyaff/arch/arm-m/linker_script.ld)
+set (linker_script ${CMAKE_CURRENT_LIST_DIR}/../../../dynamic_loader/elftoyaff/arch/arm-m/linker_script.ld)
 
+include_directories(BEFORE SYSTEM ${CMAKE_CURRENT_LIST_DIR}/../../../rootfs/usr/include)
+link_directories(BEFORE ${CMAKE_CURRENT_LIST_DIR}/../../../rootfs/lib)
+add_link_options(-T${linker_script})

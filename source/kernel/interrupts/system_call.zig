@@ -26,6 +26,9 @@ const c = @cImport({
     @cInclude("kernel/syscalls.h");
 });
 
+const kernel_log = @import("../../log/kernel_log.zig");
+const log = &kernel_log.kernel_log;
+
 const process_manager = @import("../process_manager.zig");
 const Semaphore = @import("../semaphore.zig").Semaphore;
 const KernelSemaphore = @import("kernel_semaphore.zig").KernelSemaphore;
@@ -71,7 +74,13 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
             KernelSemaphore.release(context.object);
         },
-        else => {},
+        c.sys_isatty => {
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = 1; // TODO: implement when drivers implemented
+        },
+        else => {
+            log.print("Unhandled system call id: {d}\n", .{number});
+        },
     }
 }
 

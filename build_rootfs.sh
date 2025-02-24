@@ -51,6 +51,7 @@ mkdir -p rootfs
 mkdir -p rootfs/lib
 mkdir -p rootfs/usr/include
 mkdir -p rootfs/tmp
+mkdir -p rootfs/bin
 
 cd libs 
 
@@ -58,8 +59,19 @@ build_lib()
 {
   cd $1
   mkdir -p build && cd build
-  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/libs/cmake/cortex_m33.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$SCRIPT_DIR/rootfs
-  cmake --build . --config Release
+  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/libs/cmake/cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$SCRIPT_DIR/rootfs
+  cmake --build . --config Debug 
+  cmake --install .
+  cd ..
+  cd ..
+}
+
+build_exec()
+{
+  cd $1
+  mkdir -p build && cd build
+  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/apps/cmake/cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$SCRIPT_DIR/rootfs
+  cmake --build . --config Debug 
   cmake --install .
   cd ..
   cd ..
@@ -68,6 +80,13 @@ build_lib()
 build_lib libc
 build_lib libdl
 build_lib pthread
+
+
+cd ..
+
+cd apps
+
+build_exec shell
 
 cd ..
 
@@ -78,10 +97,22 @@ if $BUILD_IMAGE; then
   for file in **/*.so
   do
     if [ -f "$file" ]; then  # Check if it's a file
-      ../dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file --type shared_library -o $(dirname $file)/$(basename "$file" .so).yso
+      mv $file $file.bak
+      ../dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file.bak --type shared_library -o $file
+      rm $file.bak 
+    fi
+  done
+
+  for file in **/*.elf
+  do
+    if [ -f "$file" ]; then  # Check if it's a file
+      ../dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file --type shared_library -o $(dirname $file)/$(basename "$file" .elf) --verbose
       rm $file 
     fi
   done
   cd ..
+
+
+
   genromfs -f $OUTPUT_FILE -d rootfs -V rootfs 
 fi

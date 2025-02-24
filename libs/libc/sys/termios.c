@@ -18,29 +18,16 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#define ICANON 0x00001
-#define ECHO   0x00002
 
-#define TCSANOW   0
-#define TCSADRAIN 1
-#define TCSAFLUSH 2
+#include "sys/termios.h"
 
-#define NCCS 4
+int	tcgetattr(int filedes, struct termios *termios_p)
+{
+  return 0;
+}
 
-typedef unsigned int tcflag_t;
-typedef unsigned char cc_t;
-typedef unsigned int speed_t;
-
-struct termios {
-  tcflag_t c_iflag;
-  tcflag_t c_oflag;
-  tcflag_t c_cflag;
-  tcflag_t c_lflag;
-  cc_t c_cc[NCCS];
-  int c_ispeed;
-  int c_ospeed;
-};
-
-int	tcgetattr(int, struct termios *);
-int	tcsetattr(int, int, const struct termios *);
+int	tcsetattr(int filedes, int optional_actions, const struct termios *termios_p)
+{
+  return 0;
+}
 

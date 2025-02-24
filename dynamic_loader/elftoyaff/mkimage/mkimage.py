@@ -278,25 +278,27 @@ class Application:
             return
 
         self.logger.verbose(
-            "+----------------------- {:-<8s} ------------------------+".format(
+            "+----------------------------- {:-<8s} ------------------------------+".format(
                 visibility
             )
         )
         self.logger.verbose(
-            "|                   name                   |    address   |"
+            "|                   name                   |    address   |    index     |"
         )
         self.logger.verbose(
-            "+------------------------------------------+--------------+"
+            "+------------------------------------------+--------------+--------------|"
         )
+        index = 0
         for symbol in symbols:
             self.logger.verbose(
-                "| {: <40.40s} |  {: <10s}  |".format(
-                    symbol, hex(self.symbols[symbol]["value"])
+                "| {: <40.40s} |  {: <10s}  |  {: <12d}   |".format(
+                    symbol, hex(self.symbols[symbol]["value"]), index 
                 )
             )
+            index += 1
 
         self.logger.verbose(
-            "+------------------------------------------+--------------+"
+            "+------------------------------------------+--------------+--------------|"
         )
 
     def __dump_symbol_table(self):
@@ -339,12 +341,12 @@ class Application:
                     self.relocations.add_local_relocation(relocation)
                 else:
                     self.relocations.add_symbol_table_relocation(
-                        relocation, self.got_section_address
+                        relocation, self.got_plt_address, visibility == "exported"
                     )
             elif relocation["info_type"] == "R_ARM_JUMP_SLOT":
                 visibility = self.symbols[relocation["symbol_name"]]["localization"]
                 self.relocations.add_symbol_table_relocation(
-                    relocation, self.got_section_address
+                    relocation, self.got_plt_address, visibility == "exported"
                 )
 
             else:
@@ -731,15 +733,14 @@ class Application:
         for rel in symbol_table_relocations:
             symbol = None
             symbol_table_index = 0
-            for s in imported_symbol_table:
-                if s["name"] == rel["name"]:
-                    symbol = s
-                    break
-                else:
-                    symbol_table_index += 1
-
-            # todo: reproduce in test
-            if symbol is None:
+            if rel["is_exported_symbol"] is False:
+                for s in imported_symbol_table:
+                    if s["name"] == rel["name"]:
+                        symbol = s
+                        break
+                    else:
+                        symbol_table_index += 1
+            elif rel["is_exported_symbol"] is True:
                 symbol_table_index = 0
                 for s in exported_symbol_table:
                     if s["name"] == rel["name"]:
@@ -752,7 +753,7 @@ class Application:
                 raise RuntimeError(
                     "Symbol {} not found in symbol table.".format(rel["name"])
                 )
-            table.append({"index": rel["index"], "offset": symbol_table_index})
+            table.append({"index": rel["index"] << 1 | rel["is_exported_symbol"], "offset": symbol_table_index})
 
         for rel in local_relocations:
             section = self.__get_relocation_section(rel)

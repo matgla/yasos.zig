@@ -146,7 +146,7 @@ pub const Module = struct {
         const data_end: usize = init_end + self.header.data_length;
         const bss_end: usize = data_end + self.header.bss_length;
 
-        for (0..init_data.len) |i| {
+        for (0..init_data.len / 4) |i| {
             const entry: *u32 = @ptrCast(@alignCast(&init_data[i * 4]));
             if (entry.* < text_end) {
                 entry.* = entry.* + @intFromPtr(self.get_text().ptr);

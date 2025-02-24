@@ -244,7 +244,7 @@ const FileSystemStub = struct {
         return "";
     }
 
-    pub fn traverse(_: *const anyopaque, _: []const u8, _: *const fn (file: *IFile) void) i32 {
+    pub fn traverse(_: *const anyopaque, _: []const u8, _: *const fn (file: *IFile, _: *anyopaque) bool, _: *anyopaque) i32 {
         return 0;
     }
 

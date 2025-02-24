@@ -20,50 +20,35 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project (yasos_libdl C CXX)
+project (shell C)
 
 set (CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_library (dl SHARED)
+set (C_STANDARD C11)
 
-target_sources (dl
+add_executable (sh)
+
+target_sources (sh
   PRIVATE 
-    dl.c
+    main.c
 )
 
-target_include_directories(dl
-  PUBLIC 
-    ${PROJECT_SOURCE_DIR}/include
+target_compile_options(sh PRIVATE 
+  -fPIE
 )
 
-set_target_properties (dl
-  PROPERTIES LINK_DEPENDS ${linker_script})
-
-
-target_include_directories(dl PRIVATE ${PROJECT_SOURCE_DIR}/../../source/kernel)
-
-target_compile_options(dl PRIVATE 
-  -fPIC
-  -mno-pic-data-is-text-relative
-  -msingle-pic-base
+target_link_options (sh PRIVATE 
+  -fPIE
 )
 
-target_link_options (dl PRIVATE 
-  -fPIC
-  -T${linker_script}
-  -nodefaultlibs 
-  -nostartfiles
-  -nostdlib
+target_link_libraries (sh 
+  PRIVATE 
+    c
 )
 
 install (
   TARGETS
-    dl 
-)
-
-install (
-  DIRECTORY
-    include/
+    sh
   DESTINATION 
-    usr/include 
+    bin/
 )

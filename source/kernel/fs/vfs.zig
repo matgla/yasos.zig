@@ -83,10 +83,10 @@ pub const VirtualFileSystem = struct {
         return "vfs";
     }
 
-    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32 {
+    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
         const maybe_node = self.mount_points.find_longest_matching_point(path);
-        return maybe_node.point.filesystem.traverse(maybe_node.left, callback);
+        return maybe_node.point.filesystem.traverse(maybe_node.left, callback, user_context);
     }
 
     fn get(ctx: *anyopaque, path: []const u8) ?IFile {

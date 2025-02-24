@@ -46,6 +46,9 @@ const Mutex = @import("kernel/mutex.zig").Mutex;
 const yasld = @import("yasld");
 
 const IFile = @import("kernel/fs/fs.zig").IFile;
+const IoctlCommonCommands = @import("kernel/fs/ifile.zig").IoctlCommonCommands;
+const FileMemoryMapAttributes = @import("kernel/fs/ifile.zig").FileMemoryMapAttributes;
+
 const fs = @import("kernel/fs/fs.zig");
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
@@ -93,17 +96,49 @@ export fn some_other_process() void {
     log.write("Died\n");
 }
 
-fn file_resolver(_: []const u8) ?*anyopaque {
-    return null;
+var vfs_instance: fs.VirtualFileSystem = undefined;
+var vfs: fs.IFileSystem = undefined;
+var module: ?*anyopaque = null;
+
+const ModuleContext = struct {
+    path: []const u8,
+    address: ?*const anyopaque,
+};
+
+fn traverse_directory(file: *IFile, context: *anyopaque) bool {
+    var module_context: *ModuleContext = @ptrCast(@alignCast(context));
+    log.print("file: {s} == {s}\n", .{ file.name(), module_context.path });
+    if (std.mem.eql(u8, module_context.path, file.name())) {
+        var attr: FileMemoryMapAttributes = .{
+            .is_memory_mapped = false,
+            .mapped_address_r = null,
+            .mapped_address_w = null,
+        };
+        _ = file.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        if (attr.mapped_address_r) |address| {
+            module_context.address = address;
+            return false;
+        }
+    }
+    return true;
 }
 
-fn traverse_directory(file: *IFile) void {
-    log.print("file: {s}\n", .{file.name()});
+fn file_resolver(name: []const u8) ?*const anyopaque {
+    log.print("searching for dependency: {s}\n", .{name});
+    var context: ModuleContext = .{
+        .path = name,
+        .address = null,
+    };
+    _ = vfs.traverse("/lib", traverse_directory, &context);
+    if (context.address) |address| {
+        return address;
+    }
+    return null;
 }
 
 export fn kernel_process() void {
     log.write(" - creating virtual file system\n");
-    var vfs_instance = fs.VirtualFileSystem.init(malloc_allocator);
+    vfs_instance = fs.VirtualFileSystem.init(malloc_allocator);
     const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..0x100000]);
 
     if (maybe_romfs == null) {
@@ -120,37 +155,44 @@ export fn kernel_process() void {
         log.print("Can't mount '/' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
         return;
     };
-    var vfs = vfs_instance.ifilesystem();
-    _ = vfs.traverse("/", traverse_directory);
+    vfs = vfs_instance.ifilesystem();
     log.write(" - loading yasld\n");
-    const symbols = [_]yasld.SymbolEntry{
-        .{ .address = @intFromPtr(&c.puts), .name = "puts" },
-    };
+    const symbols = [_]yasld.SymbolEntry{};
     const environment = yasld.Environment{
         .symbols = &symbols,
     };
     const loader: yasld.Loader = yasld.Loader.create(malloc_allocator, environment, &file_resolver);
 
-    const executable_memory: *anyopaque = @ptrFromInt(0x10080000);
-    const maybeExecutable: ?yasld.Executable = loader.load_executable(
-        executable_memory,
-        log,
-    ) catch |err| blk: {
-        log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
-        break :blk null;
-    };
+    const maybe_shell = vfs.get("/bin/sh");
+    if (maybe_shell) |shell| {
+        log.write("starting: /bin/sh");
+        var attr: FileMemoryMapAttributes = .{
+            .is_memory_mapped = false,
+            .mapped_address_r = null,
+            .mapped_address_w = null,
+        };
+        _ = shell.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        log.print("File {} at: 0x{x}", .{ attr.is_memory_mapped, attr.mapped_address_r.? });
+        const maybeExecutable: ?yasld.Executable = loader.load_executable(
+            attr.mapped_address_r.?,
+            log,
+        ) catch |err| blk: {
+            log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
+            break :blk null;
+        };
 
-    if (maybeExecutable) |executable| {
-        const args: []const [*:0]const u8 = &.{
-            "arg1",
-            "arg2",
-            "arg3",
-            "10",
-            "12",
-        };
-        _ = executable.main(args.ptr, args.len) catch |err| {
-            log.print("Cannot execute main: {s}\n", .{@errorName(err)});
-        };
+        if (maybeExecutable) |executable| {
+            const args: []const [*:0]const u8 = &.{
+                "arg1",
+                "arg2",
+                "arg3",
+                "10",
+                "12",
+            };
+            _ = executable.main(args.ptr, args.len) catch |err| {
+                log.print("Cannot execute main: {s}\n", .{@errorName(err)});
+            };
+        }
     }
     while (true) {
         time.sleep_ms(20);

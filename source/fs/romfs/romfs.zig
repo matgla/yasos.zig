@@ -94,7 +94,7 @@ pub const RomFs = struct {
         return "romfs";
     }
 
-    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32 {
+    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, context: *anyopaque) i32 {
         const self: *RomFs = @ptrCast(@alignCast(ctx));
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
@@ -103,7 +103,9 @@ pub const RomFs = struct {
                 while (it) |child| : (it = child.next()) {
                     var file: RomFsFile = RomFsFile.init(child);
                     var ifile = file.ifile();
-                    callback(&ifile);
+                    if (!callback(&ifile, context)) {
+                        return 0;
+                    }
                 }
                 return 0;
             }
@@ -180,20 +182,21 @@ const ExpectationList = std.ArrayList([]const u8);
 var expected_directories: ExpectationList = undefined;
 var did_error: anyerror!void = {};
 
-fn traverse_dir(file: *IFile) void {
-    did_error catch return;
+fn traverse_dir(file: *IFile, _: *anyopaque) bool {
+    did_error catch return false;
     did_error = std.testing.expect(expected_directories.items.len != 0);
     did_error catch {
         std.debug.print("Expectation not found for: '{s}'\n", .{file.name()});
-        return;
+        return false;
     };
     const expectation = expected_directories.items[0];
     did_error = std.testing.expectEqualStrings(expectation, file.name());
     did_error catch {
         std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation, file.name() });
-        return;
+        return false;
     };
     _ = expected_directories.orderedRemove(0);
+    return true;
 }
 
 test "Parsing filesystem" {
@@ -212,27 +215,27 @@ test "Parsing filesystem" {
             try std.testing.expectEqualStrings(root_directory.name(), ".");
         }
         _ = try expected_directories.appendSlice(&.{ ".", "..", "dev", "subdir", "file.txt" });
-        try std.testing.expectEqual(0, ifs.traverse(".", &traverse_dir));
+        try std.testing.expectEqual(0, ifs.traverse(".", &traverse_dir, undefined));
         try did_error;
 
         _ = try expected_directories.appendSlice(&.{ ".", "test.socket", "pipe1", "fc1", "..", "fb1" });
-        try std.testing.expectEqual(0, ifs.traverse("/dev", &traverse_dir));
+        try std.testing.expectEqual(0, ifs.traverse("/dev", &traverse_dir, undefined));
         try did_error;
 
         _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "other_dir", "f2.txt", "dir", ".." });
-        try std.testing.expectEqual(0, ifs.traverse("/subdir", &traverse_dir));
+        try std.testing.expectEqual(0, ifs.traverse("/subdir", &traverse_dir, undefined));
         try did_error;
 
         _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
-        try std.testing.expectEqual(0, ifs.traverse("/subdir/dir", &traverse_dir));
+        try std.testing.expectEqual(0, ifs.traverse("/subdir/dir", &traverse_dir, undefined));
         try did_error;
 
         _ = try expected_directories.appendSlice(&.{ ".", "dir", "..", "a.txt", "b.txt" });
-        try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir", &traverse_dir));
+        try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir", &traverse_dir, undefined));
         try did_error;
 
         _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
-        try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir/dir", &traverse_dir));
+        try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir/dir", &traverse_dir, undefined));
         try did_error;
 
         var maybe_file = ifs.get("/file.txt");

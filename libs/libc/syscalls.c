@@ -36,9 +36,10 @@ void __attribute__((noinline)) __attribute__((naked))
 trigger_supervisor_call(int number, const void *args, void *result,
                         optional_errno *err) {
   asm inline("svc 0");
+  asm inline("bx lr");
 }
 
-void inline trigger_syscall(int number, const void *args, void *result) {
+void trigger_syscall(int number, const void *args, void *result) {
   optional_errno err;
   trigger_supervisor_call(number, NULL, &result, &err);
   if (err.isset) {

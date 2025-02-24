@@ -34,6 +34,16 @@ pub const FileType = enum(u8) {
     Fifo = 7,
 };
 
+pub const IoctlCommonCommands = enum(u32) {
+    GetMemoryMappingStatus,
+};
+
+pub const FileMemoryMapAttributes = extern struct {
+    is_memory_mapped: bool,
+    mapped_address_r: ?*const anyopaque,
+    mapped_address_w: ?*anyopaque,
+};
+
 pub const IFile = struct {
     const Self = @This();
 

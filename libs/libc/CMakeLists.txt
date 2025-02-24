@@ -34,6 +34,9 @@ target_sources (c
     syscalls.c
     semaphore.c
     path.c
+    sys/termios.c
+    sys/wait.c
+    sys/exec.c
 )
 
 target_include_directories(c
@@ -53,15 +56,24 @@ target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../../source/kernel)
 
 target_compile_options(c PRIVATE 
   -fPIC
+  -mno-pic-data-is-text-relative
+  -msingle-pic-base
+  -mpic-register=r9
+  -mlong-calls
+  -fno-plt
 )
 
 target_link_options (c PRIVATE 
   -fPIC
   -Wl,--no-warn-rwx-segments
-  -T${linker_script}
+  -T${linker_script} 
   -nodefaultlibs 
   -nostartfiles
   -nostdlib
+  -mno-pic-data-is-text-relative 
+  -msingle-pic-base 
+  -fno-plt
+  -mpic-register=r9
   -u__cxa_begin_cleanup
   -u__cxa_pure_virtual
   -u__gnu_Unwind_Find_exidx
