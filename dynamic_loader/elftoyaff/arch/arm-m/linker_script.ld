@@ -25,7 +25,7 @@ MEMORY
 
 PHDRS
 {
-  code  PT_LOAD;
+  text PT_LOAD;
   data  PT_LOAD;
 }
 
@@ -46,7 +46,7 @@ SECTIONS
     *(.rodata)
     *(.rodata*)
     . = ALIGN(16);
-  } > image :code
+  } > image :text
 
   .init_arrays :
   {
@@ -66,7 +66,13 @@ SECTIONS
     KEEP(*(.fini_array))
     PROVIDE_HIDDEN(__fini_array_end = .);
     . = ALIGN(16);
-  } > image :code
+  } > image :text
+
+
+  .plt :
+  {
+    *(.plt*)
+  } > image :text
 
   .data :
   {
@@ -84,11 +90,6 @@ SECTIONS
     *(COMMON)
     . = ALIGN(4);
   } > image :data
-
-  .plt :
-  {
-    *(.plt*)
-  } > image :code
 
   .got :
   {

@@ -34,49 +34,33 @@ target_sources (c
     syscalls.c
     semaphore.c
     path.c
+    stdio.c
+    string.c
     sys/termios.c
     sys/wait.c
     sys/exec.c
 )
 
 target_include_directories(c
-  PUBLIC 
+  PUBLIC BEFORE
     ${PROJECT_SOURCE_DIR}/include
 )
 
 set_target_properties (c
   PROPERTIES LINK_DEPENDS ${linker_script})
 
-target_link_libraries(c
-  PRIVATE -Wl,--whole-archive libc.a -Wl,--no-whole-archive
-  gcc supc++ 
-)
-
 target_include_directories(c PRIVATE ${PROJECT_SOURCE_DIR}/../../source/kernel)
+
 
 target_compile_options(c PRIVATE 
   -fPIC
+  -nostdinc
   -mno-pic-data-is-text-relative
-  -msingle-pic-base
-  -mpic-register=r9
-  -mlong-calls
-  -fno-plt
 )
 
 target_link_options (c PRIVATE 
   -fPIC
-  -Wl,--no-warn-rwx-segments
-  -T${linker_script} 
-  -nodefaultlibs 
-  -nostartfiles
   -nostdlib
-  -mno-pic-data-is-text-relative 
-  -msingle-pic-base 
-  -fno-plt
-  -mpic-register=r9
-  -u__cxa_begin_cleanup
-  -u__cxa_pure_virtual
-  -u__gnu_Unwind_Find_exidx
 )
 
 install (

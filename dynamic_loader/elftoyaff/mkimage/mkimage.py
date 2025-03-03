@@ -154,26 +154,41 @@ class Application:
         self.elf = ElfParser(self.args.input)
         self.text_section = self.__fetch_section(".text", 0x00000000)
         self.text = bytearray(self.text_section["data"])
+        text_size = self.text_section["size"]
+        if self.__has_section(".rodata"):
+            self.rodata_section = self.__fetch_section(".rodata", self.text_section["size"])
+            self.text += bytearray(self.rodata_section["data"])
+            text_size += self.rodata_section["size"]
 
         # let's place init arrays in ram and fix addresses in yasld
-
         if self.__has_section(".init_arrays"):
             init_arrays_section_address = (
-                self.text_section["address"] + self.text_section["size"]
+                self.text_section["address"] + text_size 
             )
             self.init_arrays_section = self.__fetch_section(
                 ".init_arrays", init_arrays_section_address
             )
             self.init_arrays = bytearray(self.init_arrays_section["data"])
-            data_section_address = (
+            plt_section_address = (
                 self.init_arrays_section["address"] + self.init_arrays_section["size"]
             )
         else:
             self.init_arrays_section = None
             self.init_arrays = bytearray()
-            data_section_address = (
-                self.text_section["address"] + self.text_section["size"]
+            plt_section_address = (
+                self.text_section["address"] +  text_size
             )
+
+
+        self.plt_address = plt_section_address 
+        data_section_address = plt_section_address
+        if self.__has_section(".plt"):
+            self.plt_section = self.__fetch_section(".plt", self.plt_address)
+            self.plt = bytearray(self.plt_section["data"])
+            data_section_address += self.plt_section["size"]
+        else:
+            self.plt = bytearray()
+
 
         self.data_section = self.__fetch_section(".data", data_section_address)
         self.data = bytearray(self.data_section["data"])
@@ -182,14 +197,8 @@ class Application:
         self.bss_section = self.__fetch_section(".bss", bss_section_address)
         self.bss = bytearray(self.bss_section["data"])
 
-        self.plt_address = bss_section_address + len(self.bss)
-        if self.__has_section(".plt"):
-            self.plt_section = self.__fetch_section(".plt", self.plt_address)
-            self.plt = bytearray(self.plt_section["data"])
-        else:
-            self.plt = bytearray()
 
-        self.got_section_address = self.plt_address + len(self.plt)
+        self.got_section_address = bss_section_address + len(self.bss)
 
         if self.__has_section(".got"):
             self.got_section = self.__fetch_section(".got", self.got_section_address)
@@ -341,12 +350,12 @@ class Application:
                     self.relocations.add_local_relocation(relocation)
                 else:
                     self.relocations.add_symbol_table_relocation(
-                        relocation, self.got_plt_address, visibility == "exported"
+                        relocation, self.got_section_address, visibility == "exported"
                     )
             elif relocation["info_type"] == "R_ARM_JUMP_SLOT":
                 visibility = self.symbols[relocation["symbol_name"]]["localization"]
                 self.relocations.add_symbol_table_relocation(
-                    relocation, self.got_plt_address, visibility == "exported"
+                    relocation, self.got_section_address, visibility == "exported"
                 )
 
             else:

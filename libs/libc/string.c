@@ -1,5 +1,5 @@
 /**
- * semaphore.h
+ * string.c
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -18,18 +18,15 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#pragma once 
+#include "string.h"
 
-#include <stdint.h>
+#include "stdint.h"
 
-typedef uint8_t sem_t;
+size_t strlen(const char *str)
+{
+  size_t r = 0;
+  while(*str != 0) ++str;
+  return r;
+}
 
-int    sem_close(sem_t *);
-int    sem_destroy(sem_t *);
-int    sem_getvalue(sem_t *, int *);
-int    sem_init(sem_t *, int, unsigned int);
-sem_t *sem_open(const char *, int, ...);
-int    sem_post(sem_t *);
-int    sem_trywait(sem_t *);
-int    sem_unlink(const char *);
-int    sem_wait(sem_t *);
+

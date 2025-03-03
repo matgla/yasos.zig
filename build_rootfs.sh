@@ -59,7 +59,7 @@ build_lib()
 {
   cd $1
   mkdir -p build && cd build
-  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/libs/cmake/cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$SCRIPT_DIR/rootfs
+  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/libs/cmake/tcc_cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$SCRIPT_DIR/rootfs
   cmake --build . --config Debug 
   cmake --install .
   cd ..
@@ -70,7 +70,7 @@ build_exec()
 {
   cd $1
   mkdir -p build && cd build
-  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/apps/cmake/cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$SCRIPT_DIR/rootfs
+  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/apps/cmake/tcc_cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$SCRIPT_DIR/rootfs
   cmake --build . --config Debug 
   cmake --install .
   cd ..

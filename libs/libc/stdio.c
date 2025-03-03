@@ -1,5 +1,5 @@
 /**
- * semaphore.h
+ * stdio.c
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -18,18 +18,13 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#pragma once 
+#include "stdio.h"
 
-#include <stdint.h>
+#include <unistd.h>
 
-typedef uint8_t sem_t;
+#include <string.h>
 
-int    sem_close(sem_t *);
-int    sem_destroy(sem_t *);
-int    sem_getvalue(sem_t *, int *);
-int    sem_init(sem_t *, int, unsigned int);
-sem_t *sem_open(const char *, int, ...);
-int    sem_post(sem_t *);
-int    sem_trywait(sem_t *);
-int    sem_unlink(const char *);
-int    sem_wait(sem_t *);
+int puts(const char *str)
+{
+  write(STDOUT_FILENO, str, strlen(str)); 
+}

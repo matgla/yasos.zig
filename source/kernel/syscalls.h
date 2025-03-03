@@ -111,3 +111,5 @@ typedef enum SystemCall {
   sys_wait,
   sys_times,
 } SystemCall;
+
+void trigger_syscall(int number, const void *args, void *result);

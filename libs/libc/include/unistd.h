@@ -1,5 +1,5 @@
 /**
- * semaphore.h
+ * unistd.h
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -20,16 +20,10 @@
 
 #pragma once 
 
-#include <stdint.h>
+#include <sys/types.h>
 
-typedef uint8_t sem_t;
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
 
-int    sem_close(sem_t *);
-int    sem_destroy(sem_t *);
-int    sem_getvalue(sem_t *, int *);
-int    sem_init(sem_t *, int, unsigned int);
-sem_t *sem_open(const char *, int, ...);
-int    sem_post(sem_t *);
-int    sem_trywait(sem_t *);
-int    sem_unlink(const char *);
-int    sem_wait(sem_t *);
+ssize_t write(int fd, const void* buf, size_t size);

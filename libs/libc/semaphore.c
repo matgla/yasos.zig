@@ -20,42 +20,42 @@
 
 #include "semaphore.h"
 
-#include <stdlib.h>
+#include <stddef.h>
 
-int    sem_close(sem_t *)
+int    sem_close(sem_t * semaphore)
 {
   return 0;
 }
 
-int    sem_destroy(sem_t *)
+int    sem_destroy(sem_t * semaphore)
 {
   return 0;
 }
-int    sem_getvalue(sem_t *, int *)
+int    sem_getvalue(sem_t *semaphore, int * value)
 {
   return 0;
 }
-int    sem_init(sem_t *, int, unsigned int)
+int    sem_init(sem_t * semaphore, int v, unsigned int x)
 {
   return 0;
 }
-sem_t *sem_open(const char *, int, ...)
+sem_t *sem_open(const char * path, int t, ...)
 {
   return NULL;
 }
-int    sem_post(sem_t *)
+int    sem_post(sem_t * semaphore)
 {
   return 0;
 }
-int    sem_trywait(sem_t *)
+int    sem_trywait(sem_t * semaphore)
 {
   return 0;
 }
-int    sem_unlink(const char *)
+int    sem_unlink(const char * path)
 {
   return 0;
 }
-int    sem_wait(sem_t *)
+int    sem_wait(sem_t * semaphore)
 {
   return 0;
 }

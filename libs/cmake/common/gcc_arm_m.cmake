@@ -20,8 +20,8 @@
 
 include (${CMAKE_CURRENT_LIST_DIR}/../../../dynamic_loader/elftoyaff/cmake/toolchains/yasld_toolchain.cmake)
 
-set (CMAKE_C_FLAGS "-nodefaultlibs -nostdlib")
-set (CMAKE_EXE_LINKER_FLAGS "-nodefaultlibs -nostartfiles -nostdlib")
+set (CMAKE_C_FLAGS "-nostdlib")
+set (CMAKE_EXE_LINKER_FLAGS "-nostartfiles -nostdlib")
 set (CMAKE_C_FLAGS_RELEASE "-Os")
 
 set (linker_script ${PROJECT_SOURCE_DIR}/../../dynamic_loader/elftoyaff/arch/arm-m/linker_script.ld)

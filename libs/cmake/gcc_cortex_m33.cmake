@@ -1,5 +1,5 @@
 #
-# arm_m.cmake
+# cortex_m33.cmake
 #
 # Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 #
@@ -18,14 +18,9 @@
 # <https://www.gnu.org/licenses/>.
 #
 
-include (${CMAKE_CURRENT_LIST_DIR}/../../../dynamic_loader/elftoyaff/cmake/toolchains/yasld_toolchain.cmake)
 
-set (CMAKE_C_FLAGS "-nodefaultlibs -nostdlib -fPIE -fvisibility=hidden")
-set (CMAKE_EXE_LINKER_FLAGS "-nodefaultlibs -nostartfiles -nostdlib -fPIE -Wl,--entry=main")
-set (CMAKE_C_FLAGS_RELEASE "-Os")
+include (${CMAKE_CURRENT_LIST_DIR}/common/gcc_arm_m.cmake)
 
-set (linker_script ${CMAKE_CURRENT_LIST_DIR}/../../../dynamic_loader/elftoyaff/arch/arm-m/linker_script.ld)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=cortex-m4")
 
-include_directories(BEFORE SYSTEM ${CMAKE_CURRENT_LIST_DIR}/../../../rootfs/usr/include)
-link_directories(BEFORE ${CMAKE_CURRENT_LIST_DIR}/../../../rootfs/lib)
-add_link_options(-T${linker_script})
+

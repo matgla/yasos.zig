@@ -20,18 +20,21 @@
 
 #include <stddef.h>
 
-void *dlopen(const char *, int)
-{
-  return NULL;
-}
-void *dlsym(void *, const char *)
-{
-  return NULL;
-}
-int dlclose(void *)
+void *dlopen(const char *a, int b)
 {
   return 0;
 }
+
+void *dlsym(void *a, const char * b)
+{
+  return 0;
+}
+
+int dlclose(void *a)
+{
+  return 0;
+}
+
 char *dlerror(void)
 {
 return "";

@@ -19,7 +19,7 @@
 #
 
 
-include (${CMAKE_CURRENT_LIST_DIR}/common/arm_m.cmake)
+include (${CMAKE_CURRENT_LIST_DIR}/common/tcc_arm_m.cmake)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=cortex-m33")
 

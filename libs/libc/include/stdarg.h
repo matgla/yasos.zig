@@ -1,5 +1,5 @@
 /**
- * semaphore.h
+ * stdarg.h
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -18,18 +18,13 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#pragma once 
+#pragma once
 
-#include <stdint.h>
+typedef void* va_list;
 
-typedef uint8_t sem_t;
+void *__va_arg(void **ap, int size);
 
-int    sem_close(sem_t *);
-int    sem_destroy(sem_t *);
-int    sem_getvalue(sem_t *, int *);
-int    sem_init(sem_t *, int, unsigned int);
-sem_t *sem_open(const char *, int, ...);
-int    sem_post(sem_t *);
-int    sem_trywait(sem_t *);
-int    sem_unlink(const char *);
-int    sem_wait(sem_t *);
+#define va_start(ap, last)  ((ap) = ((void *) &(last)) + sizeof(long))
+#define va_arg(ap, type)    (*(type *)__va_arg(&(ap), sizeof(type)))
+#define va_end(ap)          ((ap) = (void *)0)
+

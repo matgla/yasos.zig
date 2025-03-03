@@ -25,8 +25,8 @@ const toolchain = @import("toolchains").arm_none_eabi_toolchain;
 
 pub const targetOptions = std.Target.Query{
     .cpu_arch = .thumb,
-    .os_tag = .freestanding,
-    .abi = .eabi,
+    .os_tag = .other,
+    .abi = .eabihf,
     .cpu_model = .{ .explicit = &std.Target.arm.cpu.cortex_m33 },
     .cpu_features_add = std.Target.arm.featureSet(&[_]std.Target.arm.Feature{
         .fp_armv8d16sp,

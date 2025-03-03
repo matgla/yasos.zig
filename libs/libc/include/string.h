@@ -1,5 +1,5 @@
 /**
- * semaphore.h
+ * string.h
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -20,16 +20,6 @@
 
 #pragma once 
 
-#include <stdint.h>
+#include <stddef.h>
 
-typedef uint8_t sem_t;
-
-int    sem_close(sem_t *);
-int    sem_destroy(sem_t *);
-int    sem_getvalue(sem_t *, int *);
-int    sem_init(sem_t *, int, unsigned int);
-sem_t *sem_open(const char *, int, ...);
-int    sem_post(sem_t *);
-int    sem_trywait(sem_t *);
-int    sem_unlink(const char *);
-int    sem_wait(sem_t *);
+size_t strlen(const char *str);
