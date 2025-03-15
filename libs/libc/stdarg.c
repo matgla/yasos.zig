@@ -1,5 +1,5 @@
 /**
- * stdint.h
+ * stdarg.c
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -18,10 +18,8 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#pragma once 
-
-typedef unsigned char uint8_t;
-typedef unsigned long long uint64_t;
-typedef long long int intmax_t;
-typedef unsigned int uintptr_t;
+void *__va_arg(void **ap, int size)
+{
+  return 0;
+}
 

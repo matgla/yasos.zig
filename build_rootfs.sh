@@ -43,6 +43,7 @@ cd $SCRIPT_DIR
 if $CLEAR; then 
   echo "Clearing..."
   rm -rf rootfs
+  rm -rf apps/shell/build
   rm -rf libs/libc/build
   rm -rf libs/libdl/build
   rm -rf libs/pthread/build

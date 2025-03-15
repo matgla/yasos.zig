@@ -1,3 +1,6 @@
 [submodule "hal/libs/pico-sdk"]
 	path = hal/libs/pico-sdk
 	url = https://github.com/raspberrypi/pico-sdk.git
+[submodule "libs/libc/libs/printf"]
+	path = libs/libc/libs/printf
+	url = https://github.com/mpaland/printf.git

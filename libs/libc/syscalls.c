@@ -26,8 +26,8 @@
 
 #include <stdint.h>
 
-#include <unistd.h>
 #include <signal.h>
+#include <unistd.h>
 
 #include <sys/time.h>
 #include <sys/times.h>
@@ -42,11 +42,13 @@ trigger_supervisor_call(int number, const void *args, void *result,
 }
 
 void trigger_syscall(int number, const void *args, void *result) {
-  optional_errno err;
-  trigger_supervisor_call(number, NULL, &result, &err);
-  if (err.isset) {
-    errno = err.err;
-  }
+  optional_errno err = {
+      .isset = 0,
+  };
+  trigger_supervisor_call(number, args, result, &err);
+  // if (err.isset) {
+  //   errno = err.err;
+  // }
 }
 
 pid_t _getpid() {
@@ -102,13 +104,16 @@ ssize_t write(int fd, const void *buf, size_t count) {
   return result;
 }
 
-void __aeabi_memset (void *dest, size_t n, int c)
-{
+void __aeabi_memset(void *dest, size_t n, int c) {
   /*Note that relative to ANSI memset, __aeabi_memset hase the order
     of its second and third arguments reversed.  */
   // uint8_t *ptr = (uint8_t *)dest;
-  // while (--n) *ptr++ = (uint8_t)c; 
+  // while (--n) *ptr++ = (uint8_t)c;
 }
+
+void __aeabi_uldivmod() {}
+
+void _putchar(char c) {}
 
 // pid_t _fork() {
 //   pid_t result;

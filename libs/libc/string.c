@@ -22,11 +22,9 @@
 
 #include "stdint.h"
 
-size_t strlen(const char *str)
-{
+size_t strlen(const char *str) {
   size_t r = 0;
-  while(*str != 0) ++str;
+  while (str[r] != 0)
+    ++r;
   return r;
 }
-
-

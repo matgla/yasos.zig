@@ -1,5 +1,5 @@
 /**
- * stdint.h
+ * float.h
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -20,8 +20,4 @@
 
 #pragma once 
 
-typedef unsigned char uint8_t;
-typedef unsigned long long uint64_t;
-typedef long long int intmax_t;
-typedef unsigned int uintptr_t;
-
+#define DBL_MAX 1E+37

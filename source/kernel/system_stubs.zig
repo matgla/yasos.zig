@@ -61,7 +61,7 @@ export fn _read(_: c_int, _: *void, _: usize) isize {
     return 0;
 }
 
-export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
+pub export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
     if (fd == 1) {
         log.print("{s}", .{@as([*:0]const u8, @ptrCast(data))[0..size]});
     }

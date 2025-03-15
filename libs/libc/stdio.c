@@ -23,8 +23,17 @@
 #include <unistd.h>
 
 #include <string.h>
+#include <stdarg.h>
 
 int puts(const char *str)
 {
-  write(STDOUT_FILENO, str, strlen(str)); 
+  const int n = strlen(str);
+  write(STDOUT_FILENO, str, n); 
+  return n;
 }
+
+int scanf(const char *format, ...)
+{
+  return 0;
+}
+

@@ -135,7 +135,7 @@ pub const Loader = struct {
     }
 
     fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        var got = module.get_got_plt();
+        var got = module.get_got();
         const text = module.get_text();
         const module_start = @intFromPtr(text.ptr);
 

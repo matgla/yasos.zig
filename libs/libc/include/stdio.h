@@ -21,4 +21,7 @@
 #pragma once 
 
 int puts(const char *str);
-  
+
+#include "printf/printf.h"
+
+int scanf(const char *format, ...);

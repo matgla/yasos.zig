@@ -26,6 +26,8 @@ const c = @cImport({
     @cInclude("kernel/syscalls.h");
 });
 
+const syscall = @import("../system_stubs.zig");
+
 const kernel_log = @import("../../log/kernel_log.zig");
 const log = &kernel_log.kernel_log;
 
@@ -77,6 +79,11 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
         c.sys_isatty => {
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = 1; // TODO: implement when drivers implemented
+        },
+        c.sys_write => {
+            const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._write(context.fd, context.buf.?, context.count);
         },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});
