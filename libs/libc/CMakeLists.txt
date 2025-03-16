@@ -39,11 +39,14 @@ target_sources (c
     sys/termios.c
     sys/wait.c
     sys/exec.c
+
+    libs/printf/printf.c
 )
 
 target_include_directories(c
   PUBLIC BEFORE
     ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/libs
 )
 
 set_target_properties (c
@@ -56,6 +59,7 @@ target_compile_options(c PRIVATE
   -fPIC
   -nostdinc
   -mno-pic-data-is-text-relative
+  -g
 )
 
 target_link_options (c PRIVATE 
@@ -74,3 +78,21 @@ install (
   DESTINATION 
     usr/include 
 )
+
+install (
+  DIRECTORY
+    ${compiler_include_dir}/
+  DESTINATION 
+    usr/include 
+)
+
+
+
+install (
+  FILES 
+    libs/printf/printf.h
+  DESTINATION 
+    usr/include/printf 
+)
+
+

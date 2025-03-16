@@ -20,7 +20,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project (yasos_libdl C CXX)
+project (yasos_libdl C)
 
 set (CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

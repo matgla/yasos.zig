@@ -28,3 +28,6 @@ set (CMAKE_C_FLAGS_RELEASE "-Os")
 
 set (linker_script ${PROJECT_SOURCE_DIR}/../../dynamic_loader/elftoyaff/arch/arm-m/linker_script.ld)
 
+set (compiler_include_dir /home/mateusz/repos/tinycc/include)
+include_directories(${compiler_include_dir})
+

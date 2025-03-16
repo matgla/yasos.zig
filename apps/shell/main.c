@@ -58,7 +58,7 @@
 //     {
 //       continue;
 //     }
-//     
+//
 //     got_not_space = true;
 //     if (ch == '\t')
 //     {
@@ -73,7 +73,7 @@
 //       }
 //       continue;
 //     }
-//     
+//
 //     if (i < size - 1 && got_not_space)
 //     {
 //       printf("%c", ch);
@@ -97,15 +97,15 @@
 //   }
 
 //   pid_t pid = fork();
-//   if (pid == -1) 
+//   if (pid == -1)
 //   {
 //     printf("spawn process failure\n");
 //   }
-//   else if (pid == 0) 
+//   else if (pid == 0)
 //   {
 //     execvp(command, args);
 //   }
-//   else 
+//   else
 //   {
 //     int rc = 0;
 //     waitpid(pid, &rc, 0);
@@ -125,7 +125,7 @@
 //   const char* delimiter = " ";
 //   bool command_found = false;
 //   const char *command = NULL;
-//   int argc = 0; 
+//   int argc = 0;
 //   char *part = NULL;
 
 //   if (strlen(buffer) == 0)
@@ -134,7 +134,7 @@
 //   }
 //   part = strtok(buffer, delimiter);
 
-//   while (part != NULL) 
+//   while (part != NULL)
 //   {
 //     if (is_environment_variable(part) && (command == NULL))
 //     {
@@ -142,7 +142,7 @@
 //     }
 //     else if (is_completion_request(part))
 //     {
-//       // process completion request 
+//       // process completion request
 //       return 0;
 //     }
 //     else if (command == NULL)
@@ -150,13 +150,13 @@
 //       command = part;
 //       args[argc++] = part;
 //     }
-//     else 
+//     else
 //     {
 //       if (argc < MAX_NUMBER_OF_ARGUMENTS - 2)
 //       {
 //         args[argc++] = part;
 //       }
-//       else 
+//       else
 //       {
 //         break;
 //       }
@@ -169,9 +169,9 @@
 //   return execute_command(command, args);
 // }
 
-// int main(int argc, char *argv[]) 
+// int main(int argc, char *argv[])
 // {
-//   if (isatty(STDIN_FILENO)) 
+//   if (isatty(STDIN_FILENO))
 //   {
 //     struct termios termios_original;
 //     struct termios termios_stdout_original;
@@ -196,7 +196,7 @@
 //     tcsetattr(STDOUT_FILENO, TCSAFLUSH, &termios_stdout_original);
 //     // run interactive mode
 //   }
-//   else 
+//   else
 //   {
 //     // run script processor
 //   }
@@ -205,8 +205,43 @@
 
 #include <stdio.h>
 
-int main(int argc, char *argv[])
-{
-  puts("Hello from shell\n");
-}
+// int fun(int a, int b, int c, int d) { //}, int e, int f) {
+//   puts("adding\n");
+//   return a + b + c + d; // + e + f;
+// }
 
+// int fun2(int a, int b, int c, int d, int e, int f) {
+//   puts("adding 2\n");
+//   return a + b + c + d + e + f;
+// }
+
+// int fun3(int count, ...) {
+//   int sum = 0;
+//   va_list args;
+//   va_start(args, count);
+//   for (int i = 0; i < count; ++i) {
+//     sum += va_arg(args, int);
+//   }
+//   va_end(args);
+//   return sum;
+// }
+
+int main(int argc, char *argv[]) {
+  // puts("Hello from shell\n");
+  // puts("Let's go\n");
+  // int x = fun(1, 2, 3, 4); //, 5, 6);
+  // puts("Done\n");
+  // x = fun2(1, 2, 3, 4, 5, 6);
+  // if (x == 21) {
+  //   puts("Result OK\n");
+  // } else {
+  //   puts("result false\n");
+  // }
+  // puts("Testing vaargs\n");
+  // int x = fun3(3, 1, 2, 3);
+  // if (x == 6) {
+  // puts("It's ok\n");
+  // }
+  int x = 123;
+  printf("No wez w koncu: %d\n", x);
+}

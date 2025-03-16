@@ -113,7 +113,15 @@ void __aeabi_memset(void *dest, size_t n, int c) {
 
 void __aeabi_uldivmod() {}
 
-void _putchar(char c) {}
+void _putchar(char c) {
+  ssize_t result;
+  const write_context context = {
+      .fd = 1,
+      .buf = &c,
+      .count = 1,
+  };
+  trigger_syscall(sys_write, &context, &result);
+}
 
 // pid_t _fork() {
 //   pid_t result;
