@@ -18,4 +18,16 @@
 # <https://www.gnu.org/licenses/>.
 #
 
+config CONFIG_FS_MAX_MOUNT_POINT_SIZE
+  int "Maximum mount point name length in bytes"
+  default 64 
+  help 
+    This is not maximum mounting in terms of depth, since mounting points are linked list
+
+config CONFIG_FS_MAX_PATH_LENGTH
+  int "Maximum path length"
+  default 64
+  help 
+    Maximum path size used inside kernel
+
 rsource "ramfs/KConfig"

@@ -28,6 +28,7 @@ const config = @import("config");
 const arch_process = @import("../arch/arch.zig").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
+const IFile = @import("fs/ifile.zig").IFile;
 
 var pid_counter: u32 = 0;
 
@@ -53,6 +54,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         _allocator: std.mem.Allocator,
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
+        fds: std.AutoHashMap(u16, IFile),
 
         pub const State = enum(u2) {
             Ready,
@@ -77,11 +79,14 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .stack_position = stack_position,
                 ._allocator = allocator,
                 .current_core = 0,
+                .fds = std.AutoHashMap(u16, IFile).init(allocator),
             };
         }
 
         pub fn deinit(self: Self) void {
             self._allocator.free(self.stack);
+            self._allocator.free(self.cwd);
+            self.fds.deinit();
         }
 
         pub fn validate_stack(self: Self) bool {

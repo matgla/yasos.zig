@@ -46,6 +46,11 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             return data.len;
         }
 
+        pub fn read(_: Self, buffer: []u8) usize {
+            uart.uart_read_blocking(Register, buffer.ptr, buffer.len);
+            return buffer.len;
+        }
+
         fn getRegisterAddress(comptime id: u32) *uart.uart_inst_t {
             if (id == 1) {
                 return @ptrFromInt(uart.UART1_BASE);

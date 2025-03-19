@@ -1,5 +1,5 @@
 //
-// fs.zig
+// idriver.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,9 +18,27 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
-pub const IFile = @import("ifile.zig").IFile;
-pub const VirtualFileSystem = @import("vfs.zig").VirtualFileSystem;
-pub const vfs_init = @import("vfs.zig").vfs_init;
-pub const vfs = @import("vfs.zig").vfs;
-pub const ivfs = @import("vfs.zig").ivfs;
+const IFile = @import("../fs/ifile.zig").IFile;
+
+pub const IDriver = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        load: *const fn (ctx: *anyopaque) bool,
+        unload: *const fn (ctx: *anyopaque) bool,
+        ifile: *const fn (ctx: *anyopaque) ?IFile,
+    };
+
+    pub fn load(self: IDriver) bool {
+        return self.vtable.load(self.ptr);
+    }
+
+    pub fn unload(self: IDriver) bool {
+        return self.vtable.unload(self.ptr);
+    }
+
+    pub fn ifile(self: IDriver) ?IFile {
+        return self.vtable.ifile(self.ptr);
+    }
+};

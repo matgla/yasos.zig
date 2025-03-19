@@ -25,6 +25,9 @@ const c = @cImport({
     @cInclude("sys/stat.h");
 });
 
+const process_manager = @import("process_manager.zig");
+const FileType = @import("fs/ifile.zig").FileType;
+
 export fn _exit(_: c_int) void {
     while (true) {}
 }
@@ -45,7 +48,14 @@ export fn _fstat(_: c_int, _: *c.struct_stat) c_int {
     return 0;
 }
 
-export fn _isatty(_: c_int) c_int {
+pub export fn _isatty(fd: c_int) c_int {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_file = process.fds.get(@intCast(fd));
+        if (maybe_file) |file| {
+            if (file.filetype() == FileType.CharDevice) return 1;
+        }
+    }
     return 0;
 }
 
@@ -62,10 +72,14 @@ export fn _read(_: c_int, _: *void, _: usize) isize {
 }
 
 pub export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
-    if (fd == 1) {
-        log.print("{s}", .{@as([*:0]const u8, @ptrCast(data))[0..size]});
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_file = process.fds.get(@intCast(fd));
+        if (maybe_file) |file| {
+            return file.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
+        }
     }
-    return 0;
+    return -1;
 }
 
 export fn _open(_: *const c_char, _: c_int) c_int {

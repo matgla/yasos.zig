@@ -101,3 +101,19 @@ pub const VirtualFileSystem = struct {
         return maybe_node.point.filesystem.has_path(maybe_node.left);
     }
 };
+
+var vfs_instance: VirtualFileSystem = undefined;
+var vfs_object: IFileSystem = undefined;
+
+pub fn vfs_init(allocator: std.mem.Allocator) void {
+    vfs_instance = VirtualFileSystem.init(allocator);
+    vfs_object = vfs_instance.ifilesystem();
+}
+
+pub fn ivfs() *IFileSystem {
+    return &vfs_object;
+}
+
+pub fn vfs() *VirtualFileSystem {
+    return &vfs_instance;
+}

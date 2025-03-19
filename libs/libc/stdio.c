@@ -22,18 +22,20 @@
 
 #include <unistd.h>
 
-#include <string.h>
 #include <stdarg.h>
+#include <string.h>
 
-int puts(const char *str)
-{
+int puts(const char *str) {
   const int n = strlen(str);
-  write(STDOUT_FILENO, str, n); 
+  write(STDOUT_FILENO, str, n);
   return n;
 }
 
-int scanf(const char *format, ...)
-{
+int scanf(const char *format, ...) {
+  va_list ptr;
+  char token[100];
+  int i = 0;
+  va_start(ptr, format);
+  va_end(ptr);
   return 0;
 }
-

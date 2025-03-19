@@ -196,11 +196,11 @@ void _putchar(char c) {
 //   return 0;
 // }
 
-// int _isatty(int fd) {
-//   int result;
-//   trigger_syscall(sys_isatty, &fd, &result);
-//   return result;
-// }
+int isatty(int fd) {
+  int result;
+  trigger_syscall(sys_isatty, &fd, &result);
+  return result;
+}
 
 // pid_t _wait(int *_Nullable wstatus) {
 //   pid_t result;

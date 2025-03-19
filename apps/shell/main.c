@@ -18,9 +18,9 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-// #include <unistd.h>
+#include <unistd.h>
 
-// #include <stdio.h>
+#include <stdio.h>
 // #include <string.h>
 // #include <stdbool.h>
 // #include <ctype.h>
@@ -169,79 +169,36 @@
 //   return execute_command(command, args);
 // }
 
-// int main(int argc, char *argv[])
-// {
-//   if (isatty(STDIN_FILENO))
-//   {
-//     struct termios termios_original;
-//     struct termios termios_stdout_original;
-//     struct termios termios_raw = {};
-//     tcgetattr(STDIN_FILENO, &termios_original);
-//     tcgetattr(STDOUT_FILENO, &termios_stdout_original);
-//     termios_raw = termios_original;
-//     termios_raw.c_lflag &= ~(ICANON | ECHO);
-//     tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
-//     termios_raw = termios_stdout_original;
-//     termios_raw.c_lflag &= ~(ICANON | ECHO);
-//     tcsetattr(STDOUT_FILENO, TCSANOW, &termios_raw);
-//     while (true)
-//     {
-//       printf("$ ");
-//       char buffer[MAX_LINE_SIZE];
-//       scanline(buffer, sizeof(buffer));
-//       if (parse_command(buffer) == -1) break;
-//     }
-
-//     tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original);
-//     tcsetattr(STDOUT_FILENO, TCSAFLUSH, &termios_stdout_original);
-//     // run interactive mode
-//   }
-//   else
-//   {
-//     // run script processor
-//   }
-// }
-//
-
-#include <stdio.h>
-
-// int fun(int a, int b, int c, int d) { //}, int e, int f) {
-//   puts("adding\n");
-//   return a + b + c + d; // + e + f;
-// }
-
-// int fun2(int a, int b, int c, int d, int e, int f) {
-//   puts("adding 2\n");
-//   return a + b + c + d + e + f;
-// }
-
-// int fun3(int count, ...) {
-//   int sum = 0;
-//   va_list args;
-//   va_start(args, count);
-//   for (int i = 0; i < count; ++i) {
-//     sum += va_arg(args, int);
-//   }
-//   va_end(args);
-//   return sum;
-// }
-
 int main(int argc, char *argv[]) {
-  // puts("Hello from shell\n");
-  // puts("Let's go\n");
-  // int x = fun(1, 2, 3, 4); //, 5, 6);
-  // puts("Done\n");
-  // x = fun2(1, 2, 3, 4, 5, 6);
-  // if (x == 21) {
-  //   puts("Result OK\n");
-  // } else {
-  //   puts("result false\n");
-  // }
-  // puts("Testing vaargs\n");
-  // int x = fun3(3, 1, 2, 3);
-  // if (x == 6) {
-  // puts("It's ok\n");
-  // }
-  int x = 123;
-  printf("No wez w koncu: %d\n", x);
+  if (isatty(STDIN_FILENO)) {
+    printf("This is atty\n");
+    char buf[50];
+    scanf("%s", buf);
+    printf("Buffer: '%s'\n", buf);
+    //     struct termios termios_original;
+    //     struct termios termios_stdout_original;
+    //     struct termios termios_raw = {};
+    //     tcgetattr(STDIN_FILENO, &termios_original);
+    //     tcgetattr(STDOUT_FILENO, &termios_stdout_original);
+    //     termios_raw = termios_original;
+    //     termios_raw.c_lflag &= ~(ICANON | ECHO);
+    //     tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
+    //     termios_raw = termios_stdout_original;
+    //     termios_raw.c_lflag &= ~(ICANON | ECHO);
+    //     tcsetattr(STDOUT_FILENO, TCSANOW, &termios_raw);
+    //     while (true)
+    //     {
+    //       printf("$ ");
+    //       char buffer[MAX_LINE_SIZE];
+    //       scanline(buffer, sizeof(buffer));
+    //       if (parse_command(buffer) == -1) break;
+    //     }
+
+    //     tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original);
+    //     tcsetattr(STDOUT_FILENO, TCSAFLUSH, &termios_stdout_original);
+    //     // run interactive mode
+  } else {
+    // run script processor
+    printf("Run interactive mode\n");
+  }
 }

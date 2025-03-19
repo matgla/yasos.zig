@@ -77,8 +77,9 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             KernelSemaphore.release(context.object);
         },
         c.sys_isatty => {
+            const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
             const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = 1; // TODO: implement when drivers implemented
+            result.* = syscall._isatty(fd.*);
         },
         c.sys_write => {
             const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));

@@ -53,6 +53,10 @@ const fs = @import("kernel/fs/fs.zig");
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 
+const DriverFs = @import("kernel/drivers/driverfs.zig").DriverFs;
+
+const UartDriver = @import("kernel/drivers/uart/uart_driver.zig").UartDriver;
+
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
     _ = @import("kernel/system_stubs.zig");
@@ -96,8 +100,6 @@ export fn some_other_process() void {
     log.write("Died\n");
 }
 
-var vfs_instance: fs.VirtualFileSystem = undefined;
-var vfs: fs.IFileSystem = undefined;
 var module: ?*anyopaque = null;
 
 const ModuleContext = struct {
@@ -129,7 +131,7 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
         .path = name,
         .address = null,
     };
-    _ = vfs.traverse("/lib", traverse_directory, &context);
+    _ = fs.ivfs().traverse("/lib", traverse_directory, &context);
     if (context.address) |address| {
         return address;
     }
@@ -138,7 +140,7 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 
 export fn kernel_process() void {
     log.write(" - creating virtual file system\n");
-    vfs_instance = fs.VirtualFileSystem.init(malloc_allocator);
+    fs.vfs_init(malloc_allocator);
     const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..0x100000]);
 
     if (maybe_romfs == null) {
@@ -151,11 +153,60 @@ export fn kernel_process() void {
         log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
         return;
     };
-    vfs_instance.mount_filesystem("/", romfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+
+    fs.vfs().mount_filesystem("/", romfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.ifilesystem().name(), @errorName(err) });
         return;
     };
-    vfs = vfs_instance.ifilesystem();
+
+    fs.vfs().mount_filesystem("/tmp", ramfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+        return;
+    };
+
+    const maybe_driverfs = DriverFs.init(malloc_allocator);
+    if (maybe_driverfs == null) {
+        log.write("Can't initialize DriverFs\n");
+        return;
+    }
+    var driverfs = maybe_driverfs.?;
+    fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
+        return;
+    };
+
+    log.write(" - register drivers\n");
+    var uart_driver = UartDriver(board.uart.uart0).create(malloc_allocator);
+    var iuart_driver = uart_driver.idriver();
+    driverfs.append(iuart_driver) catch |err| {
+        log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
+        return;
+    };
+
+    var driver = driverfs.container.first;
+    while (driver) |node| : (driver = node.next) {
+        if (!node.data.load()) {
+            log.write("Can't load driver\n");
+        }
+    }
+
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |p| {
+        log.write("- setting default streams\n");
+        const maybe_uart_file = iuart_driver.ifile();
+        if (maybe_uart_file) |uart_file| {
+            p.fds.put(0, uart_file) catch {
+                log.write("Can't register: stdin\n");
+            };
+            p.fds.put(1, uart_file) catch {
+                log.write("Can't register: stdout\n");
+            };
+            p.fds.put(2, uart_file) catch {
+                log.write("Can't register: stderr\n");
+            };
+        }
+    }
+
     log.write(" - loading yasld\n");
     const symbols = [_]yasld.SymbolEntry{};
     const environment = yasld.Environment{
@@ -163,7 +214,7 @@ export fn kernel_process() void {
     };
     const loader: yasld.Loader = yasld.Loader.create(malloc_allocator, environment, &file_resolver);
 
-    const maybe_shell = vfs.get("/bin/sh");
+    const maybe_shell = fs.ivfs().get("/bin/sh");
     if (maybe_shell) |shell| {
         log.write("starting: /bin/sh");
         var attr: FileMemoryMapAttributes = .{
@@ -196,10 +247,6 @@ export fn kernel_process() void {
     }
     while (true) {
         time.sleep_ms(20);
-        // mutex.lock();
-        // log.write("Kernel is running\n");
-        // process_manager.instance.dump_processes(log);
-        // mutex.unlock();
     }
 }
 
