@@ -1,5 +1,5 @@
 /**
- * semaphore.c
+ * malloc.c
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -18,35 +18,41 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#include "semaphore.h"
+#include "stddef.h"
 
-#include <stddef.h>
+#ifndef YALIBC_MALLOC_ALIGNMENT 
+#define YALIBC_MALLOC_ALIGNMENT 8
+#endif
 
-int sem_close(sem_t *semaphore) {
-  return 0;
-}
+typedef struct memory_block {
+  size_t size;
+  struct memory_block *next;
 
-int sem_destroy(sem_t *semaphore) {
-  return 0;
-}
-int sem_getvalue(sem_t *semaphore, int *value) {
-  return 0;
-}
-int sem_init(sem_t *semaphore, int v, unsigned int x) {
-  return 0;
-}
-sem_t *sem_open(const char *path, int t, ...) {
+} memory_block;
+
+void *heap_start = NULL;
+void *heap_end = NULL; 
+
+memory_block root = {0, NULL};
+
+memory_block *find_free_block(size_t size) {
+  memory_block *current = &root;
+  while (current != NULL) {
+    if (current->size >= size) {
+      return current;
+    }
+    current = current->next;
+  }
   return NULL;
 }
-int sem_post(sem_t *semaphore) {
-  return 0;
-}
-int sem_trywait(sem_t *semaphore) {
-  return 0;
-}
-int sem_unlink(const char *path) {
-  return 0;
-}
-int sem_wait(sem_t *semaphore) {
-  return 0;
+
+void *malloc(size_t size) {
+  if (heap_start == NULL) {
+    heap_start = sbrk(size);
+    heap_end = heap_start + size;
+  }
+
+  memory_block *free_block = find_free_block(size); 
+
+  return NULL;
 }

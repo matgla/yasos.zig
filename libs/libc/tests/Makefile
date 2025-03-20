@@ -1,7 +1,12 @@
 CC = gcc
-CFLAGS = -Wall -g
+CFLAGS = -Wall 
+
+SUT_SRCS = ../stdio.c
+
 SRCS = $(wildcard *.c)
-OBJS = $(patsubst %.c, build/%.o, $(SRCS))
+OBJS = $(patsubst %.c, build/%.o, $(SRCS) $(SUT_SRCS))
+
+
 TARGET = build/libc_tests
 
 # Rules

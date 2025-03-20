@@ -41,6 +41,7 @@ target_sources (c
     sys/exec.c
 
     libs/printf/printf.c
+    libs/Baselibc/src/vsscanf.c
 )
 
 target_include_directories(c
