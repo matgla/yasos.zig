@@ -24,13 +24,14 @@ typedef struct memory_block {
   size_t size : 31;
   size_t used : 1;
   struct memory_block *next;
+  struct memory_block *prev;
 } memory_block;
 
-memory_block root = {0, 0, NULL};
-memory_block *last = &root;
+memory_block *root = NULL;
+memory_block *last = NULL;
 
 static memory_block *find_free_block(size_t size) {
-  memory_block *current = &root;
+  memory_block *current = root;
   while (current != NULL) {
     if (!current->used && current->size >= size) {
       return current;
@@ -46,23 +47,34 @@ static size_t malloc_align(size_t size) {
 
 void *malloc(size_t size) {
   const size_t memory_block_size = malloc_align(sizeof(memory_block));
+
   const size_t allocation_size = malloc_align(size) + memory_block_size;
 
   memory_block *free_block = find_free_block(malloc_align(size));
   if (free_block == NULL) {
-    void *new_block = sbrk(allocation_size);
-    memset(new_block, 0, memory_block_size);
-    if (new_block == (void *)-1) {
+
+    void *block_memory = sbrk(allocation_size);
+    if (block_memory == (void *)-1) {
       return NULL;
     }
-    memory_block *block = (memory_block *)new_block;
+
+    memset(block_memory, 0, memory_block_size);
+    memory_block *block = (memory_block *)block_memory;
     block->size = malloc_align(size);
     block->used = 1;
     block->next = NULL;
+    block->prev = NULL;
 
-    last->next = block;
-    last = block;
-    return new_block + memory_block_size;
+    if (root == NULL) {
+      root = block;
+      last = root;
+    } else {
+      last->next = block;
+      block->prev = last;
+      last = block;
+    }
+
+    return block_memory + memory_block_size;
   } else {
     if (free_block->size > size + sizeof(memory_block)) {
       memory_block *new_block =
@@ -91,37 +103,44 @@ void free(void *ptr) {
   memory_block *block =
       (memory_block *)((void *)ptr - malloc_align(sizeof(memory_block)));
 
+  const size_t memory_block_size = malloc_align(sizeof(memory_block));
   if (block->used == 0) {
     return;
   }
 
-  memory_block *parent = &root;
-  for (parent = &root; parent != NULL; parent = parent->next) {
-    if (parent->next == block) {
-      break;
-    }
-  }
   block->used = 0;
-  if (parent != NULL) {
-    if (block->next != NULL && block->next->used == 0) {
-      block->size += block->next->size + malloc_align(sizeof(memory_block));
-      block->next = block->next->next;
+
+  if (block->next != NULL && block->next->used == 0) {
+    // consolidate right block
+    // case is valid when right of block is not used and not last
+    block->size += block->next->size + memory_block_size;
+    block->next->size = 0;
+    block->next = block->next->next;
+    block->next->prev = block;
+  }
+
+  if (block->prev != NULL && block->prev->used == 0) {
+    block->prev->size += block->size + memory_block_size;
+
+    block->size = 0;
+    block->prev->next = block->next;
+    if (block->next != NULL) {
+      block->next->prev = block->prev;
     }
-    if (parent->used == 0 && parent != &root) {
-      parent->size += block->size + malloc_align(sizeof(memory_block));
-      parent->next = block->next;
-      if (last == block) {
-        last = parent;
-      }
-      block = parent;
+    if (last == block) {
+      last = block->prev;
     }
+    block = block->prev;
   }
 
   if (last == block) {
-    sbrk(-(block->size + malloc_align(sizeof(memory_block))));
-    last = parent;
-    if (parent != NULL) {
-      parent->next = block->next;
+    sbrk(-(block->size + memory_block_size));
+    block->size = 0;
+    last = block->prev;
+    if (block->prev != NULL) {
+      block->prev->next = block->next;
+    } else {
+      root = NULL;
     }
     return;
   }

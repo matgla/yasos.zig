@@ -36,13 +36,17 @@ typedef struct memory_block {
   size_t size : 31;
   size_t used : 1;
   struct memory_block *next;
+  struct memory_block *prev;
 } memory_block;
+
+const size_t memory_block_size =
+    (sizeof(memory_block) + alignof(max_align_t) - 1) &
+    ~(alignof(max_align_t) - 1);
 
 void process_syscall_sbrk(int number, const void *args, void *result,
                           optional_errno *err) {
   context.number = number;
   context.size = *(intptr_t *)args;
-  printf("number: %d, sbrk(%d)\n", number, context.size);
   sbrk_result *sbrk_result = result;
   sbrk_result->result = context.result;
 }
@@ -72,7 +76,7 @@ allocation_metadata test_allocate(int size, void *heap_pointer) {
 
   return (allocation_metadata){
       .ptr = result,
-      .block = (memory_block *)((void *)result - alignof(max_align_t)),
+      .block = (memory_block *)((void *)result - memory_block_size),
       .full_size = context.size,
   };
 }
@@ -98,7 +102,6 @@ UTEST_F_TEARDOWN(malloc_tests) {
 }
 
 UTEST_F(malloc_tests, allocate) {
-  const int memory_block_size = alignof(max_align_t);
   uint8_t heap[128];
   trigger_supervisor_call_fake.custom_fake = process_syscall_sbrk;
 
@@ -170,80 +173,73 @@ UTEST_F(malloc_tests, allocate) {
   ASSERT_EQ(a3.block->next, NULL);
 }
 
-UTEST(malloc_tests, divide_and_consolidate) {
-  // reset_context_state();
-  // uint8_t heap[128];
-  // trigger_supervisor_call_fake.custom_fake = process_syscall_sbrk;
-  // context.result = heap;
-  // char *ptr = sut_malloc(sizeof(char));
-  // memory_block *block = (memory_block *)heap;
-  // *ptr = 'a';
-  // ASSERT_EQ(context.number, sys_sbrk);
-  // ASSERT_EQ(block->size, 16);
-  // ASSERT_EQ(block->used, 1);
-  // ASSERT_EQ(block->next, NULL);
-  // ASSERT_EQ(*((char *)(&heap) + alignof(max_align_t)), 'a');
+UTEST_F(malloc_tests, divide_and_consolidate) {
+  uint8_t heap[512];
+  trigger_supervisor_call_fake.custom_fake = process_syscall_sbrk;
 
-  // context.result = heap + alignof(max_align_t) * 2;
-  // int *ptr2 = sut_malloc(sizeof(int));
-  // memory_block *block2 = (memory_block *)(context.result);
-  // *ptr2 = 0xcafebabe;
-  // ASSERT_EQ(context.number, sys_sbrk);
-  // ASSERT_EQ(block2->size, 16);
-  // ASSERT_EQ(block2->used, 1);
-  // ASSERT_EQ(block->next, block2);
-  // ASSERT_EQ(block2->next, NULL);
+  allocation_metadata a0 = test_allocate(sizeof(char) * 32, heap);
+  char *ptr0 = (char *)a0.ptr;
+  ASSERT_EQ(context.number, sys_sbrk);
+  ASSERT_EQ(a0.block->size, 32);
+  ASSERT_EQ(a0.block->used, 1);
+  ASSERT_EQ(a0.block->next, NULL);
 
-  // int *data = (int *)(heap + alignof(max_align_t) * 3);
-  // ASSERT_EQ(*(int *)&heap[alignof(max_align_t) * 3], 0xcafebabe);
+  allocation_metadata a1 =
+      test_allocate(sizeof(char) * 32, heap + a0.full_size);
+  char *ptr1 = (char *)a1.ptr;
+  ASSERT_EQ(context.number, sys_sbrk);
+  ASSERT_EQ(a1.block->size, 32);
+  ASSERT_EQ(a1.block->used, 1);
+  ASSERT_EQ(a1.block->next, NULL);
 
-  // context.result = heap + alignof(max_align_t) * 4;
-  // char *ptr3 = sut_malloc(sizeof(char) * 24);
-  // memory_block *block3 = (memory_block *)(context.result);
-  // ASSERT_EQ(block3->size, 32);
-  // ASSERT_EQ(block3->used, 1);
-  // ASSERT_EQ(block2->next, block3);
-  // ASSERT_EQ(block3->next, NULL);
+  allocation_metadata a2 =
+      test_allocate(sizeof(char) * 32, heap + a0.full_size + a1.full_size);
+  char *ptr2 = (char *)a2.ptr;
+  ASSERT_EQ(context.number, sys_sbrk);
+  ASSERT_EQ(a2.block->size, 32);
+  ASSERT_EQ(a2.block->used, 1);
+  ASSERT_EQ(a2.block->next, NULL);
 
-  // const char *msg = "Hello, World!";
-  // memcpy(ptr3, msg, strlen(msg) + 1);
-  // char *data_str = (char *)(heap + alignof(max_align_t) * 5);
-  // ASSERT_STREQ(data_str, msg);
-  // int release_size = -(block3->size + alignof(max_align_t));
-  // context.number = 0;
-  // sut_free(ptr3);
-  // ASSERT_EQ(context.number, sys_sbrk);
-  // ASSERT_EQ(context.size, release_size);
-  // ASSERT_EQ(block2->next, NULL);
-  // context.number = 0;
-  // sut_free(ptr);
-  // // can't be removed because it's not the last block
-  // ASSERT_EQ(context.number, 0);
-  // ASSERT_EQ(block->used, 0);
-  // ASSERT_EQ(block->size, alignof(max_align_t));
-  // ASSERT_EQ(block->next, block2);
-  // // root -> block(free) -> block2(used)
+  allocation_metadata a3 = test_allocate(
+      sizeof(char) * 32, heap + a0.full_size + a1.full_size + a2.full_size);
+  char *ptr3 = (char *)a3.ptr;
+  ASSERT_EQ(context.number, sys_sbrk);
+  ASSERT_EQ(a3.block->size, 32);
+  ASSERT_EQ(a3.block->used, 1);
+  ASSERT_EQ(a3.block->next, NULL);
 
-  // // if we allocate the same size as the released block, it should be reused
-  // context.number = 0;
-  // int *ptr4 = (int *)sut_malloc(sizeof(int));
-  // // can't be removed because it's not the last block
-  // ASSERT_EQ(context.number, 0);
-  // ASSERT_EQ(block->used, 1);
-  // ASSERT_EQ(block->size, alignof(max_align_t));
-  // ASSERT_EQ(block->next, block2);
-  // ASSERT_EQ(block2->next, NULL);
+  ASSERT_EQ(a0.block->next, a1.block);
+  ASSERT_EQ(a1.block->next, a2.block);
+  ASSERT_EQ(a2.block->next, a3.block);
 
-  // sut_free(ptr4);
-  // ASSERT_EQ(context.number, 0);
-  // ASSERT_EQ(block->used, 0);
-  // ASSERT_EQ(block->size, alignof(max_align_t));
-  // ASSERT_EQ(block->next, block2);
+  ASSERT_EQ(test_free(a2.ptr), 0);
+  // release the block in the middle
+  ASSERT_EQ(a0.block->next, a1.block);
+  ASSERT_EQ(a1.block->next, a2.block);
+  ASSERT_EQ(a2.block->next, a3.block);
+  ASSERT_EQ(a3.block->next, NULL);
 
-  // sut_free(ptr2);
-  // ASSERT_EQ(context.number, sys_sbrk);
-  // ASSERT_EQ(block->used, 0);
-  // ASSERT_EQ(block->next, NULL);
-  // ASSERT_EQ(block2->next, NULL);
-  // ASSERT_EQ(block3->next, NULL);
+  // release left block to consolidate right
+  ASSERT_EQ(test_free(a1.ptr), 0);
+  // release the block in the middle
+  ASSERT_EQ(a0.block->next, a1.block);
+  ASSERT_EQ(a1.block->next, a3.block);
+  ASSERT_EQ(a3.block->next, NULL);
+
+  ASSERT_TRUE(a0.block->used);
+  ASSERT_FALSE(a1.block->used);
+  ASSERT_FALSE(a2.block->used);
+  ASSERT_TRUE(a3.block->used);
+
+  // 3 blocks with 32 bytes each + single memory metadata block
+  ASSERT_EQ(test_free(a3.ptr), a1.full_size + a2.full_size + a3.full_size);
+  ASSERT_EQ(a3.block->next, NULL);
+
+  ASSERT_EQ(test_free(a0.ptr), a0.full_size);
+  ASSERT_EQ(a0.block->next, NULL);
+
+  ASSERT_FALSE(a0.block->used);
+  ASSERT_FALSE(a1.block->used);
+  ASSERT_FALSE(a2.block->used);
+  ASSERT_FALSE(a3.block->used);
 }
