@@ -1,5 +1,5 @@
 /**
- * errno.h
+ * libc_tests_main.c
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  *
@@ -18,6 +18,6 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#pragma once
+#include "utest.h"
 
-extern int errno;
+UTEST_MAIN()

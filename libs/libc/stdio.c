@@ -25,8 +25,6 @@
 #include <stdarg.h>
 #include <string.h>
 
-#include "libs/Baselibc/include/stdio.h"
-
 int puts(const char *str) {
   const int n = strlen(str);
   write(STDOUT_FILENO, str, n);
@@ -37,7 +35,5 @@ int scanf(const char *format, ...) {
   va_list ptr;
   size_t size;
   char line[255];
-  getline(&line, &size, stdin);
-  vsscanf(line, format, ptr);
   return 0;
 }

@@ -15,6 +15,15 @@
  *   along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-typedef unsigned short pid_t;
-typedef unsigned int mode_t;
-typedef unsigned int off_t;
+#pragma once
+
+#if __STDC_VERSION__ < 201112L && (defined(__GNUC__) || defined(__TINYC__))
+#define _Alignas(t) __attribute__((__aligned__(t)))
+#define _Alignof(t) __alignof__(t)
+#endif
+
+#define alignas _Alignas
+#define alignof _Alignof
+
+#define __alignas_is_defined 1
+#define __alignof_is_defined 1

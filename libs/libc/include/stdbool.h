@@ -15,6 +15,9 @@
  *   along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-typedef unsigned short pid_t;
-typedef unsigned int mode_t;
-typedef unsigned int off_t;
+#pragma once
+
+#define bool _Bool
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1

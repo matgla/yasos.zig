@@ -15,6 +15,22 @@
  *   along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-typedef unsigned short pid_t;
-typedef unsigned int mode_t;
-typedef unsigned int off_t;
+#pragma once
+
+typedef __SIZE_TYPE__ size_t;
+typedef __PTRDIFF_TYPE__ ssize_t;
+typedef __WCHAR_TYPE__ wchar_t;
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
+typedef __INTPTR_TYPE__ intptr_t;
+typedef __SIZE_TYPE__ uintptr_t;
+
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
+#if __STDC_VERSION__ >= 201112L
+typedef union {
+  long long __ll;
+  long double __ld;
+} max_align_t;
+#endif

@@ -1,22 +1,19 @@
-//
-// stdio.zig
-//
-// Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
-//
-// This program is free software: you can redistribute it and/or
-// modify it under the terms of the GNU General Public License
-// as published by the Free Software Foundation, either version
-// 3 of the License, or (at your option) any later version.
-//
-// This program is distributed in the hope that it will be
-// useful, but WITHOUT ANY WARRANTY; without even the implied
-// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
-// PURPOSE. See the GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General
-// Public License along with this program. If not, see
-// <https://www.gnu.org/licenses/>.
-//
+/*
+ *   Copyright (c) 2025 Mateusz Stadnik
+
+ *   This program is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation, either version 3 of the License, or
+ *   (at your option) any later version.
+
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <sys/types.h>
 
@@ -34,12 +31,15 @@
 
 #include "syscalls.h"
 
-void __attribute__((noinline)) __attribute__((naked))
-trigger_supervisor_call(int number, const void *args, void *result,
-                        optional_errno *err) {
-  asm("svc 0");
-  asm("bx lr");
-}
+// void __attribute__((noinline)) __attribute__((naked))
+// trigger_supervisor_call(int number, const void *args, void *result,
+//                         optional_errno *err) {
+//   asm("svc 0");
+//   asm("bx lr");
+// }
+
+void trigger_supervisor_call(int number, const void *args, void *result,
+                             optional_errno *err);
 
 void trigger_syscall(int number, const void *args, void *result) {
   optional_errno err = {
@@ -111,7 +111,8 @@ void __aeabi_memset(void *dest, size_t n, int c) {
   // while (--n) *ptr++ = (uint8_t)c;
 }
 
-void __aeabi_uldivmod() {}
+void __aeabi_uldivmod() {
+}
 
 void _putchar(char c) {
   ssize_t result;
@@ -236,11 +237,11 @@ int isatty(int fd) {
 
 // void _init() {}
 
-// void *_sbrk(intptr_t increment) {
-//   void *result;
-//   trigger_syscall(sys_sbrk, &increment, &result);
-//   return result;
-// }
+void *sbrk(intptr_t increment) {
+  sbrk_result result;
+  trigger_syscall(sys_sbrk, &increment, &result);
+  return result.result;
+}
 
 // int _open(const char *filename, int flags, ...) {
 //   va_list args;
