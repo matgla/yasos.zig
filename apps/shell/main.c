@@ -171,6 +171,7 @@
 
 int main(int argc, char *argv[]) {
   if (isatty(STDIN_FILENO)) {
+    // puts("Hello\n, trying varargs\n");
     printf("This is atty\n");
     char buf[50];
     scanf("%s", buf);

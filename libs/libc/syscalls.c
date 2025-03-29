@@ -31,12 +31,14 @@
 
 #include "syscalls.h"
 
-// void __attribute__((noinline)) __attribute__((naked))
-// trigger_supervisor_call(int number, const void *args, void *result,
-//                         optional_errno *err) {
-//   asm("svc 0");
-//   asm("bx lr");
-// }
+#ifdef YASLIBC_ARM_SVC_TRIGGER
+void __attribute__((noinline)) __attribute__((naked))
+trigger_supervisor_call(int number, const void *args, void *result,
+                        optional_errno *err) {
+  asm("svc 0");
+  asm("bx lr");
+}
+#endif
 
 void trigger_supervisor_call(int number, const void *args, void *result,
                              optional_errno *err);
@@ -80,12 +82,12 @@ pid_t _getpid() {
 //   }
 // }
 
-// ssize_t _read(int fd, void *buf, size_t count) {
-//   ssize_t result;
-//   const read_context context = {.fd = fd, .buf = buf, .count = count};
-//   trigger_syscall(sys_read, &context, &result);
-//   return result;
-// }
+ssize_t read(int fd, void *buf, size_t count) {
+  read_result result;
+  const read_context context = {.fd = fd, .buf = buf, .count = count};
+  trigger_syscall(sys_read, &context, &result);
+  return result.result;
+}
 
 // int _gettimeofday(struct timeval *restrict tv,
 //                   struct timezone *_Nullable restrict tz) {
@@ -94,14 +96,14 @@ pid_t _getpid() {
 // }
 
 ssize_t write(int fd, const void *buf, size_t count) {
-  ssize_t result;
+  write_result result;
   const write_context context = {
       .fd = fd,
       .buf = buf,
       .count = count,
   };
   trigger_syscall(sys_write, &context, &result);
-  return result;
+  return result.result;
 }
 
 void __aeabi_memset(void *dest, size_t n, int c) {

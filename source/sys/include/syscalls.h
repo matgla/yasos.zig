@@ -32,6 +32,10 @@ typedef struct read_context {
   size_t count;
 } read_context;
 
+typedef struct read_result {
+  ssize_t result;
+} read_result;
+
 typedef struct kill_context {
   pid_t pid;
   int sig;
@@ -42,6 +46,10 @@ typedef struct write_context {
   const void *buf;
   size_t count;
 } write_context;
+
+typedef struct write_result {
+  ssize_t result;
+} write_result;
 
 typedef struct link_context {
   const char *oldpath;

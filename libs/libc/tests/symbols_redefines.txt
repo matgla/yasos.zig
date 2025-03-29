@@ -20,3 +20,4 @@ write sut_write
 strlen sut_strlen
 isatty sut_isatty
 memset sut_memset
+isspace sut_isspace

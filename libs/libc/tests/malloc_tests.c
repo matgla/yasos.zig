@@ -43,15 +43,15 @@ const size_t memory_block_size =
     (sizeof(memory_block) + alignof(max_align_t) - 1) &
     ~(alignof(max_align_t) - 1);
 
-void process_syscall_sbrk(int number, const void *args, void *result,
-                          optional_errno *err) {
+static void process_syscall_sbrk(int number, const void *args, void *result,
+                                 optional_errno *err) {
   context.number = number;
   context.size = *(intptr_t *)args;
   sbrk_result *sbrk_result = result;
   sbrk_result->result = context.result;
 }
 
-void reset_context_state() {
+static void reset_context_state() {
   context.number = 0;
   context.size = 0;
   context.result = NULL;

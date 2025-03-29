@@ -19,6 +19,7 @@
 
 #include "stdalign.h"
 #include "unistd.h"
+#include <string.h>
 
 typedef struct memory_block {
   size_t size : 31;
