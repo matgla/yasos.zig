@@ -23,7 +23,7 @@ const std = @import("std");
 const hal = @import("hal");
 
 const c = @cImport({
-    @cInclude("kernel/syscalls.h");
+    @cInclude("syscalls.h");
 });
 
 const syscall = @import("../system_stubs.zig");
@@ -66,7 +66,6 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             };
             result.* = true;
         },
-
         c.sys_semaphore_acquire => {
             const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
             const result: *volatile bool = @ptrCast(@alignCast(out));
@@ -85,6 +84,20 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = syscall._write(context.fd, context.buf.?, context.count);
+        },
+        c.sys_read => {
+            const context: *const volatile c.read_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._read(context.fd, context.buf.?, context.count);
+        },
+        c.sys_fork => {
+            const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
+            result.* = @intCast(process_manager.instance.fork());
+        },
+        c.sys_waitpid => {
+            const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
+            result.* = process_manager.instance.waitpid(context.pid, context.status);
         },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});

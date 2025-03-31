@@ -335,8 +335,9 @@ class Application:
             "R_ARM_NONE",  # can be ignored, just marker
             "R_ARM_THM_JUMP8",  # PC relative
             "R_ARM_THM_JUMP11",  # PC relative
+            "R_ARM_RELATIVE",  # dynamic relocation
             # "R_ARM_JUMP_SLOT",  # TODO
-            "R_ARM_GLOB_DAT",
+            # "R_ARM_GLOB_DAT",
         ]
 
         self.relocations = RelocationSet()
@@ -357,7 +358,11 @@ class Application:
                 self.relocations.add_symbol_table_relocation(
                     relocation, self.got_section_address, visibility == "exported"
                 )
-
+            elif relocation["info_type"] == "R_ARM_GLOB_DAT":
+                visibility = self.symbols[relocation["symbol_name"]]["localization"]
+                self.relocations.add_symbol_table_relocation(
+                    relocation, self.got_section_address, visibility == "exported"
+                )
             else:
                 raise RuntimeError(
                     "Unknown relocation for '{name}': {relocation}".format(
@@ -435,6 +440,24 @@ class Application:
                     self.relocations.add_data_relocation(
                         relocation, from_address, offset
                     )
+            elif relocation["info_type"] == "R_ARM_RELATIVE":
+                print(hex(relocation["offset"]), hex(data_offset))
+                from_address = int(relocation["offset"] - data_offset)
+                data = self.data
+                print(len(data), hex(from_address))
+                section_code = SectionCode.Data
+                offset = data_offset
+                original_offset = struct.unpack_from("<I", data, from_address)[0]
+
+                if original_offset - offset < 0:
+                    # this is a data relocation towards code
+                    offset = original_offset << 2 | SectionCode.Code.value
+                else: 
+                    offset = ((original_offset - offset) << 2) | section_code.value
+
+                self.relocations.add_data_relocation(
+                    relocation, from_address, offset
+                )
 
     def __dump_local_relocations(self):
         self.logger.verbose("Dumping local relocations")
@@ -525,9 +548,12 @@ class Application:
                 section = ".text"
             from_offset = rel["offset"] >> 2
 
+            name = rel["name"]
+            if name == None:
+                name = "-local-"
             self.logger.verbose(
                 "| {: <40} | {: <16} | {: <16} | {: <9} |".format(
-                    rel["name"], hex(from_offset), hex(rel["index"]), section
+                    name, hex(from_offset), hex(rel["index"]), section
                 )
             )
 
@@ -547,14 +573,14 @@ class Application:
         self.__dump_symbol_table()
         self.__process_relocations()
         if self.init_arrays_section:
-            init_offset = self.init_arrays_section["size"]
+            init_offset = self.init_arrays_section["address"]
         else:
             init_offset = 0
 
-        # self.__process_data_relocations(
-        #     self.text_section["address"] + self.text_section["size"],
-        #     self.text_section["address"] + self.text_section["size"] + init_offset,
-        # )
+        self.__process_data_relocations(
+            init_offset, 
+            self.data_section["address"],
+        )
         self.__dump_relocations()
 
     def __fix_offsets_in_code(self):
@@ -767,6 +793,7 @@ class Application:
         for rel in local_relocations:
             section = self.__get_relocation_section(rel)
             value = rel["symbol_value"]
+
             if section == SectionCode.Init:
                 value -= len(self.text)
             if section == SectionCode.Data:

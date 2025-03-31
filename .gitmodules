@@ -1,6 +1,6 @@
 [submodule "hal/libs/pico-sdk"]
 	path = hal/libs/pico-sdk
 	url = https://github.com/raspberrypi/pico-sdk.git
-[submodule "libs/libc/libs/yasos_libc"]
-	path = libs/libc/libs/yasos_libc
+[submodule "libs/libc"]
+	path = libs/libc
 	url = https://github.com/matgla/yasos_libc.git

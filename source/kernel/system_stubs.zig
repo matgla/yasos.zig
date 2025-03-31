@@ -67,7 +67,14 @@ export fn _lseek(_: c_int, _: c.off_t, _: c_int) c_int {
     return 0;
 }
 
-export fn _read(_: c_int, _: *void, _: usize) isize {
+pub export fn _read(fd: c_int, data: *anyopaque, size: usize) isize {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_file = process.fds.get(@intCast(fd));
+        if (maybe_file) |file| {
+            return file.read(@as([*:0]u8, @ptrCast(data))[0..size]);
+        }
+    }
     return 0;
 }
 

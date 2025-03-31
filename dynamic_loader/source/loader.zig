@@ -138,6 +138,12 @@ pub const Loader = struct {
         var got = module.get_got();
         const text = module.get_text();
         const module_start = @intFromPtr(text.ptr);
+        const maybe_init = self.find_symbol(module, "__start_data");
+        if (maybe_init) |address| {
+            stdout.print("[yasld] Found __start_data at: 0x{x}\n", .{address});
+        } else {
+            stdout.print("[yasld] Can't find symbol '__start_data'\n", .{});
+        }
 
         for (0..got.len) |i| {
             const address = module_start + got[i];
@@ -190,13 +196,14 @@ pub const Loader = struct {
         }
     }
 
-    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module) !void {
+    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
         const data_memory = module.get_data();
         for (parser.data_relocations.relocations) |rel| {
             const address_to_change: usize = @intFromPtr(data_memory.ptr) + rel.to;
             const target: *usize = @ptrFromInt(address_to_change);
             const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));
             const address_from: usize = base_address_from + rel.from;
+            stdout.print("Patching from: 0x{x} to: 0x{x}\n", .{ address_to_change, address_from });
             target.* = address_from;
         }
     }
@@ -218,10 +225,11 @@ pub const Loader = struct {
 
         const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
         try module.relocate_init(init_ptr[0..header.init_length]);
+        module.process_initializers(stdout);
 
         try self.process_symbol_table_relocations(&parser, module, stdout);
         try self.process_local_relocations(&parser, module);
-        try self.process_data_relocations(&parser, module);
+        try self.process_data_relocations(&parser, module, stdout);
 
         stdout.print("[yasld] GOT loaded at 0x{x}\n", .{@intFromPtr(module.get_got().ptr)});
         stdout.print("[yasld] text loaded at 0x{x}\n", .{@intFromPtr(module.program.?.ptr)});

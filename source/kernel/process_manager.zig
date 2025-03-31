@@ -75,6 +75,14 @@ pub const ProcessManager = struct {
         }
     }
 
+    pub fn fork(_: Self) i32 {
+        return -1;
+    }
+
+    pub fn waitpid(_: Self, _: i32, _: *i32) i32 {
+        return -1;
+    }
+
     // This must take asking core into consideration since, more than one processes are going in the parallel
     pub fn get_current_process(self: Self) ?*Process {
         return self.scheduler.get_current();

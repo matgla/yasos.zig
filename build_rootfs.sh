@@ -137,7 +137,7 @@ if $BUILD_IMAGE; then
   do
     if [ -f "$file" ]; then  # Check if it's a file
       mv $file $file.bak
-      $SCRIPT_DIR/dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file.bak --type shared_library -o $file
+      $SCRIPT_DIR/dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file.bak --type shared_library -o $file --verbose
       rm $file.bak 
     fi
   done

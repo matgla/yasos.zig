@@ -92,6 +92,40 @@ typedef struct sbrk_result {
   void *result;
 } sbrk_result;
 
+typedef struct getdents_context {
+  int fd;
+  struct dirent *dirp;
+  size_t count;
+} getdents_context;
+
+typedef struct ioctl_context {
+  int fd;
+  unsigned long request;
+  void *arg;
+} ioctl_context;
+
+typedef struct gettimeofday_context {
+  struct timeval *tv;
+  struct timezone *tz;
+} gettimeofday_context;
+
+typedef struct waitpid_context {
+  pid_t pid;
+  int *status;
+  int options;
+} waitpid_context;
+
+typedef struct nanosleep_context {
+  const struct timespec *req;
+  struct timespec *rem;
+} nanosleep_context;
+
+typedef struct execve_context {
+  const char *filename;
+  char **const argv;
+  char **const envp;
+} execve_context;
+
 typedef enum SystemCall {
   sys_dynamic_loader_prepare_entry = 1,
   sys_dynamic_loader_process_exit,
@@ -119,6 +153,12 @@ typedef enum SystemCall {
   sys_lseek,
   sys_wait,
   sys_times,
+  sys_getdents,
+  sys_ioctl,
+  sys_gettimeofday,
+  sys_waitpid,
+  sys_execve,
+  sys_nanosleep,
   SYSCALL_COUNT,
 } SystemCall;
 

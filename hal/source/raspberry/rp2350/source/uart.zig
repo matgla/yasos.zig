@@ -51,6 +51,10 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             return buffer.len;
         }
 
+        pub fn getc(_: Self) u8 {
+            return uart.uart_getc(Register);
+        }
+
         fn getRegisterAddress(comptime id: u32) *uart.uart_inst_t {
             if (id == 1) {
                 return @ptrFromInt(uart.UART1_BASE);

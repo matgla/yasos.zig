@@ -47,6 +47,9 @@ pub fn UartFile(comptime UartType: anytype) type {
             .filetype = filetype,
         };
 
+        icanonical: bool = true,
+        echo: bool = true,
+
         pub fn create() Self {
             return .{};
         }
@@ -58,7 +61,30 @@ pub fn UartFile(comptime UartType: anytype) type {
             };
         }
 
-        pub fn read(_: *anyopaque, buffer: []u8) isize {
+        pub fn read(ctx: *anyopaque, buffer: []u8) isize {
+            const self: *const Self = @ptrCast(@alignCast(ctx));
+            if (self.icanonical) {
+                var index: usize = 0;
+                var ch: [1]u8 = .{1};
+                while (index < buffer.len) {
+                    if (uart.read(ch[0..1]) == 0) {
+                        return @intCast(index);
+                    }
+
+                    if (ch[0] == '\r') {
+                        ch[0] = '\n';
+                    }
+                    buffer[index] = ch[0];
+                    if (self.echo) {
+                        _ = uart.write_some(ch[0..1]) catch {};
+                    }
+                    index += 1;
+                    if (ch[0] == 0 or ch[0] == '\n' or ch[0] == -1) {
+                        break;
+                    }
+                }
+                return @intCast(index);
+            }
             return @intCast(uart.read(buffer));
         }
 

@@ -26,7 +26,7 @@ const system_call = @import("interrupts/system_call.zig");
 const process_manager = @import("process_manager.zig");
 
 const c = @cImport({
-    @cInclude("kernel/syscalls.h");
+    @cInclude("syscalls.h");
 });
 
 pub fn spawn(allocator: std.mem.Allocator, entry: anytype, arg: ?*const anyopaque, stack_size: u32) error{ProcessCreationFailed}!void {
