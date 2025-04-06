@@ -100,7 +100,7 @@ typedef struct getdents_context {
 
 typedef struct ioctl_context {
   int fd;
-  unsigned long request;
+  int op;
   void *arg;
 } ioctl_context;
 
@@ -125,6 +125,10 @@ typedef struct execve_context {
   char **const argv;
   char **const envp;
 } execve_context;
+
+typedef struct fork_context {
+  size_t program_counter;
+} fork_context;
 
 typedef enum SystemCall {
   sys_dynamic_loader_prepare_entry = 1,

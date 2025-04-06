@@ -259,11 +259,11 @@ pub export fn main() void {
     log.write(" - initializing process manager\n");
     log.write(" - scheduler: round robin\n");
 
+    process_manager.initialize_process_manager(malloc_allocator);
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
     });
     process.init();
-
-    spawn.root_process(malloc_allocator, &kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
+    spawn.root_process(&kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
     while (true) {}
 }

@@ -30,11 +30,13 @@ pub const ProcessManager = struct {
 
     processes: ContainerType,
     scheduler: RoundRobinScheduler(Self),
+    allocator: std.mem.Allocator,
 
-    pub fn create() Self {
+    pub fn create(allocator: std.mem.Allocator) Self {
         return Self{
             .processes = .{},
             .scheduler = .{},
+            .allocator = allocator,
         };
     }
 
@@ -42,9 +44,9 @@ pub const ProcessManager = struct {
         self.scheduler = scheduler;
     }
 
-    pub fn create_process(self: *Self, allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, args: anytype) !void {
-        var node = try allocator.create(ContainerType.Node);
-        node.data = try Process.create(allocator, stack_size, process_entry, args);
+    pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype) !void {
+        var node = try self.allocator.create(ContainerType.Node);
+        node.data = try Process.create(self.allocator, stack_size, process_entry, args);
         return self.processes.append(node);
     }
 
@@ -75,7 +77,17 @@ pub const ProcessManager = struct {
         }
     }
 
-    pub fn fork(_: Self) i32 {
+    pub fn fork(self: *Self) i32 {
+        var node = self.allocator.create(ContainerType.Node) catch {
+            return -1;
+        };
+        const maybe_current_process = self.scheduler.get_current();
+        if (maybe_current_process) |current_process| {
+            node.data = current_process.clone() catch {
+                return -1;
+            };
+            return @intCast(node.data.pid);
+        }
         return -1;
     }
 
@@ -93,9 +105,11 @@ pub const ProcessManager = struct {
     }
 };
 
-pub var instance = ProcessManager.create();
+pub var instance: ProcessManager = undefined;
 
-// C interface for context switching assembly code
+pub fn initialize_process_manager(allocator: std.mem.Allocator) void {
+    instance = ProcessManager.create(allocator);
+}
 
 export fn get_next_task() *const u8 {
     if (instance.scheduler.get_next()) |task| {
@@ -106,7 +120,7 @@ export fn get_next_task() *const u8 {
     @panic("Context switch called without tasks available");
 }
 
-export fn update_stack_pointer(ptr: *const u8) void {
+export fn update_stack_pointer(ptr: *u8) void {
     if (instance.scheduler.get_current()) |task| {
         task.set_stack_pointer(ptr);
     }

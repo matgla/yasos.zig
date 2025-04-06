@@ -20,10 +20,7 @@
 
 ///! This module provides file handler implementation for ramfs filesystem
 const std = @import("std");
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("../../libc_imports.zig").c;
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
@@ -139,7 +136,7 @@ pub const RomFsFile = struct {
         return self.data.name();
     }
 
-    pub fn ioctl(ctx: *anyopaque, cmd: u32, data: *anyopaque) i32 {
+    pub fn ioctl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
         const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {

@@ -20,10 +20,7 @@
 
 ///! This module provides file handler implementation for ramfs filesystem
 const std = @import("std");
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("../../libc_imports.zig").c;
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
@@ -148,7 +145,7 @@ pub const RamFsFile = struct {
         return self.data.name();
     }
 
-    pub fn ioctl(_: *anyopaque, _: u32, _: *const anyopaque) i32 {
+    pub fn ioctl(_: *anyopaque, _: i32, _: ?*const anyopaque) i32 {
         return 0;
     }
 

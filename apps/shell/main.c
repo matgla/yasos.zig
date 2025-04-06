@@ -44,7 +44,7 @@ char *strip(char *str, size_t length) {
 void scanline(char *buffer, size_t size) {
   char ch;
   size_t i = 0;
-  bool got_not_space = false;
+  int got_not_space = false;
 
   if (size != 0) {
     buffer[0] = 0;
@@ -69,6 +69,7 @@ void scanline(char *buffer, size_t size) {
 
     if (i < size - 1 && got_not_space) {
       printf("%c", ch);
+      fflush(stdout);
       buffer[i++] = ch;
     }
   }
@@ -81,7 +82,6 @@ bool is_environment_variable(const char *buffer) {
 
 int execute_command(const char *command, char *args[]) {
   printf("\n");
-  printf("command: '%s'\n", command);
   if (strcmp(command, "exit") == 0) {
     return -1;
   }
@@ -90,9 +90,11 @@ int execute_command(const char *command, char *args[]) {
   if (pid == -1) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
+    printf("child process\n");
     execvp(command, args);
   } else {
     int rc = 0;
+    printf("Parent process\n");
     waitpid(pid, &rc, 0);
   }
   // try to call command
@@ -123,8 +125,6 @@ int parse_command(char *buffer) {
       // process completion request
       return 0;
     } else if (command == NULL) {
-
-      printf("buffer: '%s'\n", part);
       command = part;
       args[argc++] = part;
     } else {

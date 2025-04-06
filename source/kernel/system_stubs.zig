@@ -20,10 +20,7 @@
 
 const log = &@import("../log/kernel_log.zig").kernel_log;
 
-const c = @cImport({
-    @cInclude("sys/types.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("../libc_imports.zig").c;
 
 const process_manager = @import("process_manager.zig");
 const FileType = @import("fs/ifile.zig").FileType;
@@ -84,6 +81,17 @@ pub export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
         const maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |file| {
             return file.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
+        }
+    }
+    return -1;
+}
+
+pub export fn _ioctl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_file = process.fds.get(@intCast(fd));
+        if (maybe_file) |file| {
+            return file.ioctl(request, data);
         }
     }
     return -1;

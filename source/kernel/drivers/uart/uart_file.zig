@@ -19,10 +19,7 @@
 //
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("../../../libc_imports.zig").c;
 
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileType = @import("../../fs/ifile.zig").FileType;
@@ -63,29 +60,29 @@ pub fn UartFile(comptime UartType: anytype) type {
 
         pub fn read(ctx: *anyopaque, buffer: []u8) isize {
             const self: *const Self = @ptrCast(@alignCast(ctx));
-            if (self.icanonical) {
-                var index: usize = 0;
-                var ch: [1]u8 = .{1};
-                while (index < buffer.len) {
-                    if (uart.read(ch[0..1]) == 0) {
-                        return @intCast(index);
-                    }
+            var index: usize = 0;
+            var ch: [1]u8 = .{1};
+            while (index < buffer.len) {
+                if (uart.read(ch[0..1]) == 0) {
+                    return @intCast(index);
+                }
 
-                    if (ch[0] == '\r') {
-                        ch[0] = '\n';
-                    }
-                    buffer[index] = ch[0];
-                    if (self.echo) {
-                        _ = uart.write_some(ch[0..1]) catch {};
-                    }
-                    index += 1;
+                if (ch[0] == '\r') {
+                    ch[0] = '\n';
+                }
+                buffer[index] = ch[0];
+                if (self.echo) {
+                    _ = uart.write_some(ch[0..1]) catch {};
+                }
+                index += 1;
+                if (self.icanonical) {
                     if (ch[0] == 0 or ch[0] == '\n' or ch[0] == -1) {
                         break;
                     }
                 }
                 return @intCast(index);
             }
-            return @intCast(uart.read(buffer));
+            return 0;
         }
 
         pub fn write(_: *anyopaque, data: []const u8) isize {
@@ -118,8 +115,40 @@ pub fn UartFile(comptime UartType: anytype) type {
             return "";
         }
 
-        pub fn ioctl(_: *anyopaque, _: u32, _: *const anyopaque) i32 {
-            return 0;
+        pub fn ioctl(ctx: *anyopaque, op: i32, arg: ?*anyopaque) i32 {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            if (arg) |termios_arg| {
+                const termios: *c.termios = @ptrCast(@alignCast(termios_arg));
+                switch (op) {
+                    c.TCSETS => {
+                        self.icanonical = (termios.c_lflag & c.ICANON) != 0;
+                        self.echo = (termios.c_lflag & c.ECHO) != 0;
+                        return 0;
+                    },
+                    c.TCSETSW => {
+                        return -1;
+                    },
+                    c.TCSETSF => {
+                        return -1;
+                    },
+                    c.TCGETS => {
+                        termios.c_iflag = 0;
+                        termios.c_oflag = 0;
+                        termios.c_cflag = 0;
+                        termios.c_lflag = 0;
+                        termios.c_line = 0;
+                        termios.c_cc[0] = 0;
+                        termios.c_cc[1] = 0;
+                        termios.c_cc[2] = 0;
+                        termios.c_cc[3] = 0;
+                        return 0;
+                    },
+                    else => {
+                        return -1;
+                    },
+                }
+            }
+            return -1;
         }
 
         pub fn stat(_: *const anyopaque, buf: *c.struct_stat) void {

@@ -61,7 +61,7 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
         c.sys_create_process => {
             const context: *const volatile CreateProcessCall = @ptrCast(@alignCast(arg));
             const result: *volatile bool = @ptrCast(out);
-            process_manager.instance.create_process(context.allocator, context.stack_size, context.entry, context.arg) catch {
+            process_manager.instance.create_process(context.stack_size, context.entry, context.arg) catch {
                 return;
             };
             result.* = true;
@@ -98,6 +98,11 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));
             const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
             result.* = process_manager.instance.waitpid(context.pid, context.status);
+        },
+        c.sys_ioctl => {
+            const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._ioctl(context.fd, context.op, context.arg);
         },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});

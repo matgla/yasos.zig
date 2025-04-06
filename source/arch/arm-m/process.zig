@@ -162,7 +162,7 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
     };
 }
 
-pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype) *const u8 {
+pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype) *u8 {
     const hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
     // const software_pushed_registers = create_default_software_registers();
     const stack_start: usize = if (stack.len % 8 == 0) stack.len else stack.len - stack.len % 8;
@@ -188,6 +188,13 @@ pub fn initialize_context_switching() void {
     hal.irq.set_priority(.systick, 0x00);
     hal.irq.set_priority(.supervisor_call, 0xfe);
     hal.irq.set_priority(.pendsv, 0xff);
+}
+
+extern fn context_switch_push_registers_to_stack(stack: *u8) void;
+
+pub fn dump_registers_on_stack(stack_position: *u8) *u8 {
+    context_switch_push_registers_to_stack(stack_position);
+    return @ptrFromInt(@intFromPtr(stack_position) - @sizeOf(HardwareStoredRegisters) - @sizeOf(SoftwareStoredRegisters));
 }
 
 fn test_entry() void {}

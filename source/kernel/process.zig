@@ -20,9 +20,7 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("sys/types.h");
-});
+const c = @import("../libc_imports.zig").c;
 
 const config = @import("config");
 const arch_process = @import("../arch/arch.zig").process;
@@ -50,7 +48,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         impl: implementation,
         pid: u32,
         stack: []align(8) u8,
-        stack_position: *const u8,
+        stack_position: *u8,
         _allocator: std.mem.Allocator,
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
@@ -83,6 +81,24 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             };
         }
 
+        pub fn clone(self: Self) !Self {
+            const stack: []align(8) u8 = try self._allocator.alignedAlloc(u8, 8, self.stack.len);
+            @memcpy(stack, self.stack);
+
+            pid_counter += 1;
+            return Self{
+                .state = State.Ready,
+                .priority = self.priority,
+                .impl = .{},
+                .pid = pid_counter,
+                .stack = stack,
+                .stack_position = arch_process.dump_registers_on_stack(self.stack_position),
+                ._allocator = self._allocator,
+                .current_core = 0,
+                .fds = try self.fds.clone(),
+            };
+        }
+
         pub fn deinit(self: Self) void {
             self._allocator.free(self.stack);
             self._allocator.free(self.cwd);
@@ -107,7 +123,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             return self.stack_position;
         }
 
-        pub fn set_stack_pointer(self: *Self, ptr: *const u8) void {
+        pub fn set_stack_pointer(self: *Self, ptr: *u8) void {
             self.stack_position = ptr;
         }
 
