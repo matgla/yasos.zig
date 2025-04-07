@@ -38,6 +38,8 @@ pub fn init() void {
     arch_process.init();
 }
 
+pub fn fork_return() usize {}
+
 pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
@@ -81,7 +83,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             };
         }
 
-        pub fn clone(self: Self) !Self {
+        pub fn clone(self: Self, lr: usize) !Self {
             const stack: []align(8) u8 = try self._allocator.alignedAlloc(u8, 8, self.stack.len);
             @memcpy(stack, self.stack);
 
@@ -92,7 +94,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .impl = .{},
                 .pid = pid_counter,
                 .stack = stack,
-                .stack_position = arch_process.dump_registers_on_stack(self.stack_position),
+                .stack_position = arch_process.dump_registers_on_stack(@ptrFromInt(@intFromPtr(stack.ptr) + self.stack.len - self.stack_usage() - 1), lr),
                 ._allocator = self._allocator,
                 .current_core = 0,
                 .fds = try self.fds.clone(),

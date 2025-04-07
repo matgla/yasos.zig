@@ -77,15 +77,18 @@ pub const ProcessManager = struct {
         }
     }
 
-    pub fn fork(self: *Self) i32 {
+    pub fn fork(self: *Self, lr: usize) i32 {
         var node = self.allocator.create(ContainerType.Node) catch {
             return -1;
         };
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |current_process| {
-            node.data = current_process.clone() catch {
+            node.data = current_process.clone(lr) catch {
                 return -1;
             };
+
+            // node.data.stack_position = context_switch_push_registers_to_stack(node.data.stack_position);
+            self.processes.append(node);
             return @intCast(node.data.pid);
         }
         return -1;
@@ -104,6 +107,9 @@ pub const ProcessManager = struct {
         process.initialize_context_switching();
     }
 };
+
+extern fn context_switch_get_psp() usize;
+extern fn context_switch_push_registers_to_stack(stack_pointer: *u8) *u8;
 
 pub var instance: ProcessManager = undefined;
 

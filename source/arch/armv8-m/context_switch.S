@@ -45,17 +45,26 @@ store_and_switch_to_next_task:
   cpsid i // better to not interrupt that operation from nested IRQ
   mrs r0, psp 
   mov r1, lr
-  stmia r0!, {r1, r4-r12}
+  vstmdb r0!, {s16-s31}
+  stmdb r0!, {r1, r4-r12}
   
   bl update_stack_pointer
   b switch_to_next_task
 
 .global context_switch_push_registers_to_stack
 .thumb_func
-context_switch_push_registers_to_stack: 
-  cpsid i 
-  stmia r0!, {r0-r3, r12, lr, psr}
-  vstmia r0!, {s16-s31}
-  mov r1, lr 
-  stmia r0!, {r1, r4-r12}
-  
+context_switch_push_registers_to_stack:
+  vstmdb r0!, {s16-s31}
+  stmdb r0!, {r1, r4-r12}
+  bx lr
+
+.global context_switch_get_psp
+.thumb_func
+context_switch_get_psp:
+  mrs r0, psp 
+  bx lr
+
+.global get_lr
+.thumb_func 
+get_lr:
+  mov r0, lr
