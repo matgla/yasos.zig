@@ -100,11 +100,11 @@ pub const SoftwareStoredRegisters = extern struct {
 
 pub fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
     return .{
-        .r0 = 0xdeadbeef,
-        .r1 = 0xdeadbeef,
-        .r2 = 0xdeadbeef,
-        .r3 = 0xdeadbeef,
-        .r12 = 0xdeadbeef,
+        .r0 = 0,
+        .r1 = 0,
+        .r2 = 0,
+        .r3 = 0,
+        .r12 = 0,
         .lr = @as(u32, @intCast(@intFromPtr(exit_handler))),
         .pc = @as(u32, @intCast(@intFromPtr(process_entry))),
         .psr = 0x21000000,

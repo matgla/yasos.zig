@@ -50,15 +50,18 @@ pub const SemaphoreEvent = struct {
     object: *Semaphore,
 };
 
+// mov to arch file
+
 fn get_lr() callconv(.Inline) usize {
     return asm volatile (
-        \\ mov lr, %[ret]
+        \\ mov %[ret], lr
         : [ret] "=r" (-> usize),
     );
 }
 
 export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
     // those operations must be secure since both cores may be executing that code in the same time
+    const lr: usize = get_lr();
     hal.hw_atomic.lock(config.process.hw_spinlock_number);
     defer hal.hw_atomic.unlock(config.process.hw_spinlock_number);
     switch (number) {
@@ -99,7 +102,7 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
         },
         c.sys_fork => {
             const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
-            result.* = @intCast(process_manager.instance.fork(get_lr()));
+            result.* = @intCast(process_manager.instance.fork(lr));
         },
         c.sys_waitpid => {
             const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));

@@ -87,7 +87,6 @@ pub const ProcessManager = struct {
                 return -1;
             };
 
-            // node.data.stack_position = context_switch_push_registers_to_stack(node.data.stack_position);
             self.processes.append(node);
             return @intCast(node.data.pid);
         }

@@ -86,16 +86,26 @@ int execute_command(const char *command, char *args[]) {
     return -1;
   }
 
+  printf("Forking process\n");
   pid_t pid = fork();
+  printf("Forked process %d\n", pid);
   if (pid == -1) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
     printf("child process\n");
     execvp(command, args);
+    while (true) {
+      printf("execvp done\n");
+      sleep(1);
+    }
   } else {
     int rc = 0;
     printf("Parent process\n");
     waitpid(pid, &rc, 0);
+    while (true) {
+      printf("waitpid done\n");
+      sleep(1);
+    }
   }
   // try to call command
   return 0;

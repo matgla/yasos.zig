@@ -38,12 +38,19 @@ pub fn init() void {
     arch_process.init();
 }
 
+fn get_psp() callconv(.Inline) usize {
+    return asm volatile (
+        \\ mrs %[ret], psp 
+        : [ret] "=r" (-> usize),
+    );
+}
 pub fn fork_return() usize {}
 
 pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
         const stack_marker: u32 = 0xdeadbeef;
+        const BlockingProcessesList = std.SegmentedList(*const Self);
 
         state: State,
         priority: u8,
@@ -55,6 +62,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
         fds: std.AutoHashMap(u16, IFile),
+        blocked_by: BlockingProcessesList,
 
         pub const State = enum(u2) {
             Ready,
@@ -80,11 +88,15 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 ._allocator = allocator,
                 .current_core = 0,
                 .fds = std.AutoHashMap(u16, IFile).init(allocator),
+                .blocked_by = std.SegmentedList(*const Self).init(allocator),
             };
         }
 
+        // this is full copy of the process, so it shares the same stack
+        // stack relocation impossible without MMU
         pub fn clone(self: Self, lr: usize) !Self {
             const stack: []align(8) u8 = try self._allocator.alignedAlloc(u8, 8, self.stack.len);
+            const stack_offset: usize = get_psp() - @intFromPtr(self.stack.ptr);
             @memcpy(stack, self.stack);
 
             pid_counter += 1;
@@ -94,7 +106,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .impl = .{},
                 .pid = pid_counter,
                 .stack = stack,
-                .stack_position = arch_process.dump_registers_on_stack(@ptrFromInt(@intFromPtr(stack.ptr) + self.stack.len - self.stack_usage() - 1), lr),
+                .stack_position = arch_process.dump_registers_on_stack(@ptrFromInt(@intFromPtr(stack.ptr) + stack_offset), lr),
                 ._allocator = self._allocator,
                 .current_core = 0,
                 .fds = try self.fds.clone(),
