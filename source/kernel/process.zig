@@ -50,7 +50,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
         const stack_marker: u32 = 0xdeadbeef;
-        const BlockingProcessesList = std.SegmentedList(*const Self);
+        const BlockingProcessesList = std.SegmentedList(*const Self, 2);
 
         state: State,
         priority: u8,
@@ -88,16 +88,14 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 ._allocator = allocator,
                 .current_core = 0,
                 .fds = std.AutoHashMap(u16, IFile).init(allocator),
-                .blocked_by = std.SegmentedList(*const Self).init(allocator),
+                .blocked_by = BlockingProcessesList{},
             };
         }
 
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
         pub fn clone(self: Self, lr: usize) !Self {
-            const stack: []align(8) u8 = try self._allocator.alignedAlloc(u8, 8, self.stack.len);
             const stack_offset: usize = get_psp() - @intFromPtr(self.stack.ptr);
-            @memcpy(stack, self.stack);
 
             pid_counter += 1;
             return Self{
@@ -105,11 +103,12 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .priority = self.priority,
                 .impl = .{},
                 .pid = pid_counter,
-                .stack = stack,
-                .stack_position = arch_process.dump_registers_on_stack(@ptrFromInt(@intFromPtr(stack.ptr) + stack_offset), lr),
+                .stack = self.stack,
+                .stack_position = arch_process.dump_registers_on_stack(@ptrFromInt(@intFromPtr(self.stack.ptr) + stack_offset), lr),
                 ._allocator = self._allocator,
                 .current_core = 0,
                 .fds = try self.fds.clone(),
+                .blocked_by = BlockingProcessesList{},
             };
         }
 
@@ -148,6 +147,14 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         pub fn block(self: *Self, semaphore: *const Semaphore) void {
             self.waiting_for = semaphore;
             self.state = Process.State.Blocked;
+        }
+
+        pub fn blocked_by_process(self: *Self, process: *const Self) void {
+            self.blocked_by.append(process);
+        }
+
+        pub fn unblock_process(self: *Self, process: *const Self) void {
+            self.blocked_by.remove(process);
         }
 
         pub fn is_blocked_by(self: *Self, semaphore: *const Semaphore) bool {

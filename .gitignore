@@ -10,4 +10,4 @@ config/
 rootfs/
 .cache/
 build/
-rootfs.zig
+rootfs.img
