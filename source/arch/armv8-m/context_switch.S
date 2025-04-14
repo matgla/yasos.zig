@@ -54,8 +54,13 @@ store_and_switch_to_next_task:
 .global context_switch_push_registers_to_stack
 .thumb_func
 context_switch_push_registers_to_stack:
+  push {r4}
+  mrs r4, psp 
+  stmdb r4!, {r0, r1, r2}
+  mov r0, r4
+  pop {r4} 
   vstmdb r0!, {s16-s31}
-  stmdb r0!, {r1, r4-r12}
+  stmdb r0!, {r3, r4-r12}
   bx lr
 
 .global context_switch_get_psp
@@ -68,3 +73,12 @@ context_switch_get_psp:
 .thumb_func 
 get_lr:
   mov r0, lr
+
+.global context_switch_return_pop_single
+.thumb_func
+context_switch_return_pop_single:
+  mrs r1, psp 
+  ldmia r1!, {r0, r2, r3}
+  str r2, [r0]
+  msr psp, r1
+  bx r3 

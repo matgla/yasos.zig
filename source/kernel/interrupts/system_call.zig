@@ -61,7 +61,7 @@ fn get_lr() callconv(.Inline) usize {
 
 export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
     // those operations must be secure since both cores may be executing that code in the same time
-    const lr: usize = get_lr();
+    const lr = get_lr();
     hal.hw_atomic.lock(config.process.hw_spinlock_number);
     defer hal.hw_atomic.unlock(config.process.hw_spinlock_number);
     switch (number) {
@@ -102,7 +102,7 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
         },
         c.sys_fork => {
             const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
-            result.* = @intCast(process_manager.instance.fork(lr));
+            result.* = @intCast(process_manager.instance.vfork(lr, @intFromPtr(result)));
         },
         c.sys_waitpid => {
             const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));
@@ -114,19 +114,36 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = syscall._ioctl(context.fd, context.op, context.arg);
         },
+        c.sys_exit => {
+            const context: *const volatile c_int = @ptrCast(@alignCast(arg));
+            syscall._exit(context.*);
+        },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});
         },
     }
 }
 
-export fn unlock_pendsv_spinlock() void {
+pub export fn unlock_pendsv_spinlock() void {
     hal.hw_atomic.unlock(config.process.hw_spinlock_number);
 }
 
 export fn irq_pendsv() void {
     hal.hw_atomic.lock(config.process.hw_spinlock_number);
-    store_and_switch_to_next_task();
+    if (process_manager.instance.scheduler.schedule_next()) {
+        store_and_switch_to_next_task();
+    } else {
+        hal.hw_atomic.unlock(config.process.hw_spinlock_number);
+    }
+}
+
+export fn irq_hard_fault() void {
+    log.print("PANIC: Hard Fault occured!\n", .{});
+    while (true) {
+        asm volatile (
+            \\ wfi
+        );
+    }
 }
 
 pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) void {

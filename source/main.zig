@@ -240,6 +240,7 @@ export fn kernel_process() void {
                 "10",
                 "12",
             };
+            process_manager.instance.dump_processes(log);
             _ = executable.main(args.ptr, args.len) catch |err| {
                 log.print("Cannot execute main: {s}\n", .{@errorName(err)});
             };

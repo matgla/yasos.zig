@@ -30,10 +30,6 @@ const IFile = @import("fs/ifile.zig").IFile;
 
 var pid_counter: u32 = 0;
 
-fn exit_handler() void {
-    while (true) {}
-}
-
 pub fn init() void {
     arch_process.init();
 }
@@ -44,13 +40,17 @@ fn get_psp() callconv(.Inline) usize {
         : [ret] "=r" (-> usize),
     );
 }
-pub fn fork_return() usize {}
+
+extern fn context_switch_return_pop_single() void;
+
+fn exit_handler() void {
+    @panic("Process exited from unexpected path");
+}
 
 pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
         const stack_marker: u32 = 0xdeadbeef;
-        const BlockingProcessesList = std.SegmentedList(*const Self, 2);
 
         state: State,
         priority: u8,
@@ -62,13 +62,14 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
         fds: std.AutoHashMap(u16, IFile),
-        blocked_by: BlockingProcessesList,
+        blocked_by_process: ?*Self = null,
+        blocks_process: ?*Self = null,
 
         pub const State = enum(u2) {
             Ready,
             Blocked,
             Running,
-            Killed,
+            Terminated,
         };
 
         pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype) !Self {
@@ -88,33 +89,39 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 ._allocator = allocator,
                 .current_core = 0,
                 .fds = std.AutoHashMap(u16, IFile).init(allocator),
-                .blocked_by = BlockingProcessesList{},
+                .blocked_by_process = null,
+                .blocks_process = null,
             };
         }
 
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
-        pub fn clone(self: Self, lr: usize) !Self {
-            const stack_offset: usize = get_psp() - @intFromPtr(self.stack.ptr);
-
+        pub fn vfork(self: *Self, lr: usize, result: usize) !Self {
+            // allocate stack copy
+            const stack: []align(8) u8 = try self._allocator.alignedAlloc(u8, 8, self.stack.len);
+            const stack_position = self.stack_position;
             pid_counter += 1;
+            self.stack_position = arch_process.dump_registers_on_stack(result, pid_counter, lr, @intFromPtr(&context_switch_return_pop_single));
+            @memcpy(stack, self.stack);
+            const parent_stack = self.stack;
+            self.stack = stack;
             return Self{
                 .state = State.Ready,
                 .priority = self.priority,
                 .impl = .{},
                 .pid = pid_counter,
-                .stack = self.stack,
-                .stack_position = arch_process.dump_registers_on_stack(@ptrFromInt(@intFromPtr(self.stack.ptr) + stack_offset), lr),
+                .stack = parent_stack,
+                .stack_position = stack_position,
                 ._allocator = self._allocator,
                 .current_core = 0,
                 .fds = try self.fds.clone(),
-                .blocked_by = BlockingProcessesList{},
+                .blocked_by_process = self.blocked_by_process,
+                .blocks_process = self.blocks_process,
             };
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
             self._allocator.free(self.stack);
-            self._allocator.free(self.cwd);
             self.fds.deinit();
         }
 
@@ -149,11 +156,45 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             self.state = Process.State.Blocked;
         }
 
-        pub fn blocked_by_process(self: *Self, process: *const Self) void {
-            self.blocked_by.append(process);
+        pub fn wait_for_process(self: *Self, process: *Self) !void {
+            self.state = Process.State.Blocked;
+            self.blocked_by_process = process;
+            process.blocks_process = self;
+        }
+
+        pub fn unblock_parent(self: *Self) void {
+            if (self.blocks_process) |p| {
+                // restore parent stack
+                p.blocked_by_process = null;
+                @memcpy(self.stack, p.stack);
+                const stack = p.stack;
+                p.stack = self.stack;
+                self.stack = stack;
+                p.reevaluate_state();
+                self.blocks_process = null;
+            }
+        }
+
+        pub fn reevaluate_state(self: *Self) void {
+            if (self.waiting_for != null) {
+                self.state = Process.State.Blocked;
+                return;
+            }
+            if (self.blocked_by_process != null) {
+                self.state = Process.State.Blocked;
+                return;
+            }
+            self.state = Process.State.Ready;
         }
 
         pub fn unblock_process(self: *Self, process: *const Self) void {
+            for (self.blocked_by) |node| {
+                if (node.data == process) {
+                    self.blocked_by.remove(node);
+
+                    break;
+                }
+            }
             self.blocked_by.remove(process);
         }
 

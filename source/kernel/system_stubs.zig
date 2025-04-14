@@ -25,8 +25,14 @@ const c = @import("../libc_imports.zig").c;
 const process_manager = @import("process_manager.zig");
 const FileType = @import("fs/ifile.zig").FileType;
 
-export fn _exit(_: c_int) void {
-    while (true) {}
+pub export fn _exit(code: c_int) void {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        process_manager.instance.delete_process(process.pid);
+    } else {
+        @panic("No process found");
+    }
+    log.print("Process exited with code {d}\n", .{code});
 }
 
 export fn _kill(_: c.pid_t, _: c_int) c.pid_t {

@@ -190,10 +190,10 @@ pub fn initialize_context_switching() void {
     hal.irq.set_priority(.pendsv, 0xff);
 }
 
-extern fn context_switch_push_registers_to_stack(stack: *u8, lr: usize) *u8;
+extern fn context_switch_push_registers_to_stack(result_ptr: usize, pid: usize, lr: usize, restore: usize) *u8;
 
-pub fn dump_registers_on_stack(stack_position: *u8, lr: usize) *u8 {
-    return context_switch_push_registers_to_stack(stack_position, lr);
+pub fn dump_registers_on_stack(result_ptr: usize, ret: usize, lr: usize, restore: usize) *u8 {
+    return context_switch_push_registers_to_stack(result_ptr, ret, lr, restore);
 }
 
 fn test_entry() void {}

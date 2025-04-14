@@ -43,7 +43,7 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
                 return true;
             }
 
-            var it = self.current;
+            var it = self.current.?.next;
 
             while (it) |node| : (it = node.next) {
                 // search for the next ready process

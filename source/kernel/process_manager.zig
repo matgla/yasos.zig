@@ -19,9 +19,16 @@
 //
 const std = @import("std");
 
+const hal = @import("hal");
+
 const RoundRobinScheduler = @import("round_robin.zig").RoundRobin;
 const process = @import("process.zig");
 const Process = process.Process;
+const config = @import("config");
+
+var log = &@import("../log/kernel_log.zig").kernel_log;
+
+extern fn switch_to_next_task() void;
 
 pub const ProcessManager = struct {
     pub const ContainerType = std.DoublyLinkedList(Process);
@@ -51,12 +58,19 @@ pub const ProcessManager = struct {
     }
 
     pub fn delete_process(self: *Self, pid: u32) void {
-        for (self.processes) |p| {
+        var it = self.processes.first;
+        while (it) |p| : (it = p.next) {
             if (p.data.pid == pid) {
-                const allocator = p.data.allocator;
+                p.data.unblock_parent();
+                const allocator = p.data._allocator;
                 p.data.deinit();
                 self.processes.remove(p);
                 allocator.destroy(p);
+                if (self.scheduler.schedule_next()) {
+                    switch_to_next_task();
+                } else {
+                    @panic("ProcessManager: No process to schedule\n");
+                }
                 break;
             }
         }
@@ -66,8 +80,10 @@ pub const ProcessManager = struct {
         var it = self.processes.first;
         out_stream.print("  PID     STATE      PRIO     STACK    CPU  \n", .{});
         while (it) |node| : (it = node.next) {
-            out_stream.print("{d: >5}     {s: <8}   {d: <4}  {d}/{d} B   {d}\n", .{
+            const active = if (node == self.scheduler.current) "*" else " ";
+            out_stream.print("{d: >5}{s}   {s: <8}   {d: <4}  {d}/{d} B   {d}\n", .{
                 node.data.pid,
+                active,
                 std.enums.tagName(Process.State, node.data.state) orelse "?",
                 node.data.priority,
                 node.data.stack_usage(),
@@ -77,18 +93,39 @@ pub const ProcessManager = struct {
         }
     }
 
-    pub fn fork(self: *Self, lr: usize) i32 {
+    pub fn reevaluate_state(_: *Self, p: *Process) void {
+        if (p.waiting_for != null) {
+            p.state = Process.State.Blocked;
+            return;
+        }
+        if (p.blocked_by_process != null) {
+            p.state = Process.State.Blocked;
+            return;
+        }
+        p.state = Process.State.Ready;
+    }
+
+    pub fn vfork(self: *Self, lr: usize, result: usize) i32 {
         var node = self.allocator.create(ContainerType.Node) catch {
             return -1;
         };
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |current_process| {
-            node.data = current_process.clone(lr) catch {
+            node.data = current_process.vfork(lr, result) catch {
                 return -1;
             };
 
+            log.print("current process pid: {d}\n", .{current_process.pid});
+            current_process.wait_for_process(&node.data) catch {
+                return -1;
+            };
             self.processes.append(node);
-            return @intCast(node.data.pid);
+            self.dump_processes(log);
+            // switch without context switch
+            self.scheduler.current = node;
+            self.dump_processes(log);
+
+            return 0; //@intCast(node.data.pid);
         }
         return -1;
     }

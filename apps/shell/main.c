@@ -93,18 +93,19 @@ int execute_command(const char *command, char *args[]) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
     printf("child process\n");
-    execvp(command, args);
-    while (true) {
-      printf("execvp done\n");
-      sleep(1);
-    }
+    // execvp(command, args);
+    // while (true) {
+    // printf("execvp done\n");
+    // sleep(1);
+    // }
+    exit(0);
   } else {
     int rc = 0;
     printf("Parent process\n");
-    waitpid(pid, &rc, 0);
+    // waitpid(pid, &rc, 0);
     while (true) {
-      printf("waitpid done\n");
-      sleep(1);
+      // printf("waitpid done\n");
+      // sleep(1);
     }
   }
   // try to call command
