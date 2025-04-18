@@ -57,6 +57,9 @@ const DriverFs = @import("kernel/drivers/driverfs.zig").DriverFs;
 
 const UartDriver = @import("kernel/drivers/uart/uart_driver.zig").UartDriver;
 
+const process_memory_pool = @import("kernel/process_memory_pool.zig");
+const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
+
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
     _ = @import("kernel/system_stubs.zig");
@@ -191,6 +194,7 @@ export fn kernel_process() void {
     }
 
     const maybe_process = process_manager.instance.get_current_process();
+    var pid: u32 = 0;
     if (maybe_process) |p| {
         log.write("- setting default streams\n");
         const maybe_uart_file = iuart_driver.ifile();
@@ -205,6 +209,9 @@ export fn kernel_process() void {
                 log.write("Can't register: stderr\n");
             };
         }
+        pid = p.pid;
+    } else {
+        @panic("Process unavailable but called from it");
     }
 
     log.write(" - loading yasld\n");
@@ -212,7 +219,9 @@ export fn kernel_process() void {
     const environment = yasld.Environment{
         .symbols = &symbols,
     };
-    const loader: yasld.Loader = yasld.Loader.create(malloc_allocator, environment, &file_resolver);
+
+    var process_memory_allocator = ProcessPageAllocator.create(maybe_process.?.pid);
+    const loader: yasld.Loader = yasld.Loader.create(process_memory_allocator.std_allocator(), environment, &file_resolver);
 
     const maybe_shell = fs.ivfs().get("/bin/sh");
     if (maybe_shell) |shell| {
@@ -260,6 +269,9 @@ pub export fn main() void {
     log.write(" - initializing process manager\n");
     log.write(" - scheduler: round robin\n");
 
+    log.write(" - initializing process memory pool\n");
+
+    process_memory_pool.init();
     process_manager.initialize_process_manager(malloc_allocator);
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,

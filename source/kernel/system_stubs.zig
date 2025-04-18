@@ -103,6 +103,26 @@ pub export fn _ioctl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
     return -1;
 }
 
+pub fn _mmap(addr: ?*anyopaque, size: i32, prot: i32, flags: i32, fd: i32, offset: i32) *allowzero anyopaque {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        return process.mmap(addr, size, prot, flags, fd, offset) catch {
+            return @ptrFromInt(0);
+        };
+    }
+
+    return @ptrFromInt(0);
+}
+
+pub fn _munmap(addr: ?*anyopaque, length: i32) i32 {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        process.munmap(addr, length);
+        return 0;
+    }
+    return -1;
+}
+
 export fn _open(_: *const c_char, _: c_int) c_int {
     return 0;
 }
@@ -119,6 +139,19 @@ export fn _sbrk(incr: usize) *allowzero anyopaque {
     }
     heap_end = next_heap_end;
     return prev_heap_end;
+}
+
+pub fn process_sbrk(incr: usize) *allowzero anyopaque {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const prev_heap_end: *u8 = process.heap_end;
+        const next_heap_end: *u8 = @ptrFromInt(@intFromPtr(process.heap_end) + incr);
+        if (@intFromPtr(next_heap_end) >= @intFromPtr(&__heap_limit__)) {
+            return @ptrFromInt(0);
+        }
+        process.heap_end = next_heap_end;
+        return prev_heap_end;
+    }
 }
 
 export fn hard_assertion_failure() void {

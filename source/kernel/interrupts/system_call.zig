@@ -100,7 +100,7 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = syscall._read(context.fd, context.buf.?, context.count);
         },
-        c.sys_fork => {
+        c.sys_vfork => {
             const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
             result.* = @intCast(process_manager.instance.vfork(lr, @intFromPtr(result)));
         },
@@ -117,6 +117,16 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
         c.sys_exit => {
             const context: *const volatile c_int = @ptrCast(@alignCast(arg));
             syscall._exit(context.*);
+        },
+        c.sys_mmap => {
+            const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c.mmap_result = @ptrCast(@alignCast(out));
+            result.memory = syscall._mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset);
+        },
+        c.sys_munmap => {
+            const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._munmap(context.addr, context.length);
         },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});

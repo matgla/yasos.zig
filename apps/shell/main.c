@@ -35,6 +35,20 @@
 #define MAX_LINE_SIZE 255
 #define MAX_NUMBER_OF_ARGUMENTS 16
 
+extern char **environ;
+
+void _start(int argc, char *argv[]) {
+  // Initialize the environment
+  environ = (char **)malloc(sizeof(char *));
+  environ[0] = NULL;
+
+  // Call the main function with the provided arguments
+  int ret = main(argc, argv);
+
+  // Exit the program with the return value from main
+  exit(ret);
+}
+
 char *strip(char *str, size_t length) {
   while (isspace(*str) && (length-- != 0))
     str++;
@@ -87,13 +101,13 @@ int execute_command(const char *command, char *args[]) {
   }
 
   printf("Forking process\n");
-  pid_t pid = fork();
+  pid_t pid = vfork();
   printf("Forked process %d\n", pid);
   if (pid == -1) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
     printf("child process\n");
-    // execvp(command, args);
+    execvp(command, args);
     // while (true) {
     // printf("execvp done\n");
     // sleep(1);
@@ -103,10 +117,6 @@ int execute_command(const char *command, char *args[]) {
     int rc = 0;
     printf("Parent process\n");
     // waitpid(pid, &rc, 0);
-    while (true) {
-      // printf("waitpid done\n");
-      // sleep(1);
-    }
   }
   // try to call command
   return 0;

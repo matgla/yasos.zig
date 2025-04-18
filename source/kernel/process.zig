@@ -27,6 +27,7 @@ const arch_process = @import("../arch/arch.zig").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
 const IFile = @import("fs/ifile.zig").IFile;
+const process_memory_pool = @import("process_memory_pool.zig");
 
 var pid_counter: u32 = 0;
 
@@ -51,7 +52,6 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
         const stack_marker: u32 = 0xdeadbeef;
-
         state: State,
         priority: u8,
         impl: implementation,
@@ -74,6 +74,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
 
         pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype) !Self {
             const stack: []align(8) u8 = try allocator.alignedAlloc(u8, 8, stack_size);
+
             if (comptime config.process.use_stack_overflow_detection) {
                 @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
@@ -212,6 +213,31 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
 
         pub fn set_core(self: *Self, coreid: u8) void {
             self.current_core = coreid;
+        }
+
+        pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, _: i32, _: i32, _: i32) !*anyopaque {
+            if (addr == null) {
+                var number_of_pages = @divTrunc(length, process_memory_pool.ProcessMemoryPool.page_size);
+                if (@rem(length, process_memory_pool.ProcessMemoryPool.page_size) != 0) {
+                    number_of_pages += 1;
+                }
+                const maybe_address = process_memory_pool.instance.allocate_pages(number_of_pages, self.pid);
+                if (maybe_address) |address| {
+                    return address;
+                }
+            }
+            return std.posix.MMapError.OutOfMemory;
+        }
+
+        pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
+            if (maybe_address) |addr| {
+                var number_of_pages = @divTrunc(length, process_memory_pool.ProcessMemoryPool.page_size);
+                if (@rem(length, process_memory_pool.ProcessMemoryPool.page_size) != 0) {
+                    number_of_pages += 1;
+                }
+
+                process_memory_pool.instance.free_pages(addr, number_of_pages, self.pid);
+            }
         }
     };
 }

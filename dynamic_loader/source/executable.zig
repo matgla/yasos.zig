@@ -31,7 +31,7 @@ pub const Executable = struct {
             return call_entry(entry, self.module.get_got().ptr);
         }
 
-        const maybe_symbol = self.module.find_symbol("main");
+        const maybe_symbol = self.module.find_symbol("_start");
         if (maybe_symbol) |symbol| {
             return call_main(argc, argv, symbol, self.module.get_got().ptr);
         }

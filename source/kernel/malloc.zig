@@ -24,6 +24,8 @@ const c = @cImport({
     @cInclude("string.h");
 });
 
+const process_memory_pool = @import("process_memory_pool.zig");
+
 const MallocAllocator = struct {
     fn alloc(
         _: *anyopaque,
@@ -82,4 +84,71 @@ const malloc_allocator_vtable = std.mem.Allocator.VTable{
     .alloc = MallocAllocator.alloc,
     .resize = MallocAllocator.resize,
     .free = MallocAllocator.free,
+};
+
+pub const ProcessPageAllocator = struct {
+    pid: u32,
+
+    fn alloc(
+        ctx: *anyopaque,
+        len: usize,
+        log2_align: u8,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *ProcessPageAllocator = @ptrCast(@alignCast(ctx));
+        _ = log2_align;
+        _ = return_address;
+        const number_of_pages: i32 = @intCast((len + process_memory_pool.ProcessMemoryPool.page_size - 1) / process_memory_pool.ProcessMemoryPool.page_size);
+        const ptr = @as([*]u8, @ptrCast(process_memory_pool.instance.allocate_pages(number_of_pages, self.pid) orelse return null));
+        return ptr;
+    }
+
+    fn resize(
+        ctx: *anyopaque,
+        buf: []u8,
+        log2_buf_align: u8,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        _ = ctx;
+        _ = buf;
+        _ = return_address;
+        _ = log2_buf_align;
+        _ = new_len;
+
+        return false;
+    }
+
+    fn free(
+        ctx: *anyopaque,
+        buf: []u8,
+        log2_buf_align: u8,
+        return_address: usize,
+    ) void {
+        const self: *ProcessPageAllocator = @ptrCast(@alignCast(ctx));
+        _ = log2_buf_align;
+        _ = return_address;
+        c.free(buf.ptr);
+        const number_of_pages: i32 = @intCast((buf.len + process_memory_pool.ProcessMemoryPool.page_size - 1) / process_memory_pool.ProcessMemoryPool.page_size);
+        process_memory_pool.instance.free_pages(buf.ptr, number_of_pages, self.pid);
+    }
+
+    pub fn create(pid: u32) ProcessPageAllocator {
+        return ProcessPageAllocator{
+            .pid = pid,
+        };
+    }
+
+    pub fn std_allocator(self: *ProcessPageAllocator) std.mem.Allocator {
+        return std.mem.Allocator{
+            .ptr = @ptrCast(self),
+            .vtable = &process_page_allocator_vtable,
+        };
+    }
+};
+
+const process_page_allocator_vtable = std.mem.Allocator.VTable{
+    .alloc = ProcessPageAllocator.alloc,
+    .resize = ProcessPageAllocator.resize,
+    .free = ProcessPageAllocator.free,
 };

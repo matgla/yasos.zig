@@ -126,9 +126,23 @@ typedef struct execve_context {
   char **const envp;
 } execve_context;
 
-typedef struct fork_context {
-  size_t program_counter;
-} fork_context;
+typedef struct mmap_context {
+  void *addr;
+  int length;
+  int prot;
+  int flags;
+  int fd;
+  int offset;
+} mmap_context;
+
+typedef struct mmap_result {
+  void *memory;
+} mmap_result;
+
+typedef struct munmap_context {
+  void *addr;
+  int length;
+} munmap_context;
 
 typedef enum SystemCall {
   sys_dynamic_loader_prepare_entry = 1,
@@ -149,7 +163,7 @@ typedef enum SystemCall {
   sys_read,
   sys_kill,
   sys_write,
-  sys_fork,
+  sys_vfork,
   sys_unlink,
   sys_link,
   sys_stat,
@@ -163,6 +177,8 @@ typedef enum SystemCall {
   sys_waitpid,
   sys_execve,
   sys_nanosleep,
+  sys_mmap,
+  sys_munmap,
   SYSCALL_COUNT,
 } SystemCall;
 
