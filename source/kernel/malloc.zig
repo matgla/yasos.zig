@@ -128,7 +128,6 @@ pub const ProcessPageAllocator = struct {
         const self: *ProcessPageAllocator = @ptrCast(@alignCast(ctx));
         _ = log2_buf_align;
         _ = return_address;
-        c.free(buf.ptr);
         const number_of_pages: i32 = @intCast((buf.len + process_memory_pool.ProcessMemoryPool.page_size - 1) / process_memory_pool.ProcessMemoryPool.page_size);
         process_memory_pool.instance.free_pages(buf.ptr, number_of_pages, self.pid);
     }

@@ -421,18 +421,7 @@ class Application:
                         offset = init_offset
                     original_offset = struct.unpack_from("<I", data, from_address)[0]
 
-                    if relocation["symbol_name"] == ".data":
-                        print(
-                            "Rel: ",
-                            hex(relocation["symbol_value"]),
-                            "offset:",
-                            hex(offset),
-                            "section_code: ",
-                            section_code.value,
-                        )
                     if relocation["symbol_value"] < offset:
-                        if relocation["symbol_name"] == ".data":
-                            print("But i take code...")
                         offset = original_offset << 2 | SectionCode.Code.value
                     else:
                         offset = ((original_offset - offset) << 2) | section_code.value
@@ -441,10 +430,8 @@ class Application:
                         relocation, from_address, offset
                     )
             elif relocation["info_type"] == "R_ARM_RELATIVE":
-                print(hex(relocation["offset"]), hex(data_offset))
                 from_address = int(relocation["offset"] - data_offset)
                 data = self.data
-                print(len(data), hex(from_address))
                 section_code = SectionCode.Data
                 offset = data_offset
                 original_offset = struct.unpack_from("<I", data, from_address)[0]
@@ -595,7 +582,6 @@ class Application:
 
             data_base = self.text
             relative_offset = rel["offset"]
-            print(hex(relative_offset))
             if rel["offset"] > len(self.text):
                 if rel["offset"] > len(self.text) + len(self.init_arrays) + len(
                     self.data

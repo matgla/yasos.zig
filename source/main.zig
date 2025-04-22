@@ -112,7 +112,6 @@ const ModuleContext = struct {
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    log.print("file: {s} == {s}\n", .{ file.name(), module_context.path });
     if (std.mem.eql(u8, module_context.path, file.name())) {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
@@ -242,15 +241,9 @@ export fn kernel_process() void {
         };
 
         if (maybeExecutable) |executable| {
-            const args: []const [*:0]const u8 = &.{
-                "arg1",
-                "arg2",
-                "arg3",
-                "10",
-                "12",
-            };
+            const args: [][]u8 = &.{};
             process_manager.instance.dump_processes(log);
-            _ = executable.main(args.ptr, args.len) catch |err| {
+            _ = executable.main(@ptrCast(args.ptr), args.len) catch |err| {
                 log.print("Cannot execute main: {s}\n", .{@errorName(err)});
             };
         }

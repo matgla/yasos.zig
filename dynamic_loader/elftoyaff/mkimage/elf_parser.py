@@ -113,7 +113,6 @@ class ElfParser:
                     continue
                 symbols = elf.get_section(section["sh_link"])
                 for relocation in section.iter_relocations():
-                    print(relocation)
                     if relocation["r_info_sym"] == 0:
                         # this could be data relocation of internal symbols
                         data = {

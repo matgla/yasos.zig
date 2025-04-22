@@ -4,3 +4,6 @@
 [submodule "libs/libc"]
 	path = libs/libc
 	url = git@github.com:matgla/yasos_libc.git
+[submodule "libs/tinycc"]
+	path = libs/tinycc
+	url = git@github.com:matgla/tinycc.git

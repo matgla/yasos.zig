@@ -122,9 +122,19 @@ typedef struct nanosleep_context {
 
 typedef struct execve_context {
   const char *filename;
+
   char **const argv;
   char **const envp;
 } execve_context;
+
+typedef struct execve_result {
+  int result;
+  size_t symbol;
+  int argc;
+  char **argv;
+  int envc;
+  char **envp;
+} execve_result;
 
 typedef struct mmap_context {
   void *addr;

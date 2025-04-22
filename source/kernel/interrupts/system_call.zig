@@ -128,6 +128,18 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = syscall._munmap(context.addr, context.length);
         },
+        c.sys_execve => {
+            asm volatile (
+                \\ cpsid i 
+            );
+            const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c.execve_result = @ptrCast(@alignCast(out));
+            const exec_result = process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
+            result.result = exec_result;
+            asm volatile (
+                \\ cpsie i 
+            );
+        },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});
         },

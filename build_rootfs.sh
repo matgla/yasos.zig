@@ -41,6 +41,7 @@ SCRIPT_DIR=$(dirname "$(realpath "$0")")
 
 PREFIX=$SCRIPT_DIR/rootfs/usr
 
+echo "Building rootfs from $SCRIPT_DIR..."
 cd $SCRIPT_DIR
 
 if $CLEAR; then 
@@ -50,6 +51,7 @@ if $CLEAR; then
   rm -rf libs/libc/build
   rm -rf libs/libdl/build
   rm -rf libs/pthread/build
+  cd libs/tinycc && make clean && cd ../..
 fi
 mkdir -p rootfs
 mkdir -p rootfs/usr/include
@@ -58,11 +60,25 @@ cd rootfs
 ln -s usr/lib  
 ln -s usr/bin
 ls -lah
+pwd
 cd ..
 mkdir -p rootfs/tmp
 mkdir -p rootfs/dev
-
+pwd
 cd libs 
+
+build_cross_compiler()
+{
+  cd tinycc
+  ./configure --enable-cross --extra-cflags="-DTCC_DEBUG=0 -g -O0" --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc 
+  PATH=$SCRIPT_DIR/libs/tinycc:$PATH
+  make install
+  cd ..
+}
 
 build_makefile()
 {
@@ -71,7 +87,7 @@ build_makefile()
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make install PREFIX=$PREFIX
+  make CC=armv8m-tcc install PREFIX=$PREFIX
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -96,26 +112,11 @@ build_lib()
   cd ..
 }
 
-build_exec()
-{
-  cd $1
-  mkdir -p build && cd build
-  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/apps/cmake/tcc_cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$PREFIX
-  cmake --build . --config Debug 
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
- 
-  cmake --install .
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
- 
-  cd ..
-  cd ..
-}
+
+build_cross_compiler
 
 build_makefile libc
+
 build_lib libdl
 build_lib pthread
 
@@ -123,7 +124,8 @@ cd ..
 
 cd apps
 
-build_exec shell
+build_makefile shell
+build_makefile coreutils
 
 cd ..
 
@@ -133,6 +135,10 @@ if $BUILD_IMAGE; then
   rm -rf /tmp/rootfs_temp 
   cp -r rootfs /tmp/rootfs_temp
   cd /tmp/rootfs_temp
+  rm usr/bin/tcc
+  rm usr/bin/armv8m-tcc
+  rm usr/lib/libtcc.a
+
   for file in **/*.so
   do
     if [ -f "$file" ]; then  # Check if it's a file

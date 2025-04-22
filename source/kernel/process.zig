@@ -28,6 +28,7 @@ const arch_process = @import("../arch/arch.zig").process;
 const Semaphore = @import("semaphore.zig").Semaphore;
 const IFile = @import("fs/ifile.zig").IFile;
 const process_memory_pool = @import("process_memory_pool.zig");
+const ProcessPageAllocator = @import("malloc.zig").ProcessPageAllocator;
 
 var pid_counter: u32 = 0;
 
@@ -64,6 +65,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         fds: std.AutoHashMap(u16, IFile),
         blocked_by_process: ?*Self = null,
         blocks_process: ?*Self = null,
+        memory_pool_allocator: ProcessPageAllocator,
 
         pub const State = enum(u2) {
             Ready,
@@ -73,13 +75,15 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         };
 
         pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype) !Self {
-            const stack: []align(8) u8 = try allocator.alignedAlloc(u8, 8, stack_size);
+            pid_counter += 1;
+            var memory_pool = ProcessPageAllocator.create(pid_counter);
+            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, 8, stack_size);
 
             if (comptime config.process.use_stack_overflow_detection) {
                 @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
             pid_counter += 1;
-            const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry);
+            const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry, null);
             return Self{
                 .state = State.Ready,
                 .priority = 0,
@@ -92,6 +96,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .fds = std.AutoHashMap(u16, IFile).init(allocator),
                 .blocked_by_process = null,
                 .blocks_process = null,
+                .memory_pool_allocator = memory_pool,
             };
         }
 
@@ -99,9 +104,11 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         // stack relocation impossible without MMU
         pub fn vfork(self: *Self, lr: usize, result: usize) !Self {
             // allocate stack copy
-            const stack: []align(8) u8 = try self._allocator.alignedAlloc(u8, 8, self.stack.len);
-            const stack_position = self.stack_position;
             pid_counter += 1;
+            var memory_pool = ProcessPageAllocator.create(pid_counter);
+            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, 8, self.stack.len);
+
+            const stack_position = self.stack_position;
             self.stack_position = arch_process.dump_registers_on_stack(result, pid_counter, lr, @intFromPtr(&context_switch_return_pop_single));
             @memcpy(stack, self.stack);
             const parent_stack = self.stack;
@@ -118,12 +125,25 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .fds = try self.fds.clone(),
                 .blocked_by_process = self.blocked_by_process,
                 .blocks_process = self.blocks_process,
+                .memory_pool_allocator = memory_pool,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self._allocator.free(self.stack);
+            self.memory_pool_allocator.std_allocator().free(self.stack);
             self.fds.deinit();
+        }
+
+        pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize) void {
+            if (comptime config.process.use_stack_overflow_detection) {
+                @memcpy(self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
+            }
+            const args = [_]usize{
+                argc,
+                argv,
+                symbol,
+            };
+            self.stack_position = implementation.prepare_process_stack(self.stack, &exit_handler, process_entry, args[0..3]);
         }
 
         pub fn validate_stack(self: Self) bool {

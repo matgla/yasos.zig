@@ -17,6 +17,8 @@ const std = @import("std");
 
 const malloc_allocator = @import("malloc.zig").malloc_allocator;
 
+var log = &@import("../log/kernel_log.zig").kernel_log;
+
 extern var __process_ram_start__: u8;
 extern var __process_ram_end__: u8;
 

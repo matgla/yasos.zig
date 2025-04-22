@@ -162,8 +162,22 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
     };
 }
 
-pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype) *u8 {
-    const hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
+pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize) *u8 {
+    var hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
+    if (maybe_args) |args| {
+        if (args.len >= 1) {
+            hardware_pushed_registers.r0 = @intCast(args[0]);
+        }
+        if (args.len >= 2) {
+            hardware_pushed_registers.r1 = @intCast(args[1]);
+        }
+        if (args.len >= 3) {
+            hardware_pushed_registers.r2 = @intCast(args[2]);
+        }
+        if (args.len >= 4) {
+            hardware_pushed_registers.r3 = @intCast(args[3]);
+        }
+    }
     // const software_pushed_registers = create_default_software_registers();
     const stack_start: usize = if (stack.len % 8 == 0) stack.len else stack.len - stack.len % 8;
     const hw_registers_size = @sizeOf(HardwareStoredRegisters);
