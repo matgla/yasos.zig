@@ -18,6 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
 const IFile = @import("../fs/ifile.zig").IFile;
 
 pub const IDriver = struct {
@@ -28,6 +29,7 @@ pub const IDriver = struct {
         load: *const fn (ctx: *anyopaque) bool,
         unload: *const fn (ctx: *anyopaque) bool,
         ifile: *const fn (ctx: *anyopaque) ?IFile,
+        destroy: *const fn (ctx: *anyopaque) void,
     };
 
     pub fn load(self: IDriver) bool {
@@ -40,5 +42,9 @@ pub const IDriver = struct {
 
     pub fn ifile(self: IDriver) ?IFile {
         return self.vtable.ifile(self.ptr);
+    }
+
+    pub fn destroy(self: IDriver) void {
+        self.vtable.destroy(self.ptr);
     }
 };

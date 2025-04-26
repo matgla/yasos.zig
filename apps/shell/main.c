@@ -108,8 +108,7 @@ int execute_command(const char *command, char *args[]) {
     exit(0);
   } else {
     int rc = 0;
-    printf("Parent process\n");
-    // waitpid(pid, &rc, 0);
+    waitpid(pid, &rc, 0);
   }
   // try to call command
   return 0;

@@ -154,6 +154,11 @@ typedef struct munmap_context {
   int length;
 } munmap_context;
 
+typedef struct getcwd_context {
+  char *buf;
+  size_t size;
+} getcwd_context;
+
 typedef enum SystemCall {
   sys_dynamic_loader_prepare_entry = 1,
   sys_dynamic_loader_process_exit,
@@ -189,6 +194,7 @@ typedef enum SystemCall {
   sys_nanosleep,
   sys_mmap,
   sys_munmap,
+  sys_getcwd,
   SYSCALL_COUNT,
 } SystemCall;
 

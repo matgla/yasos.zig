@@ -18,9 +18,14 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
 const log = &@import("../log/kernel_log.zig").kernel_log;
 
 const c = @import("../libc_imports.zig").c;
+const fs = @import("fs/vfs.zig");
+const IFile = @import("fs/ifile.zig").IFile;
+
+const config = @import("config");
 
 const process_manager = @import("process_manager.zig");
 const FileType = @import("fs/ifile.zig").FileType;
@@ -56,13 +61,22 @@ pub export fn _isatty(fd: c_int) c_int {
     if (maybe_process) |process| {
         const maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |file| {
-            if (file.filetype() == FileType.CharDevice) return 1;
+            if (file.file.filetype() == FileType.CharDevice) return 1;
         }
     }
     return 0;
 }
 
-export fn _close(_: c_int) c_int {
+pub export fn _close(fd: c_int) c_int {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_file = process.fds.get(@intCast(fd));
+        if (maybe_file) |file| {
+            _ = file.file.close();
+            _ = process.fds.remove(@intCast(fd));
+            return 0;
+        }
+    }
     return 0;
 }
 
@@ -75,7 +89,7 @@ pub export fn _read(fd: c_int, data: *anyopaque, size: usize) isize {
     if (maybe_process) |process| {
         const maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |file| {
-            return file.read(@as([*:0]u8, @ptrCast(data))[0..size]);
+            return file.file.read(@as([*:0]u8, @ptrCast(data))[0..size]);
         }
     }
     return 0;
@@ -86,7 +100,7 @@ pub export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
     if (maybe_process) |process| {
         const maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |file| {
-            return file.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
+            return file.file.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
         }
     }
     return -1;
@@ -97,7 +111,7 @@ pub export fn _ioctl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
     if (maybe_process) |process| {
         const maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |file| {
-            return file.ioctl(request, data);
+            return file.file.ioctl(request, data);
         }
     }
     return -1;
@@ -123,7 +137,99 @@ pub fn _munmap(addr: ?*anyopaque, length: i32) i32 {
     return -1;
 }
 
-export fn _open(_: *const c_char, _: c_int) c_int {
+pub fn _open(path: *const c_char, _: c_int, _: c_int) c_int {
+    const maybe_process = process_manager.instance.get_current_process();
+    const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(path)));
+    if (maybe_process) |process| {
+        const maybe_file = fs.ivfs().get(path_slice);
+        if (maybe_file) |file| {
+            defer file.destroy();
+            const fd = process.get_free_fd();
+            const maybe_ifile = file.dupe();
+            if (maybe_ifile) |ifile| {
+                process.fds.put(fd, .{
+                    .file = ifile,
+                    .path = blk: {
+                        var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                        std.mem.copyForwards(u8, path_buffer[0..path_slice.len], path_slice);
+                        break :blk path_buffer;
+                    },
+                    .diriter = null,
+                }) catch {
+                    return -1;
+                };
+                return fd;
+            }
+        }
+    }
+    return -1;
+}
+
+const DirentTraverseTracker = struct {
+    dirp: *allowzero c.dirent,
+    offset: usize,
+    count: usize,
+    skipuntil: ?IFile,
+    lastfile: ?IFile,
+};
+
+// most stupid way to keep track of the last file
+pub fn traverse_directory(file: *IFile, context: *anyopaque) bool {
+    const tracker: *DirentTraverseTracker = @ptrCast(@alignCast(context));
+    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + file.name().len, @alignOf(c.dirent));
+    // skip files that were already traversed
+
+    if (tracker.skipuntil) |lastfile| {
+        if (std.mem.eql(u8, lastfile.name(), file.name())) {
+            _ = lastfile.close();
+            tracker.skipuntil = null;
+        }
+
+        return true;
+    }
+    if (tracker.offset + required_space > tracker.count) {
+        if (tracker.lastfile) |lastfile| {
+            _ = lastfile.close();
+        }
+        tracker.lastfile = file.dupe();
+        return false;
+    }
+    const address = @intFromPtr(tracker.dirp) + tracker.offset;
+    const dirp: *c.dirent = @ptrCast(@alignCast(@as(*c.dirent, @ptrFromInt(address))));
+    dirp.d_ino = 0xdead;
+    dirp.d_off = 0xbeef;
+    dirp.d_reclen = @intCast(required_space);
+    std.mem.copyForwards(u8, dirp.d_name[0..], file.name());
+    dirp.d_name[file.name().len] = 0;
+    tracker.offset += required_space;
+    if (tracker.lastfile) |lastfile| {
+        _ = lastfile.close();
+    }
+    tracker.lastfile = file.dupe();
+
+    return true;
+}
+
+pub fn _getdents(fd: c_int, dirp: *anyopaque, count: usize) isize {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_entity = process.fds.getPtr(@intCast(fd));
+        if (maybe_entity) |entity| {
+            var tracker = DirentTraverseTracker{
+                .dirp = @ptrCast(@alignCast(dirp)),
+                .offset = 0,
+                .count = count,
+                .skipuntil = if (entity.diriter != null) entity.diriter.?.dupe() else null,
+                .lastfile = null,
+            };
+            _ = fs.ivfs().traverse(std.mem.span(@as([*:0]const u8, @ptrCast(&entity.path))), traverse_directory, &tracker);
+            if (entity.diriter) |*diriter| {
+                _ = diriter.close();
+            }
+            entity.diriter = tracker.lastfile;
+            return @intCast(tracker.offset);
+        }
+    }
     return 0;
 }
 
@@ -134,6 +240,11 @@ var heap_end: *u8 = &end;
 export fn _sbrk(incr: usize) *allowzero anyopaque {
     const prev_heap_end: *u8 = heap_end;
     const next_heap_end: *u8 = @ptrFromInt(@intFromPtr(heap_end) + incr);
+
+    const current = (@intFromPtr(next_heap_end) - @intFromPtr(&end)) / 1024;
+    const left = (@intFromPtr(&__heap_limit__) - @intFromPtr(next_heap_end)) / 1024;
+    log.print("sbrk, current size: {d}K, left: {d}K, incr: {d}\n", .{ current, left, incr });
+    log.print("new heap pointer: {*}\n", .{next_heap_end});
     if (@intFromPtr(next_heap_end) >= @intFromPtr(&__heap_limit__)) {
         return @ptrFromInt(0);
     }

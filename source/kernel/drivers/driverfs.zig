@@ -28,7 +28,7 @@ pub const DriverFs = struct {
     const VTable = IFileSystem.VTable{
         .mount = mount,
         .umount = umount,
-        .create = create,
+        .create = _create,
         .mkdir = mkdir,
         .remove = remove,
         .name = name,
@@ -37,13 +37,27 @@ pub const DriverFs = struct {
         .has_path = has_path,
     };
 
-    allocator: std.mem.Allocator,
-    container: std.DoublyLinkedList(IDriver),
+    _allocator: std.mem.Allocator,
+    _container: std.ArrayList(IDriver),
 
-    pub fn init(allocator: std.mem.Allocator) ?DriverFs {
+    pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*DriverFs {
+        const object = try allocator.create(DriverFs);
+        object.* = DriverFs.create(allocator);
+        return object;
+    }
+
+    pub fn destroy(self: *DriverFs) void {
+        for (self._container.items) |driver| {
+            driver.destroy();
+        }
+        self._container.deinit();
+        self._allocator.destroy(self);
+    }
+
+    pub fn create(allocator: std.mem.Allocator) DriverFs {
         return .{
-            .allocator = allocator,
-            .container = .{},
+            ._allocator = allocator,
+            ._container = std.ArrayList(IDriver).init(allocator),
         };
     }
 
@@ -63,7 +77,7 @@ pub const DriverFs = struct {
         return 0;
     }
 
-    fn create(_: *anyopaque, _: []const u8, _: i32) i32 {
+    fn _create(_: *anyopaque, _: []const u8, _: i32) i32 {
         // read-only filesystem
         return -1;
     }
@@ -96,8 +110,16 @@ pub const DriverFs = struct {
 
     // driverfs interface, not IFileSystem
     pub fn append(self: *DriverFs, driver: IDriver) !void {
-        var node = try self.allocator.create(std.DoublyLinkedList(IDriver).Node);
-        node.data = driver;
-        self.container.append(node);
+        try self._container.append(driver);
+    }
+
+    pub fn load_all(self: *DriverFs) bool {
+        var success: bool = true;
+        for (self._container.items) |driver| {
+            if (!driver.load()) {
+                success = false;
+            }
+        }
+        return success;
     }
 };

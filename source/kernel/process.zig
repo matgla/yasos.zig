@@ -21,6 +21,7 @@
 const std = @import("std");
 
 const c = @import("../libc_imports.zig").c;
+const log = &@import("../log/kernel_log.zig").kernel_log;
 
 const config = @import("config");
 const arch_process = @import("../arch/arch.zig").process;
@@ -36,7 +37,7 @@ pub fn init() void {
     arch_process.init();
 }
 
-fn get_psp() callconv(.Inline) usize {
+inline fn get_psp() usize {
     return asm volatile (
         \\ mrs %[ret], psp 
         : [ret] "=r" (-> usize),
@@ -53,6 +54,12 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
         const stack_marker: u32 = 0xdeadbeef;
+        const FileHandle = struct {
+            file: IFile,
+            path: [config.fs.max_path_length]u8,
+            diriter: ?IFile,
+        };
+
         state: State,
         priority: u8,
         impl: implementation,
@@ -62,10 +69,13 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         _allocator: std.mem.Allocator,
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
-        fds: std.AutoHashMap(u16, IFile),
+        fds: std.AutoHashMap(u16, FileHandle),
         blocked_by_process: ?*Self = null,
         blocks_process: ?*Self = null,
         memory_pool_allocator: ProcessPageAllocator,
+        has_own_stack: bool = true,
+        cwd: []const u8 = "/",
+        node: std.DoublyLinkedList.Node,
 
         pub const State = enum(u2) {
             Ready,
@@ -74,10 +84,10 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             Terminated,
         };
 
-        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype) !Self {
+        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype, cwd: []const u8) !Self {
             pid_counter += 1;
             var memory_pool = ProcessPageAllocator.create(pid_counter);
-            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, 8, stack_size);
+            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, .@"8", stack_size);
 
             if (comptime config.process.use_stack_overflow_detection) {
                 @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
@@ -93,10 +103,13 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .stack_position = stack_position,
                 ._allocator = allocator,
                 .current_core = 0,
-                .fds = std.AutoHashMap(u16, IFile).init(allocator),
+                .fds = std.AutoHashMap(u16, FileHandle).init(allocator),
                 .blocked_by_process = null,
                 .blocks_process = null,
                 .memory_pool_allocator = memory_pool,
+                .has_own_stack = true,
+                .cwd = cwd,
+                .node = .{},
             };
         }
 
@@ -106,13 +119,14 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             // allocate stack copy
             pid_counter += 1;
             var memory_pool = ProcessPageAllocator.create(pid_counter);
-            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, 8, self.stack.len);
+            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, .@"8", self.stack.len);
 
             const stack_position = self.stack_position;
             self.stack_position = arch_process.dump_registers_on_stack(result, pid_counter, lr, @intFromPtr(&context_switch_return_pop_single));
             @memcpy(stack, self.stack);
             const parent_stack = self.stack;
             self.stack = stack;
+            self.has_own_stack = false;
             return Self{
                 .state = State.Ready,
                 .priority = self.priority,
@@ -126,11 +140,15 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .blocked_by_process = self.blocked_by_process,
                 .blocks_process = self.blocks_process,
                 .memory_pool_allocator = memory_pool,
+                .has_own_stack = false,
+                .cwd = self.cwd,
+                .node = .{},
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.memory_pool_allocator.std_allocator().free(self.stack);
+            self.memory_pool_allocator.release_pages();
             self.fds.deinit();
         }
 
@@ -183,14 +201,25 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             process.blocks_process = self;
         }
 
+        // swap stack with the process that is waiting for us, only if was swapped before
+        pub fn restore_stack(self: *Self) void {
+            if (self.blocks_process) |p| {
+                if (!p.has_own_stack) {
+                    @memcpy(self.stack, p.stack);
+                    const stack = p.stack;
+                    p.stack = self.stack;
+                    self.stack = stack;
+                    p.has_own_stack = true;
+                    self.has_own_stack = true;
+                }
+            }
+        }
+
         pub fn unblock_parent(self: *Self) void {
             if (self.blocks_process) |p| {
-                // restore parent stack
                 p.blocked_by_process = null;
-                @memcpy(self.stack, p.stack);
-                const stack = p.stack;
-                p.stack = self.stack;
-                self.stack = stack;
+                // stack must be restored when parent is unblocked
+                self.restore_stack();
                 p.reevaluate_state();
                 self.blocks_process = null;
             }
@@ -219,7 +248,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             self.blocked_by.remove(process);
         }
 
-        pub fn is_blocked_by(self: *Self, semaphore: *const Semaphore) bool {
+        pub fn is_blocked_by(self: Self, semaphore: *const Semaphore) bool {
             if (self.waiting_for) |blocker| {
                 return blocker == semaphore;
             }
@@ -243,7 +272,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 }
                 const maybe_address = process_memory_pool.instance.allocate_pages(number_of_pages, self.pid);
                 if (maybe_address) |address| {
-                    return address;
+                    return address.ptr;
                 }
             }
             return std.posix.MMapError.OutOfMemory;
@@ -258,6 +287,17 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
 
                 process_memory_pool.instance.free_pages(addr, number_of_pages, self.pid);
             }
+        }
+
+        pub fn get_free_fd(self: *Self) u16 {
+            var fd: u16 = 0;
+            while (true) {
+                if (self.fds.get(fd) == null) {
+                    break;
+                }
+                fd += 1;
+            }
+            return fd;
         }
     };
 }

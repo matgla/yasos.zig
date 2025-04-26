@@ -52,7 +52,7 @@ pub const SemaphoreEvent = struct {
 
 // mov to arch file
 
-fn get_lr() callconv(.Inline) usize {
+inline fn get_lr() usize {
     return asm volatile (
         \\ mov %[ret], lr
         : [ret] "=r" (-> usize),
@@ -71,7 +71,7 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
         c.sys_create_process => {
             const context: *const volatile CreateProcessCall = @ptrCast(@alignCast(arg));
             const result: *volatile bool = @ptrCast(out);
-            process_manager.instance.create_process(context.stack_size, context.entry, context.arg) catch {
+            process_manager.instance.create_process(context.stack_size, context.entry, context.arg, "/") catch {
                 return;
             };
             result.* = true;
@@ -89,6 +89,16 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = syscall._isatty(fd.*);
+        },
+        c.sys_open => {
+            const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._open(context.path, context.flags, context.mode);
+        },
+        c.sys_close => {
+            const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._close(fd.*);
         },
         c.sys_write => {
             const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
@@ -139,6 +149,31 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             asm volatile (
                 \\ cpsie i 
             );
+        },
+        c.sys_getcwd => {
+            const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
+            const result: *volatile *allowzero c_char = @ptrCast(@alignCast(out));
+            if (process_manager.instance.get_current_process()) |current_process| {
+                std.mem.copyForwards(u8, context.buf[0..context.size], current_process.cwd);
+                var last_index = current_process.cwd.len;
+                if (last_index > context.size) {
+                    last_index = context.size - 1;
+                }
+                context.buf[last_index] = 0;
+                result.* = context.buf;
+            } else {
+                context.buf[0] = 0;
+                result.* = @ptrFromInt(0);
+            }
+        },
+        c.sys_getdents => {
+            const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
+            const result: *volatile isize = @ptrCast(@alignCast(out));
+            if (context.dirp == null) {
+                result.* = -1;
+            } else {
+                result.* = syscall._getdents(context.fd, context.dirp.?, context.count);
+            }
         },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});

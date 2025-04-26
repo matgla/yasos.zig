@@ -33,12 +33,25 @@ pub fn UartDriver(comptime UartType: anytype) type {
             .load = load,
             .unload = unload,
             .ifile = ifile,
+            .destroy = _destroy,
         };
-        allocator: std.mem.Allocator,
+
+        _allocator: std.mem.Allocator,
+        // object is owner of the file handle
+
+        pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+            const object = try allocator.create(Self);
+            object.* = Self.create(allocator);
+            return object;
+        }
+
+        pub fn destroy(self: *Self) void {
+            self._allocator.destroy(self);
+        }
 
         pub fn create(allocator: std.mem.Allocator) Self {
             return .{
-                .allocator = allocator,
+                ._allocator = allocator,
             };
         }
 
@@ -50,11 +63,12 @@ pub fn UartDriver(comptime UartType: anytype) type {
         }
 
         fn load(_: *anyopaque) bool {
-            uart.init(.{
-                .baudrate = 115200,
-            }) catch {
-                return false;
-            };
+            // uart.init(.{
+            //     .baudrate = 115200,
+            // }) catch {
+            //     return false;
+            // };
+            // return true;
             return true;
         }
 
@@ -64,10 +78,15 @@ pub fn UartDriver(comptime UartType: anytype) type {
 
         fn ifile(ctx: *anyopaque) ?IFile {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            var file = self.allocator.create(UartFile(uart)) catch {
+            var file = UartFile(uart).new(self._allocator) catch {
                 return null;
             };
             return file.ifile();
+        }
+
+        fn _destroy(ctx: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            self.destroy();
         }
     };
 }

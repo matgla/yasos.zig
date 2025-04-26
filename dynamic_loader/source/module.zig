@@ -61,6 +61,9 @@ pub const Module = struct {
         if (self.program_memory) |program| {
             self.allocator.free(program);
         }
+        for (self.imported_modules.items) |*module| {
+            module.deinit();
+        }
         self.imported_modules.deinit();
     }
 

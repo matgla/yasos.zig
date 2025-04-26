@@ -101,7 +101,7 @@ pub const RomFs = struct {
             if (node.filetype() == FileType.Directory) {
                 var it: ?FileHeader = FileHeader.init(node.memory, node.specinfo());
                 while (it) |child| : (it = child.next()) {
-                    var file: RomFsFile = RomFsFile.init(child);
+                    var file: RomFsFile = RomFsFile.create(child, self.allocator);
                     var ifile = file.ifile();
                     if (!callback(&ifile, context)) {
                         return 0;
@@ -162,10 +162,9 @@ pub const RomFs = struct {
     fn get(ctx: *anyopaque, path: []const u8) ?IFile {
         const self: *RomFs = @ptrCast(@alignCast(ctx));
         const maybe_node = self.get_file_header(path);
-        const file = self.allocator.create(RomFsFile) catch return null;
         if (maybe_node) |node| {
-            file.* = RomFsFile.init(node);
-            file.allocator = self.allocator;
+            const file = self.allocator.create(RomFsFile) catch return null;
+            file.* = RomFsFile.create(node, self.allocator);
             return file.ifile();
         }
         return null;

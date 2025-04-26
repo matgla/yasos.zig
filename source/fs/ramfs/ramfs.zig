@@ -34,26 +34,29 @@ pub const RamFs = struct {
     root: FilesNode,
 
     const FilesNode = struct {
-        const FilesHandler = std.DoublyLinkedList(FilesNode);
-        const FileNode = FilesHandler.Node;
-
         node: RamFsData,
-        children: FilesHandler,
+        children: std.DoublyLinkedList,
+        list_node: std.DoublyLinkedList.Node,
 
         pub fn deinit(self: *FilesNode, allocator: std.mem.Allocator) void {
-            var it = self.children.pop();
-            while (it) |node| : (it = self.children.pop()) {
-                node.data.deinit(allocator);
-                allocator.destroy(node);
+            var next = self.children.pop();
+
+            while (next) |node| {
+                const child: *FilesNode = @fieldParentPtr("list_node", node);
+                next = self.children.pop();
+                child.deinit(allocator);
+                allocator.destroy(child);
             }
             self.node.deinit();
         }
 
         pub fn get(self: *const FilesNode, node_name: []const u8) ?*FilesNode {
-            var it = self.children.first;
-            while (it) |child| : (it = child.next) {
-                if (std.mem.eql(u8, child.data.node.name(), node_name)) {
-                    return &child.data;
+            var next = self.children.first;
+            while (next) |node| {
+                const child: *FilesNode = @fieldParentPtr("list_node", node);
+                next = node.next;
+                if (std.mem.eql(u8, child.node.name(), node_name)) {
+                    return child;
                 }
             }
             return null;
@@ -78,6 +81,7 @@ pub const RamFs = struct {
             .root = .{
                 .node = try RamFsData.create_directory(allocator, "/"),
                 .children = .{},
+                .list_node = .{},
             },
         };
     }
@@ -111,10 +115,13 @@ pub const RamFs = struct {
                 if (parent_node.get(basename) != null) {
                     return -1;
                 }
-                var new = self.allocator.create(FilesNode.FileNode) catch return -1;
-                new.data.node = RamFsData.create(self.allocator, basename, filetype) catch return -1;
-                new.data.children = .{};
-                parent_node.children.append(new);
+                var new: *FilesNode = self.allocator.create(FilesNode) catch return -1;
+                new.* = FilesNode{
+                    .node = RamFsData.create(self.allocator, basename, filetype) catch return -1,
+                    .children = .{},
+                    .list_node = .{},
+                };
+                parent_node.children.append(&new.list_node);
                 return 0;
             }
         }
@@ -140,14 +147,16 @@ pub const RamFs = struct {
         }
         const maybe_parent = self.get_node(dirname.?) catch return -1;
         if (maybe_parent) |parent| {
-            var it = parent.children.first;
-            while (it) |child| : (it = child.next) {
-                if (std.mem.eql(u8, child.data.node.name(), basename)) {
-                    if (child.data.children.len != 0) {
+            var next = parent.children.first;
+            while (next) |node| {
+                const child: *FilesNode = @fieldParentPtr("list_node", node);
+                next = node.next;
+                if (std.mem.eql(u8, child.node.name(), basename)) {
+                    if (child.children.len() != 0) {
                         return -1;
                     }
-                    parent.children.remove(child);
-                    child.data.deinit(self.allocator);
+                    parent.children.remove(&child.list_node);
+                    child.deinit(self.allocator);
                     self.allocator.destroy(child);
                     return 0;
                 }
@@ -164,11 +173,13 @@ pub const RamFs = struct {
     fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         const self: *RamFs = @ptrCast(@alignCast(ctx));
         const maybe_node = self.get_node(path) catch return -1;
-        if (maybe_node) |node| {
-            if (node.node.type == FileType.Directory) {
-                var it = node.children.first;
-                while (it) |child| : (it = child.next) {
-                    var file: RamFsFile = RamFsFile.create(&child.data.node);
+        if (maybe_node) |file_node| {
+            if (file_node.node.type == FileType.Directory) {
+                var next = file_node.children.first;
+                while (next) |node| {
+                    const child: *FilesNode = @fieldParentPtr("list_node", node);
+                    next = node.next;
+                    var file: RamFsFile = RamFsFile.create(&child.node, self.allocator);
                     var ifile = file.ifile();
                     if (!callback(&ifile, user_context)) {
                         return 0;
@@ -185,8 +196,7 @@ pub const RamFs = struct {
         const maybe_node = self.get_node(path) catch return null;
         if (maybe_node) |node| {
             const file = self.allocator.create(RamFsFile) catch return null;
-            file.* = RamFsFile.create(&node.node);
-            file.allocator = self.allocator;
+            file.* = RamFsFile.create(&node.node, self.allocator);
             return file.ifile();
         }
         return null;

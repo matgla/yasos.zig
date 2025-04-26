@@ -42,18 +42,21 @@ pub const RomFsFile = struct {
         .ioctl = ioctl,
         .stat = stat,
         .filetype = filetype,
+        .dupe = dupe,
+        .destroy = destroy,
     };
 
     /// Pointer to data instance, data is kept by filesystem
     data: FileHeader,
-    allocator: ?std.mem.Allocator = null,
+    allocator: std.mem.Allocator,
 
     /// Current position in file
     position: usize = 0,
 
-    pub fn init(data: FileHeader) RomFsFile {
+    pub fn create(data: FileHeader, allocator: std.mem.Allocator) RomFsFile {
         return .{
             .data = data,
+            .allocator = allocator,
         };
     }
 
@@ -110,9 +113,7 @@ pub const RomFsFile = struct {
 
     pub fn close(ctx: *anyopaque) i32 {
         const self: *RomFsFile = @ptrCast(@alignCast(ctx));
-        if (self.allocator) |allocator| {
-            allocator.destroy(self);
-        }
+        self.allocator.destroy(self);
         return 0;
     }
 
@@ -168,5 +169,17 @@ pub const RomFsFile = struct {
     pub fn filetype(ctx: *const anyopaque) FileType {
         const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
         return self.data.filetype();
+    }
+
+    pub fn dupe(ctx: *anyopaque) ?IFile {
+        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
+        const new_file = self.allocator.create(RomFsFile) catch return null;
+        new_file.* = self.*;
+        return new_file.ifile();
+    }
+
+    pub fn destroy(ctx: *anyopaque) void {
+        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
+        self.allocator.destroy(self);
     }
 };

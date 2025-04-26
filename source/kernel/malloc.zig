@@ -24,53 +24,60 @@ const c = @cImport({
     @cInclude("string.h");
 });
 
+const log = &@import("../log/kernel_log.zig").kernel_log;
+
 const process_memory_pool = @import("process_memory_pool.zig");
 
 const MallocAllocator = struct {
     fn alloc(
         _: *anyopaque,
         len: usize,
-        log2_align: u8,
+        log2_align: std.mem.Alignment,
         return_address: usize,
     ) ?[*]u8 {
         _ = log2_align;
         _ = return_address;
         std.debug.assert(len > 0);
         const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
+
+        log.print("malloc alloc: {d}, {*}\n", .{ len, ptr });
         return ptr;
     }
 
     fn resize(
-        _: *anyopaque,
+        ctx: *anyopaque,
         buf: []u8,
-        log2_buf_align: u8,
+        log2_buf_align: std.mem.Alignment,
         new_len: usize,
         return_address: usize,
     ) bool {
+        _ = ctx;
         _ = return_address;
         _ = log2_buf_align;
-        if (new_len <= buf.len) {
-            return true;
-        }
+        _ = buf;
+        _ = new_len;
+        return false;
+    }
 
-        const ptr = c.malloc(new_len);
-        if (ptr == c.NULL) {
-            return false;
-        }
-        if (buf.len > 0) {
-            _ = c.memcpy(ptr, buf.ptr, buf.len);
-        }
-        return true;
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        return if (resize(context, memory, alignment, new_len, return_address)) memory.ptr else null;
     }
 
     fn free(
         _: *anyopaque,
         buf: []u8,
-        log2_buf_align: u8,
+        log2_buf_align: std.mem.Alignment,
         return_address: usize,
     ) void {
         _ = log2_buf_align;
         _ = return_address;
+        log.print("malloc free: {*}:{d}\n", .{ buf.ptr, buf.len });
         c.free(buf.ptr);
     }
 };
@@ -84,6 +91,7 @@ const malloc_allocator_vtable = std.mem.Allocator.VTable{
     .alloc = MallocAllocator.alloc,
     .resize = MallocAllocator.resize,
     .free = MallocAllocator.free,
+    .remap = MallocAllocator.remap,
 };
 
 pub const ProcessPageAllocator = struct {
@@ -92,7 +100,7 @@ pub const ProcessPageAllocator = struct {
     fn alloc(
         ctx: *anyopaque,
         len: usize,
-        log2_align: u8,
+        log2_align: std.mem.Alignment,
         return_address: usize,
     ) ?[*]u8 {
         const self: *ProcessPageAllocator = @ptrCast(@alignCast(ctx));
@@ -106,7 +114,7 @@ pub const ProcessPageAllocator = struct {
     fn resize(
         ctx: *anyopaque,
         buf: []u8,
-        log2_buf_align: u8,
+        log2_buf_align: std.mem.Alignment,
         new_len: usize,
         return_address: usize,
     ) bool {
@@ -119,10 +127,20 @@ pub const ProcessPageAllocator = struct {
         return false;
     }
 
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        return if (resize(context, memory, alignment, new_len, return_address)) memory.ptr else null;
+    }
+
     fn free(
         ctx: *anyopaque,
         buf: []u8,
-        log2_buf_align: u8,
+        log2_buf_align: std.mem.Alignment,
         return_address: usize,
     ) void {
         const self: *ProcessPageAllocator = @ptrCast(@alignCast(ctx));
@@ -138,6 +156,10 @@ pub const ProcessPageAllocator = struct {
         };
     }
 
+    pub fn release_pages(self: *ProcessPageAllocator) void {
+        process_memory_pool.instance.release_pages_for(self.pid);
+    }
+
     pub fn std_allocator(self: *ProcessPageAllocator) std.mem.Allocator {
         return std.mem.Allocator{
             .ptr = @ptrCast(self),
@@ -150,4 +172,5 @@ const process_page_allocator_vtable = std.mem.Allocator.VTable{
     .alloc = ProcessPageAllocator.alloc,
     .resize = ProcessPageAllocator.resize,
     .free = ProcessPageAllocator.free,
+    .remap = ProcessPageAllocator.remap,
 };

@@ -18,65 +18,69 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
 const Process = @import("process.zig").Process;
 
 const cpu = @import("hal").cpu;
 
 pub fn RoundRobin(comptime ManagerType: anytype) type {
     return struct {
-        const ProcessManagerType = ManagerType;
         const Self = @This();
         manager: *const ManagerType = undefined,
-        current: ?*ProcessManagerType.ContainerType.Node = null,
-        next: ?*ProcessManagerType.ContainerType.Node = null,
+        current: ?*std.DoublyLinkedList.Node = null,
+        next: ?*std.DoublyLinkedList.Node = null,
 
         pub fn schedule_next(self: *Self) bool {
-            if (self.manager.processes.len == 0) {
+            if (self.manager.processes.len() == 0) {
                 return false;
             }
 
             if (self.current == null) {
-                if (self.manager.processes.first) |process| {
-                    process.data.set_core(@intCast(cpu.coreid()));
+                if (self.manager.processes.first) |node| {
+                    const process: *Process = @fieldParentPtr("node", node);
+                    process.set_core(@intCast(cpu.coreid()));
                 }
                 self.next = self.manager.processes.first;
                 return true;
             }
 
-            var it = self.current.?.next;
+            var next = self.current.?.next;
 
-            while (it) |node| : (it = node.next) {
+            while (next) |node| {
                 // search for the next ready process
-                if (node.data.state == Process.State.Ready) {
-                    if (it) |process| {
-                        process.data.set_core(@intCast(cpu.coreid()));
-                    }
-                    self.next = it;
+                const process: *Process = @fieldParentPtr("node", node);
+
+                if (process.state == Process.State.Ready) {
+                    process.set_core(@intCast(cpu.coreid()));
+                    self.next = node;
                     return true;
                 }
+
+                next = node.next;
             }
             // if not found, try to search from beginning
-            it = self.manager.processes.first;
-            while (it) |node| : (it = node.next) {
+            next = self.manager.processes.first;
+            while (next) |node| {
+                const process: *Process = @fieldParentPtr("node", node);
+
                 if (node == self.current) {
                     // only already running process can be executed
                     return false;
                 }
                 // search for the next ready process
-                if (node.data.state == Process.State.Ready) {
-                    if (it) |process| {
-                        process.data.set_core(@intCast(cpu.coreid()));
-                    }
-                    self.next = it;
+                if (process.state == Process.State.Ready) {
+                    process.set_core(@intCast(cpu.coreid()));
+                    self.next = node;
                     return true;
                 }
+                next = node.next;
             }
             return false;
         }
 
         pub fn get_current(self: Self) ?*Process {
             if (self.current) |node| {
-                return &node.data;
+                return @fieldParentPtr("node", node);
             }
             return null;
         }
@@ -88,17 +92,19 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
                         return null;
                     }
                 }
-                return &node.data;
+                return @fieldParentPtr("node", node);
             }
             return null;
         }
 
         pub fn update_current(self: *Self) void {
             if (self.current) |current| {
-                current.data.state = Process.State.Ready;
+                const process: *Process = @fieldParentPtr("node", current);
+                process.state = Process.State.Ready;
             }
             if (self.next) |next| {
-                next.data.state = Process.State.Running;
+                const process: *Process = @fieldParentPtr("node", next);
+                process.state = Process.State.Running;
             }
             self.current = self.next;
         }

@@ -26,57 +26,17 @@ const process = @import("process.zig");
 const Process = process.Process;
 const config = @import("config");
 
-const yasld = @import("yasld");
-
 var log = &@import("../log/kernel_log.zig").kernel_log;
 
-const fs = @import("fs/vfs.zig");
-const IFile = @import("fs/fs.zig").IFile;
-const FileMemoryMapAttributes = @import("fs/ifile.zig").FileMemoryMapAttributes;
-const IoctlCommonCommands = @import("fs/ifile.zig").IoctlCommonCommands;
+const dynamic_loader = @import("modules.zig");
 
 extern fn switch_to_next_task() void;
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
 
 extern fn reload_current_task() void;
 
-const ModuleContext = struct {
-    path: []const u8,
-    address: ?*const anyopaque,
-};
-
-fn traverse_directory(file: *IFile, context: *anyopaque) bool {
-    var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    if (std.mem.eql(u8, module_context.path, file.name())) {
-        var attr: FileMemoryMapAttributes = .{
-            .is_memory_mapped = false,
-            .mapped_address_r = null,
-            .mapped_address_w = null,
-        };
-        _ = file.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        if (attr.mapped_address_r) |address| {
-            module_context.address = address;
-            return false;
-        }
-    }
-    return true;
-}
-
-fn file_resolver(name: []const u8) ?*const anyopaque {
-    log.print("searching for dependency: {s}\n", .{name});
-    var context: ModuleContext = .{
-        .path = name,
-        .address = null,
-    };
-    _ = fs.ivfs().traverse("/lib", traverse_directory, &context);
-    if (context.address) |address| {
-        return address;
-    }
-    return null;
-}
-
 pub const ProcessManager = struct {
-    pub const ContainerType = std.DoublyLinkedList(Process);
+    pub const ContainerType = std.DoublyLinkedList;
     pub const ProcessType = Process;
     const Self = @This();
 
@@ -96,21 +56,23 @@ pub const ProcessManager = struct {
         self.scheduler = scheduler;
     }
 
-    pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype) !void {
-        var node = try self.allocator.create(ContainerType.Node);
-        node.data = try Process.create(self.allocator, stack_size, process_entry, args);
-        return self.processes.append(node);
+    pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
+        var new_process = try Process.create(self.allocator, stack_size, process_entry, args, cwd);
+        return self.processes.append(&new_process.node);
     }
 
     pub fn delete_process(self: *Self, pid: u32) void {
-        var it = self.processes.first;
-        while (it) |p| : (it = p.next) {
-            if (p.data.pid == pid) {
-                p.data.unblock_parent();
-                const allocator = p.data._allocator;
-                p.data.deinit();
-                self.processes.remove(p);
+        var next = self.processes.first;
+        while (next) |node| {
+            const p: *Process = @fieldParentPtr("node", node);
+            next = node.next;
+            if (p.pid == pid) {
+                p.unblock_parent();
+                const allocator = p._allocator;
+                p.deinit();
+                self.processes.remove(&p.node);
                 allocator.destroy(p);
+                dynamic_loader.release_executable(pid);
                 if (self.scheduler.schedule_next()) {
                     switch_to_next_task();
                 } else {
@@ -151,24 +113,21 @@ pub const ProcessManager = struct {
     }
 
     pub fn vfork(self: *Self, lr: usize, result: usize) i32 {
-        var node = self.allocator.create(ContainerType.Node) catch {
+        var new_process = self.allocator.create(Process) catch {
             return -1;
         };
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |current_process| {
-            node.data = current_process.vfork(lr, result) catch {
+            new_process.* = current_process.vfork(lr, result) catch {
                 return -1;
             };
 
-            log.print("current process pid: {d}\n", .{current_process.pid});
-            current_process.wait_for_process(&node.data) catch {
+            current_process.wait_for_process(new_process) catch {
                 return -1;
             };
-            self.processes.append(node);
-            self.dump_processes(log);
+            self.processes.append(&new_process.node);
             // switch without context switch
-            self.scheduler.current = node;
-            self.dump_processes(log);
+            self.scheduler.current = &new_process.node;
 
             return 0; //@intCast(node.data.pid);
         }
@@ -186,53 +145,35 @@ pub const ProcessManager = struct {
     };
 
     pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) i32 {
-        const symbols = [_]yasld.SymbolEntry{};
-        const environment = yasld.Environment{
-            .symbols = &symbols,
-        };
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |p| {
             // TODO: move loader to struct, pass allocator to loading functions
-            const loader = yasld.Loader.create(p.memory_pool_allocator.std_allocator(), environment, &file_resolver);
-            const maybe_file = fs.ivfs().get(path);
-            if (maybe_file) |f| {
-                var attr: FileMemoryMapAttributes = .{
-                    .is_memory_mapped = false,
-                    .mapped_address_r = null,
-                    .mapped_address_w = null,
-                };
-                _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+            const executable = dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid) catch {
+                return -1;
+            };
+            var argc: usize = 0;
+            while (argv[argc] != null) : (argc += 1) {}
 
-                const executable = loader.load_executable(attr.mapped_address_r.?, log) catch |err| {
-                    log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
-                    return -1;
-                };
-                var argc: usize = 0;
-                while (argv[argc] != null) : (argc += 1) {}
+            var envpc: usize = 0;
+            while (envp[envpc] != null) : (envpc += 1) {}
 
-                var envpc: usize = 0;
-                while (envp[envpc] != null) : (envpc += 1) {}
-
-                var symbol: usize = 0;
-                if (executable.module.entry) |entry| {
-                    symbol = entry;
-                } else if (executable.module.find_symbol("_start")) |entry| {
-                    symbol = entry;
-                } else {
-                    return -1;
-                }
-
-                p.unblock_parent();
-                p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol);
-                self.dump_processes(log);
-
-                // switch to me
-                reload_current_task();
-
-                return 0;
+            var symbol: usize = 0;
+            if (executable.module.entry) |entry| {
+                symbol = entry;
+            } else if (executable.module.find_symbol("_start")) |entry| {
+                symbol = entry;
             } else {
                 return -1;
             }
+
+            p.restore_stack(); // process is still blocked so it won't be scheduled, unblocking when child finishes
+            // TODO: add & support
+            p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol);
+
+            // switch to me
+            reload_current_task();
+
+            return 0;
         }
         return -1;
     }

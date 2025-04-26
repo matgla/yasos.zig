@@ -29,6 +29,7 @@ const config = @import("config");
 const hal = @import("hal");
 
 var log = &@import("log/kernel_log.zig").kernel_log;
+var null_log = &@import("log/kernel_log.zig").null_log;
 
 const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
 
@@ -44,6 +45,7 @@ const time = @import("kernel/time.zig");
 const Mutex = @import("kernel/mutex.zig").Mutex;
 
 const yasld = @import("yasld");
+const dynamic_loader = @import("kernel/modules.zig");
 
 const IFile = @import("kernel/fs/fs.zig").IFile;
 const IoctlCommonCommands = @import("kernel/fs/ifile.zig").IoctlCommonCommands;
@@ -92,17 +94,6 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
 
 var mutex: Mutex = .{};
 
-export fn some_other_process() void {
-    while (true) {
-        time.sleep_ms(50);
-        mutex.lock();
-        log.write("Other process working\n");
-        process_manager.instance.dump_processes(log);
-        mutex.unlock();
-    }
-    log.write("Died\n");
-}
-
 var module: ?*anyopaque = null;
 
 const ModuleContext = struct {
@@ -141,6 +132,8 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 }
 
 export fn kernel_process() void {
+    log.write(" - initializing dynamic loader\n");
+    dynamic_loader.init(malloc_allocator);
     log.write(" - creating virtual file system\n");
     fs.vfs_init(malloc_allocator);
     const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..0x100000]);
@@ -166,45 +159,70 @@ export fn kernel_process() void {
         return;
     };
 
-    const maybe_driverfs = DriverFs.init(malloc_allocator);
-    if (maybe_driverfs == null) {
-        log.write("Can't initialize DriverFs\n");
+    const driverfs = DriverFs.new(malloc_allocator) catch |err| {
+        log.print("Can't create driverfs: {s}\n", .{@errorName(err)});
         return;
-    }
-    var driverfs = maybe_driverfs.?;
+    };
+
     fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
         log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
         return;
     };
 
     log.write(" - register drivers\n");
-    var uart_driver = UartDriver(board.uart.uart0).create(malloc_allocator);
-    var iuart_driver = uart_driver.idriver();
-    driverfs.append(iuart_driver) catch |err| {
+    var uart_driver = UartDriver(board.uart.uart0).new(malloc_allocator) catch |err| {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-
-    var driver = driverfs.container.first;
-    while (driver) |node| : (driver = node.next) {
-        if (!node.data.load()) {
-            log.write("Can't load driver\n");
-        }
+    driverfs.append(uart_driver.idriver()) catch |err| {
+        log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
+        return;
+    };
+    if (!driverfs.load_all()) {
+        log.print("Can't load all drivers\n", .{});
+        return;
     }
 
     const maybe_process = process_manager.instance.get_current_process();
     var pid: u32 = 0;
     if (maybe_process) |p| {
         log.write("- setting default streams\n");
-        const maybe_uart_file = iuart_driver.ifile();
+        const maybe_uart_file = uart_driver.idriver().ifile();
         if (maybe_uart_file) |uart_file| {
-            p.fds.put(0, uart_file) catch {
+            p.fds.put(0, .{
+                .file = uart_file,
+                .path = blk: {
+                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                    const value = "/dev/stdin";
+                    std.mem.copyForwards(u8, path[0..value.len], value);
+                    break :blk path;
+                },
+                .diriter = null,
+            }) catch {
                 log.write("Can't register: stdin\n");
             };
-            p.fds.put(1, uart_file) catch {
+            p.fds.put(1, .{
+                .file = uart_file,
+                .path = blk: {
+                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                    const value = "/dev/stdout";
+                    std.mem.copyForwards(u8, path[0..value.len], value);
+                    break :blk path;
+                },
+                .diriter = null,
+            }) catch {
                 log.write("Can't register: stdout\n");
             };
-            p.fds.put(2, uart_file) catch {
+            p.fds.put(2, .{
+                .file = uart_file,
+                .path = blk: {
+                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                    const value = "/dev/stderr";
+                    std.mem.copyForwards(u8, path[0..value.len], value);
+                    break :blk path;
+                },
+                .diriter = null,
+            }) catch {
                 log.write("Can't register: stderr\n");
             };
         }
@@ -214,40 +232,17 @@ export fn kernel_process() void {
     }
 
     log.write(" - loading yasld\n");
-    const symbols = [_]yasld.SymbolEntry{};
-    const environment = yasld.Environment{
-        .symbols = &symbols,
-    };
 
     var process_memory_allocator = ProcessPageAllocator.create(maybe_process.?.pid);
-    const loader: yasld.Loader = yasld.Loader.create(process_memory_allocator.std_allocator(), environment, &file_resolver);
+    const sh = dynamic_loader.load_executable("/bin/sh", process_memory_allocator.std_allocator(), pid) catch |err| {
+        log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
+        return;
+    };
 
-    const maybe_shell = fs.ivfs().get("/bin/sh");
-    if (maybe_shell) |shell| {
-        log.write("starting: /bin/sh");
-        var attr: FileMemoryMapAttributes = .{
-            .is_memory_mapped = false,
-            .mapped_address_r = null,
-            .mapped_address_w = null,
-        };
-        _ = shell.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        log.print("File {} at: 0x{x}", .{ attr.is_memory_mapped, attr.mapped_address_r.? });
-        const maybeExecutable: ?yasld.Executable = loader.load_executable(
-            attr.mapped_address_r.?,
-            log,
-        ) catch |err| blk: {
-            log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
-            break :blk null;
-        };
-
-        if (maybeExecutable) |executable| {
-            const args: [][]u8 = &.{};
-            process_manager.instance.dump_processes(log);
-            _ = executable.main(@ptrCast(args.ptr), args.len) catch |err| {
-                log.print("Cannot execute main: {s}\n", .{@errorName(err)});
-            };
-        }
-    }
+    const args: [][]u8 = &.{};
+    _ = sh.main(@ptrCast(args.ptr), args.len) catch |err| {
+        log.print("Cannot execute main: {s}\n", .{@errorName(err)});
+    };
     while (true) {
         time.sleep_ms(20);
     }
@@ -255,17 +250,17 @@ export fn kernel_process() void {
 
 pub export fn main() void {
     initialize_board();
-    log.print("-----------------------------------------\n", .{});
+    log.print("\n-----------------------------------------\n", .{});
     log.print("|               YASOS                   |\n", .{});
     DumpHardware.print_hardware();
 
-    log.write(" - initializing process manager\n");
-    log.write(" - scheduler: round robin\n");
-
     log.write(" - initializing process memory pool\n");
-
     process_memory_pool.init();
+
+    log.write(" - initializing process manager\n");
     process_manager.initialize_process_manager(malloc_allocator);
+
+    log.write(" - scheduler: round robin\n");
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
     });

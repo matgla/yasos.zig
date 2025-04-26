@@ -37,4 +37,8 @@ pub const Executable = struct {
         }
         return error.MainNotExits;
     }
+
+    pub fn deinit(self: *Executable) void {
+        self.module.deinit();
+    }
 };

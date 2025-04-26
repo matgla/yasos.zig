@@ -20,14 +20,22 @@
 
 #include <stdio.h>
 
+#include <dirent.h>
+#include <unistd.h>
+
 int main(int argc, char *argv[]) {
-  printf("Args: {");
-  for (int i = 0; i < argc; i++) {
-    printf("%s", argv[i]);
-    if (i < argc - 1) {
-      printf(", ");
-    }
+  char cwd[256] = {0};
+  getcwd(cwd, sizeof(cwd));
+  DIR *dir = opendir(cwd);
+  if (dir == NULL) {
+    return 1;
   }
-  printf("}\n");
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    printf("%s ", entry->d_name);
+  }
+  printf("\n");
+  closedir(dir);
+
   return 0;
 }

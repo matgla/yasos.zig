@@ -26,7 +26,6 @@ const print_header = @import("header.zig").print_header;
 const Module = @import("module.zig").Module;
 const Parser = @import("parser.zig").Parser;
 const Type = @import("header.zig").Type;
-const Environment = @import("environment.zig").Environment;
 const Section = @import("section.zig").Section;
 const Symbol = @import("symbol.zig").Symbol;
 
@@ -41,30 +40,22 @@ const LoaderError = error{
     ChildLoadingFailure,
 };
 
-export fn resolver() void {
-    while (true) {}
-}
-
 pub const Loader = struct {
     // OS should provide pointer to XIP region, it must be copied to RAM if needed
     pub const FileResolver = *const fn (name: []const u8) ?*const anyopaque;
 
-    allocator: std.mem.Allocator,
     file_resolver: FileResolver,
-    environment: Environment,
 
-    pub fn create(allocator: std.mem.Allocator, environment: Environment, file_resolver: FileResolver) Loader {
+    pub fn create(file_resolver: FileResolver) Loader {
         return .{
-            .allocator = allocator,
-            .environment = environment,
             .file_resolver = file_resolver,
         };
     }
 
-    pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype) !Executable {
+    pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype, allocator: std.mem.Allocator) !Executable {
         stdout.print("[yasld] loading executable from: 0x{x}\n", .{@intFromPtr(module)});
         var executable: Executable = .{
-            .module = Module.init(self.allocator),
+            .module = Module.init(allocator),
         };
         try self.load_module(&executable.module, module, stdout);
         return executable;
@@ -174,12 +165,7 @@ pub const Loader = struct {
         }
     }
 
-    fn find_symbol(self: Loader, module: *Module, name: []const u8) ?usize {
-        // symbols provided by OS have highest priority
-        if (self.environment.find_symbol(name)) |symbol| {
-            return symbol.address;
-        }
-
+    fn find_symbol(_: Loader, module: *Module, name: []const u8) ?usize {
         if (module.find_symbol(name)) |symbol| {
             return symbol;
         }

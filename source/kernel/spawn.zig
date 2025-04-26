@@ -45,7 +45,7 @@ pub fn spawn(allocator: std.mem.Allocator, entry: anytype, arg: ?*const anyopaqu
 }
 
 pub fn root_process(entry: anytype, arg: ?*const anyopaque, stack_size: usize) !void {
-    try process_manager.instance.create_process(stack_size, entry, arg);
+    try process_manager.instance.create_process(stack_size, entry, arg, "/");
     if (process_manager.instance.scheduler.schedule_next()) {
         process_manager.instance.initialize_context_switching();
         hal.time.systick.enable();

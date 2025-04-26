@@ -16,8 +16,9 @@
 const std = @import("std");
 
 const malloc_allocator = @import("malloc.zig").malloc_allocator;
+const log = &@import("../log/kernel_log.zig").kernel_log;
 
-var log = &@import("../log/kernel_log.zig").kernel_log;
+const dynamic_loader = @import("modules.zig");
 
 extern var __process_ram_start__: u8;
 extern var __process_ram_end__: u8;
@@ -35,8 +36,7 @@ pub const ProcessMemoryPool = struct {
     };
 
     const ProcessMemoryEntity = struct {
-        address: *anyopaque,
-        length: usize,
+        address: []u8,
         pid: u32,
         access: AccessType,
     };
@@ -86,8 +86,11 @@ pub const ProcessMemoryPool = struct {
         }
         return .{ start, end_index };
     }
+    fn slicify(ptr: [*]u8, len: usize) []u8 {
+        return ptr[0..len];
+    }
 
-    pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: u32) ?*anyopaque {
+    pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: u32) ?[]u8 {
         if (number_of_pages <= 0) {
             return null;
         }
@@ -102,18 +105,24 @@ pub const ProcessMemoryPool = struct {
                 for (slot_start..end_index + 1) |i| {
                     self.page_bitmap.set(i);
                 }
-                var list = self.memory_map.getOrPutValue(pid, ProcessMemoryList.init(self.allocator)) catch {
+                var list = self.memory_map.getOrPut(pid) catch {
                     return null;
                 };
+                if (!list.found_existing) {
+                    list.value_ptr.* = ProcessMemoryList.init(self.allocator);
+                }
                 list.value_ptr.append(ProcessMemoryEntity{
-                    .address = @ptrFromInt(@intFromPtr(&__process_ram_start__) + start_index * page_size),
-                    .length = @as(usize, @intCast(number_of_pages)) * page_size,
+                    .address = slicify(
+                        @as([*]u8, @ptrFromInt(@intFromPtr(&__process_ram_start__) + start_index * page_size)),
+                        @as(usize, @intCast(number_of_pages)) * page_size,
+                    ),
                     .pid = pid,
                     .access = .{ .read = 1, .write = 1, .execute = 1 },
                 }) catch {
                     return null;
                 };
-                return @ptrFromInt(@intFromPtr(&__process_ram_start__) + start_index * page_size);
+                @memset(list.value_ptr.getLast().address, 0);
+                return list.value_ptr.getLast().address;
             } else {
                 start_index = slot_end + 1;
             }
@@ -121,12 +130,29 @@ pub const ProcessMemoryPool = struct {
         return null;
     }
 
-    pub fn free_pages(self: *ProcessMemoryPool, address: ?*anyopaque, number_of_pages: i32, pid: u32) void {
+    pub fn release_pages_for(self: *ProcessMemoryPool, pid: u32) void {
+        const maybe_mapping = self.memory_map.getEntry(pid);
+        if (maybe_mapping) |*mapping| {
+            for (mapping.value_ptr.items) |entity| {
+                const start_index = (@intFromPtr(entity.address.ptr) - @intFromPtr(&__process_ram_start__)) / page_size;
+                const end_index = start_index + @as(usize, @intCast(entity.address.len)) / page_size;
+                for (start_index..end_index) |index| {
+                    self.page_bitmap.unset(index);
+                }
+            }
+            if (self.memory_map.getPtr(pid)) |*arr| {
+                arr.*.deinit();
+            }
+            _ = self.memory_map.remove(pid);
+        }
+    }
+
+    pub fn free_pages(self: *ProcessMemoryPool, address: *anyopaque, number_of_pages: i32, pid: u32) void {
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
             var i: usize = 0;
             for (mapping.value_ptr.items) |entity| {
-                if (entity.address == address) {
+                if (@as(*anyopaque, entity.address.ptr) == address) {
                     _ = mapping.value_ptr.swapRemove(i);
                     break;
                 }

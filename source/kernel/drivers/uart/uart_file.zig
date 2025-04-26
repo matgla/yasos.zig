@@ -42,13 +42,30 @@ pub fn UartFile(comptime UartType: anytype) type {
             .ioctl = ioctl,
             .stat = stat,
             .filetype = filetype,
+            .dupe = dupe,
+            .destroy = _destroy,
         };
 
-        icanonical: bool = true,
-        echo: bool = true,
+        _icanonical: bool,
+        _echo: bool,
+        _allocator: std.mem.Allocator,
 
-        pub fn create() Self {
-            return .{};
+        pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+            const object = try allocator.create(Self);
+            object.* = Self.create(allocator);
+            return object;
+        }
+
+        pub fn destroy(self: *Self) void {
+            self._allocator.destroy(self);
+        }
+
+        pub fn create(allocator: std.mem.Allocator) Self {
+            return .{
+                ._icanonical = true,
+                ._echo = true,
+                ._allocator = allocator,
+            };
         }
 
         pub fn ifile(self: *Self) IFile {
@@ -71,11 +88,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                     ch[0] = '\n';
                 }
                 buffer[index] = ch[0];
-                if (self.echo) {
+                if (self._echo) {
                     _ = uart.write_some(ch[0..1]) catch {};
                 }
                 index += 1;
-                if (self.icanonical) {
+                if (self._icanonical) {
                     if (ch[0] == 0 or ch[0] == '\n' or ch[0] == -1) {
                         break;
                     }
@@ -121,8 +138,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                 const termios: *c.termios = @ptrCast(@alignCast(termios_arg));
                 switch (op) {
                     c.TCSETS => {
-                        self.icanonical = (termios.c_lflag & c.ICANON) != 0;
-                        self.echo = (termios.c_lflag & c.ECHO) != 0;
+                        self._icanonical = (termios.c_lflag & c.ICANON) != 0;
+                        self._echo = (termios.c_lflag & c.ECHO) != 0;
                         return 0;
                     },
                     c.TCSETSW => {
@@ -166,6 +183,16 @@ pub fn UartFile(comptime UartType: anytype) type {
 
         pub fn filetype(_: *const anyopaque) FileType {
             return FileType.CharDevice;
+        }
+
+        pub fn dupe(ctx: *anyopaque) ?IFile {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            return self.ifile();
+        }
+
+        pub fn _destroy(ctx: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            self.destroy();
         }
     };
 }

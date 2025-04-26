@@ -59,6 +59,8 @@ pub const IFile = struct {
         ioctl: *const fn (ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32,
         stat: *const fn (ctx: *const anyopaque, data: *c.struct_stat) void,
         filetype: *const fn (ctx: *const anyopaque) FileType,
+        dupe: *const fn (ctx: *anyopaque) ?IFile,
+        destroy: *const fn (ctx: *anyopaque) void, // destroy object, but do not close
     };
 
     pub fn read(self: IFile, buf: []u8) isize {
@@ -103,5 +105,13 @@ pub const IFile = struct {
 
     pub fn filetype(self: IFile) FileType {
         return self.vtable.filetype(self.ptr);
+    }
+
+    pub fn dupe(self: IFile) ?IFile {
+        return self.vtable.dupe(self.ptr);
+    }
+
+    pub fn destroy(self: IFile) void {
+        return self.vtable.destroy(self.ptr);
     }
 };
