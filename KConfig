@@ -58,15 +58,9 @@ config CONFIG_PROCESS_CONTEXT_SWITCH_HW_SPINLOCK_NUMBER
   int "HW spinlock number for context switch"
   default 6 
 
-
 endmenu
 
 menu "Filesystem Options"
-  config CONFIG_FS_MAX_MOUNT_POINT_SIZE
-  int "Maximum mount point name length in bytes"
-  default 64 
-  help 
-    This is not maximum mounting in terms of depth, since mounting points are linked list
-
   rsource "source/fs/KConfig"
+
 endmenu

@@ -1,5 +1,5 @@
 .{
-    .name = "yasos.zig",
+    .name = .yasos,
     .version = "0.0.1",
     .dependencies = .{
         .yasos_hal = .{ .path = "hal" },
@@ -9,4 +9,5 @@
         "build.zig",
         "build.zig.zon",
     },
+    .fingerprint = 0xcca464229573ecc9,
 }

@@ -20,14 +20,13 @@
 
 ///! This module provides file handler implementation for ramfs filesystem
 const std = @import("std");
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("../../libc_imports.zig").c;
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 const FileHeader = @import("file_header.zig").FileHeader;
+const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
+const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
 
 pub const RomFsFile = struct {
     /// VTable for IFile interface
@@ -43,18 +42,21 @@ pub const RomFsFile = struct {
         .ioctl = ioctl,
         .stat = stat,
         .filetype = filetype,
+        .dupe = dupe,
+        .destroy = destroy,
     };
 
     /// Pointer to data instance, data is kept by filesystem
     data: FileHeader,
-    allocator: ?std.mem.Allocator = null,
+    allocator: std.mem.Allocator,
 
     /// Current position in file
     position: usize = 0,
 
-    pub fn init(data: FileHeader) RomFsFile {
+    pub fn create(data: FileHeader, allocator: std.mem.Allocator) RomFsFile {
         return .{
             .data = data,
+            .allocator = allocator,
         };
     }
 
@@ -111,9 +113,7 @@ pub const RomFsFile = struct {
 
     pub fn close(ctx: *anyopaque) i32 {
         const self: *RomFsFile = @ptrCast(@alignCast(ctx));
-        if (self.allocator) |allocator| {
-            allocator.destroy(self);
-        }
+        self.allocator.destroy(self);
         return 0;
     }
 
@@ -137,7 +137,18 @@ pub const RomFsFile = struct {
         return self.data.name();
     }
 
-    pub fn ioctl(_: *anyopaque, _: u32, _: *const anyopaque) i32 {
+    pub fn ioctl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
+        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
+        switch (cmd) {
+            @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
+                var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
+                attr.is_memory_mapped = true;
+                attr.mapped_address_r = self.data.data().ptr;
+            },
+            else => {
+                return -1;
+            },
+        }
         return 0;
     }
 
@@ -158,5 +169,17 @@ pub const RomFsFile = struct {
     pub fn filetype(ctx: *const anyopaque) FileType {
         const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
         return self.data.filetype();
+    }
+
+    pub fn dupe(ctx: *anyopaque) ?IFile {
+        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
+        const new_file = self.allocator.create(RomFsFile) catch return null;
+        new_file.* = self.*;
+        return new_file.ifile();
+    }
+
+    pub fn destroy(ctx: *anyopaque) void {
+        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
+        self.allocator.destroy(self);
     }
 };

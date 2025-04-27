@@ -26,7 +26,7 @@ const syscall = @import("interrupts/system_call.zig");
 const atomic = @import("hal").atomic;
 
 const c = @cImport({
-    @cInclude("kernel/syscalls.h");
+    @cInclude("syscalls.h");
 });
 
 pub const Semaphore = struct {

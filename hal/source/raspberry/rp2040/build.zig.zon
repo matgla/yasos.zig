@@ -18,14 +18,19 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-.{ .name = "mcu/rp2040", .version = "0.0.0", .dependencies = .{
-    .toolchains = .{
-        .path = "../../../toolchains",
+.{
+    .name = .mcu_rp2040,
+    .version = "0.0.0",
+    .dependencies = .{
+        .toolchains = .{
+            .path = "../../../toolchains",
+        },
+        .hal_interface = .{ .path = "../../../interface" },
     },
-    .hal_interface = .{ .path = "../../../interface" },
-}, .paths = .{
-    "build.zig",
-    "build.zig.zon",
-    "rp2040.zig",
-    "uart.zig",
-} }
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "rp2040.zig",
+        "uart.zig",
+    },
+}

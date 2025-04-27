@@ -19,7 +19,7 @@
 //
 
 .{
-    .name = "mcu/host",
+    .name = .mcu_host,
     .version = "0.0.0",
     .dependencies = .{
         .hal_interface = .{ .path = "../../../interface" },

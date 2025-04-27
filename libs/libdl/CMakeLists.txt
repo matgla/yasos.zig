@@ -20,7 +20,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project (yasos_libdl C CXX)
+project (yasos_libdl C)
 
 set (CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -34,24 +34,25 @@ target_sources (dl
 target_include_directories(dl
   PUBLIC 
     ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/../libc/include
 )
 
 set_target_properties (dl
   PROPERTIES LINK_DEPENDS ${linker_script})
 
 
-target_include_directories(dl PRIVATE ${PROJECT_SOURCE_DIR}/../../source/kernel)
-
+target_include_directories(dl PRIVATE ${PROJECT_SOURCE_DIR}/../../source/kernel) 
 target_compile_options(dl PRIVATE 
   -fPIC
+  -g
+  -mno-pic-data-is-text-relative
+  -msingle-pic-base
 )
 
 target_link_options (dl PRIVATE 
   -fPIC
-  -T${linker_script}
-  -nodefaultlibs 
-  -nostartfiles
   -nostdlib
+  -nostdinc
 )
 
 install (

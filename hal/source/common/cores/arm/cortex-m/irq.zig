@@ -18,11 +18,6 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-// const c = @cImport({
-//     @cInclude("RP2040.h");
-//     @cInclude("core_cm0plus.h");
-// });
-
 const c = @import("cmsis").cmsis;
 const cpu = @import("arch").Registers;
 

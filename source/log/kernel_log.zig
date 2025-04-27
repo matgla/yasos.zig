@@ -84,3 +84,10 @@ pub var kernel_log = Logger{
 pub const WriteError = error{
     WriteFailure,
 };
+
+pub var null_log = Logger{
+    .log = KernelLog{
+        .writeFn = null,
+    },
+    .writer = null,
+};

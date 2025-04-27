@@ -52,6 +52,14 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
                 return 0;
             };
         }
+
+        pub fn read(self: Self, buffer: []u8) !usize {
+            return try self.impl.read(buffer);
+        }
+
+        pub fn flush(self: Self) void {
+            return self.impl.flush();
+        }
     };
 }
 

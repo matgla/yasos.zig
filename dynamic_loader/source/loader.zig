@@ -26,8 +26,8 @@ const print_header = @import("header.zig").print_header;
 const Module = @import("module.zig").Module;
 const Parser = @import("parser.zig").Parser;
 const Type = @import("header.zig").Type;
-const Environment = @import("environment.zig").Environment;
 const Section = @import("section.zig").Section;
+const Symbol = @import("symbol.zig").Symbol;
 
 const LoaderError = error{
     DataProcessingFailure,
@@ -40,30 +40,22 @@ const LoaderError = error{
     ChildLoadingFailure,
 };
 
-export fn resolver() void {
-    while (true) {}
-}
-
 pub const Loader = struct {
     // OS should provide pointer to XIP region, it must be copied to RAM if needed
-    pub const FileResolver = *const fn (name: []const u8) ?*anyopaque;
+    pub const FileResolver = *const fn (name: []const u8) ?*const anyopaque;
 
-    allocator: std.mem.Allocator,
     file_resolver: FileResolver,
-    environment: Environment,
 
-    pub fn create(allocator: std.mem.Allocator, environment: Environment, file_resolver: FileResolver) Loader {
+    pub fn create(file_resolver: FileResolver) Loader {
         return .{
-            .allocator = allocator,
-            .environment = environment,
             .file_resolver = file_resolver,
         };
     }
 
-    pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype) !Executable {
+    pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype, allocator: std.mem.Allocator) !Executable {
         stdout.print("[yasld] loading executable from: 0x{x}\n", .{@intFromPtr(module)});
         var executable: Executable = .{
-            .module = Module.init(self.allocator),
+            .module = Module.init(allocator),
         };
         try self.load_module(&executable.module, module, stdout);
         return executable;
@@ -134,9 +126,16 @@ pub const Loader = struct {
     }
 
     fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        var got = module.get_got_plt();
+        var got = module.get_got();
         const text = module.get_text();
         const module_start = @intFromPtr(text.ptr);
+        const maybe_init = self.find_symbol(module, "__start_data");
+        if (maybe_init) |address| {
+            stdout.print("[yasld] Found __start_data at: 0x{x}\n", .{address});
+        } else {
+            stdout.print("[yasld] Can't find symbol '__start_data'\n", .{});
+        }
+
         for (0..got.len) |i| {
             const address = module_start + got[i];
             stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
@@ -144,28 +143,29 @@ pub const Loader = struct {
         }
 
         for (parser.symbol_table_relocations.relocations) |rel| {
-            const maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
+            var maybe_symbol: ?*const Symbol = null;
+            if (rel.is_exported_symbol == 1) {
+                maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
+            } else {
+                maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
+            }
             if (maybe_symbol) |symbol| {
                 const maybe_address = self.find_symbol(module, symbol.name());
                 if (maybe_address) |address| {
-                    stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ rel.index, address });
+                    stdout.print("[yasld] Setting GOT[{d}] to: 0x{x} [{s}], exported: {d}\n", .{ rel.index, address, symbol.name(), rel.is_exported_symbol });
                     got[rel.index] = address;
                 } else {
                     stdout.print("[yasld] Can't find symbol: '{s}'\n", .{symbol.name()});
                     return LoaderError.SymbolNotFound;
                 }
             } else {
-                return LoaderError.SymbolNotFound;
+                stdout.print("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}\n", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
+                // return LoaderError.SymbolNotFound;
             }
         }
     }
 
-    fn find_symbol(self: Loader, module: *Module, name: []const u8) ?usize {
-        // symbols provided by OS have highest priority
-        if (self.environment.find_symbol(name)) |symbol| {
-            return symbol.address;
-        }
-
+    fn find_symbol(_: Loader, module: *Module, name: []const u8) ?usize {
         if (module.find_symbol(name)) |symbol| {
             return symbol;
         }
@@ -182,13 +182,14 @@ pub const Loader = struct {
         }
     }
 
-    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module) !void {
+    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
         const data_memory = module.get_data();
         for (parser.data_relocations.relocations) |rel| {
             const address_to_change: usize = @intFromPtr(data_memory.ptr) + rel.to;
             const target: *usize = @ptrFromInt(address_to_change);
             const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));
             const address_from: usize = base_address_from + rel.from;
+            stdout.print("Patching from: 0x{x} to: 0x{x}\n", .{ address_to_change, address_from });
             target.* = address_from;
         }
     }
@@ -210,10 +211,11 @@ pub const Loader = struct {
 
         const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
         try module.relocate_init(init_ptr[0..header.init_length]);
+        module.process_initializers(stdout);
 
         try self.process_symbol_table_relocations(&parser, module, stdout);
         try self.process_local_relocations(&parser, module);
-        try self.process_data_relocations(&parser, module);
+        try self.process_data_relocations(&parser, module, stdout);
 
         stdout.print("[yasld] GOT loaded at 0x{x}\n", .{@intFromPtr(module.get_got().ptr)});
         stdout.print("[yasld] text loaded at 0x{x}\n", .{@intFromPtr(module.program.?.ptr)});

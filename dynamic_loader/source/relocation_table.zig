@@ -21,7 +21,8 @@
 const Section = @import("section.zig").Section;
 
 pub const SymbolTableRelocation = packed struct {
-    index: u32,
+    is_exported_symbol: u1,
+    index: u31,
     symbol_index: u32,
 
     pub fn next(self: SymbolTableRelocation) *const SymbolTableRelocation {
