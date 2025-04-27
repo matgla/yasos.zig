@@ -63,12 +63,12 @@ pub fn UartDriver(comptime UartType: anytype) type {
         }
 
         fn load(_: *anyopaque) bool {
-            // uart.init(.{
-            //     .baudrate = 115200,
-            // }) catch {
-            //     return false;
-            // };
-            // return true;
+            uart.flush();
+            uart.init(.{
+                .baudrate = 115200,
+            }) catch {
+                return false;
+            };
             return true;
         }
 

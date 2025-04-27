@@ -159,6 +159,10 @@ typedef struct getcwd_context {
   size_t size;
 } getcwd_context;
 
+typedef struct chdir_context {
+  const char *path;
+} chdir_context;
+
 typedef enum SystemCall {
   sys_dynamic_loader_prepare_entry = 1,
   sys_dynamic_loader_process_exit,
@@ -195,6 +199,7 @@ typedef enum SystemCall {
   sys_mmap,
   sys_munmap,
   sys_getcwd,
+  sys_chdir,
   SYSCALL_COUNT,
 } SystemCall;
 

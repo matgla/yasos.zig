@@ -94,10 +94,58 @@ bool is_environment_variable(const char *buffer) {
   return strchr(buffer, '=') != NULL;
 }
 
+int process_change_directory(char *args[]) {
+  if (args[1] == NULL) {
+    printf("cd: missing argument\n");
+    return 0;
+  }
+
+  if (args[1][0] == '/') {
+    // absolute path
+    if (chdir(args[1]) != 0) {
+      printf("cd: %s: No such file or directory\n", args[1]);
+    }
+    return 0;
+  }
+
+  char buf[255];
+  if (getcwd(buf, sizeof(buf)) == NULL) {
+    printf("cd: getcwd failed\n");
+    return 0;
+  }
+
+  if (buf[0])
+    strcat(buf, "/");
+  strcat(buf, args[1]);
+
+  if (chdir(buf) != 0) {
+    printf("cd: %s: No such file or directory\n", args[1]);
+  }
+
+  return 0;
+}
+
+int process_print_current_directory(char *args[]) {
+  char buf[255];
+  if (getcwd(buf, sizeof(buf)) != NULL) {
+    printf("%s\n", buf);
+  } else {
+    printf("getcwd() error\n");
+  }
+  return 0;
+}
+
 int execute_command(const char *command, char *args[]) {
   printf("\n");
   if (strcmp(command, "exit") == 0) {
     return -1;
+  }
+  if (strcmp(command, "cd") == 0) {
+    return process_change_directory(args);
+  }
+
+  if (strcmp(command, "pwd") == 0) {
+    return process_print_current_directory(args);
   }
 
   pid_t pid = vfork();

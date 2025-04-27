@@ -74,7 +74,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         blocks_process: ?*Self = null,
         memory_pool_allocator: ProcessPageAllocator,
         has_own_stack: bool = true,
-        cwd: []const u8 = "/",
+        cwd: []u8,
         node: std.DoublyLinkedList.Node,
 
         pub const State = enum(u2) {
@@ -94,6 +94,9 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             }
             pid_counter += 1;
             const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry, null);
+            const cwd_handle = try allocator.alloc(u8, cwd.len + 1);
+            @memcpy(cwd_handle, cwd);
+            cwd_handle[cwd.len] = 0;
             return Self{
                 .state = State.Ready,
                 .priority = 0,
@@ -108,7 +111,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .blocks_process = null,
                 .memory_pool_allocator = memory_pool,
                 .has_own_stack = true,
-                .cwd = cwd,
+                .cwd = cwd_handle,
                 .node = .{},
             };
         }
@@ -127,6 +130,8 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             const parent_stack = self.stack;
             self.stack = stack;
             self.has_own_stack = false;
+            const cwd_handle = try self._allocator.alloc(u8, self.cwd.len);
+            @memcpy(cwd_handle, self.cwd);
             return Self{
                 .state = State.Ready,
                 .priority = self.priority,
@@ -141,7 +146,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .blocks_process = self.blocks_process,
                 .memory_pool_allocator = memory_pool,
                 .has_own_stack = false,
-                .cwd = self.cwd,
+                .cwd = cwd_handle,
                 .node = .{},
             };
         }
@@ -150,6 +155,17 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             self.memory_pool_allocator.std_allocator().free(self.stack);
             self.memory_pool_allocator.release_pages();
             self.fds.deinit();
+            self._allocator.free(self.cwd);
+        }
+
+        pub fn change_directory(self: *Self, path: []const u8) !void {
+            const cwd_handle = try std.fs.path.resolvePosix(self._allocator, &.{path});
+            self._allocator.free(self.cwd);
+            self.cwd = cwd_handle;
+        }
+
+        pub fn get_current_directory(self: Self) []const u8 {
+            return self.cwd;
         }
 
         pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize) void {

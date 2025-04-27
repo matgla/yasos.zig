@@ -40,7 +40,6 @@ const MallocAllocator = struct {
         std.debug.assert(len > 0);
         const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
 
-        log.print("malloc alloc: {d}, {*}\n", .{ len, ptr });
         return ptr;
     }
 
@@ -77,7 +76,6 @@ const MallocAllocator = struct {
     ) void {
         _ = log2_buf_align;
         _ = return_address;
-        log.print("malloc free: {*}:{d}\n", .{ buf.ptr, buf.len });
         c.free(buf.ptr);
     }
 };

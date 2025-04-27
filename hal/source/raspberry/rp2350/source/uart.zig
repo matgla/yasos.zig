@@ -40,59 +40,53 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             uart.gpio_set_function(@intCast(pins.rx.?), uart.GPIO_FUNC_UART);
         }
 
-        fn uart_is_writable(_: Self) bool {
+        fn is_writable(_: Self) bool {
             const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
             const derived_ptr = &uart_hw.*.fr;
             return (derived_ptr.* & uart.UART_UARTFR_TXFF_BITS) == 0;
         }
 
-        fn uart_is_readable(_: Self) bool {
+        fn is_readable(_: Self) bool {
             const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
             const derived_ptr = &uart_hw.*.fr;
             return (derived_ptr.* & uart.UART_UARTFR_RXFE_BITS) == 0;
         }
 
-        fn uart_is_busy(_: Self) bool {
+        pub fn getc(self: Self) !u8 {
             const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
-            const derived_ptr = &uart_hw.*.fr;
-            return (derived_ptr.* & uart.UART_UARTFR_BUSY_BITS) != 0;
-        }
-
-        fn wait_for_uart_writable(self: Self) void {
-            while (!self.uart_is_writable()) {}
-        }
-
-        fn wait_for_uart_readable(self: Self) void {
-            while (!self.uart_is_readable()) {}
-        }
-
-        fn wait_tx(self: Self) void {
-            while (self.uart_is_busy()) {}
+            const derived_ptr = &uart_hw.*.dr;
+            while (!self.is_readable()) {}
+            return @intCast(derived_ptr.*);
         }
 
         pub fn write(self: Self, data: []const u8) !usize {
+            const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
+            const derived_ptr = &uart_hw.*.dr;
             for (data) |byte| {
-                const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
-                std.mem.doNotOptimizeAway(self.wait_for_uart_writable());
-                const derived_ptr = &uart_hw.*.dr;
+                while (!self.is_writable()) {}
                 derived_ptr.* = byte;
             }
-            self.wait_tx();
             return data.len;
         }
 
-        pub fn read(self: Self, buffer: []u8) usize {
+        pub fn read(self: Self, buffer: []u8) !usize {
             for (buffer) |*byte| {
                 const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
-                std.mem.doNotOptimizeAway(self.wait_for_uart_readable());
+                while (!self.is_readable()) {}
                 const derived_ptr = &uart_hw.*.dr;
                 byte.* = @intCast(derived_ptr.*);
             }
             return buffer.len;
         }
 
-        pub fn getc(_: Self) u8 {
-            return uart.uart_getc(Register);
+        pub fn flush(self: Self) void {
+            const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
+            const derived_ptr = &uart_hw.*.fr;
+            while ((derived_ptr.* & uart.UART_UARTFR_BUSY_BITS) != 0) {}
+            while (self.is_readable()) {
+                const dptr = &uart_hw.*.dr;
+                _ = dptr.*;
+            }
         }
 
         fn get_register_address(comptime id: u32) *uart.uart_inst_t {

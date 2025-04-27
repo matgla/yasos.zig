@@ -20,7 +20,7 @@ build/ls.o: ls.c prepare
 build/ls.elf: build/ls.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
-install: build/ls.elf
+install: build/ls.elf build/cd.elf
 	mkdir -p $(BINDIR)
 	cp build/ls.elf $(BINDIR)
 

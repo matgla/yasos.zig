@@ -233,6 +233,28 @@ pub fn _getdents(fd: c_int, dirp: *anyopaque, count: usize) isize {
     return 0;
 }
 
+pub fn _chdir(path: *const c_char) c_int {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(path)));
+        if (path_slice.len == 0) {
+            return -1;
+        }
+        const maybe_file = fs.ivfs().get(path_slice);
+        if (maybe_file) |file| {
+            defer file.destroy();
+            if (file.filetype() == FileType.Directory) {
+                process.change_directory(path_slice) catch |err| {
+                    log.print("chdir: failed to change directory: {s}\n", .{@errorName(err)});
+                    return -1;
+                };
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
 extern var end: u8;
 extern var __heap_limit__: u8;
 var heap_end: *u8 = &end;
@@ -241,10 +263,6 @@ export fn _sbrk(incr: usize) *allowzero anyopaque {
     const prev_heap_end: *u8 = heap_end;
     const next_heap_end: *u8 = @ptrFromInt(@intFromPtr(heap_end) + incr);
 
-    const current = (@intFromPtr(next_heap_end) - @intFromPtr(&end)) / 1024;
-    const left = (@intFromPtr(&__heap_limit__) - @intFromPtr(next_heap_end)) / 1024;
-    log.print("sbrk, current size: {d}K, left: {d}K, incr: {d}\n", .{ current, left, incr });
-    log.print("new heap pointer: {*}\n", .{next_heap_end});
     if (@intFromPtr(next_heap_end) >= @intFromPtr(&__heap_limit__)) {
         return @ptrFromInt(0);
     }

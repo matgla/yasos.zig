@@ -78,9 +78,12 @@ pub fn UartFile(comptime UartType: anytype) type {
         pub fn read(ctx: *anyopaque, buffer: []u8) isize {
             const self: *const Self = @ptrCast(@alignCast(ctx));
             var index: usize = 0;
-            var ch: [1]u8 = .{1};
+            var ch: [1]u8 = .{0};
             while (index < buffer.len) {
-                if (uart.read(ch[0..1]) == 0) {
+                const result = Self.uart.read(ch[0..1]) catch {
+                    continue;
+                };
+                if (result == 0) {
                     return @intCast(index);
                 }
 
@@ -116,7 +119,6 @@ pub fn UartFile(comptime UartType: anytype) type {
         }
 
         pub fn sync(_: *anyopaque) i32 {
-            // always in sync
             return 0;
         }
 

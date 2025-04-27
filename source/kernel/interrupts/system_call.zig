@@ -154,8 +154,10 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
             const result: *volatile *allowzero c_char = @ptrCast(@alignCast(out));
             if (process_manager.instance.get_current_process()) |current_process| {
-                std.mem.copyForwards(u8, context.buf[0..context.size], current_process.cwd);
-                var last_index = current_process.cwd.len;
+                const cwd = current_process.get_current_directory();
+                const cwd_len = @min(cwd.len, context.size);
+                std.mem.copyForwards(u8, context.buf[0..cwd_len], cwd[0..cwd_len]);
+                var last_index = cwd.len;
                 if (last_index > context.size) {
                     last_index = context.size - 1;
                 }
@@ -174,6 +176,11 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             } else {
                 result.* = syscall._getdents(context.fd, context.dirp.?, context.count);
             }
+        },
+        c.sys_chdir => {
+            const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._chdir(context.path.?);
         },
         else => {
             log.print("Unhandled system call id: {d}\n", .{number});
