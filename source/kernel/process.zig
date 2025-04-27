@@ -20,54 +20,83 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("sys/types.h");
-});
+const c = @import("../libc_imports.zig").c;
+const log = &@import("../log/kernel_log.zig").kernel_log;
 
 const config = @import("config");
 const arch_process = @import("../arch/arch.zig").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
+const IFile = @import("fs/ifile.zig").IFile;
+const process_memory_pool = @import("process_memory_pool.zig");
+const ProcessPageAllocator = @import("malloc.zig").ProcessPageAllocator;
 
 var pid_counter: u32 = 0;
 
-fn exit_handler() void {
-    while (true) {}
-}
-
 pub fn init() void {
     arch_process.init();
+}
+
+inline fn get_psp() usize {
+    return asm volatile (
+        \\ mrs %[ret], psp 
+        : [ret] "=r" (-> usize),
+    );
+}
+
+extern fn context_switch_return_pop_single() void;
+
+fn exit_handler() void {
+    @panic("Process exited from unexpected path");
 }
 
 pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
         const stack_marker: u32 = 0xdeadbeef;
+        const FileHandle = struct {
+            file: IFile,
+            path: [config.fs.max_path_length]u8,
+            diriter: ?IFile,
+        };
 
         state: State,
         priority: u8,
         impl: implementation,
         pid: u32,
         stack: []align(8) u8,
-        stack_position: *const u8,
+        stack_position: *u8,
         _allocator: std.mem.Allocator,
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
+        fds: std.AutoHashMap(u16, FileHandle),
+        blocked_by_process: ?*Self = null,
+        blocks_process: ?*Self = null,
+        memory_pool_allocator: ProcessPageAllocator,
+        has_own_stack: bool = true,
+        cwd: []u8,
+        node: std.DoublyLinkedList.Node,
 
         pub const State = enum(u2) {
             Ready,
             Blocked,
             Running,
-            Killed,
+            Terminated,
         };
 
-        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype) !Self {
-            const stack: []align(8) u8 = try allocator.alignedAlloc(u8, 8, stack_size);
+        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype, cwd: []const u8) !Self {
+            pid_counter += 1;
+            var memory_pool = ProcessPageAllocator.create(pid_counter);
+            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, .@"8", stack_size);
+
             if (comptime config.process.use_stack_overflow_detection) {
                 @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
             pid_counter += 1;
-            const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry);
+            const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry, null);
+            const cwd_handle = try allocator.alloc(u8, cwd.len + 1);
+            @memcpy(cwd_handle, cwd);
+            cwd_handle[cwd.len] = 0;
             return Self{
                 .state = State.Ready,
                 .priority = 0,
@@ -77,11 +106,78 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .stack_position = stack_position,
                 ._allocator = allocator,
                 .current_core = 0,
+                .fds = std.AutoHashMap(u16, FileHandle).init(allocator),
+                .blocked_by_process = null,
+                .blocks_process = null,
+                .memory_pool_allocator = memory_pool,
+                .has_own_stack = true,
+                .cwd = cwd_handle,
+                .node = .{},
             };
         }
 
-        pub fn deinit(self: Self) void {
-            self._allocator.free(self.stack);
+        // this is full copy of the process, so it shares the same stack
+        // stack relocation impossible without MMU
+        pub fn vfork(self: *Self, lr: usize, result: usize) !Self {
+            // allocate stack copy
+            pid_counter += 1;
+            var memory_pool = ProcessPageAllocator.create(pid_counter);
+            const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, .@"8", self.stack.len);
+
+            const stack_position = self.stack_position;
+            self.stack_position = arch_process.dump_registers_on_stack(result, pid_counter, lr, @intFromPtr(&context_switch_return_pop_single));
+            @memcpy(stack, self.stack);
+            const parent_stack = self.stack;
+            self.stack = stack;
+            self.has_own_stack = false;
+            const cwd_handle = try self._allocator.alloc(u8, self.cwd.len);
+            @memcpy(cwd_handle, self.cwd);
+            return Self{
+                .state = State.Ready,
+                .priority = self.priority,
+                .impl = .{},
+                .pid = pid_counter,
+                .stack = parent_stack,
+                .stack_position = stack_position,
+                ._allocator = self._allocator,
+                .current_core = 0,
+                .fds = try self.fds.clone(),
+                .blocked_by_process = self.blocked_by_process,
+                .blocks_process = self.blocks_process,
+                .memory_pool_allocator = memory_pool,
+                .has_own_stack = false,
+                .cwd = cwd_handle,
+                .node = .{},
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.memory_pool_allocator.std_allocator().free(self.stack);
+            self.memory_pool_allocator.release_pages();
+            self.fds.deinit();
+            self._allocator.free(self.cwd);
+        }
+
+        pub fn change_directory(self: *Self, path: []const u8) !void {
+            const cwd_handle = try std.fs.path.resolvePosix(self._allocator, &.{path});
+            self._allocator.free(self.cwd);
+            self.cwd = cwd_handle;
+        }
+
+        pub fn get_current_directory(self: Self) []const u8 {
+            return self.cwd;
+        }
+
+        pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize) void {
+            if (comptime config.process.use_stack_overflow_detection) {
+                @memcpy(self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
+            }
+            const args = [_]usize{
+                argc,
+                argv,
+                symbol,
+            };
+            self.stack_position = implementation.prepare_process_stack(self.stack, &exit_handler, process_entry, args[0..3]);
         }
 
         pub fn validate_stack(self: Self) bool {
@@ -102,7 +198,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             return self.stack_position;
         }
 
-        pub fn set_stack_pointer(self: *Self, ptr: *const u8) void {
+        pub fn set_stack_pointer(self: *Self, ptr: *u8) void {
             self.stack_position = ptr;
         }
 
@@ -115,7 +211,60 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             self.state = Process.State.Blocked;
         }
 
-        pub fn is_blocked_by(self: *Self, semaphore: *const Semaphore) bool {
+        pub fn wait_for_process(self: *Self, process: *Self) !void {
+            self.state = Process.State.Blocked;
+            self.blocked_by_process = process;
+            process.blocks_process = self;
+        }
+
+        // swap stack with the process that is waiting for us, only if was swapped before
+        pub fn restore_stack(self: *Self) void {
+            if (self.blocks_process) |p| {
+                if (!p.has_own_stack) {
+                    @memcpy(self.stack, p.stack);
+                    const stack = p.stack;
+                    p.stack = self.stack;
+                    self.stack = stack;
+                    p.has_own_stack = true;
+                    self.has_own_stack = true;
+                }
+            }
+        }
+
+        pub fn unblock_parent(self: *Self) void {
+            if (self.blocks_process) |p| {
+                p.blocked_by_process = null;
+                // stack must be restored when parent is unblocked
+                self.restore_stack();
+                p.reevaluate_state();
+                self.blocks_process = null;
+            }
+        }
+
+        pub fn reevaluate_state(self: *Self) void {
+            if (self.waiting_for != null) {
+                self.state = Process.State.Blocked;
+                return;
+            }
+            if (self.blocked_by_process != null) {
+                self.state = Process.State.Blocked;
+                return;
+            }
+            self.state = Process.State.Ready;
+        }
+
+        pub fn unblock_process(self: *Self, process: *const Self) void {
+            for (self.blocked_by) |node| {
+                if (node.data == process) {
+                    self.blocked_by.remove(node);
+
+                    break;
+                }
+            }
+            self.blocked_by.remove(process);
+        }
+
+        pub fn is_blocked_by(self: Self, semaphore: *const Semaphore) bool {
             if (self.waiting_for) |blocker| {
                 return blocker == semaphore;
             }
@@ -129,6 +278,42 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
 
         pub fn set_core(self: *Self, coreid: u8) void {
             self.current_core = coreid;
+        }
+
+        pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, _: i32, _: i32, _: i32) !*anyopaque {
+            if (addr == null) {
+                var number_of_pages = @divTrunc(length, process_memory_pool.ProcessMemoryPool.page_size);
+                if (@rem(length, process_memory_pool.ProcessMemoryPool.page_size) != 0) {
+                    number_of_pages += 1;
+                }
+                const maybe_address = process_memory_pool.instance.allocate_pages(number_of_pages, self.pid);
+                if (maybe_address) |address| {
+                    return address.ptr;
+                }
+            }
+            return std.posix.MMapError.OutOfMemory;
+        }
+
+        pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
+            if (maybe_address) |addr| {
+                var number_of_pages = @divTrunc(length, process_memory_pool.ProcessMemoryPool.page_size);
+                if (@rem(length, process_memory_pool.ProcessMemoryPool.page_size) != 0) {
+                    number_of_pages += 1;
+                }
+
+                process_memory_pool.instance.free_pages(addr, number_of_pages, self.pid);
+            }
+        }
+
+        pub fn get_free_fd(self: *Self) u16 {
+            var fd: u16 = 0;
+            while (true) {
+                if (self.fds.get(fd) == null) {
+                    break;
+                }
+                fd += 1;
+            }
+            return fd;
         }
     };
 }

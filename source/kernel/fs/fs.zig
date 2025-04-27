@@ -21,3 +21,6 @@
 pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
 pub const IFile = @import("ifile.zig").IFile;
 pub const VirtualFileSystem = @import("vfs.zig").VirtualFileSystem;
+pub const vfs_init = @import("vfs.zig").vfs_init;
+pub const vfs = @import("vfs.zig").vfs;
+pub const ivfs = @import("vfs.zig").ivfs;

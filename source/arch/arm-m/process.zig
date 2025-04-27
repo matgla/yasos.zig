@@ -100,11 +100,11 @@ pub const SoftwareStoredRegisters = extern struct {
 
 pub fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
     return .{
-        .r0 = 0xdeadbeef,
-        .r1 = 0xdeadbeef,
-        .r2 = 0xdeadbeef,
-        .r3 = 0xdeadbeef,
-        .r12 = 0xdeadbeef,
+        .r0 = 0,
+        .r1 = 0,
+        .r2 = 0,
+        .r3 = 0,
+        .r12 = 0,
         .lr = @as(u32, @intCast(@intFromPtr(exit_handler))),
         .pc = @as(u32, @intCast(@intFromPtr(process_entry))),
         .psr = 0x21000000,
@@ -162,8 +162,22 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
     };
 }
 
-pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype) *const u8 {
-    const hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
+pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize) *u8 {
+    var hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
+    if (maybe_args) |args| {
+        if (args.len >= 1) {
+            hardware_pushed_registers.r0 = @intCast(args[0]);
+        }
+        if (args.len >= 2) {
+            hardware_pushed_registers.r1 = @intCast(args[1]);
+        }
+        if (args.len >= 3) {
+            hardware_pushed_registers.r2 = @intCast(args[2]);
+        }
+        if (args.len >= 4) {
+            hardware_pushed_registers.r3 = @intCast(args[3]);
+        }
+    }
     // const software_pushed_registers = create_default_software_registers();
     const stack_start: usize = if (stack.len % 8 == 0) stack.len else stack.len - stack.len % 8;
     const hw_registers_size = @sizeOf(HardwareStoredRegisters);
@@ -188,6 +202,12 @@ pub fn initialize_context_switching() void {
     hal.irq.set_priority(.systick, 0x00);
     hal.irq.set_priority(.supervisor_call, 0xfe);
     hal.irq.set_priority(.pendsv, 0xff);
+}
+
+extern fn context_switch_push_registers_to_stack(result_ptr: usize, pid: usize, lr: usize, restore: usize) *u8;
+
+pub fn dump_registers_on_stack(result_ptr: usize, ret: usize, lr: usize, restore: usize) *u8 {
+    return context_switch_push_registers_to_stack(result_ptr, ret, lr, restore);
 }
 
 fn test_entry() void {}

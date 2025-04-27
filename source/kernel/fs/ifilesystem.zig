@@ -31,9 +31,9 @@ pub const IFileSystem = struct {
         mkdir: *const fn (ctx: *anyopaque, path: []const u8, mode: i32) i32,
         remove: *const fn (ctx: *anyopaque, path: []const u8) i32,
         name: *const fn (ctx: *const anyopaque) []const u8,
-        traverse: *const fn (ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32,
+        // callback must returns true if traverse should continue or false if should break
+        traverse: *const fn (ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32,
         get: *const fn (ctx: *anyopaque, path: []const u8) ?IFile,
-
         has_path: *const fn (ctx: *anyopaque, path: []const u8) bool,
     };
 
@@ -61,8 +61,8 @@ pub const IFileSystem = struct {
         return self.vtable.name(self.ptr);
     }
 
-    pub fn traverse(self: IFileSystem, path: []const u8, callback: *const fn (file: *IFile) void) i32 {
-        return self.vtable.traverse(self.ptr, path, callback);
+    pub fn traverse(self: IFileSystem, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
+        return self.vtable.traverse(self.ptr, path, callback, user_context);
     }
 
     pub fn get(self: IFileSystem, path: []const u8) ?IFile {

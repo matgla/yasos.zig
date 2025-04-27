@@ -20,10 +20,7 @@
 
 ///! This module provides file handler implementation for ramfs filesystem
 const std = @import("std");
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("../../libc_imports.zig").c;
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
@@ -44,18 +41,21 @@ pub const RamFsFile = struct {
         .ioctl = ioctl,
         .stat = stat,
         .filetype = filetype,
+        .dupe = dupe,
+        .destroy = destroy,
     };
 
     /// Pointer to data instance, data is kept by filesystem
-    data: *RamFsData,
-    allocator: ?std.mem.Allocator = null,
+    _data: *RamFsData,
+    _allocator: std.mem.Allocator,
 
     /// Current position in file
-    position: usize = 0,
+    _position: usize = 0,
 
-    pub fn create(data: *RamFsData) RamFsFile {
+    pub fn create(data: *RamFsData, allocator: std.mem.Allocator) RamFsFile {
         return .{
-            .data = data,
+            ._data = data,
+            ._allocator = allocator,
         };
     }
 
@@ -68,26 +68,26 @@ pub const RamFsFile = struct {
 
     pub fn read(ctx: *anyopaque, buffer: []u8) isize {
         const self: *RamFsFile = @ptrCast(@alignCast(ctx));
-        if (self.position >= self.data.data.items.len) {
+        if (self._position >= self._data.data.items.len) {
             return 0;
         }
-        const length = @min(self.data.data.items.len - self.position, buffer.len);
-        @memcpy(buffer[0..length], self.data.data.items[self.position .. self.position + length]);
-        self.position += length;
+        const length = @min(self._data.data.items.len - self._position, buffer.len);
+        @memcpy(buffer[0..length], self._data.data.items[self._position .. self._position + length]);
+        self._position += length;
         return @intCast(length);
     }
 
     pub fn write(ctx: *anyopaque, data: []const u8) isize {
         const self: *RamFsFile = @ptrCast(@alignCast(ctx));
-        if (self.data.data.items.len < data.len + self.position) {
-            self.data.data.resize(self.position + data.len) catch {
+        if (self._data.data.items.len < data.len + self._position) {
+            self._data.data.resize(self._position + data.len) catch {
                 return 0;
             };
         }
-        self.data.data.replaceRange(self.position, data.len, data) catch {
+        self._data.data.replaceRange(self._position, data.len, data) catch {
             return 0;
         };
-        self.position += data.len;
+        self._position += data.len;
         return @intCast(data.len);
     }
 
@@ -98,22 +98,22 @@ pub const RamFsFile = struct {
                 if (offset < 0) {
                     return -1;
                 }
-                self.position = @intCast(offset);
+                self._position = @intCast(offset);
             },
             c.SEEK_END => {
-                if (self.data.data.items.len >= offset) {
-                    self.position = self.data.data.items.len - @as(usize, @intCast(offset));
+                if (self._data.data.items.len >= offset) {
+                    self._position = self._data.data.items.len - @as(usize, @intCast(offset));
                 } else {
                     // set errno
                     return -1;
                 }
             },
             c.SEEK_CUR => {
-                const new_position = @as(c.off_t, @intCast(self.position)) + offset;
+                const new_position = @as(c.off_t, @intCast(self._position)) + offset;
                 if (new_position < 0) {
                     return -1;
                 }
-                self.position = @intCast(new_position);
+                self._position = @intCast(new_position);
             },
             else => return -1,
         }
@@ -122,10 +122,15 @@ pub const RamFsFile = struct {
 
     pub fn close(ctx: *anyopaque) i32 {
         const self: *RamFsFile = @ptrCast(@alignCast(ctx));
-        if (self.allocator) |allocator| {
-            allocator.destroy(self);
-        }
+        self._allocator.destroy(self);
         return 0;
+    }
+
+    pub fn dupe(ctx: *anyopaque) ?IFile {
+        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+        const new_file = self._allocator.create(RamFsFile) catch return null;
+        new_file.* = self.*;
+        return new_file.ifile();
     }
 
     pub fn sync(_: *anyopaque) i32 {
@@ -135,20 +140,20 @@ pub const RamFsFile = struct {
 
     pub fn tell(ctx: *const anyopaque) c.off_t {
         const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
-        return @intCast(self.position);
+        return @intCast(self._position);
     }
 
     pub fn size(ctx: *const anyopaque) isize {
         const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
-        return @intCast(@sizeOf(RamFsData) + self.data.data.items.len);
+        return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
     pub fn name(ctx: *const anyopaque) []const u8 {
         const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
-        return self.data.name();
+        return self._data.name();
     }
 
-    pub fn ioctl(_: *anyopaque, _: u32, _: *const anyopaque) i32 {
+    pub fn ioctl(_: *anyopaque, _: i32, _: ?*const anyopaque) i32 {
         return 0;
     }
 
@@ -161,14 +166,19 @@ pub const RamFsFile = struct {
         buf.st_uid = 0;
         buf.st_gid = 0;
         buf.st_rdev = 0;
-        buf.st_size = @intCast(self.data.data.items.len + @sizeOf(RamFsData));
+        buf.st_size = @intCast(self._data.data.items.len + @sizeOf(RamFsData));
         buf.st_blksize = 1;
         buf.st_blocks = 1;
     }
 
     pub fn filetype(ctx: *const anyopaque) FileType {
         const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
-        return self.data.type;
+        return self._data.type;
+    }
+
+    pub fn destroy(ctx: *anyopaque) void {
+        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+        self._allocator.destroy(self);
     }
 };
 

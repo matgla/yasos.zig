@@ -53,7 +53,7 @@ class RelocationSet:
         })
         self.index += 1
 
-    def add_symbol_table_relocation(self, relocation, got_start):
+    def add_symbol_table_relocation(self, relocation, got_start, is_exported_symbol):
         if self.__get_relocation(relocation["symbol_name"]) != None:
             self.omitted_relocations.append({
                 "name": relocation["symbol_name"],
@@ -61,6 +61,7 @@ class RelocationSet:
                 "index": self.__get_relocation(relocation["symbol_name"])["index"],
                 "symbol_value": relocation["symbol_value"],
                 "type": "symbol_table",
+                "is_exported_symbol": is_exported_symbol,
             })
             return
 
@@ -72,6 +73,7 @@ class RelocationSet:
             ),  # self.__create_index(relocation["symbol_name"]),
             "symbol_value": relocation["symbol_value"],
             "type": "symbol_table",
+            "is_exported_symbol": is_exported_symbol,
         })
 
     def add_data_relocation(self, relocation, index, offset):

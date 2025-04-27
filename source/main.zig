@@ -29,6 +29,7 @@ const config = @import("config");
 const hal = @import("hal");
 
 var log = &@import("log/kernel_log.zig").kernel_log;
+var null_log = &@import("log/kernel_log.zig").null_log;
 
 const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
 
@@ -44,11 +45,22 @@ const time = @import("kernel/time.zig");
 const Mutex = @import("kernel/mutex.zig").Mutex;
 
 const yasld = @import("yasld");
+const dynamic_loader = @import("kernel/modules.zig");
 
 const IFile = @import("kernel/fs/fs.zig").IFile;
+const IoctlCommonCommands = @import("kernel/fs/ifile.zig").IoctlCommonCommands;
+const FileMemoryMapAttributes = @import("kernel/fs/ifile.zig").FileMemoryMapAttributes;
+
 const fs = @import("kernel/fs/fs.zig");
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
+
+const DriverFs = @import("kernel/drivers/driverfs.zig").DriverFs;
+
+const UartDriver = @import("kernel/drivers/uart/uart_driver.zig").UartDriver;
+
+const process_memory_pool = @import("kernel/process_memory_pool.zig");
+const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
 
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
@@ -82,28 +94,48 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
 
 var mutex: Mutex = .{};
 
-export fn some_other_process() void {
-    while (true) {
-        time.sleep_ms(50);
-        mutex.lock();
-        log.write("Other process working\n");
-        process_manager.instance.dump_processes(log);
-        mutex.unlock();
+var module: ?*anyopaque = null;
+
+const ModuleContext = struct {
+    path: []const u8,
+    address: ?*const anyopaque,
+};
+
+fn traverse_directory(file: *IFile, context: *anyopaque) bool {
+    var module_context: *ModuleContext = @ptrCast(@alignCast(context));
+    if (std.mem.eql(u8, module_context.path, file.name())) {
+        var attr: FileMemoryMapAttributes = .{
+            .is_memory_mapped = false,
+            .mapped_address_r = null,
+            .mapped_address_w = null,
+        };
+        _ = file.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        if (attr.mapped_address_r) |address| {
+            module_context.address = address;
+            return false;
+        }
     }
-    log.write("Died\n");
+    return true;
 }
 
-fn file_resolver(_: []const u8) ?*anyopaque {
+fn file_resolver(name: []const u8) ?*const anyopaque {
+    log.print("searching for dependency: {s}\n", .{name});
+    var context: ModuleContext = .{
+        .path = name,
+        .address = null,
+    };
+    _ = fs.ivfs().traverse("/lib", traverse_directory, &context);
+    if (context.address) |address| {
+        return address;
+    }
     return null;
 }
 
-fn traverse_directory(file: *IFile) void {
-    log.print("file: {s}\n", .{file.name()});
-}
-
 export fn kernel_process() void {
+    log.write(" - initializing dynamic loader\n");
+    dynamic_loader.init(malloc_allocator);
     log.write(" - creating virtual file system\n");
-    var vfs_instance = fs.VirtualFileSystem.init(malloc_allocator);
+    fs.vfs_init(malloc_allocator);
     const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..0x100000]);
 
     if (maybe_romfs == null) {
@@ -116,65 +148,123 @@ export fn kernel_process() void {
         log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
         return;
     };
-    vfs_instance.mount_filesystem("/", romfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+
+    fs.vfs().mount_filesystem("/", romfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.ifilesystem().name(), @errorName(err) });
         return;
     };
-    var vfs = vfs_instance.ifilesystem();
-    _ = vfs.traverse("/", traverse_directory);
-    log.write(" - loading yasld\n");
-    const symbols = [_]yasld.SymbolEntry{
-        .{ .address = @intFromPtr(&c.puts), .name = "puts" },
-    };
-    const environment = yasld.Environment{
-        .symbols = &symbols,
-    };
-    const loader: yasld.Loader = yasld.Loader.create(malloc_allocator, environment, &file_resolver);
 
-    const executable_memory: *anyopaque = @ptrFromInt(0x10080000);
-    const maybeExecutable: ?yasld.Executable = loader.load_executable(
-        executable_memory,
-        log,
-    ) catch |err| blk: {
-        log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
-        break :blk null;
+    fs.vfs().mount_filesystem("/tmp", ramfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+        return;
     };
 
-    if (maybeExecutable) |executable| {
-        const args: []const [*:0]const u8 = &.{
-            "arg1",
-            "arg2",
-            "arg3",
-            "10",
-            "12",
-        };
-        _ = executable.main(args.ptr, args.len) catch |err| {
-            log.print("Cannot execute main: {s}\n", .{@errorName(err)});
-        };
+    const driverfs = DriverFs.new(malloc_allocator) catch |err| {
+        log.print("Can't create driverfs: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
+        return;
+    };
+
+    log.write(" - register drivers\n");
+    var uart_driver = UartDriver(board.uart.uart0).new(malloc_allocator) catch |err| {
+        log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
+        return;
+    };
+    driverfs.append(uart_driver.idriver()) catch |err| {
+        log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
+        return;
+    };
+    if (!driverfs.load_all()) {
+        log.print("Can't load all drivers\n", .{});
+        return;
     }
+
+    const maybe_process = process_manager.instance.get_current_process();
+    var pid: u32 = 0;
+    if (maybe_process) |p| {
+        log.write("- setting default streams\n");
+        const maybe_uart_file = uart_driver.idriver().ifile();
+        if (maybe_uart_file) |uart_file| {
+            p.fds.put(0, .{
+                .file = uart_file,
+                .path = blk: {
+                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                    const value = "/dev/stdin";
+                    std.mem.copyForwards(u8, path[0..value.len], value);
+                    break :blk path;
+                },
+                .diriter = null,
+            }) catch {
+                log.write("Can't register: stdin\n");
+            };
+            p.fds.put(1, .{
+                .file = uart_file,
+                .path = blk: {
+                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                    const value = "/dev/stdout";
+                    std.mem.copyForwards(u8, path[0..value.len], value);
+                    break :blk path;
+                },
+                .diriter = null,
+            }) catch {
+                log.write("Can't register: stdout\n");
+            };
+            p.fds.put(2, .{
+                .file = uart_file,
+                .path = blk: {
+                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                    const value = "/dev/stderr";
+                    std.mem.copyForwards(u8, path[0..value.len], value);
+                    break :blk path;
+                },
+                .diriter = null,
+            }) catch {
+                log.write("Can't register: stderr\n");
+            };
+        }
+        pid = p.pid;
+    } else {
+        @panic("Process unavailable but called from it");
+    }
+
+    log.write(" - loading yasld\n");
+
+    var process_memory_allocator = ProcessPageAllocator.create(maybe_process.?.pid);
+    const sh = dynamic_loader.load_executable("/bin/sh", process_memory_allocator.std_allocator(), pid) catch |err| {
+        log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    const args: [][]u8 = &.{};
+    _ = sh.main(@ptrCast(args.ptr), args.len) catch |err| {
+        log.print("Cannot execute main: {s}\n", .{@errorName(err)});
+    };
     while (true) {
         time.sleep_ms(20);
-        // mutex.lock();
-        // log.write("Kernel is running\n");
-        // process_manager.instance.dump_processes(log);
-        // mutex.unlock();
     }
 }
 
 pub export fn main() void {
     initialize_board();
-    log.print("-----------------------------------------\n", .{});
+    log.print("\n-----------------------------------------\n", .{});
     log.print("|               YASOS                   |\n", .{});
     DumpHardware.print_hardware();
 
-    log.write(" - initializing process manager\n");
-    log.write(" - scheduler: round robin\n");
+    log.write(" - initializing process memory pool\n");
+    process_memory_pool.init();
 
+    log.write(" - initializing process manager\n");
+    process_manager.initialize_process_manager(malloc_allocator);
+
+    log.write(" - scheduler: round robin\n");
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
     });
     process.init();
-
-    spawn.root_process(malloc_allocator, &kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
+    spawn.root_process(&kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
     while (true) {}
 }

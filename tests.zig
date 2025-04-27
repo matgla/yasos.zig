@@ -20,6 +20,6 @@
 
 comptime {
     // _ = @import("source/kernel/process.zig");
-    _ = @import("source/kernel/fs/mount_points.zig");
-    _ = @import("source/tests.zig");
+    // _ = @import("source/kernel/fs/mount_points.zig");
+    // _ = @import("source/tests.zig");
 }

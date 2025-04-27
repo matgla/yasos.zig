@@ -18,10 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("../../libc_imports.zig").c;
 
 pub const FileType = enum(u8) {
     HardLink = 0,
@@ -32,6 +29,16 @@ pub const FileType = enum(u8) {
     CharDevice = 5,
     Socket = 6,
     Fifo = 7,
+};
+
+pub const IoctlCommonCommands = enum(u32) {
+    GetMemoryMappingStatus,
+};
+
+pub const FileMemoryMapAttributes = extern struct {
+    is_memory_mapped: bool,
+    mapped_address_r: ?*const anyopaque,
+    mapped_address_w: ?*anyopaque,
 };
 
 pub const IFile = struct {
@@ -49,9 +56,11 @@ pub const IFile = struct {
         tell: *const fn (ctx: *anyopaque) c.off_t,
         size: *const fn (ctx: *anyopaque) isize,
         name: *const fn (ctx: *anyopaque) []const u8,
-        ioctl: *const fn (ctx: *anyopaque, cmd: u32, arg: *anyopaque) i32,
-        stat: *const fn (ctx: *anyopaque, data: *c.struct_stat) void,
+        ioctl: *const fn (ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32,
+        stat: *const fn (ctx: *const anyopaque, data: *c.struct_stat) void,
         filetype: *const fn (ctx: *const anyopaque) FileType,
+        dupe: *const fn (ctx: *anyopaque) ?IFile,
+        destroy: *const fn (ctx: *anyopaque) void, // destroy object, but do not close
     };
 
     pub fn read(self: IFile, buf: []u8) isize {
@@ -86,7 +95,7 @@ pub const IFile = struct {
         return self.vtable.name(self.ptr);
     }
 
-    pub fn ioctl(self: IFile, cmd: u32, arg: *anyopaque) i32 {
+    pub fn ioctl(self: IFile, cmd: i32, arg: ?*anyopaque) i32 {
         return self.vtable.ioctl(self.ptr, cmd, arg);
     }
 
@@ -96,5 +105,13 @@ pub const IFile = struct {
 
     pub fn filetype(self: IFile) FileType {
         return self.vtable.filetype(self.ptr);
+    }
+
+    pub fn dupe(self: IFile) ?IFile {
+        return self.vtable.dupe(self.ptr);
+    }
+
+    pub fn destroy(self: IFile) void {
+        return self.vtable.destroy(self.ptr);
     }
 };

@@ -1,9 +1,15 @@
+#include "../../../../source/kernel/syscalls.h"
+
 .thumb 
 .syntax unified 
 .cpu cortex-m33
 
 .text 
 
+
+// wrapper can't touch stack or registers
+// otherwise destination function may get 
+// destroyed data
 {% for name in names %}
 
 .global {{ name }}_yasld_wrapper
@@ -19,23 +25,21 @@
   // stored arguments are link register, r4, r9, 
   // r8 dummy to fill alignment requirement
   mov r0, pc 
-  mov r1, r9
-  push {r0, r1, r4, lr}
-  movs r0, #0xa
+  push {r0, r9, r10, lr}
+  movs r0, =sys_dynamic_loader_prepare_entry
   mov r1, sp
   svc #0
 
   // retrieve r9 value
-  pop {r0}
+  pop {r9}
 
   // discard 3 elements from stack
   add sp, sp, #12
-  mov r9, r0
 
   // calculate relocation
-  adr r4, {{ name }}_original_symbol 
-  ldr r4, [r4]
-  ldr r4, [r0, r4]
+  adr r1, {{ name }}_original_symbol 
+  ldr r1, [r1]
+  ldr r1, [r0, r1]
  
   // restore original stack 
   pop {r0, r1}

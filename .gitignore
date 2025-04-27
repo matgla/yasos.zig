@@ -10,3 +10,4 @@ config/
 rootfs/
 .cache/
 build/
+rootfs.img

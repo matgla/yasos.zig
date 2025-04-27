@@ -18,11 +18,12 @@ linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/
 /* TODO make this configurable via kconfig */
 MEMORY 
 {
-  flash(rx!w)     : ORIGIN = 0x10000000, LENGTH = 512K 
-  romfs(rx!w)     : ORIGIN = 0x10080000, LENGTH = 1536K
-  ram(rxw)        : ORIGIN = 0x20000000, LENGTH = 256K
-  scratch_x(rxw)  : ORIGIN = 0x20040000, LENGTH = 4K 
-  scratch_y(rxw)  : ORIGIN = 0x20041000, LENGTH = 4K
+  flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 512K 
+  romfs(rx!w)       : ORIGIN = 0x10080000, LENGTH = 1536K
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 32K 
+  process_ram(rxw)  : ORIGIN = 0x20008000, LENGTH = 220K
+  scratch_x(rxw)    : ORIGIN = 0x20040000, LENGTH = 4K 
+  scratch_y(rxw)    : ORIGIN = 0x20041000, LENGTH = 4K
 }
 
 SECTIONS
@@ -103,7 +104,7 @@ SECTIONS
   .ram_vector_table (NOLOAD) : 
   {
     *(.ram_vector_table)
-  } > ram 
+  } > kernel_ram 
 
   __data_start_flash__ = LOADADDR(.data);
   .data : 
@@ -116,7 +117,7 @@ SECTIONS
     *(.data*)
     . = ALIGN(4);
     __data_end__ = .;
-  } > ram AT> flash 
+  } > kernel_ram AT> flash 
 
   .bss (NOLOAD) : 
   {
@@ -127,17 +128,24 @@ SECTIONS
     *(COMMON)
     . = ALIGN(4);
     __bss_end__ = .;
-  } > ram 
+  } > kernel_ram 
 
   .heap (NOLOAD):
   {
     __end__ = .;
     end = __end__;
     KEEP(*(.heap*))
-  } > ram 
+  } > kernel_ram 
 
-  __heap_limit__ = ORIGIN(ram) + LENGTH(ram);
-    
+  __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
+
+  .process_ram (NOLOAD):
+  {
+    __process_ram_start__ = .;
+  } > process_ram 
+
+  __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
+   
   .scratch_x : 
   {
     __scratch_x_start__ = .;
@@ -166,7 +174,7 @@ SECTIONS
     KEEP(*(.stack*))
   } > scratch_y 
 
-  __stack_limit__ = ORIGIN(ram) + LENGTH(ram);
+  __stack_limit__ = ORIGIN(process_ram) + LENGTH(process_ram);
   __stack1_top__ = ORIGIN(scratch_x) + LENGTH(scratch_x);
   __stack_top__ = ORIGIN(scratch_y) + LENGTH(scratch_y);
   __stack1_bottom__ = __stack1_top__ - SIZEOF(.stack1_dummy);

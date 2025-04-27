@@ -34,26 +34,29 @@ pub const RamFs = struct {
     root: FilesNode,
 
     const FilesNode = struct {
-        const FilesHandler = std.DoublyLinkedList(FilesNode);
-        const FileNode = FilesHandler.Node;
-
         node: RamFsData,
-        children: FilesHandler,
+        children: std.DoublyLinkedList,
+        list_node: std.DoublyLinkedList.Node,
 
         pub fn deinit(self: *FilesNode, allocator: std.mem.Allocator) void {
-            var it = self.children.pop();
-            while (it) |node| : (it = self.children.pop()) {
-                node.data.deinit(allocator);
-                allocator.destroy(node);
+            var next = self.children.pop();
+
+            while (next) |node| {
+                const child: *FilesNode = @fieldParentPtr("list_node", node);
+                next = self.children.pop();
+                child.deinit(allocator);
+                allocator.destroy(child);
             }
             self.node.deinit();
         }
 
         pub fn get(self: *const FilesNode, node_name: []const u8) ?*FilesNode {
-            var it = self.children.first;
-            while (it) |child| : (it = child.next) {
-                if (std.mem.eql(u8, child.data.node.name(), node_name)) {
-                    return &child.data;
+            var next = self.children.first;
+            while (next) |node| {
+                const child: *FilesNode = @fieldParentPtr("list_node", node);
+                next = node.next;
+                if (std.mem.eql(u8, child.node.name(), node_name)) {
+                    return child;
                 }
             }
             return null;
@@ -78,6 +81,7 @@ pub const RamFs = struct {
             .root = .{
                 .node = try RamFsData.create_directory(allocator, "/"),
                 .children = .{},
+                .list_node = .{},
             },
         };
     }
@@ -111,10 +115,13 @@ pub const RamFs = struct {
                 if (parent_node.get(basename) != null) {
                     return -1;
                 }
-                var new = self.allocator.create(FilesNode.FileNode) catch return -1;
-                new.data.node = RamFsData.create(self.allocator, basename, filetype) catch return -1;
-                new.data.children = .{};
-                parent_node.children.append(new);
+                var new: *FilesNode = self.allocator.create(FilesNode) catch return -1;
+                new.* = FilesNode{
+                    .node = RamFsData.create(self.allocator, basename, filetype) catch return -1,
+                    .children = .{},
+                    .list_node = .{},
+                };
+                parent_node.children.append(&new.list_node);
                 return 0;
             }
         }
@@ -140,14 +147,16 @@ pub const RamFs = struct {
         }
         const maybe_parent = self.get_node(dirname.?) catch return -1;
         if (maybe_parent) |parent| {
-            var it = parent.children.first;
-            while (it) |child| : (it = child.next) {
-                if (std.mem.eql(u8, child.data.node.name(), basename)) {
-                    if (child.data.children.len != 0) {
+            var next = parent.children.first;
+            while (next) |node| {
+                const child: *FilesNode = @fieldParentPtr("list_node", node);
+                next = node.next;
+                if (std.mem.eql(u8, child.node.name(), basename)) {
+                    if (child.children.len() != 0) {
                         return -1;
                     }
-                    parent.children.remove(child);
-                    child.data.deinit(self.allocator);
+                    parent.children.remove(&child.list_node);
+                    child.deinit(self.allocator);
                     self.allocator.destroy(child);
                     return 0;
                 }
@@ -161,16 +170,20 @@ pub const RamFs = struct {
         return "ramfs";
     }
 
-    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile) void) i32 {
+    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         const self: *RamFs = @ptrCast(@alignCast(ctx));
         const maybe_node = self.get_node(path) catch return -1;
-        if (maybe_node) |node| {
-            if (node.node.type == FileType.Directory) {
-                var it = node.children.first;
-                while (it) |child| : (it = child.next) {
-                    var file: RamFsFile = RamFsFile.create(&child.data.node);
+        if (maybe_node) |file_node| {
+            if (file_node.node.type == FileType.Directory) {
+                var next = file_node.children.first;
+                while (next) |node| {
+                    const child: *FilesNode = @fieldParentPtr("list_node", node);
+                    next = node.next;
+                    var file: RamFsFile = RamFsFile.create(&child.node, self.allocator);
                     var ifile = file.ifile();
-                    callback(&ifile);
+                    if (!callback(&ifile, user_context)) {
+                        return 0;
+                    }
                 }
                 return 0;
             }
@@ -183,8 +196,7 @@ pub const RamFs = struct {
         const maybe_node = self.get_node(path) catch return null;
         if (maybe_node) |node| {
             const file = self.allocator.create(RamFsFile) catch return null;
-            file.* = RamFsFile.create(&node.node);
-            file.allocator = self.allocator;
+            file.* = RamFsFile.create(&node.node, self.allocator);
             return file.ifile();
         }
         return null;
@@ -216,20 +228,20 @@ const ExpectationList = std.DoublyLinkedList([]const u8);
 var expected_directories: ExpectationList = undefined;
 var did_error: anyerror!void = {};
 
-fn traverse_dir(file: *IFile) void {
-    did_error catch return;
+fn traverse_dir(file: *IFile, _: *anyopaque) bool {
+    did_error catch return false;
     did_error = std.testing.expect(expected_directories.first != null);
     did_error catch {
         std.debug.print("Expectation not found for: '{s}'\n", .{file.name()});
-        return;
+        return false;
     };
     const expectation = expected_directories.popFirst().?;
     did_error = std.testing.expectEqualStrings(expectation.data, file.name());
     did_error catch {
         std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation.data, file.name() });
-
-        return;
+        return false;
     };
+    return true;
 }
 
 test "Create files in ramfs" {
@@ -268,8 +280,8 @@ test "Create files in ramfs" {
     var other_dir = ExpectationList.Node{ .data = "other" };
     expected_directories.append(&other_dir);
 
-    try std.testing.expectEqual(-1, sut.traverse("/test/file.txt", traverse_dir));
-    try std.testing.expectEqual(0, sut.traverse("/", traverse_dir));
+    try std.testing.expectEqual(-1, sut.traverse("/test/file.txt", traverse_dir, undefined));
+    try std.testing.expectEqual(0, sut.traverse("/", traverse_dir, undefined));
     try did_error;
     try std.testing.expectEqual(0, expected_directories.len);
 
@@ -278,7 +290,7 @@ test "Create files in ramfs" {
     var file_file = ExpectationList.Node{ .data = "file.txt" };
     expected_directories.append(&file_file);
 
-    try std.testing.expectEqual(0, sut.traverse("/test", traverse_dir));
+    try std.testing.expectEqual(0, sut.traverse("/test", traverse_dir, undefined));
     try did_error;
     try std.testing.expectEqual(0, expected_directories.len);
 

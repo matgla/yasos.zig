@@ -44,13 +44,12 @@ target_include_directories(pthread PRIVATE ${PROJECT_SOURCE_DIR}/../../source/ke
 
 target_compile_options(pthread PRIVATE 
   -fPIC
+  -nostdinc
+  -mno-pic-data-is-text-relative
 )
 
 target_link_options (pthread PRIVATE 
   -fPIC
-  -T${linker_script}
-  -nodefaultlibs 
-  -nostartfiles
   -nostdlib
 )
 

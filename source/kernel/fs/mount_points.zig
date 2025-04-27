@@ -25,30 +25,34 @@ const IFile = @import("ifile.zig").IFile;
 const config = @import("config");
 
 const MountPoint = struct {
-    pub const List = std.DoublyLinkedList(MountPoint);
+    pub const List = std.DoublyLinkedList;
     path_buffer: [config.fs.max_mount_point_size]u8,
     path: []u8,
     filesystem: IFileSystem,
     children: List,
+    list_node: List.Node,
 
     pub fn appendChild(self: *MountPoint, allocator: std.mem.Allocator, path: []const u8, filesystem: IFileSystem) !void {
-        const node = try allocator.create(MountPoint.List.Node);
-        node.data = .{
+        const point = try allocator.create(MountPoint);
+        point.* = .{
             .path_buffer = undefined,
             .path = undefined,
             .filesystem = filesystem,
             .children = .{},
+            .list_node = .{},
         };
-        @memcpy(node.data.path_buffer[0..path.len], path);
-        node.data.path = node.data.path_buffer[0..path.len];
-        self.children.append(node);
+        @memcpy(point.path_buffer[0..path.len], path);
+        point.path = point.path_buffer[0..path.len];
+        self.children.append(&point.list_node);
     }
 
     pub fn removeChild(self: *MountPoint, allocator: std.mem.Allocator, child_path: []const u8) void {
-        var it = self.children.first;
-        while (it) |child| : (it = child.next) {
-            if (std.mem.eql(u8, child_path, child.data.path)) {
-                self.children.remove(child);
+        var next = self.children.first;
+        while (next) |node| {
+            const child: *MountPoint = @fieldParentPtr("list_node", node);
+            next = node.next;
+            if (std.mem.eql(u8, child_path, child.path)) {
+                self.children.remove(&child.list_node);
                 allocator.destroy(child);
                 return;
             }
@@ -57,9 +61,11 @@ const MountPoint = struct {
 
     pub fn deinit(self: *MountPoint, allocator: std.mem.Allocator) void {
         var it = self.children.pop();
-        while (it) |child| : (it = self.children.pop()) {
+        while (it) |node| {
+            const child: *MountPoint = @fieldParentPtr("list_node", node);
+            it = self.children.pop();
             child.data.deinit(allocator);
-            allocator.destroy(child);
+            allocator.destroy(&child.list_node);
         }
     }
 };
@@ -106,30 +112,32 @@ pub const MountPoints = struct {
         var parent: *MountPoint = &self.root.?;
         // skip root searching, already checked
         var left: []const u8 = std.mem.trim(u8, path, "/");
-        while (maybe_node) |node| {
+        while (maybe_node) |mountpoint| {
             // already finished
             if (left.len == 0) {
                 break;
             }
 
             // traverse children
-            var childit = node.children.first;
+            var next = mountpoint.children.first;
             var bestchild: ?*MountPoint = null;
 
-            while (childit) |child| : (childit = child.next) {
-                if (std.mem.startsWith(u8, left, child.data.path)) {
+            while (next) |node| {
+                const child: *MountPoint = @fieldParentPtr("list_node", node);
+                next = node.next;
+                if (std.mem.startsWith(u8, left, child.path)) {
                     if (bestchild == null) {
-                        bestchild = &child.data;
+                        bestchild = child;
                         continue;
                     }
-                    if (child.data.path.len > bestchild.?.path.len) {
-                        bestchild = &child.data;
+                    if (child.path.len > bestchild.?.path.len) {
+                        bestchild = child;
                     }
                 }
             }
 
             if (bestchild) |child| {
-                parent = node;
+                parent = mountpoint;
                 left = std.mem.trimLeft(u8, left[child.path.len..], "/");
                 last_matched_point = child;
             }
@@ -151,6 +159,7 @@ pub const MountPoints = struct {
             .path = undefined,
             .filesystem = filesystem,
             .children = .{},
+            .list_node = .{},
         };
         @memcpy(self.root.?.path_buffer[0..path.len], path);
         self.root.?.path = self.root.?.path_buffer[0..path.len];
@@ -244,7 +253,7 @@ const FileSystemStub = struct {
         return "";
     }
 
-    pub fn traverse(_: *const anyopaque, _: []const u8, _: *const fn (file: *IFile) void) i32 {
+    pub fn traverse(_: *const anyopaque, _: []const u8, _: *const fn (file: *IFile, _: *anyopaque) bool, _: *anyopaque) i32 {
         return 0;
     }
 

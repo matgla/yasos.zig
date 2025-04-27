@@ -22,7 +22,7 @@ pub const internal = struct {
     pub const Uart = @import("source/uart.zig").Uart;
     pub const Time = @import("source/time.zig").Time;
     pub const Cpu = @import("source/cpu.zig").Cpu;
-    pub const Mmio = @import("../common/mmio.zig").Mmio;
+    pub const Mmio = @import("raspberry_common").mmio.Mmio;
     pub const HardwareAtomic = @import("source/atomic.zig").HardwareAtomic;
     pub const Irq = @import("cortex-m").Irq;
 };

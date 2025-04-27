@@ -109,7 +109,9 @@ pub fn build(b: *std.Build) !void {
         });
         b.installArtifact(boardDep.artifact("yasos_kernel"));
         boardDep.artifact("yasos_kernel").addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
-        boardDep.artifact("yasos_kernel").addIncludePath(b.path("source"));
+        boardDep.artifact("yasos_kernel").addIncludePath(b.path("source/sys/include"));
+        boardDep.artifact("yasos_kernel").addIncludePath(b.path("."));
+
         const yasld = b.dependency("yasld", .{
             .optimize = optimize,
             .target = boardDep.artifact("yasos_kernel").root_module.resolved_target.?,

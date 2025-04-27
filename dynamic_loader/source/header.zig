@@ -55,6 +55,8 @@ pub const Header = packed struct {
     got_length: u32,
     got_plt_length: u32,
     plt_length: u32,
+    arm_extab: u32,
+    arm_exidx: u32,
 };
 
 pub fn print_header(header: *const Header, stdout: anytype) void {
@@ -76,7 +78,7 @@ pub fn print_header(header: *const Header, stdout: anytype) void {
     stdout.print("      local: {d},\n", .{header.local_relocations_amount});
     stdout.print("      data: {d},\n", .{header.data_relocations_amount});
     stdout.print("    exported_symbols: {d},\n", .{header.exported_symbols_amount});
-    stdout.print("    imported_symbols: {d},\n", .{header.exported_symbols_amount});
+    stdout.print("    imported_symbols: {d},\n", .{header.imported_symbols_amount});
     stdout.print("    got_size: {d},\n", .{header.got_length});
     stdout.print("    got_plt_size: {d},\n", .{header.got_plt_length});
     stdout.print("    plt_size: {d},\n", .{header.plt_length});
@@ -86,5 +88,5 @@ pub fn print_header(header: *const Header, stdout: anytype) void {
 
 comptime {
     var buf: [30]u8 = undefined;
-    if (@sizeOf(Header) != 64) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
+    if (@sizeOf(Header) != 72) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
 }

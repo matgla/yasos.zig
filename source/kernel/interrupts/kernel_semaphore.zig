@@ -23,6 +23,7 @@ const std = @import("std");
 const hal = @import("hal");
 
 const process_manager = @import("../process_manager.zig");
+const Process = @import("../process.zig").Process;
 const Semaphore = @import("../semaphore.zig").Semaphore;
 
 // this is kernel semaphore intended to be used by kernel events handlers
@@ -34,10 +35,12 @@ pub const KernelSemaphore = struct {
     pub fn release(semaphore: *Semaphore) void {
         semaphore.counter.increment();
         // unblock waiting processes
-        var it = process_manager.instance.processes.first;
-        while (it) |node| : (it = node.next) {
-            if (node.data.is_blocked_by(semaphore)) {
-                node.data.unblock();
+        var next = process_manager.instance.processes.first;
+        while (next) |node| {
+            const process: *Process = @fieldParentPtr("node", node);
+            next = node.next;
+            if (process.is_blocked_by(semaphore)) {
+                process.unblock();
             }
         }
     }
