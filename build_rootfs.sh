@@ -48,6 +48,8 @@ if $CLEAR; then
   echo "Clearing..."
   rm -rf rootfs
   rm -rf apps/shell/build
+  rm -rf apps/coreutils/build
+  rm -rf apps/cowsay/build
   rm -rf libs/libc/build
   rm -rf libs/libdl/build
   rm -rf libs/pthread/build
@@ -126,6 +128,7 @@ cd apps
 
 build_makefile shell
 build_makefile coreutils
+build_makefile cowsay
 
 cd ..
 
