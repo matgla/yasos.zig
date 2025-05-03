@@ -199,9 +199,9 @@ pub fn init() void {
 }
 
 pub fn initialize_context_switching() void {
-    hal.irq.set_priority(.systick, 0x00);
-    hal.irq.set_priority(.supervisor_call, 0xfe);
-    hal.irq.set_priority(.pendsv, 0xff);
+    hal.irq.set_priority(.supervisor_call, 0x00);
+    hal.irq.set_priority(.systick, 0xff);
+    hal.irq.set_priority(.pendsv, 0xfe);
 }
 
 extern fn context_switch_push_registers_to_stack(result_ptr: usize, pid: usize, lr: usize, restore: usize) *u8;

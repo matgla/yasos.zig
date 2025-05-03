@@ -40,6 +40,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             .size = size,
             .name = name,
             .ioctl = ioctl,
+            .fcntl = fcntl,
             .stat = stat,
             .filetype = filetype,
             .dupe = dupe,
@@ -48,6 +49,7 @@ pub fn UartFile(comptime UartType: anytype) type {
 
         _icanonical: bool,
         _echo: bool,
+        _nonblock: bool,
         _allocator: std.mem.Allocator,
 
         pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
@@ -64,6 +66,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             return .{
                 ._icanonical = true,
                 ._echo = true,
+                ._nonblock = false,
                 ._allocator = allocator,
             };
         }
@@ -80,6 +83,11 @@ pub fn UartFile(comptime UartType: anytype) type {
             var index: usize = 0;
             var ch: [1]u8 = .{0};
             while (index < buffer.len) {
+                if (self._nonblock) {
+                    if (!Self.uart.is_readable()) {
+                        return @intCast(index);
+                    }
+                }
                 const result = Self.uart.read(ch[0..1]) catch {
                     continue;
                 };
@@ -160,6 +168,31 @@ pub fn UartFile(comptime UartType: anytype) type {
                         termios.c_cc[1] = 0;
                         termios.c_cc[2] = 0;
                         termios.c_cc[3] = 0;
+                        return 0;
+                    },
+                    else => {
+                        return -1;
+                    },
+                }
+            }
+            return -1;
+        }
+
+        pub fn fcntl(ctx: *anyopaque, op: i32, maybe_arg: ?*anyopaque) i32 {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+
+            var result: i32 = 0;
+            if (maybe_arg) |arg| {
+                const flags: *c_int = @ptrCast(@alignCast(arg));
+                switch (op) {
+                    c.F_GETFL => {
+                        if (self._nonblock) {
+                            result |= c.O_NONBLOCK;
+                        }
+                        return result;
+                    },
+                    c.F_SETFL => {
+                        self._nonblock = (flags.* & c.O_NONBLOCK) != 0;
                         return 0;
                     },
                     else => {

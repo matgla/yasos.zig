@@ -38,13 +38,6 @@ pub fn init() void {
     arch_process.init();
 }
 
-inline fn get_psp() usize {
-    return asm volatile (
-        \\ mrs %[ret], psp 
-        : [ret] "=r" (-> usize),
-    );
-}
-
 extern fn context_switch_return_pop_single() void;
 
 fn exit_handler() void {

@@ -176,23 +176,8 @@ pub const Module = struct {
     // used for example for current TCC implementation
     // that exports __section_start instead of .init_array
     pub fn process_initializers(self: *Module, stdout: anytype) void {
-        const maybe_preinit_array_start = self.find_local_symbol("__preinit_array_start");
-
-        if (maybe_preinit_array_start) |preinit_array_start| {
-            const maybe_preinit_array_end = self.find_local_symbol("__preinit_array_end");
-            if (maybe_preinit_array_end) |preinit_array_end| {
-                stdout.print("Both __preinit_array_start and __preinit_array_end found at {x} - {x}\n", .{ preinit_array_start, preinit_array_end });
-            }
-        }
-
-        const maybe_init_array_start = self.find_local_symbol("__init_array_start");
-
-        if (maybe_init_array_start) |init_array_start| {
-            const maybe_init_array_end = self.find_local_symbol("__init_array_end");
-            if (maybe_init_array_end) |init_array_end| {
-                stdout.print("Both __init_array_start and __init_array_end found at {x} - {x}\n", .{ init_array_start, init_array_end });
-            }
-        }
+        _ = self;
+        _ = stdout;
     }
 
     pub fn is_module_for_program_counter(self: Module, pc: usize, only_active: bool) bool {

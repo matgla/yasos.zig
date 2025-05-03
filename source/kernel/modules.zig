@@ -88,7 +88,7 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
             // copy file to memory before running
             @panic("Implement image copying to memory");
         }
-        const executable = loader.load_executable(header_address, null_log, allocator) catch |err| {
+        const executable = loader.load_executable(header_address, log, allocator) catch |err| {
             return err;
         };
         if (modules_list.getPtr(pid)) |prev| {

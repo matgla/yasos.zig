@@ -47,9 +47,6 @@ load_context:
   vldmia r0!, {s16-s31}
   msr psp, r0
   cpsie i
-  push {r0, r1}
-  bl unlock_pendsv_spinlock
-  pop {r0, r1}
   bx r1
 
 

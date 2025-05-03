@@ -24,6 +24,7 @@ const log = &@import("../log/kernel_log.zig").kernel_log;
 const c = @import("../libc_imports.zig").c;
 const fs = @import("fs/vfs.zig");
 const IFile = @import("fs/ifile.zig").IFile;
+const systick = @import("interrupts/systick.zig");
 
 const config = @import("config");
 
@@ -112,6 +113,17 @@ pub export fn _ioctl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
         const maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |file| {
             return file.file.ioctl(request, data);
+        }
+    }
+    return -1;
+}
+
+pub export fn _fcntl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_file = process.fds.get(@intCast(fd));
+        if (maybe_file) |file| {
+            return file.file.fcntl(request, data);
         }
     }
     return -1;
@@ -253,6 +265,14 @@ pub fn _chdir(path: *const c_char) c_int {
         }
     }
     return -1;
+}
+
+pub fn _time(time: ?*c.time_t) c.time_t {
+    const ticks: c.time_t = @intCast(systick.get_system_ticks());
+    if (time) |time_ptr| {
+        time_ptr.* = ticks;
+    }
+    return ticks;
 }
 
 extern var end: u8;

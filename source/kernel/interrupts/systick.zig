@@ -29,8 +29,8 @@ const ticks_per_event = 1000;
 var last_time: u64 = 0;
 
 export fn irq_systick() void {
-    hal.hw_atomic.lock(config.process.context_switch_hw_spinlock_number);
-    defer hal.hw_atomic.unlock(config.process.context_switch_hw_spinlock_number);
+    // hal.hw_atomic.lock(config.process.context_switch_hw_spinlock_number);
+    // defer hal.hw_atomic.unlock(config.process.context_switch_hw_spinlock_number);
     // modify from core 0 only
     const tick_counter_ptr: *volatile u64 = &tick_counter;
     tick_counter_ptr.* += 1;
@@ -41,8 +41,8 @@ export fn irq_systick() void {
 }
 
 pub fn get_system_ticks() u64 {
-    hal.hw_atomic.lock(config.process.context_switch_hw_spinlock_number);
-    defer hal.hw_atomic.unlock(config.process.context_switch_hw_spinlock_number);
+    // hal.hw_atomic.lock(config.process.context_switch_hw_spinlock_number);
+    // defer hal.hw_atomic.unlock(config.process.context_switch_hw_spinlock_number);
     const ptr: *const volatile u64 = &tick_counter;
     return ptr.*;
 }

@@ -10,3 +10,9 @@
 [submodule "apps/cowsay/ccowsay"]
 	path = apps/cowsay/ccowsay
 	url = https://github.com/0xAether/ccowsay.git
+[submodule "apps/ascii_animations"]
+	path = apps/ascii_animations
+	url = git@github.com:matgla/ascii_animations.git
+[submodule "libs/yasos_curses"]
+	path = libs/yasos_curses
+	url = git@github.com:matgla/yasos_curses.git

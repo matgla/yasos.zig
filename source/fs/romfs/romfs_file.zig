@@ -40,6 +40,7 @@ pub const RomFsFile = struct {
         .size = size,
         .name = name,
         .ioctl = ioctl,
+        .fcntl = fcntl,
         .stat = stat,
         .filetype = filetype,
         .dupe = dupe,
@@ -149,6 +150,13 @@ pub const RomFsFile = struct {
                 return -1;
             },
         }
+        return 0;
+    }
+
+    pub fn fcntl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
+        _ = ctx;
+        _ = cmd;
+        _ = data;
         return 0;
     }
 

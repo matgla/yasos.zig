@@ -39,6 +39,7 @@ pub const RamFsFile = struct {
         .size = size,
         .name = name,
         .ioctl = ioctl,
+        .fcntl = fcntl,
         .stat = stat,
         .filetype = filetype,
         .dupe = dupe,
@@ -157,6 +158,9 @@ pub const RamFsFile = struct {
         return 0;
     }
 
+    pub fn fcntl(_: *anyopaque, _: i32, _: ?*const anyopaque) i32 {
+        return 0;
+    }
     pub fn stat(ctx: *const anyopaque, buf: *c.struct_stat) void {
         const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
         buf.st_dev = 0;
