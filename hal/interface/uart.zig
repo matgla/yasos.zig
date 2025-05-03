@@ -60,6 +60,10 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
         pub fn flush(self: Self) void {
             return self.impl.flush();
         }
+
+        pub fn is_readable(self: Self) bool {
+            return self.impl.is_readable();
+        }
     };
 }
 

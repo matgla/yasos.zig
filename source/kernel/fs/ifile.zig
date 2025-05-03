@@ -57,6 +57,7 @@ pub const IFile = struct {
         size: *const fn (ctx: *anyopaque) isize,
         name: *const fn (ctx: *anyopaque) []const u8,
         ioctl: *const fn (ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32,
+        fcntl: *const fn (ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32,
         stat: *const fn (ctx: *const anyopaque, data: *c.struct_stat) void,
         filetype: *const fn (ctx: *const anyopaque) FileType,
         dupe: *const fn (ctx: *anyopaque) ?IFile,
@@ -97,6 +98,10 @@ pub const IFile = struct {
 
     pub fn ioctl(self: IFile, cmd: i32, arg: ?*anyopaque) i32 {
         return self.vtable.ioctl(self.ptr, cmd, arg);
+    }
+
+    pub fn fcntl(self: IFile, cmd: i32, arg: ?*anyopaque) i32 {
+        return self.vtable.fcntl(self.ptr, cmd, arg);
     }
 
     pub fn stat(self: IFile, data: *c.struct_stat) void {

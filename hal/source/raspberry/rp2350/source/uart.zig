@@ -40,13 +40,13 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             uart.gpio_set_function(@intCast(pins.rx.?), uart.GPIO_FUNC_UART);
         }
 
-        fn is_writable(_: Self) bool {
+        pub fn is_writable(_: Self) bool {
             const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
             const derived_ptr = &uart_hw.*.fr;
             return (derived_ptr.* & uart.UART_UARTFR_TXFF_BITS) == 0;
         }
 
-        fn is_readable(_: Self) bool {
+        pub fn is_readable(_: Self) bool {
             const uart_hw: *volatile uart.uart_hw_t = @ptrCast(uart.uart_get_hw(Register));
             const derived_ptr = &uart_hw.*.fr;
             return (derived_ptr.* & uart.UART_UARTFR_RXFE_BITS) == 0;

@@ -71,13 +71,15 @@ cd libs
 
 build_cross_compiler()
 {
+  echo "Building cross compiler..."
   cd tinycc
-  ./configure --enable-cross --extra-cflags="-DTCC_DEBUG=0 -g -O0" --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc 
   PATH=$SCRIPT_DIR/libs/tinycc:$PATH
+  echo "Installing cross compiler..."
   make install
   cd ..
 }
@@ -117,10 +119,17 @@ build_lib()
 
 build_cross_compiler
 
+echo "Building libc..."
 build_makefile libc
 
+echo "Building libdl..."
 build_lib libdl
+
+echo "Building libpthread..."
 build_lib pthread
+
+echo "Building yasos_curses..."
+build_makefile yasos_curses
 
 cd ..
 
@@ -129,6 +138,7 @@ cd apps
 build_makefile shell
 build_makefile coreutils
 build_makefile cowsay
+build_makefile ascii_animations
 
 cd ..
 
@@ -147,6 +157,10 @@ if $BUILD_IMAGE; then
     if [ -f "$file" ]; then  # Check if it's a file
       mv $file $file.bak
       $SCRIPT_DIR/dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file.bak --type shared_library -o $file --verbose
+      if [ $? -ne 0 ]; then
+        echo "Error: mkimage failed for $file"
+        exit 1
+      fi  
       rm $file.bak 
     fi
   done
@@ -155,6 +169,10 @@ if $BUILD_IMAGE; then
   do
     if [ -f "$file" ]; then  # Check if it's a file
       $SCRIPT_DIR/dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file --type shared_library -o $(dirname $file)/$(basename "$file" .elf) --verbose
+      if [ $? -ne 0 ]; then
+        echo "Error: mkimage failed for $file"
+        exit 1
+      fi 
       rm $file 
     fi
   done

@@ -59,11 +59,15 @@ inline fn get_lr() usize {
     );
 }
 
-export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
     // those operations must be secure since both cores may be executing that code in the same time
+    if (number >= c.SYSCALL_COUNT and number != 0) {
+        asm volatile (
+            \\ bkpt 0
+        );
+    }
+    var processed_number: u32 = number;
     const lr = get_lr();
-    hal.hw_atomic.lock(config.process.hw_spinlock_number);
-    defer hal.hw_atomic.unlock(config.process.hw_spinlock_number);
     switch (number) {
         c.sys_start_root_process => {
             switch_to_next_task();
@@ -103,6 +107,7 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
         c.sys_write => {
             const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
             const result: *volatile c_int = @ptrCast(@alignCast(out));
+            processed_number += 1000;
             result.* = syscall._write(context.fd, context.buf.?, context.count);
         },
         c.sys_read => {
@@ -124,6 +129,11 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = syscall._ioctl(context.fd, context.op, context.arg);
         },
+        c.sys_fcntl => {
+            const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._fcntl(context.fd, context.op, context.arg);
+        },
         c.sys_exit => {
             const context: *const volatile c_int = @ptrCast(@alignCast(arg));
             syscall._exit(context.*);
@@ -139,16 +149,10 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             result.* = syscall._munmap(context.addr, context.length);
         },
         c.sys_execve => {
-            asm volatile (
-                \\ cpsid i 
-            );
             const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
             const result: *volatile c.execve_result = @ptrCast(@alignCast(out));
             const exec_result = process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
             result.result = exec_result;
-            asm volatile (
-                \\ cpsie i 
-            );
         },
         c.sys_getcwd => {
             const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
@@ -182,22 +186,23 @@ export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile
             const result: *volatile c_int = @ptrCast(@alignCast(out));
             result.* = syscall._chdir(context.path.?);
         },
+        c.sys_time => {
+            const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c.time_t = @ptrCast(@alignCast(out));
+            result.* = syscall._time(context.timep);
+        },
         else => {
-            log.print("Unhandled system call id: {d}\n", .{number});
+            log.print("\nUnhandled system call id: {d}, {d}\n", .{ number, processed_number });
+            asm volatile (
+                \\ bkpt 0
+            );
         },
     }
 }
 
-pub export fn unlock_pendsv_spinlock() void {
-    hal.hw_atomic.unlock(config.process.hw_spinlock_number);
-}
-
 export fn irq_pendsv() void {
-    hal.hw_atomic.lock(config.process.hw_spinlock_number);
     if (process_manager.instance.scheduler.schedule_next()) {
         store_and_switch_to_next_task();
-    } else {
-        hal.hw_atomic.unlock(config.process.hw_spinlock_number);
     }
 }
 
@@ -210,6 +215,7 @@ export fn irq_hard_fault() void {
     }
 }
 
+// can be called only from the user process, not from the kernel
 pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) void {
     var svc_arg: *const anyopaque = undefined;
     var svc_out: *anyopaque = undefined;

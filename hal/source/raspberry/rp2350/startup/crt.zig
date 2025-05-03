@@ -85,7 +85,7 @@ export fn crt_init() void {
         });
     }
     // release all spinlocks
-    for (&sio.spinlocks) |*lock| {
-        lock.write(1);
-    }
+    // for (&sio.spinlocks) |*lock| {
+    //     lock.write(1);
+    // }
 }

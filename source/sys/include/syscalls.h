@@ -163,6 +163,16 @@ typedef struct chdir_context {
   const char *path;
 } chdir_context;
 
+typedef struct time_context {
+  time_t *timep;
+} time_context;
+
+typedef struct fcntl_context {
+  int fd;
+  int op;
+  void *arg;
+} fcntl_context;
+
 typedef enum SystemCall {
   sys_dynamic_loader_prepare_entry = 1,
   sys_dynamic_loader_process_exit,
@@ -200,6 +210,8 @@ typedef enum SystemCall {
   sys_munmap,
   sys_getcwd,
   sys_chdir,
+  sys_time,
+  sys_fcntl,
   SYSCALL_COUNT,
 } SystemCall;
 
