@@ -19,4 +19,5 @@ pub const c = @cImport({
     @cInclude("libs/libc/sys/ioctl.h");
     @cInclude("libs/libc/termios.h");
     @cInclude("libs/libc/dirent.h");
+    @cInclude("syscalls.h");
 });

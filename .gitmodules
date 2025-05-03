@@ -7,3 +7,6 @@
 [submodule "libs/tinycc"]
 	path = libs/tinycc
 	url = git@github.com:matgla/tinycc.git
+[submodule "apps/cowsay/ccowsay"]
+	path = apps/cowsay/ccowsay
+	url = https://github.com/0xAether/ccowsay.git

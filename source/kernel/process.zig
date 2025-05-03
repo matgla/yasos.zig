@@ -30,6 +30,7 @@ const Semaphore = @import("semaphore.zig").Semaphore;
 const IFile = @import("fs/ifile.zig").IFile;
 const process_memory_pool = @import("process_memory_pool.zig");
 const ProcessPageAllocator = @import("malloc.zig").ProcessPageAllocator;
+const system_call = @import("interrupts/system_call.zig");
 
 var pid_counter: u32 = 0;
 
@@ -47,7 +48,7 @@ inline fn get_psp() usize {
 extern fn context_switch_return_pop_single() void;
 
 fn exit_handler() void {
-    @panic("Process exited from unexpected path");
+    system_call.trigger(c.sys_exit, null, null);
 }
 
 pub fn ProcessInterface(comptime implementation: anytype) type {
