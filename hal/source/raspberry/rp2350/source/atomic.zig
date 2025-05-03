@@ -25,11 +25,11 @@ pub const HardwareAtomic = struct {
         if (id >= 32) @compileError("RPXXXX supports only 32 hardware spinlocks");
         // from datasheet
         // if both cores try to lock at the same time core 0 succeeds
-        // while (sio.spinlocks[id].read() == 0) {}
+        while (sio.spinlocks[id].read() == 0) {}
     }
 
     pub fn unlock(comptime id: u32) void {
         if (id >= 32) @compileError("RPXXXX supports only 32 hardware spinlocks");
-        // sio.spinlocks[id].write(1);
+        sio.spinlocks[id].write(1);
     }
 };
