@@ -53,6 +53,8 @@ if $CLEAR; then
   rm -rf libs/libc/build
   rm -rf libs/libdl/build
   rm -rf libs/pthread/build
+  rm -rf libs/yasos_curses/build
+  rm -rf apps/textvaders/build
   cd libs/tinycc && make clean && cd ../..
 fi
 mkdir -p rootfs
@@ -139,6 +141,7 @@ build_makefile shell
 build_makefile coreutils
 build_makefile cowsay
 build_makefile ascii_animations
+build_makefile textvaders
 
 cd ..
 

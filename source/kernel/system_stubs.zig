@@ -25,6 +25,7 @@ const c = @import("../libc_imports.zig").c;
 const fs = @import("fs/vfs.zig");
 const IFile = @import("fs/ifile.zig").IFile;
 const systick = @import("interrupts/systick.zig");
+const time = @import("time.zig");
 
 const config = @import("config");
 
@@ -127,6 +128,18 @@ pub export fn _fcntl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
         }
     }
     return -1;
+}
+
+pub export fn _nanosleep(ts: c.timespec) c_int {
+    if (ts.tv_sec != 0) {
+        time.sleep_ms(@intCast(ts.tv_sec * 1000));
+    }
+
+    if (ts.tv_nsec != 0) {
+        time.sleep_us(@intCast(@divTrunc(ts.tv_nsec, 1000)));
+    }
+
+    return 0;
 }
 
 pub fn _mmap(addr: ?*anyopaque, size: i32, prot: i32, flags: i32, fd: i32, offset: i32) *allowzero anyopaque {
@@ -267,9 +280,9 @@ pub fn _chdir(path: *const c_char) c_int {
     return -1;
 }
 
-pub fn _time(time: ?*c.time_t) c.time_t {
-    const ticks: c.time_t = @intCast(systick.get_system_ticks());
-    if (time) |time_ptr| {
+pub fn _time(t: ?*c.time_t) c.time_t {
+    const ticks: c.time_t = @intCast(systick.get_system_ticks().*);
+    if (t) |time_ptr| {
         time_ptr.* = ticks;
     }
     return ticks;

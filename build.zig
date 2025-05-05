@@ -116,7 +116,9 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
             .target = boardDep.artifact("yasos_kernel").root_module.resolved_target.?,
         });
+
         boardDep.artifact("yasos_kernel").root_module.addImport("yasld", yasld.module("yasld"));
+        boardDep.artifact("yasos_kernel").root_module.addIncludePath(b.path("."));
 
         _ = boardDep.module("board");
     } else {

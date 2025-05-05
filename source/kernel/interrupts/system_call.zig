@@ -22,9 +22,7 @@ const std = @import("std");
 
 const hal = @import("hal");
 
-const c = @cImport({
-    @cInclude("syscalls.h");
-});
+const c = @import("../../libc_imports.zig").c;
 
 const syscall = @import("../system_stubs.zig");
 
@@ -190,6 +188,11 @@ pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *vola
             const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
             const result: *volatile c.time_t = @ptrCast(@alignCast(out));
             result.* = syscall._time(context.timep);
+        },
+        c.sys_nanosleep => {
+            const context: *const volatile c.nanosleep_context = @ptrCast(@alignCast(arg));
+            const result: *volatile c_int = @ptrCast(@alignCast(out));
+            result.* = syscall._nanosleep(context.req.*);
         },
         else => {
             log.print("\nUnhandled system call id: {d}, {d}\n", .{ number, processed_number });

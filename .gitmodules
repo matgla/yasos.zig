@@ -16,3 +16,6 @@
 [submodule "libs/yasos_curses"]
 	path = libs/yasos_curses
 	url = git@github.com:matgla/yasos_curses.git
+[submodule "apps/textvaders"]
+	path = apps/textvaders
+	url = git@github.com:matgla/textvaders.git
