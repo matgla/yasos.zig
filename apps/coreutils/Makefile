@@ -17,12 +17,18 @@ prepare:
 build/ls.o: ls.c prepare
 	$(CC) $(CFLAGS) -c $< -o build/ls.o
 
+build/cat.o: cat.c prepare
+	$(CC) $(CFLAGS) -c $< -o build/cat.o
+
 build/ls.elf: build/ls.o
 	$(CC) $(LDFLAGS) $^ -o $@
+build/cat.elf: build/cat.o
+	$(CC) $(LDFLAGS) $^ -o $@
 
-install: build/ls.elf 
+install: build/ls.elf build/cat.elf
 	mkdir -p $(BINDIR)
 	cp build/ls.elf $(BINDIR)
+	cp build/cat.elf $(BINDIR)
 
 clean:
 	rm -rf build
