@@ -25,9 +25,7 @@ const syscall = @import("interrupts/system_call.zig");
 
 const atomic = @import("hal").atomic;
 
-const c = @cImport({
-    @cInclude("syscalls.h");
-});
+const c = @import("../libc_imports.zig").c;
 
 pub const Semaphore = struct {
     counter: atomic.Atomic(u32),

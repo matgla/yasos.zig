@@ -309,6 +309,11 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             }
             return fd;
         }
+
+        pub fn sleep_for_us(self: *Self, us: u32) void {
+            _ = self;
+            _ = us;
+        }
     };
 }
 

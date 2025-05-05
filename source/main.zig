@@ -18,10 +18,6 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const c = @cImport({
-    @cInclude("stdio.h");
-});
-
 const std = @import("std");
 
 const board = @import("board");
@@ -69,7 +65,7 @@ comptime {
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
-        .baudrate = 115200,
+        .baudrate = 921600,
     });
 
     log.attach_to(.{

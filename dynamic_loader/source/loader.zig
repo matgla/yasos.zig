@@ -53,7 +53,6 @@ pub const Loader = struct {
     }
 
     pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype, allocator: std.mem.Allocator) !Executable {
-        // stdout.print("[yasld] loading executable from: 0x{x}\n", .{@intFromPtr(module)});
         var executable: Executable = .{
             .module = Module.init(allocator),
         };

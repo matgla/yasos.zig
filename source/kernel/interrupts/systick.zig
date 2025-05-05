@@ -40,9 +40,9 @@ export fn irq_systick() void {
     }
 }
 
-pub fn get_system_ticks() u64 {
+pub fn get_system_ticks() *const volatile u64 {
     // hal.hw_atomic.lock(config.process.context_switch_hw_spinlock_number);
     // defer hal.hw_atomic.unlock(config.process.context_switch_hw_spinlock_number);
     const ptr: *const volatile u64 = &tick_counter;
-    return ptr.*;
+    return ptr;
 }
