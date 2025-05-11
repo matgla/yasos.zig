@@ -55,6 +55,8 @@ if $CLEAR; then
   rm -rf libs/pthread/build
   rm -rf libs/yasos_curses/build
   rm -rf apps/textvaders/build
+  rm -rf libs/libm/build
+  rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
 fi
 mkdir -p rootfs
@@ -75,14 +77,37 @@ build_cross_compiler()
 {
   echo "Building cross compiler..."
   cd tinycc
+  mkdir -p bin
   ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc 
-  PATH=$SCRIPT_DIR/libs/tinycc:$PATH
+  PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
   make install
+
+  cp armv8m-tcc bin
+  cd ..
+}
+
+build_c_compiler()
+{
+  echo "Building C compiler..."
+  cd tinycc
+  mkdir -p bin
+  PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
+  ./configure --cc=tcc --cpu=armv8m --extra-cflags="-DTCC_DEBUG=0 -g -DCONFIG_TCC_SWITCHES -O0 -DTCC_ARM_VFP=1 -DTCC_TARGET_ARM=1 -DTCC_TARGET_ARM_THUMB=1 -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs"  --sysincludepaths="$PREFIX/include" --cross-prefix=armv8m-
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  VERBOSE=1 make armv8m-tcc -j8 
+
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  make install armv8m-tcc
+  mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc.elf
   cd ..
 }
 
@@ -100,24 +125,6 @@ build_makefile()
   cd ..
 }
 
-build_lib()
-{
-  cd $1
-  mkdir -p build && cd build
-  cmake .. -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/libs/cmake/tcc_cortex_m33.cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=$PREFIX
-  cmake --build . --config Debug 
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
-  cmake --install .
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
- 
-  cd ..
-  cd ..
-}
-
 
 build_cross_compiler
 
@@ -125,13 +132,19 @@ echo "Building libc..."
 build_makefile libc
 
 echo "Building libdl..."
-build_lib libdl
+build_makefile libdl
 
 echo "Building libpthread..."
-build_lib pthread
+build_makefile pthread
 
 echo "Building yasos_curses..."
 build_makefile yasos_curses
+
+echo "Building libm..."
+build_makefile libm
+
+echo "Building target C compiler..."
+build_c_compiler
 
 cd ..
 

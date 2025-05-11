@@ -112,7 +112,7 @@ pub const ProcessManager = struct {
         p.state = Process.State.Ready;
     }
 
-    pub fn vfork(self: *Self, lr: usize, result: usize) i32 {
+    pub fn vfork(self: *Self, lr: usize, result: usize) !i32 {
         var new_process = self.allocator.create(Process) catch {
             return -1;
         };
@@ -144,11 +144,12 @@ pub const ProcessManager = struct {
         envpc: i32,
     };
 
-    pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) i32 {
+    pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |p| {
             // TODO: move loader to struct, pass allocator to loading functions
-            const executable = dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid) catch {
+            const executable = dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid) catch |err| {
+                log.print("Exec failure: {s}\n", .{@errorName(err)});
                 return -1;
             };
             var argc: usize = 0;
@@ -178,7 +179,7 @@ pub const ProcessManager = struct {
         return -1;
     }
 
-    pub fn waitpid(_: Self, _: i32, _: *i32) i32 {
+    pub fn waitpid(_: Self, _: i32, _: *i32) !i32 {
         return -1;
     }
 

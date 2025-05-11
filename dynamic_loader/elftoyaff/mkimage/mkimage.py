@@ -140,12 +140,14 @@ class Application:
         else:
             return False
 
-    def __fetch_section(self, name, position):
+    def __fetch_section(self, name, position, allow_failure=False):
         if name not in self.elf.sections:
             self.logger.info("Section '" + name + '" not found in ELF')
             return None
         section = self.elf.sections[name]
-        self.__validate_section(section, position, name)
+        if not allow_failure:
+            self.__validate_section(section, position, name)
+     
         self.logger.info("Found '" + name + "' with size: " + hex(section["size"]))
         return section
 
@@ -155,10 +157,19 @@ class Application:
         self.text_section = self.__fetch_section(".text", 0x00000000)
         self.text = bytearray(self.text_section["data"])
         text_size = self.text_section["size"]
+        
+        # looks like tcc generates regular data in .rodata section sometimes, let's move rodata to .data for now
+        # this requires to move .rodata section just before .data
+        # or mkimage should be able to detect, if .rodata is after .text then we have read only rodata 
+        # if just before .data then we have regular data 
+        self.rodata_is_data = False
         if self.__has_section(".rodata"):
-            self.rodata_section = self.__fetch_section(".rodata", self.text_section["size"])
-            self.text += bytearray(self.rodata_section["data"])
-            text_size += self.rodata_section["size"]
+            self.rodata_section = self.__fetch_section(".rodata", self.text_section["size"], True)
+            if self.rodata_section["address"] != self.text_section["size"]:
+                self.rodata_is_data = True
+            else:
+                self.text += bytearray(self.rodata_section["data"])
+                text_size += self.rodata_section["size"]
 
         # let's place init arrays in ram and fix addresses in yasld
         if self.__has_section(".init_arrays"):
@@ -190,8 +201,13 @@ class Application:
             self.plt = bytearray()
 
 
-        self.data_section = self.__fetch_section(".data", data_section_address)
-        self.data = bytearray(self.data_section["data"])
+        if self.rodata_is_data:
+            self.data = bytearray(self.rodata_section["data"])
+            self.data_section = self.__fetch_section(".data", data_section_address + self.rodata_section["size"])
+            self.data += bytearray(self.data_section["data"])
+        else:
+            self.data_section = self.__fetch_section(".data", data_section_address)
+            self.data = bytearray(self.data_section["data"])
 
         bss_section_address = self.data_section["address"] + self.data_section["size"]
         self.bss_section = self.__fetch_section(".bss", bss_section_address)
@@ -431,16 +447,20 @@ class Application:
                     )
             elif relocation["info_type"] == "R_ARM_RELATIVE":
                 from_address = int(relocation["offset"] - data_offset)
+
                 data = self.data
                 section_code = SectionCode.Data
                 offset = data_offset
                 original_offset = struct.unpack_from("<I", data, from_address)[0]
+                print("original offset: ", hex(original_offset), " data offset: ", hex(offset))
 
                 if original_offset - offset < 0:
                     # this is a data relocation towards code
                     offset = original_offset << 2 | SectionCode.Code.value
+                    print("relocation towards .text, offset: ", hex(offset))
                 else: 
                     offset = ((original_offset - offset) << 2) | section_code.value
+                    print("relocation towards .data, offset: ", hex(offset))
 
                 self.relocations.add_data_relocation(
                     relocation, from_address, offset
@@ -564,9 +584,13 @@ class Application:
         else:
             init_offset = 0
 
+        data_start = self.data_section["address"]
+        if self.rodata_is_data:
+            data_start = self.rodata_section["address"]
+
         self.__process_data_relocations(
             init_offset, 
-            self.data_section["address"],
+            data_start,
         )
         self.__dump_relocations()
 

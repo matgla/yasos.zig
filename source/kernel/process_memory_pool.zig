@@ -18,17 +18,16 @@ const std = @import("std");
 const malloc_allocator = @import("malloc.zig").malloc_allocator;
 const log = &@import("../log/kernel_log.zig").kernel_log;
 
-const dynamic_loader = @import("modules.zig");
+const memory = @import("hal").memory;
 
-extern var __process_ram_start__: u8;
-extern var __process_ram_end__: u8;
+const dynamic_loader = @import("modules.zig");
 
 // Only one process is owner of memory chunk
 // shared memory will be implemented as seperate structure
 pub const ProcessMemoryPool = struct {
     pub const page_size = 4096;
 
-    const BitSetType = std.StaticBitSet(120);
+    const BitSetType = std.StaticBitSet(2000);
     const AccessType = packed struct {
         read: u1,
         write: u1,
@@ -49,15 +48,17 @@ pub const ProcessMemoryPool = struct {
     memory_map: ProcessMemoryMap,
     // this allocator is used to keep track of the memory allocated for the process inside the kernel
     allocator: std.mem.Allocator,
+    start_address: usize,
 
     pub fn create(allocator: std.mem.Allocator) ProcessMemoryPool {
-        const memory_size: usize = @intFromPtr(&__process_ram_end__) - @intFromPtr(&__process_ram_start__);
+        const memory_layout = memory.get_memory_layout();
         return ProcessMemoryPool{
-            .memory_size = memory_size,
-            .page_count = memory_size / page_size,
+            .memory_size = memory_layout[2].size,
+            .page_count = memory_layout[2].size / page_size,
             .page_bitmap = BitSetType.initEmpty(),
             .memory_map = ProcessMemoryMap.init(allocator),
             .allocator = allocator,
+            .start_address = memory_layout[2].start_address,
         };
     }
 
@@ -86,11 +87,13 @@ pub const ProcessMemoryPool = struct {
         }
         return .{ start, end_index };
     }
+
     fn slicify(ptr: [*]u8, len: usize) []u8 {
         return ptr[0..len];
     }
 
     pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: u32) ?[]u8 {
+        // log.print("Allocating {d} pages for process {d}\n", .{ number_of_pages, pid });
         if (number_of_pages <= 0) {
             return null;
         }
@@ -113,7 +116,7 @@ pub const ProcessMemoryPool = struct {
                 }
                 list.value_ptr.append(ProcessMemoryEntity{
                     .address = slicify(
-                        @as([*]u8, @ptrFromInt(@intFromPtr(&__process_ram_start__) + start_index * page_size)),
+                        @as([*]u8, @ptrFromInt(self.start_address + start_index * page_size)),
                         @as(usize, @intCast(number_of_pages)) * page_size,
                     ),
                     .pid = pid,
@@ -134,7 +137,7 @@ pub const ProcessMemoryPool = struct {
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
             for (mapping.value_ptr.items) |entity| {
-                const start_index = (@intFromPtr(entity.address.ptr) - @intFromPtr(&__process_ram_start__)) / page_size;
+                const start_index = (@intFromPtr(entity.address.ptr) - self.start_address) / page_size;
                 const end_index = start_index + @as(usize, @intCast(entity.address.len)) / page_size;
                 for (start_index..end_index) |index| {
                     self.page_bitmap.unset(index);
@@ -158,7 +161,7 @@ pub const ProcessMemoryPool = struct {
                 }
                 i += 1;
             }
-            const start_index = (@intFromPtr(address) - @intFromPtr(&__process_ram_start__)) / page_size;
+            const start_index = (@intFromPtr(address) - self.start_address) / page_size;
             const end_index = start_index + @as(usize, @intCast(number_of_pages));
             for (start_index..end_index) |index| {
                 self.page_bitmap.unset(index);

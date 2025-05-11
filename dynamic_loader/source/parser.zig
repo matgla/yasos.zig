@@ -52,11 +52,10 @@ pub const Parser = struct {
     pub fn create(header: *const Header, stdout: anytype) Parser {
         _ = stdout;
         const name: []const u8 = std.mem.span(@as([*:0]const u8, @ptrFromInt(@intFromPtr(header) + @sizeOf(Header))));
-
         const imported_libraries = DependencyTable{
             .number_of_items = header.external_libraries_amount,
             .alignment = header.alignment,
-            .root = @as(*const Dependency, @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(name.ptr) + name.len, header.alignment))),
+            .root = @as(*const Dependency, @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(name.ptr) + name.len + 1, header.alignment))),
         };
 
         const symbol_table_array: [*]align(4) relocation.SymbolTableRelocation = @ptrFromInt(imported_libraries.address() + imported_libraries.size());

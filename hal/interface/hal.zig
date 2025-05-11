@@ -24,3 +24,5 @@ pub const cpu = @import("cpu.zig");
 pub const mmio = @import("mmio.zig");
 pub const irq = @import("irq.zig");
 pub const atomic = @import("atomic.zig");
+pub const external_memory = @import("external_memory.zig");
+pub const memory = @import("memory.zig");

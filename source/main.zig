@@ -63,6 +63,19 @@ comptime {
     _ = @import("kernel/system_stubs.zig");
 }
 
+fn qmi_delay(counter: usize) linksection(".kernel_ramfuncs") void {
+    var index: usize = 0;
+    while (index < counter) : (index += 1) {
+        asm volatile (
+            \\nop
+        );
+    }
+}
+
+fn slicify(ptr: [*]u8, len: usize) []u8 {
+    return ptr[0..len];
+}
+
 fn initialize_board() void {
     try board.uart.uart0.init(.{
         .baudrate = 921600,
@@ -70,8 +83,23 @@ fn initialize_board() void {
 
     log.attach_to(.{
         .state = &board.uart.uart0,
+
         .method = @TypeOf(board.uart.uart0).write_some_opaque,
     });
+    log.write(" - initialization of external memory\n\n");
+    if (hal.external_memory.enable()) {
+        hal.external_memory.dump_configuration(log);
+        log.print("External memory found\n", .{});
+        // asm volatile (
+        //     \\bkpt 0
+        // );
+        if (hal.external_memory.perform_post(log)) {
+            log.print("External memory post test passed\n", .{});
+        } else {
+            log.print("External memory post test failed\n", .{});
+        }
+    }
+    log.write("Memory initialization finished\n");
 }
 
 // must be in root module file, otherwise won't be used
@@ -260,7 +288,7 @@ pub export fn main() void {
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
     });
-    process.init();
     spawn.root_process(&kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
+    process.init();
     while (true) {}
 }

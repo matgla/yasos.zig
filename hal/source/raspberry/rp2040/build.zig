@@ -116,6 +116,7 @@ pub fn build(b: *std.Build) !void {
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_irq/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_gpio/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_sync/include"));
+    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_vreg/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/hardware_claim/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/pico_sync/include"));

@@ -32,7 +32,7 @@ extern fn store_and_switch_to_next_task() void;
 
 pub const KernelSemaphore = struct {
     // blocking
-    pub fn release(semaphore: *Semaphore) void {
+    pub fn release(semaphore: *Semaphore) i32 {
         semaphore.counter.increment();
         // unblock waiting processes
         var next = process_manager.instance.processes.first;
@@ -43,10 +43,11 @@ pub const KernelSemaphore = struct {
                 process.unblock();
             }
         }
+        return 0;
     }
 
     // blocking
-    pub fn acquire(semaphore: *Semaphore) bool {
+    pub fn acquire(semaphore: *Semaphore) !i32 {
         if (!semaphore.counter.compare_not_equal_decrement(0)) {
             // this must be service call
             const maybe_process = process_manager.instance.get_current_process();
@@ -57,8 +58,8 @@ pub const KernelSemaphore = struct {
                 hal.irq.trigger(.pendsv);
             }
             // process is blocked, let's trigger scheduler
-            return false;
+            return 1;
         }
-        return true;
+        return 0;
     }
 };

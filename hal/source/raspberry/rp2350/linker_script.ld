@@ -19,8 +19,8 @@ MEMORY
 {
   flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 512K 
   romfs(rx!w)       : ORIGIN = 0x10080000, LENGTH = 1536K
-  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 32K 
-  process_ram(rxw)  : ORIGIN = 0x20008000, LENGTH = 480K 
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 256K 
+  process_ram(rxw)  : ORIGIN = 0x20040000, LENGTH = 256K 
   scratch_x(rxw)    : ORIGIN = 0x20080000, LENGTH = 4K 
   scratch_y(rxw)    : ORIGIN = 0x20081000, LENGTH = 4K
 }
@@ -106,7 +106,6 @@ SECTIONS
     *(.time_critical*)
     *(.data)
     *(.data*)
-    . = ALIGN(4);
     __data_end__ = .;
   } > kernel_ram AT> flash 
 
@@ -129,15 +128,6 @@ SECTIONS
   } > kernel_ram 
 
   __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
-
-
-  .process_ram (NOLOAD):
-  {
-    __process_ram_start__ = .;
-  } > process_ram 
-
-  __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
- 
 
   .scratch_x : 
   {
@@ -171,6 +161,13 @@ SECTIONS
   __stack1_top__ = ORIGIN(scratch_x) + LENGTH(scratch_x);
   __stack_top__ = ORIGIN(scratch_y) + LENGTH(scratch_y);
   __stack1_bottom__ = __stack1_top__ - SIZEOF(.stack1_dummy);
+  __kernel_ram_start__ = ORIGIN(kernel_ram);
+  __kernel_ram_end__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
+  __process_ram_start__ = ORIGIN(process_ram);
+  __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
+  
+  
+
   PROVIDE(__stack = __stack_top__); 
   ASSERT(__stack_limit__ >= __heap_limit__, "region RAM overflowed")
 }
