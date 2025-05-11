@@ -84,9 +84,9 @@ pub const Module = struct {
     pub fn get_base_address(self: Module, section: Section) error{UnknownSection}!usize {
         switch (section) {
             .Code => return @intFromPtr(self.program.?.ptr),
-            .Data => return @intFromPtr(self.program.?.ptr) + self.header.code_length + self.header.init_length,
+            .Data => return @intFromPtr(self.program.?.ptr) + self.header.code_length + self.header.init_length + self.header.plt_length,
             .Init => return @intFromPtr(self.program.?.ptr) + self.header.code_length,
-            .Bss => return @intFromPtr(self.program.?.ptr) + self.header.code_length + self.header.data_length + self.header.init_length,
+            .Bss => return @intFromPtr(self.program.?.ptr) + self.header.code_length + self.header.data_length + self.header.init_length + self.header.plt_length,
             .Unknown => return error.UnknownSection,
         }
     }
@@ -137,13 +137,13 @@ pub const Module = struct {
     }
 
     pub fn get_data(self: *Module) []u8 {
-        const data_start = self.header.code_length + self.header.init_length;
+        const data_start = self.header.code_length + self.header.init_length + self.header.plt_length;
         const data_end = data_start + self.header.data_length;
         return self.program.?[data_start..data_end];
     }
 
     pub fn get_bss(self: *Module) []u8 {
-        const bss_start = self.header.code_length + self.header.init_length + self.header.data_length;
+        const bss_start = self.header.code_length + self.header.init_length + self.header.data_length + self.header.bss_length;
         const bss_end = bss_start + self.header.bss_length;
         return self.program.?[bss_start..bss_end];
     }

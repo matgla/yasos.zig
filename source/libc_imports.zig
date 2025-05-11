@@ -21,4 +21,5 @@ pub const c = @cImport({
     @cInclude("libs/libc/termios.h");
     @cInclude("libs/libc/dirent.h");
     @cInclude("libs/libc/fcntl.h");
+    @cInclude("libs/libc/errno.h");
 });

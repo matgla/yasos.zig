@@ -21,20 +21,17 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-typedef struct optional_errno {
-  int err;
-  bool isset;
-} optional_errno;
+typedef struct syscall_result {
+  int err; // errno returned by OS
+  int result;
+} syscall_result;
 
 typedef struct read_context {
   int fd;
   void *buf;
   size_t count;
+  ssize_t *result;
 } read_context;
-
-typedef struct read_result {
-  ssize_t result;
-} read_result;
 
 typedef struct kill_context {
   pid_t pid;
@@ -45,11 +42,8 @@ typedef struct write_context {
   int fd;
   const void *buf;
   size_t count;
+  ssize_t *result;
 } write_context;
-
-typedef struct write_result {
-  ssize_t result;
-} write_result;
 
 typedef struct link_context {
   const char *oldpath;
@@ -65,6 +59,7 @@ typedef struct lseek_context {
   int fd;
   off_t offset;
   int whence;
+  off_t *result;
 } lseek_context;
 
 typedef struct getentropy_context {
@@ -88,14 +83,11 @@ typedef struct fstat_context {
   struct stat *buf;
 } fstat_context;
 
-typedef struct sbrk_result {
-  void *result;
-} sbrk_result;
-
 typedef struct getdents_context {
   int fd;
   struct dirent *dirp;
   size_t count;
+  ssize_t *result;
 } getdents_context;
 
 typedef struct ioctl_context {
@@ -120,21 +112,16 @@ typedef struct nanosleep_context {
   struct timespec *rem;
 } nanosleep_context;
 
-typedef struct execve_context {
-  const char *filename;
-
-  char **const argv;
-  char **const envp;
-} execve_context;
-
 typedef struct execve_result {
   int result;
-  size_t symbol;
-  int argc;
-  char **argv;
-  int envc;
-  char **envp;
 } execve_result;
+
+typedef struct execve_context {
+  const char *filename;
+  char **const argv;
+  char **const envp;
+  execve_result *result;
+} execve_context;
 
 typedef struct mmap_context {
   void *addr;
@@ -143,11 +130,8 @@ typedef struct mmap_context {
   int flags;
   int fd;
   int offset;
+  void **result;
 } mmap_context;
-
-typedef struct mmap_result {
-  void *memory;
-} mmap_result;
 
 typedef struct munmap_context {
   void *addr;
@@ -157,6 +141,7 @@ typedef struct munmap_context {
 typedef struct getcwd_context {
   char *buf;
   size_t size;
+  char **result;
 } getcwd_context;
 
 typedef struct chdir_context {
@@ -165,6 +150,7 @@ typedef struct chdir_context {
 
 typedef struct time_context {
   time_t *timep;
+  time_t *result;
 } time_context;
 
 typedef struct fcntl_context {
@@ -173,10 +159,23 @@ typedef struct fcntl_context {
   void *arg;
 } fcntl_context;
 
+typedef struct remove_context {
+  const char *pathname;
+} remove_context;
+
+typedef struct realpath_context {
+  const char *path;
+  char *resolved_path;
+} realpath_context;
+
+typedef struct mprotect_context {
+  void *addr;
+  size_t length;
+  int prot;
+} mprotect_context;
+
 typedef enum SystemCall {
-  sys_dynamic_loader_prepare_entry = 1,
-  sys_dynamic_loader_process_exit,
-  sys_start_root_process,
+  sys_start_root_process = 1,
   sys_create_process,
   sys_semaphore_acquire,
   sys_semaphore_release,
@@ -185,8 +184,6 @@ typedef enum SystemCall {
   sys_fstat,
   sys_isatty,
   sys_open,
-  sys_sbrk,
-  sys_init,
   sys_close,
   sys_exit,
   sys_read,
@@ -212,7 +209,10 @@ typedef enum SystemCall {
   sys_chdir,
   sys_time,
   sys_fcntl,
+  sys_remove,
+  sys_realpath,
+  sys_mprotect,
   SYSCALL_COUNT,
 } SystemCall;
 
-void trigger_syscall(int number, const void *args, void *result);
+int trigger_syscall(int number, const void *args);

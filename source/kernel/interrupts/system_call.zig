@@ -26,30 +26,15 @@ const c = @import("../../libc_imports.zig").c;
 
 const syscall = @import("../system_stubs.zig");
 
-const kernel_log = @import("../../log/kernel_log.zig");
-const log = &kernel_log.kernel_log;
+const log = &@import("../../log/kernel_log.zig").kernel_log;
 
 const process_manager = @import("../process_manager.zig");
-const Semaphore = @import("../semaphore.zig").Semaphore;
-const KernelSemaphore = @import("kernel_semaphore.zig").KernelSemaphore;
-const config = @import("config");
 
-extern fn switch_to_next_task() void;
+const handlers = @import("syscall_handlers.zig");
+
 extern fn store_and_switch_to_next_task() void;
 
-pub const CreateProcessCall = struct {
-    allocator: std.mem.Allocator,
-    entry: *const anyopaque,
-    stack_size: u32,
-    arg: ?*const anyopaque,
-};
-
-pub const SemaphoreEvent = struct {
-    object: *Semaphore,
-};
-
 // mov to arch file
-
 inline fn get_lr() usize {
     return asm volatile (
         \\ mov %[ret], lr
@@ -57,150 +42,92 @@ inline fn get_lr() usize {
     );
 }
 
+pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) void {
+    const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
+    const result: i32 = result_or_error catch |err| {
+        c_result.*.err = @intFromError(err);
+        c_result.*.result = -1;
+        return;
+    };
+
+    c_result.*.result = result;
+    c_result.*.err = -1;
+}
+
+const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
+
+fn sys_unhandled_factory(comptime i: usize) type {
+    return struct {
+        fn handler(arg: *const volatile anyopaque) !i32 {
+            _ = arg;
+            log.print("\nUnhandled system call id: {d}\n", .{i});
+            return -1;
+        }
+    };
+}
+
+fn SyscallFactory(comptime index: usize) SyscallHandler {
+    comptime {
+        switch (index) {
+            c.sys_start_root_process => return handlers.sys_start_root_process,
+            c.sys_create_process => return handlers.sys_create_process,
+            c.sys_semaphore_acquire => return handlers.sys_semaphore_acquire,
+            c.sys_semaphore_release => return handlers.sys_semaphore_release,
+            c.sys_getpid => return handlers.sys_getpid,
+            c.sys_mkdir => return handlers.sys_mkdir,
+            c.sys_fstat => return handlers.sys_fstat,
+            c.sys_isatty => return handlers.sys_isatty,
+            c.sys_open => return handlers.sys_open,
+            c.sys_close => return handlers.sys_close,
+            c.sys_exit => return handlers.sys_exit,
+            c.sys_read => return handlers.sys_read,
+            c.sys_kill => return handlers.sys_kill,
+            c.sys_write => return handlers.sys_write,
+            c.sys_vfork => return handlers.sys_vfork,
+            c.sys_unlink => return handlers.sys_unlink,
+            c.sys_link => return handlers.sys_link,
+            c.sys_stat => return handlers.sys_stat,
+            c.sys_getentropy => return handlers.sys_getentropy,
+            c.sys_lseek => return handlers.sys_lseek,
+            c.sys_wait => return handlers.sys_wait,
+            c.sys_times => return handlers.sys_times,
+            c.sys_getdents => return handlers.sys_getdents,
+            c.sys_ioctl => return handlers.sys_ioctl,
+            c.sys_gettimeofday => return handlers.sys_gettimeofday,
+            c.sys_waitpid => return handlers.sys_waitpid,
+            c.sys_execve => return handlers.sys_execve,
+            c.sys_nanosleep => return handlers.sys_nanosleep,
+            c.sys_mmap => return handlers.sys_mmap,
+            c.sys_munmap => return handlers.sys_munmap,
+            c.sys_getcwd => return handlers.sys_getcwd,
+            c.sys_chdir => return handlers.sys_chdir,
+            c.sys_time => return handlers.sys_time,
+            c.sys_fcntl => return handlers.sys_fcntl,
+            c.sys_remove => return handlers.sys_remove,
+            c.sys_realpath => return handlers.sys_realpath,
+            c.sys_mprotect => return handlers.sys_mprotect,
+            else => return sys_unhandled_factory(index).handler,
+        }
+    }
+}
+
+fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
+    var syscalls: [count]SyscallHandler = undefined;
+    for (&syscalls, 0..) |*f, index| {
+        f.* = SyscallFactory(index);
+    }
+    return syscalls;
+}
+
+const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
+
 pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
-    // those operations must be secure since both cores may be executing that code in the same time
-    if (number >= c.SYSCALL_COUNT and number != 0) {
-        asm volatile (
-            \\ bkpt 0
-        );
+    var arg_to_call = arg;
+    if (number == c.sys_vfork) {
+        const lr = get_lr();
+        arg_to_call = @ptrCast(&lr);
     }
-    var processed_number: u32 = number;
-    const lr = get_lr();
-    switch (number) {
-        c.sys_start_root_process => {
-            switch_to_next_task();
-        },
-        c.sys_create_process => {
-            const context: *const volatile CreateProcessCall = @ptrCast(@alignCast(arg));
-            const result: *volatile bool = @ptrCast(out);
-            process_manager.instance.create_process(context.stack_size, context.entry, context.arg, "/") catch {
-                return;
-            };
-            result.* = true;
-        },
-        c.sys_semaphore_acquire => {
-            const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
-            const result: *volatile bool = @ptrCast(@alignCast(out));
-            result.* = KernelSemaphore.acquire(context.object);
-        },
-        c.sys_semaphore_release => {
-            const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
-            KernelSemaphore.release(context.object);
-        },
-        c.sys_isatty => {
-            const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._isatty(fd.*);
-        },
-        c.sys_open => {
-            const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._open(context.path, context.flags, context.mode);
-        },
-        c.sys_close => {
-            const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._close(fd.*);
-        },
-        c.sys_write => {
-            const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            processed_number += 1000;
-            result.* = syscall._write(context.fd, context.buf.?, context.count);
-        },
-        c.sys_read => {
-            const context: *const volatile c.read_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._read(context.fd, context.buf.?, context.count);
-        },
-        c.sys_vfork => {
-            const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
-            result.* = @intCast(process_manager.instance.vfork(lr, @intFromPtr(result)));
-        },
-        c.sys_waitpid => {
-            const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c.pid_t = @ptrCast(@alignCast(out));
-            result.* = process_manager.instance.waitpid(context.pid, context.status);
-        },
-        c.sys_ioctl => {
-            const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._ioctl(context.fd, context.op, context.arg);
-        },
-        c.sys_fcntl => {
-            const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._fcntl(context.fd, context.op, context.arg);
-        },
-        c.sys_exit => {
-            const context: *const volatile c_int = @ptrCast(@alignCast(arg));
-            syscall._exit(context.*);
-        },
-        c.sys_mmap => {
-            const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c.mmap_result = @ptrCast(@alignCast(out));
-            result.memory = syscall._mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset);
-        },
-        c.sys_munmap => {
-            const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._munmap(context.addr, context.length);
-        },
-        c.sys_execve => {
-            const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c.execve_result = @ptrCast(@alignCast(out));
-            const exec_result = process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
-            result.result = exec_result;
-        },
-        c.sys_getcwd => {
-            const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
-            const result: *volatile *allowzero c_char = @ptrCast(@alignCast(out));
-            if (process_manager.instance.get_current_process()) |current_process| {
-                const cwd = current_process.get_current_directory();
-                const cwd_len = @min(cwd.len, context.size);
-                std.mem.copyForwards(u8, context.buf[0..cwd_len], cwd[0..cwd_len]);
-                var last_index = cwd.len;
-                if (last_index > context.size) {
-                    last_index = context.size - 1;
-                }
-                context.buf[last_index] = 0;
-                result.* = context.buf;
-            } else {
-                context.buf[0] = 0;
-                result.* = @ptrFromInt(0);
-            }
-        },
-        c.sys_getdents => {
-            const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
-            const result: *volatile isize = @ptrCast(@alignCast(out));
-            if (context.dirp == null) {
-                result.* = -1;
-            } else {
-                result.* = syscall._getdents(context.fd, context.dirp.?, context.count);
-            }
-        },
-        c.sys_chdir => {
-            const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._chdir(context.path.?);
-        },
-        c.sys_time => {
-            const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c.time_t = @ptrCast(@alignCast(out));
-            result.* = syscall._time(context.timep);
-        },
-        c.sys_nanosleep => {
-            const context: *const volatile c.nanosleep_context = @ptrCast(@alignCast(arg));
-            const result: *volatile c_int = @ptrCast(@alignCast(out));
-            result.* = syscall._nanosleep(context.req.*);
-        },
-        else => {
-            log.print("\nUnhandled system call id: {d}, {d}\n", .{ number, processed_number });
-            asm volatile (
-                \\ bkpt 0
-            );
-        },
-    }
+    write_result(out, syscall_lookup_table[number](arg_to_call));
 }
 
 export fn irq_pendsv() void {

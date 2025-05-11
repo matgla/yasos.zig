@@ -89,7 +89,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             pid_counter += 1;
             const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry, null);
             const cwd_handle = try allocator.alloc(u8, cwd.len + 1);
-            @memcpy(cwd_handle, cwd);
+            @memcpy(cwd_handle[0..cwd.len], cwd);
             cwd_handle[cwd.len] = 0;
             return Self{
                 .state = State.Ready,
