@@ -452,15 +452,12 @@ class Application:
                 section_code = SectionCode.Data
                 offset = data_offset
                 original_offset = struct.unpack_from("<I", data, from_address)[0]
-                print("original offset: ", hex(original_offset), " data offset: ", hex(offset))
 
                 if original_offset - offset < 0:
                     # this is a data relocation towards code
                     offset = original_offset << 2 | SectionCode.Code.value
-                    print("relocation towards .text, offset: ", hex(offset))
                 else: 
                     offset = ((original_offset - offset) << 2) | section_code.value
-                    print("relocation towards .data, offset: ", hex(offset))
 
                 self.relocations.add_data_relocation(
                     relocation, from_address, offset

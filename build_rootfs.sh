@@ -69,6 +69,7 @@ ls -lah
 pwd
 cd ..
 mkdir -p rootfs/tmp
+cp $SCRIPT_DIR/hello_world.c rootfs/usr
 mkdir -p rootfs/dev
 pwd
 cd libs 
@@ -78,7 +79,7 @@ build_cross_compiler()
   echo "Building cross compiler..."
   cd tinycc
   mkdir -p bin
-  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  ./configure --extra-cflags="-DTCC_DEBUG=2 -g -O0" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -97,7 +98,9 @@ build_c_compiler()
   cd tinycc
   mkdir -p bin
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
-  ./configure --cc=tcc --cpu=armv8m --extra-cflags="-DTCC_DEBUG=0 -g -DCONFIG_TCC_SWITCHES -O0 -DTCC_ARM_VFP=1 -DTCC_TARGET_ARM=1 -DTCC_TARGET_ARM_THUMB=1 -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs"  --sysincludepaths="$PREFIX/include" --cross-prefix=armv8m-
+  # gcc -o armv8m-tcc.o -c tcc.c -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM_ARCHV8M -DCONFIG_TCC_CROSSPREFIX="\"armv8m-\"" -I. -DTCC_GITHASH="\"2025-05-11 armv8m@ec701fe2*\"" -DTCC_DEBUG=2 -g -O0 -Wdeclaration-after-statement -Wno-unused-result
+
+  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-DTCC_DEBUG=2 -g -O0 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
   if [ $? -ne 0 ]; then
     exit -1;
   fi

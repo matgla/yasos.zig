@@ -24,8 +24,14 @@ pub const MemoryInfo = struct {
         SRAM,
     };
 
+    pub const Owner = enum {
+        Kernel,
+        User,
+    };
+
     speed: MemorySpeed,
     memory_type: MemoryType,
+    owner: Owner,
     size: usize,
     start_address: usize,
 };
@@ -44,6 +50,10 @@ pub fn Memory(comptime MemoryImpl: anytype) type {
 
         pub fn get_memory_layout(self: Self) []const MemoryInfo {
             return self.impl.get_memory_layout();
+        }
+
+        pub fn get_memory_section(self: Self, selector: anytype) MemoryInfo {
+            return self.impl.get_memory_section(selector);
         }
     };
 }

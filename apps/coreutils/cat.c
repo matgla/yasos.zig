@@ -46,6 +46,7 @@ int main(int argc, char *argv[]) {
   while (fgets(buffer, sizeof(buffer), file) != NULL) {
     printf("%s", buffer);
   }
+  printf("\n");
   fclose(file);
   return 0;
 }
