@@ -278,7 +278,16 @@ pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
+    const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
+    const maybe_process = process_manager.instance.get_current_process();
+
+    if (maybe_process) |process| {
+        const maybe_file = process.fds.get(@intCast(context.fd));
+        if (maybe_file) |file| {
+            context.result.* = file.file.seek(context.offset, context.whence);
+            return 0;
+        }
+    }
     return -1;
 }
 pub fn sys_wait(arg: *const volatile anyopaque) !i32 {

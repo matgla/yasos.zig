@@ -31,18 +31,21 @@ var memory_layout: [3]MemoryInfo = [_]MemoryInfo{
     MemoryInfo{
         .speed = MemoryInfo.MemorySpeed.Fast,
         .memory_type = MemoryInfo.MemoryType.SRAM,
+        .owner = MemoryInfo.Owner.Kernel,
         .size = 0,
         .start_address = 0,
     },
     MemoryInfo{
         .speed = MemoryInfo.MemorySpeed.Fast,
         .memory_type = MemoryInfo.MemoryType.SRAM,
+        .owner = MemoryInfo.Owner.User,
         .size = 0,
         .start_address = 0,
     },
     MemoryInfo{
         .speed = MemoryInfo.MemorySpeed.Slow,
         .memory_type = MemoryInfo.MemoryType.PSRAM,
+        .owner = MemoryInfo.Owner.User,
         .size = 0,
         .start_address = 0,
     },
@@ -55,8 +58,13 @@ pub const Memory = struct {
         memory_layout[0].size = @intFromPtr(&__kernel_ram_end__) - @intFromPtr(&__kernel_ram_start__);
         memory_layout[1].start_address = @intFromPtr(&__process_ram_start__);
         memory_layout[1].size = @intFromPtr(&__process_ram_end__) - @intFromPtr(&__process_ram_start__);
-        memory_layout[2].start_address = 0x1d000000;
+        memory_layout[2].start_address = 0x11000000;
         memory_layout[2].size = external_memory.get_memory_size();
         return &memory_layout;
+    }
+
+    pub fn get_memory_section(self: Memory, selector: anytype) MemoryInfo {
+        _ = self;
+        return memory_layout[selector];
     }
 };

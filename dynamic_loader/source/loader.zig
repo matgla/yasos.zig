@@ -96,7 +96,7 @@ pub const Loader = struct {
     }
 
     fn process_data(_: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        // _ = stdout;
+        _ = stdout;
         const data_initializer = parser.get_data();
         const text = parser.get_text();
         try module.allocate_program(header.data_length + header.bss_length + header.code_length + header.init_length + header.got_plt_length + header.got_length + header.plt_length);
@@ -105,13 +105,13 @@ pub const Loader = struct {
         const plt_start = header.code_length + header.init_length;
         const plt_end = plt_start + header.plt_length;
         const plt_data = parser.get_plt();
-        stdout.print("[yasld] copying .plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(plt_data.ptr), @intFromPtr(&module.program.?[plt_start]), plt_data.len });
+        // stdout.print("[yasld] copying .plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(plt_data.ptr), @intFromPtr(&module.program.?[plt_start]), plt_data.len });
         @memcpy(module.program.?[plt_start..plt_end], plt_data);
 
         const data_start = plt_end;
         const data_end = data_start + header.data_length;
 
-        stdout.print("[yasld] copying .data from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(data_initializer.ptr), @intFromPtr(&module.program.?[data_start]), data_initializer.len });
+        // stdout.print("[yasld] copying .data from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(data_initializer.ptr), @intFromPtr(&module.program.?[data_start]), data_initializer.len });
         @memcpy(module.program.?[data_start..data_end], data_initializer);
         const bss_start = data_end;
         const bss_end = bss_start + header.bss_length;
@@ -121,13 +121,13 @@ pub const Loader = struct {
         const got_start = bss_end;
         const got_end = got_start + header.got_length;
         const got_data = parser.get_got();
-        stdout.print("[yasld] copying .got from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(got_data.ptr), @intFromPtr(&module.program.?[got_start]), got_data.len });
+        // stdout.print("[yasld] copying .got from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(got_data.ptr), @intFromPtr(&module.program.?[got_start]), got_data.len });
         @memcpy(module.program.?[got_start..got_end], got_data);
 
         const got_plt_start = got_end;
         const got_plt_end = got_plt_start + header.got_plt_length;
         const got_plt_data = parser.get_got_plt();
-        stdout.print("[yasld] copying .got.plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(got_plt_data.ptr), @intFromPtr(&module.program.?[got_plt_start]), got_plt_data.len });
+        // stdout.print("[yasld] copying .got.plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(got_plt_data.ptr), @intFromPtr(&module.program.?[got_plt_start]), got_plt_data.len });
         @memcpy(module.program.?[got_plt_start..got_plt_end], got_plt_data);
     }
 
@@ -187,14 +187,14 @@ pub const Loader = struct {
     }
 
     fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        // _ = stdout;
+        _ = stdout;
         const data_memory = module.get_data();
         for (parser.data_relocations.relocations) |rel| {
             const address_to_change: usize = @intFromPtr(data_memory.ptr) + rel.to;
             const target: *usize = @ptrFromInt(address_to_change);
             const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));
             const address_from: usize = base_address_from + rel.from;
-            stdout.print("Patching from: 0x{x} to: 0x{x}, base: {x}\n", .{ rel.from, rel.to, base_address_from });
+            // stdout.print("Patching from: 0x{x} to: 0x{x}, base: {x}\n", .{ rel.from, rel.to, base_address_from });
 
             target.* = address_from;
         }

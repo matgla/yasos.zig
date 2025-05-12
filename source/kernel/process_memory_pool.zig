@@ -27,7 +27,6 @@ const dynamic_loader = @import("modules.zig");
 pub const ProcessMemoryPool = struct {
     pub const page_size = 4096;
 
-    const BitSetType = std.StaticBitSet(2000);
     const AccessType = packed struct {
         read: u1,
         write: u1,
@@ -44,18 +43,18 @@ pub const ProcessMemoryPool = struct {
 
     memory_size: usize,
     page_count: usize,
-    page_bitmap: BitSetType,
+    page_bitmap: std.DynamicBitSet,
     memory_map: ProcessMemoryMap,
     // this allocator is used to keep track of the memory allocated for the process inside the kernel
     allocator: std.mem.Allocator,
     start_address: usize,
 
-    pub fn create(allocator: std.mem.Allocator) ProcessMemoryPool {
+    pub fn create(allocator: std.mem.Allocator) !ProcessMemoryPool {
         const memory_layout = memory.get_memory_layout();
         return ProcessMemoryPool{
             .memory_size = memory_layout[2].size,
             .page_count = memory_layout[2].size / page_size,
-            .page_bitmap = BitSetType.initEmpty(),
+            .page_bitmap = try std.DynamicBitSet.initEmpty(allocator, memory_layout[2].size / page_size),
             .memory_map = ProcessMemoryMap.init(allocator),
             .allocator = allocator,
             .start_address = memory_layout[2].start_address,
@@ -80,10 +79,13 @@ pub const ProcessMemoryPool = struct {
         var end_index = start;
         while (end_index < self.page_count and pages != 0) {
             if (self.page_bitmap.isSet(end_index)) {
-                return .{ start, end_index };
+                return .{ start, end_index - 1 };
             }
             end_index += 1;
             pages -= 1;
+        }
+        if (self.page_bitmap.isSet(end_index)) {
+            return .{ start, end_index - 1 };
         }
         return .{ start, end_index };
     }
@@ -93,7 +95,6 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: u32) ?[]u8 {
-        // log.print("Allocating {d} pages for process {d}\n", .{ number_of_pages, pid });
         if (number_of_pages <= 0) {
             return null;
         }
@@ -104,8 +105,8 @@ pub const ProcessMemoryPool = struct {
             };
             if (slot_end - slot_start >= number_of_pages - 1) {
                 start_index = slot_start;
-                const end_index: usize = slot_start + @as(usize, @intCast(number_of_pages)) - 1;
-                for (slot_start..end_index + 1) |i| {
+                const end_index: usize = slot_start + @as(usize, @intCast(number_of_pages));
+                for (slot_start..end_index) |i| {
                     self.page_bitmap.set(i);
                 }
                 var list = self.memory_map.getOrPut(pid) catch {
@@ -125,6 +126,7 @@ pub const ProcessMemoryPool = struct {
                     return null;
                 };
                 @memset(list.value_ptr.getLast().address, 0);
+
                 return list.value_ptr.getLast().address;
             } else {
                 start_index = slot_end + 1;
@@ -172,6 +174,6 @@ pub const ProcessMemoryPool = struct {
 
 pub var instance: ProcessMemoryPool = undefined;
 
-pub fn init() void {
-    instance = ProcessMemoryPool.create(malloc_allocator);
+pub fn init() !void {
+    instance = try ProcessMemoryPool.create(malloc_allocator);
 }

@@ -279,7 +279,10 @@ pub export fn main() void {
     DumpHardware.print_hardware();
 
     log.write(" - initializing process memory pool\n");
-    process_memory_pool.init();
+    process_memory_pool.init() catch |err| {
+        log.print("Can't initialize process memory pool: {s}\n", .{@errorName(err)});
+        while (true) {}
+    };
 
     log.write(" - initializing process manager\n");
     process_manager.initialize_process_manager(malloc_allocator);
@@ -288,7 +291,7 @@ pub export fn main() void {
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
     });
-    spawn.root_process(&kernel_process, null, 1024 * 8) catch @panic("Can't spawn root process: ");
+    spawn.root_process(&kernel_process, null, 1024 * 64) catch @panic("Can't spawn root process: ");
     process.init();
     while (true) {}
 }
