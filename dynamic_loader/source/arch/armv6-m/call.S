@@ -26,7 +26,7 @@
 r0 - int argc
 r1 - char *argv[]
 r2 - std::size_t main_address
-r3 - std::size_t *lot
+r3 - std::size_t *got
 */
 
 .global call_main

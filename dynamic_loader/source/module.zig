@@ -31,6 +31,16 @@ pub const ForeignCallContext = extern struct {
     temp: [2]usize = .{ 0, 0 },
 };
 
+pub const GotEntry = extern struct {
+    base_register: usize,
+    symbol_offset: usize,
+};
+
+pub const SymbolEntry = struct {
+    address: usize,
+    target_got_address: usize,
+};
+
 pub const Module = struct {
     allocator: std.mem.Allocator,
     program_memory: ?[]u8 = null,
@@ -41,8 +51,9 @@ pub const Module = struct {
     imported_modules: std.ArrayList(Module),
     // this needs to be corelated with thread info
     active: bool,
-    entry: ?usize = null,
+    entry: ?SymbolEntry = null,
     header: *const Header = undefined,
+    list_node: std.DoublyLinkedList.Node,
 
     pub fn init(allocator: std.mem.Allocator) Module {
         return .{
@@ -50,6 +61,7 @@ pub const Module = struct {
             .foreign_call_context = .{},
             .imported_modules = std.ArrayList(Module).init(allocator),
             .active = false,
+            .list_node = .{},
         };
     }
 
@@ -102,16 +114,22 @@ pub const Module = struct {
         return null;
     }
 
-    pub fn find_symbol(self: Module, name: []const u8) ?usize {
+    pub fn find_symbol(self: Module, name: []const u8) ?SymbolEntry {
         const maybe_local_symbol = self.find_local_symbol(name);
         if (maybe_local_symbol) |symbol| {
-            return symbol;
+            return .{
+                .address = symbol,
+                .target_got_address = @intFromPtr(self.get_got().ptr),
+            };
         }
 
         for (self.imported_modules.items) |module| {
             const maybe_symbol = module.find_symbol(name);
             if (maybe_symbol) |symbol| {
-                return symbol;
+                return .{
+                    .address = symbol.address,
+                    .target_got_address = @intFromPtr(module.get_got().ptr),
+                };
             }
         }
 
@@ -232,11 +250,11 @@ pub const Module = struct {
         return null;
     }
 
-    pub fn get_got(self: *const Module) []usize {
+    pub fn get_got(self: *const Module) []GotEntry {
         const got_start = self.header.code_length + self.header.data_length + self.header.init_length + self.header.bss_length + self.header.plt_length;
         const got_end = (self.header.got_length / 4);
 
-        return @as([*]usize, @ptrFromInt(@intFromPtr(self.program.?.ptr) + got_start))[0..got_end];
+        return @as([*]GotEntry, @ptrFromInt(@intFromPtr(self.program.?.ptr) + got_start))[0..got_end];
     }
     pub fn get_got_plt(self: *const Module) []usize {
         const got_plt_start = self.header.code_length + self.header.data_length + self.header.init_length + self.header.bss_length + self.header.got_length + self.header.plt_length;
@@ -252,17 +270,17 @@ pub const Module = struct {
         return @as([*]usize, @ptrFromInt(@intFromPtr(self.program.?.ptr) + plt_start))[0..plt_end];
     }
 
-    pub fn find_module_with_got(self: *const Module, got_address: usize) ?*Module {
-        if (got_address == @as(usize, @intFromPtr(self.get_got().ptr))) {
-            return self;
-        }
+    // pub fn find_module_with_got(self: *const Module, got_address: usize) ?*Module {
+    //     if (got_address == @as(usize, @intFromPtr(self.get_got().ptr))) {
+    //         return self;
+    //     }
 
-        for (self.imported_modules.items) |module| {
-            const maybe_module = module.find_module_with_got(got_address);
-            if (maybe_module) |m| {
-                return m;
-            }
-        }
-        return null;
-    }
+    //     for (self.imported_modules.items) |module| {
+    //         const maybe_module = module.find_module_with_got(got_address);
+    //         if (maybe_module) |m| {
+    //             return m;
+    //         }
+    //     }
+    //     return null;
+    // }
 };

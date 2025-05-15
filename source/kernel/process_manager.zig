@@ -29,6 +29,7 @@ const config = @import("config");
 var log = &@import("../log/kernel_log.zig").kernel_log;
 
 const dynamic_loader = @import("modules.zig");
+const SymbolEntry = @import("yasld").SymbolEntry;
 
 extern fn switch_to_next_task() void;
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
@@ -148,17 +149,14 @@ pub const ProcessManager = struct {
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |p| {
             // TODO: move loader to struct, pass allocator to loading functions
-            const executable = dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid) catch |err| {
-                log.print("Exec failure: {s}\n", .{@errorName(err)});
-                return -1;
-            };
+            const executable = try dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid);
             var argc: usize = 0;
             while (argv[argc] != null) : (argc += 1) {}
 
             var envpc: usize = 0;
             while (envp[envpc] != null) : (envpc += 1) {}
 
-            var symbol: usize = 0;
+            var symbol: SymbolEntry = undefined;
             if (executable.module.entry) |entry| {
                 symbol = entry;
             } else if (executable.module.find_symbol("_start")) |entry| {
@@ -169,7 +167,7 @@ pub const ProcessManager = struct {
 
             p.restore_stack(); // process is still blocked so it won't be scheduled, unblocking when child finishes
             // TODO: add & support
-            p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol);
+            p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
 
             // switch to me
             reload_current_task();

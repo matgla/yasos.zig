@@ -69,7 +69,7 @@ class RelocationSet:
             "name": relocation["symbol_name"],
             "offset": relocation["offset"],
             "index": int(
-                (relocation["offset"] - got_start) / 4
+                (relocation["offset"] - got_start) / 8
             ),  # self.__create_index(relocation["symbol_name"]),
             "symbol_value": relocation["symbol_value"],
             "type": "symbol_table",

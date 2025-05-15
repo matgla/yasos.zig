@@ -112,15 +112,10 @@ typedef struct nanosleep_context {
   struct timespec *rem;
 } nanosleep_context;
 
-typedef struct execve_result {
-  int result;
-} execve_result;
-
 typedef struct execve_context {
   const char *filename;
   char **const argv;
   char **const envp;
-  execve_result *result;
 } execve_context;
 
 typedef struct mmap_context {
@@ -174,6 +169,22 @@ typedef struct mprotect_context {
   int prot;
 } mprotect_context;
 
+typedef struct dlopen_context {
+  const char *path;
+  int flags;
+  void **result;
+} dlopen_context;
+
+typedef struct dlclose_context {
+  void *handle;
+} dlclose_context;
+
+typedef struct dlsym_context {
+  void *handle;
+  const char *symbol;
+  void **result;
+} dlsym_context;
+
 typedef enum SystemCall {
   sys_start_root_process = 1,
   sys_create_process,
@@ -212,6 +223,9 @@ typedef enum SystemCall {
   sys_remove,
   sys_realpath,
   sys_mprotect,
+  sys_dlopen,
+  sys_dlclose,
+  sys_dlsym,
   SYSCALL_COUNT,
 } SystemCall;
 

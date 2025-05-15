@@ -22,6 +22,8 @@ const std = @import("std");
 
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
+const alignment: u32 = 16;
+
 pub const Type = enum(u4) {
     HardLink = 0,
     Directory = 1,
@@ -79,10 +81,8 @@ pub const FileHeader = struct {
     }
 
     pub fn data(self: FileHeader) []const u8 {
-        const data_index = self.start_index + 16 + self.name().len;
-        const remainder = data_index % 16;
-        const padded_index = if (remainder == 0) data_index else (data_index + (16 - remainder));
-        return self.memory[padded_index .. padded_index + self.size()];
+        const data_index = (self.start_index + self.name().len + 1 + 16 + (alignment - 1)) & ~(alignment - 1);
+        return self.memory[data_index .. data_index + self.size()];
     }
 
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result

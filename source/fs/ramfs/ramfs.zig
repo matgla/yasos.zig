@@ -103,39 +103,49 @@ pub const RamFs = struct {
         return 0;
     }
 
-    fn create_node(self: *RamFs, path: []const u8, filetype: FileType) i32 {
+    fn create_node(self: *RamFs, path: []const u8, filetype: FileType) ?*FilesNode {
         var dirname = std.fs.path.dirname(path);
         const basename = std.fs.path.basenamePosix(path);
         if (dirname == null) {
             dirname = "/";
         }
         if (dirname) |parent_path| {
-            const maybe_parent_node = self.get_node(parent_path) catch return -1;
+            const maybe_parent_node = self.get_node(parent_path) catch return null;
             if (maybe_parent_node) |parent_node| {
                 if (parent_node.get(basename) != null) {
-                    return -1;
+                    return null;
                 }
-                var new: *FilesNode = self.allocator.create(FilesNode) catch return -1;
+                var new: *FilesNode = self.allocator.create(FilesNode) catch return null;
                 new.* = FilesNode{
-                    .node = RamFsData.create(self.allocator, basename, filetype) catch return -1,
+                    .node = RamFsData.create(self.allocator, basename, filetype) catch return null,
                     .children = .{},
                     .list_node = .{},
                 };
                 parent_node.children.append(&new.list_node);
-                return 0;
+                return new;
             }
         }
-        return -1;
+        return null;
     }
 
-    fn create(ctx: *anyopaque, path: []const u8, _: i32) i32 {
+    fn create(ctx: *anyopaque, path: []const u8, _: i32) ?IFile {
         const self: *RamFs = @ptrCast(@alignCast(ctx));
-        return self.create_node(path, FileType.File);
+
+        if (self.create_node(path, FileType.File)) |node| {
+            const file = self.allocator.create(RamFsFile) catch return null;
+            file.* = RamFsFile.create(&node.node, self.allocator);
+            return file.ifile();
+        }
+        return null;
     }
 
     fn mkdir(ctx: *anyopaque, path: []const u8, _: i32) i32 {
         const self: *RamFs = @ptrCast(@alignCast(ctx));
-        return self.create_node(path, FileType.Directory);
+        const maybe_node = self.create_node(path, FileType.Directory);
+        if (maybe_node != null) {
+            return 0;
+        }
+        return -1;
     }
 
     fn remove(ctx: *anyopaque, path: []const u8) i32 {

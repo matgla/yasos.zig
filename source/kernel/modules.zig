@@ -63,11 +63,15 @@ fn traverse_directory(file: *IFile, context: *anyopaque) bool {
 }
 
 var modules_list: std.AutoHashMap(u32, yasld.Executable) = undefined;
+var libraries_list: std.AutoHashMap(u32, std.DoublyLinkedList) = undefined;
 var loader: yasld.Loader = undefined;
+var kernel_allocator: std.mem.Allocator = undefined;
 
-pub fn init(kernel_allocator: std.mem.Allocator) void {
+pub fn init(allocator: std.mem.Allocator) void {
     loader = yasld.Loader.create(&file_resolver);
-    modules_list = std.AutoHashMap(u32, yasld.Executable).init(kernel_allocator);
+    modules_list = std.AutoHashMap(u32, yasld.Executable).init(allocator);
+    libraries_list = std.AutoHashMap(u32, std.DoublyLinkedList).init(allocator);
+    kernel_allocator = allocator;
 }
 
 pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
@@ -102,10 +106,54 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
     return std.posix.AccessError.FileNotFound;
 }
 
+pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
+    const maybe_file = fs.ivfs().get(path);
+    if (maybe_file) |f| {
+        var attr: FileMemoryMapAttributes = .{
+            .is_memory_mapped = false,
+            .mapped_address_r = null,
+            .mapped_address_w = null,
+        };
+        _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        f.destroy();
+        var header_address: *const anyopaque = undefined;
+
+        if (attr.mapped_address_r) |address| {
+            header_address = address;
+        } else {
+            // copy file to memory before running
+            @panic("Implement image copying to memory");
+        }
+        const library = kernel_allocator.create(yasld.Module) catch |err| return err;
+        library.* = loader.load_library(header_address, log, allocator) catch |err| {
+            return err;
+        };
+
+        if (!libraries_list.contains(pid)) {
+            libraries_list.put(pid, .{}) catch |err| return err;
+        }
+        const maybe_list = libraries_list.getPtr(pid);
+        if (maybe_list) |list| {
+            list.append(&library.list_node);
+        }
+        return library;
+    }
+    return std.posix.AccessError.FileNotFound;
+}
+
 pub fn release_executable(pid: u32) void {
     const maybe_executable = modules_list.getPtr(pid);
     if (maybe_executable) |executable| {
         executable.deinit();
         _ = modules_list.remove(pid);
+        _ = libraries_list.remove(pid);
+    }
+}
+
+pub fn release_shared_library(pid: u32, library: *yasld.Module) void {
+    const maybe_list = libraries_list.getPtr(pid);
+    if (maybe_list) |*list| {
+        list.*.remove(&library.list_node);
+        library.deinit();
     }
 }

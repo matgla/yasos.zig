@@ -77,9 +77,9 @@ pub const DriverFs = struct {
         return 0;
     }
 
-    fn _create(_: *anyopaque, _: []const u8, _: i32) i32 {
+    fn _create(_: *anyopaque, _: []const u8, _: i32) ?IFile {
         // read-only filesystem
-        return -1;
+        return null;
     }
 
     fn mkdir(_: *anyopaque, _: []const u8, _: i32) i32 {

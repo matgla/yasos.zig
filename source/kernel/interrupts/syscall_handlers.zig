@@ -31,6 +31,9 @@ const config = @import("config");
 
 const c = @import("../../libc_imports.zig").c;
 
+const dynamic_loader = @import("../modules.zig");
+const yasld = @import("yasld");
+
 const E = enum(u16) {
     EINVAL = c.EINVAL,
 };
@@ -177,6 +180,23 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
                 };
                 return fd;
             }
+        } else if ((context.flags & c.O_CREAT) != 0) {
+            const fd = process.get_free_fd();
+            const maybe_ifile = fs.ivfs().create(path_slice, context.mode);
+            if (maybe_ifile) |ifile| {
+                process.fds.put(fd, .{
+                    .file = ifile,
+                    .path = blk: {
+                        var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                        std.mem.copyForwards(u8, path_buffer[0..path_slice.len], path_slice);
+                        break :blk path_buffer;
+                    },
+                    .diriter = null,
+                }) catch {
+                    return -1;
+                };
+                return fd;
+            }
         }
     }
     return -1;
@@ -218,7 +238,7 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
     if (maybe_process) |process| {
         const maybe_file = process.fds.get(@intCast(context.fd));
         if (maybe_file) |file| {
-            context.result.* = file.file.read(@as([*:0]u8, @ptrCast(context.buf.?))[0..context.count]);
+            context.result.* = file.file.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
             return 0;
         }
     }
@@ -247,7 +267,7 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     if (maybe_process) |process| {
         const maybe_file = process.fds.get(@intCast(context.fd));
         if (maybe_file) |file| {
-            context.result.* = file.file.write(@as([*:0]const u8, @ptrCast(context.buf.?))[0..context.count]);
+            context.result.* = file.file.write(@as([*]const u8, @ptrCast(context.buf.?))[0..context.count]);
             return 0;
         }
     }
@@ -353,8 +373,7 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    context.result.*.result = try process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
-    return 0;
+    return process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
@@ -454,5 +473,41 @@ pub fn sys_realpath(arg: *const volatile anyopaque) !i32 {
 }
 pub fn sys_mprotect(arg: *const volatile anyopaque) !i32 {
     _ = arg;
+    return -1;
+}
+
+pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.dlopen_context = @ptrCast(@alignCast(arg));
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const library = dynamic_loader.load_shared_library(std.mem.span(@as([*:0]const u8, @ptrCast(context.path))), process.memory_pool_allocator.std_allocator(), process.pid) catch |err| {
+            log.print("dlopen: failed to load library: {s}\n", .{@errorName(err)});
+            return -1;
+        };
+        context.*.result.* = library;
+        return 0;
+    }
+    return -1;
+}
+
+pub fn sys_dlclose(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.dlclose_context = @ptrCast(@alignCast(arg));
+    const maybe_process = process_manager.instance.get_current_process();
+    const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
+    if (maybe_process) |process| {
+        dynamic_loader.release_shared_library(process.pid, library);
+        return 0;
+    }
+    return -1;
+}
+
+pub fn sys_dlsym(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.dlsym_context = @ptrCast(@alignCast(arg));
+    const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
+    const maybe_symbol = library.find_symbol(std.mem.span(@as([*:0]const u8, @ptrCast(context.symbol))));
+    if (maybe_symbol) |symbol| {
+        context.result.* = @ptrFromInt(symbol.address);
+        return 0;
+    }
     return -1;
 }

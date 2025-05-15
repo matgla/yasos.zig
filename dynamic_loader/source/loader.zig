@@ -28,6 +28,7 @@ const Parser = @import("parser.zig").Parser;
 const Type = @import("header.zig").Type;
 const Section = @import("section.zig").Section;
 const Symbol = @import("symbol.zig").Symbol;
+const SymbolEntry = @import("module.zig").SymbolEntry;
 
 const LoaderError = error{
     DataProcessingFailure,
@@ -58,6 +59,12 @@ pub const Loader = struct {
         };
         try self.load_module(&executable.module, module, stdout);
         return executable;
+    }
+
+    pub fn load_library(self: Loader, module: *const anyopaque, stdout: anytype, allocator: std.mem.Allocator) !Module {
+        var library: Module = Module.init(allocator);
+        try self.load_module(&library, module, stdout);
+        return library;
     }
 
     fn import_child_modules(self: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) LoaderError!void {
@@ -96,7 +103,7 @@ pub const Loader = struct {
     }
 
     fn process_data(_: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        _ = stdout;
+        // _ = stdout;
         const data_initializer = parser.get_data();
         const text = parser.get_text();
         try module.allocate_program(header.data_length + header.bss_length + header.code_length + header.init_length + header.got_plt_length + header.got_length + header.plt_length);
@@ -105,30 +112,29 @@ pub const Loader = struct {
         const plt_start = header.code_length + header.init_length;
         const plt_end = plt_start + header.plt_length;
         const plt_data = parser.get_plt();
-        // stdout.print("[yasld] copying .plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(plt_data.ptr), @intFromPtr(&module.program.?[plt_start]), plt_data.len });
+        stdout.print("[yasld] copying .plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(plt_data.ptr), @intFromPtr(&module.program.?[plt_start]), plt_data.len });
         @memcpy(module.program.?[plt_start..plt_end], plt_data);
 
         const data_start = plt_end;
         const data_end = data_start + header.data_length;
 
-        // stdout.print("[yasld] copying .data from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(data_initializer.ptr), @intFromPtr(&module.program.?[data_start]), data_initializer.len });
+        stdout.print("[yasld] copying .data from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(data_initializer.ptr), @intFromPtr(&module.program.?[data_start]), data_initializer.len });
         @memcpy(module.program.?[data_start..data_end], data_initializer);
         const bss_start = data_end;
         const bss_end = bss_start + header.bss_length;
 
         @memset(module.program.?[bss_start..bss_end], 0);
 
-        const got_start = bss_end;
-        const got_end = got_start + header.got_length;
-        const got_data = parser.get_got();
+        // const got_start = bss_end;
+        stdout.print("[yasld] intializing .got at: 0x{x}\n", .{@intFromPtr(&module.program.?[bss_end])});
+        // const got_end = got_start + header.got_length;
+        // const got_data = parser.get_got();
         // stdout.print("[yasld] copying .got from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(got_data.ptr), @intFromPtr(&module.program.?[got_start]), got_data.len });
-        @memcpy(module.program.?[got_start..got_end], got_data);
+        // @memcpy(module.program.?[got_start..got_end], got_data);
 
-        const got_plt_start = got_end;
-        const got_plt_end = got_plt_start + header.got_plt_length;
-        const got_plt_data = parser.get_got_plt();
-        // stdout.print("[yasld] copying .got.plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(got_plt_data.ptr), @intFromPtr(&module.program.?[got_plt_start]), got_plt_data.len });
-        @memcpy(module.program.?[got_plt_start..got_plt_end], got_plt_data);
+        if (header.got_plt_length != 0) {
+            @panic("Support for .got.plt is not implemented yet");
+        }
     }
 
     fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
@@ -141,9 +147,10 @@ pub const Loader = struct {
         }
 
         for (0..got.len) |i| {
-            const address = module_start + got[i];
-            // stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
-            got[i] = address;
+            const address = module_start + got[i].symbol_offset;
+            stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
+            got[i].base_register = @intFromPtr(got.ptr);
+            got[i].symbol_offset = address;
         }
 
         for (parser.symbol_table_relocations.relocations) |rel| {
@@ -154,10 +161,11 @@ pub const Loader = struct {
                 maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
             }
             if (maybe_symbol) |symbol| {
-                const maybe_address = self.find_symbol(module, symbol.name());
-                if (maybe_address) |address| {
-                    // stdout.print("[yasld] Setting GOT[{d}] to: 0x{x} [{s}], exported: {d}\n", .{ rel.index, address, symbol.name(), rel.is_exported_symbol });
-                    got[rel.index] = address;
+                const maybe_symbol_entry = self.find_symbol(module, symbol.name());
+                if (maybe_symbol_entry) |symbol_entry| {
+                    stdout.print("[yasld] Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}\n", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });
+                    got[rel.index].symbol_offset = symbol_entry.address;
+                    got[rel.index].base_register = symbol_entry.target_got_address;
                 } else {
                     stdout.print("[yasld] Can't find symbol: '{s}'\n", .{symbol.name()});
                     return LoaderError.SymbolNotFound;
@@ -169,7 +177,7 @@ pub const Loader = struct {
         }
     }
 
-    fn find_symbol(_: Loader, module: *Module, name: []const u8) ?usize {
+    fn find_symbol(_: Loader, module: *Module, name: []const u8) ?SymbolEntry {
         if (module.find_symbol(name)) |symbol| {
             return symbol;
         }
@@ -182,7 +190,8 @@ pub const Loader = struct {
         for (parser.local_relocations.relocations) |rel| {
             const relocated_start_address: usize = try module.get_base_address(@enumFromInt(rel.section));
             const relocated = relocated_start_address + rel.target_offset;
-            got[rel.index] = relocated;
+            got[rel.index].symbol_offset = relocated;
+            got[rel.index].base_register = @intFromPtr(got.ptr);
         }
     }
 
@@ -202,9 +211,12 @@ pub const Loader = struct {
 
     fn load_module(self: Loader, module: *Module, module_address: *const anyopaque, stdout: anytype) !void {
         // stdout.write("[yasld] parsing header\n");
-        const header = self.process_header(module_address) catch |err| return err;
+        const header = self.process_header(module_address) catch |err| {
+            stdout.write("Wrong magic cookie, not a yaff file\n");
+            return err;
+        };
         module.set_header(header);
-        // print_header(header, stdout);
+        print_header(header, stdout);
 
         const parser = Parser.create(header, stdout);
         // parser.print(stdout);
@@ -243,7 +255,10 @@ pub const Loader = struct {
             }
 
             const base_address = try module.get_base_address(section);
-            module.entry = base_address + header.entry;
+            module.entry = .{
+                .address = base_address + header.entry,
+                .target_got_address = @intFromPtr(module.get_got().ptr),
+            };
         }
     }
 

@@ -106,6 +106,9 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_remove => return handlers.sys_remove,
             c.sys_realpath => return handlers.sys_realpath,
             c.sys_mprotect => return handlers.sys_mprotect,
+            c.sys_dlopen => return handlers.sys_dlopen,
+            c.sys_dlclose => return handlers.sys_dlclose,
+            c.sys_dlsym => return handlers.sys_dlsym,
             else => return sys_unhandled_factory(index).handler,
         }
     }

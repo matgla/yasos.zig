@@ -162,7 +162,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             return self.cwd;
         }
 
-        pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize) void {
+        pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize) void {
             if (comptime config.process.use_stack_overflow_detection) {
                 @memcpy(self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
@@ -170,8 +170,9 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 argc,
                 argv,
                 symbol,
+                got,
             };
-            self.stack_position = implementation.prepare_process_stack(self.stack, &exit_handler, process_entry, args[0..3]);
+            self.stack_position = implementation.prepare_process_stack(self.stack, &exit_handler, process_entry, args[0..4]);
         }
 
         pub fn validate_stack(self: Self) bool {

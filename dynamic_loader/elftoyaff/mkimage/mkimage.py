@@ -98,6 +98,11 @@ def parse_cli_arguments():
         action="store",
         help="Type of module: library/executable. Workaround for Cortex-M0 to create shared libraries from executables",
     )
+    parser.add_argument(
+        "--separate_text_data",
+        action="store_true",
+        help="Separate text and data sections")
+
 
     args, _ = parser.parse_known_args()
     return args
@@ -877,27 +882,48 @@ class Application:
         )
 
         image += struct.pack(
-            "<IIII", len(self.got), len(self.got_plt), len(self.plt), 0
+            "<III", len(self.got), len(self.got_plt), len(self.plt),
         )
 
-        image += struct.pack("<II", len(self.arm_extab), len(self.arm_exidx))
+        arch_section_position = len(image)
+        image += struct.pack("<H", 0)
 
-        image += Application.__align_bytes(
-            bytearray(Path(self.args.input).stem + "\0", "ascii"), alignment
-        )
+        imported_libraries_position = len(image)
+        image += struct.pack("<H", 0)
 
+        relocations_position = len(image)
+        image += struct.pack("<H", 0)
+
+        imported_symbol_table_position = len(image)
+        image += struct.pack("<H", 0)
+
+        exported_symbol_table_position = len(image)
+        image += struct.pack("<H", 0)
+
+        text_offset = len(image)
+        image += struct.pack("<H", 0)
+
+        encoded_name = Application.__align_bytes(bytearray(Path(self.args.input).stem + "\0", "ascii"), alignment)
+        image += encoded_name
+
+        struct.pack_into("<H", image, imported_libraries_position, len(image))
         for lib in self.dependant_libraries:
             image += Application.__align_bytes(
                 bytearray(lib + "\0", "ascii"), alignment
             )
 
+        struct.pack_into("<H", image, relocations_position, len(image))
         for rel in relocations:
             image += struct.pack("<II", rel["index"], rel["offset"])
 
+        struct.pack_into("<H", image, imported_symbol_table_position, len(image))
         image += imported_symbol_table
+
+        struct.pack_into("<H", image, exported_symbol_table_position, len(image))
         image += exported_symbol_table
 
         image = Application.__align_bytes(image, 16)
+        struct.pack_into("<H", image, text_offset, len(image))
         image += self.text
         image += self.init_arrays
         image += self.data

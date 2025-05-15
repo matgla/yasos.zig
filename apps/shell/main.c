@@ -152,6 +152,14 @@ int execute_command(const char *command, char *args[]) {
   if (pid == -1) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
+    char cwd[255];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+      strcat(cwd, "/");
+      strcat(cwd, command);
+      if (execv(cwd, args) == 0) {
+        exit(0);
+      }
+    }
     execvp(command, args);
     exit(0);
   } else {
@@ -175,6 +183,7 @@ int parse_command(char *buffer) {
   char *part = NULL;
 
   if (strlen(buffer) == 0) {
+    printf("\n");
     return 0;
   }
   part = strtok(buffer, delimiter);
