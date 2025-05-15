@@ -34,7 +34,7 @@ install: $(TARGET_SHARED) $(TARGET_STATIC)
 	cp $(TARGET_SHARED) $(LIBDIR)
 	cp $(TARGET_STATIC) $(LIBDIR)
 
-	cp include/*.h $(INCLUDEDIR)
+	# cp include/*.h $(INCLUDEDIR)
 
 clean:
 	rm -rf build

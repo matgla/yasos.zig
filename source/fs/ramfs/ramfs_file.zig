@@ -27,6 +27,9 @@ const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
 const RamFsData = @import("ramfs_data.zig").RamFsData;
 
+const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
+const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
+
 pub const RamFsFile = struct {
     /// VTable for IFile interface
     const VTable = IFile.VTable{
@@ -154,7 +157,18 @@ pub const RamFsFile = struct {
         return self._data.name();
     }
 
-    pub fn ioctl(_: *anyopaque, _: i32, _: ?*const anyopaque) i32 {
+    pub fn ioctl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
+        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+        switch (cmd) {
+            @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
+                var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
+                attr.is_memory_mapped = true;
+                attr.mapped_address_r = self._data.data.items.ptr;
+            },
+            else => {
+                return -1;
+            },
+        }
         return 0;
     }
 

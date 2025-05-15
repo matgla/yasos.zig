@@ -43,7 +43,7 @@ pub const Header = packed struct {
     entry: u32,
     external_libraries_amount: u16,
     alignment: u8,
-    _reserved: u8,
+    text_and_data_separation: u8,
     version_major: u16,
     version_minor: u16,
     symbol_table_relocations_amount: u16,
@@ -55,8 +55,12 @@ pub const Header = packed struct {
     got_length: u32,
     got_plt_length: u32,
     plt_length: u32,
-    arm_extab: u32,
-    arm_exidx: u32,
+    arch_section_offset: u16,
+    imported_libraries_offset: u16,
+    relocations_offset: u16,
+    imported_symbols_offset: u16,
+    exported_symbols_offset: u16,
+    text_offset: u16,
 };
 
 pub fn print_header(header: *const Header, stdout: anytype) void {
@@ -82,6 +86,12 @@ pub fn print_header(header: *const Header, stdout: anytype) void {
     stdout.print("    got_size: {d},\n", .{header.got_length});
     stdout.print("    got_plt_size: {d},\n", .{header.got_plt_length});
     stdout.print("    plt_size: {d},\n", .{header.plt_length});
+    stdout.print("    arch_section_offset: {d},\n", .{header.arch_section_offset});
+    stdout.print("    imported_libraries_offset: {d},\n", .{header.imported_libraries_offset});
+    stdout.print("    relocations_offset: {d},\n", .{header.relocations_offset});
+    stdout.print("    imported_symbols_offset: {d},\n", .{header.imported_symbols_offset});
+    stdout.print("    exported_symbols_offset: {d},\n", .{header.exported_symbols_offset});
+    stdout.print("    text_offset: {d},\n", .{header.text_offset});
 
     stdout.write("  }\n");
 }

@@ -63,8 +63,10 @@ pub const VirtualFileSystem = struct {
         return 0;
     }
 
-    fn create(_: *anyopaque, _: []const u8, _: i32) i32 {
-        return 0;
+    fn create(ctx: *anyopaque, path: []const u8, mode: i32) ?IFile {
+        const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
+        const maybe_node = self.mount_points.find_longest_matching_point(path);
+        return maybe_node.point.filesystem.create(maybe_node.left, mode);
     }
 
     fn mkdir(ctx: *anyopaque, path: []const u8, mode: i32) i32 {

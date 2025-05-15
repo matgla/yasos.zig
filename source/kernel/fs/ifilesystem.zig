@@ -27,7 +27,7 @@ pub const IFileSystem = struct {
     pub const VTable = struct {
         mount: *const fn (ctx: *anyopaque) i32,
         umount: *const fn (ctx: *anyopaque) i32,
-        create: *const fn (ctx: *anyopaque, path: []const u8, flags: i32) i32,
+        create: *const fn (ctx: *anyopaque, path: []const u8, flags: i32) ?IFile,
         mkdir: *const fn (ctx: *anyopaque, path: []const u8, mode: i32) i32,
         remove: *const fn (ctx: *anyopaque, path: []const u8) i32,
         name: *const fn (ctx: *const anyopaque) []const u8,
@@ -45,7 +45,7 @@ pub const IFileSystem = struct {
         return self.vtable.umount(self.ptr);
     }
 
-    pub fn create(self: IFileSystem, path: []const u8, flags: i32) i32 {
+    pub fn create(self: IFileSystem, path: []const u8, flags: i32) ?IFile {
         return self.vtable.create(self.ptr, path, flags);
     }
 

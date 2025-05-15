@@ -17,25 +17,3 @@
  * Public License along with this program. If not, see
  * <https://www.gnu.org/licenses/>.
  */
-
-#include <stddef.h>
-
-void *dlopen(const char *a, int b)
-{
-  return 0;
-}
-
-void *dlsym(void *a, const char * b)
-{
-  return 0;
-}
-
-int dlclose(void *a)
-{
-  return 0;
-}
-
-char *dlerror(void)
-{
-return "";
-}
