@@ -29,6 +29,8 @@ const Type = @import("header.zig").Type;
 const Section = @import("section.zig").Section;
 const Symbol = @import("symbol.zig").Symbol;
 const SymbolEntry = @import("module.zig").SymbolEntry;
+const LoadedSharedData = @import("module.zig").LoadedSharedData;
+const LoadedUniqueData = @import("module.zig").LoadedUniqueData;
 
 const LoaderError = error{
     DataProcessingFailure,
@@ -47,26 +49,115 @@ pub const Loader = struct {
 
     file_resolver: FileResolver,
 
-    pub fn create(file_resolver: FileResolver) Loader {
+    // mapping from name to loaded instances
+    // pid to module mapping done inside kernel itself
+    modules_list: std.AutoHashMap([]const u8, std.DoublyLinkedList),
+    kernel_allocator: std.mem.Allocator,
+
+    pub fn create(file_resolver: FileResolver, kernel_allocator: std.mem.Allocator) Loader {
         return .{
             .file_resolver = file_resolver,
+            .modules_list = std.AutoHashMap(u32, std.DoublyLinkedList).init(kernel_allocator),
+            .allocator = kernel_allocator,
         };
     }
 
-    pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype, allocator: std.mem.Allocator) !Executable {
-        var executable: Executable = .{
-            .module = Module.init(allocator),
+    pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Executable {
+        const executable: Executable = .{
+            .module = try Module.create(
+                self.allocator,
+                process_allocator,
+                true,
+            ),
         };
-        try self.load_module(&executable.module, module, stdout);
+        try self.load_module(executable.module, module, stdout);
         return executable;
     }
 
-    pub fn load_library(self: Loader, module: *const anyopaque, stdout: anytype, allocator: std.mem.Allocator) !Module {
-        var library: Module = Module.init(allocator);
+    pub fn load_library(self: Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Module {
+        var library: *Module = try Module.create(self.allocator, process_allocator, true);
         try self.load_module(&library, module, stdout);
         return library;
     }
 
+    pub fn unload_module(self: *Loader, module: *Module) void {
+        var maybe_list = self.modules_list.getPtr(module.name);
+        if (maybe_list) |*list| {
+            list.remove(module.list_node);
+            module.destroy();
+        }
+        return error.ModuleNotFound;
+    }
+
+    fn is_already_loaded(self: *Loader, name: []const u8) bool {
+        return self.modules_list.contains(name);
+    }
+
+    fn load_module(self: *Loader, module: *Module, module_address: *const anyopaque, stdout: anytype) !void {
+        // stdout.write("[yasld] parsing header\n");
+        const header = self.process_header(module_address) catch |err| {
+            stdout.write("Wrong magic cookie, not a yaff file\n");
+            return err;
+        };
+        print_header(header, stdout);
+
+        const parser = Parser.create(header, stdout);
+        // parser.print(stdout);
+
+        try module.set_name(parser.name);
+
+        try self.import_child_modules(header, &parser, module, stdout);
+
+        // if module is already loaded just data must be loaded
+        const maybe_existing_module = self.modules_list.getPtr(parser.name);
+        if (maybe_existing_module) |*loaded| {
+            stdout.print("Module is already loaded, propagating .text for: {s}", .{parser.name});
+            if (loaded.shared_data) |*data| {
+                module.add_shared_data(data);
+            } else {
+                stdout.print("Module '{s}' is already loaded, but shared data missing\n", .{parser.name});
+                return LoaderError.DataProcessingFailure;
+            }
+        }
+
+        // import modules
+        try self.process_data(header, &parser, module, stdout);
+        module.exported_symbols = parser.exported_symbols;
+
+        const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
+        try module.relocate_init(init_ptr[0..header.init_length]);
+        module.process_initializers(stdout);
+
+        try self.process_symbol_table_relocations(&parser, module, stdout);
+        try self.process_local_relocations(&parser, module);
+        try self.process_data_relocations(&parser, module, stdout);
+
+        // stdout.print("[yasld] GOT loaded at 0x{x}\n", .{@intFromPtr(module.get_got().ptr)});
+        stdout.print("[yasld] text loaded at 0x{x} for: {s}\n", .{ @intFromPtr(module.program.?.ptr), module.name.? });
+
+        if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
+            var section: Section = .Unknown;
+            const text_limit: usize = module.get_text().len;
+            const init_limit: usize = text_limit + module.get_init().len;
+            const data_limit: usize = init_limit + module.get_data().len;
+
+            if (header.entry < text_limit) {
+                section = .Code;
+            } else if (header.entry < init_limit) {
+                section = .Init;
+            } else if (header.entry < data_limit) {
+                section = .Data;
+            } else {
+                section = .Bss;
+            }
+
+            const base_address = try module.get_base_address(section);
+            module.entry = .{
+                .address = base_address + header.entry,
+                .target_got_address = @intFromPtr(module.get_got().ptr),
+            };
+        }
+    }
     fn import_child_modules(self: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) LoaderError!void {
         if (header.external_libraries_amount == 0) {
             return;
@@ -104,10 +195,27 @@ pub const Loader = struct {
 
     fn process_data(_: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) !void {
         // _ = stdout;
-        const data_initializer = parser.get_data();
-        const text = parser.get_text();
-        try module.allocate_program(header.data_length + header.bss_length + header.code_length + header.init_length + header.got_plt_length + header.got_length + header.plt_length);
-        @memcpy(module.program.?[0..header.code_length], text);
+        if (module.shared_data == null) {
+            // we are first module that uses that data, initialization must be done
+            const shared_data = LoadedSharedData.create(module.allocator, module.list_node, module.xip);
+            if (module.xip) {
+                const text = parser.get_text();
+                const init = parser.get_init();
+                const plt = parser.get_plt();
+                shared_data.*.text = text;
+                shared_data.*.init = init;
+                shared_data.*.plt = plt;
+                module.shared_data = shared_data;
+            } else {}
+        }
+
+        // unique data must be always copied to RAM
+        module.unique_data = LoadedUniqueData.create(
+            module.allocator,
+            module.process_allocator,
+            header,
+            parser,
+        );
 
         const plt_start = header.code_length + header.init_length;
         const plt_end = plt_start + header.plt_length;
@@ -206,59 +314,6 @@ pub const Loader = struct {
             // stdout.print("Patching from: 0x{x} to: 0x{x}, base: {x}\n", .{ rel.from, rel.to, base_address_from });
 
             target.* = address_from;
-        }
-    }
-
-    fn load_module(self: Loader, module: *Module, module_address: *const anyopaque, stdout: anytype) !void {
-        // stdout.write("[yasld] parsing header\n");
-        const header = self.process_header(module_address) catch |err| {
-            stdout.write("Wrong magic cookie, not a yaff file\n");
-            return err;
-        };
-        module.set_header(header);
-        print_header(header, stdout);
-
-        const parser = Parser.create(header, stdout);
-        // parser.print(stdout);
-
-        module.name = parser.name;
-        try self.import_child_modules(header, &parser, module, stdout);
-        // import modules
-        try self.process_data(header, &parser, module, stdout);
-        module.exported_symbols = parser.exported_symbols;
-
-        const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
-        try module.relocate_init(init_ptr[0..header.init_length]);
-        module.process_initializers(stdout);
-
-        try self.process_symbol_table_relocations(&parser, module, stdout);
-        try self.process_local_relocations(&parser, module);
-        try self.process_data_relocations(&parser, module, stdout);
-
-        // stdout.print("[yasld] GOT loaded at 0x{x}\n", .{@intFromPtr(module.get_got().ptr)});
-        stdout.print("[yasld] text loaded at 0x{x} for: {s}\n", .{ @intFromPtr(module.program.?.ptr), module.name.? });
-
-        if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
-            var section: Section = .Unknown;
-            const text_limit: usize = module.get_text().len;
-            const init_limit: usize = text_limit + module.get_init().len;
-            const data_limit: usize = init_limit + module.get_data().len;
-
-            if (header.entry < text_limit) {
-                section = .Code;
-            } else if (header.entry < init_limit) {
-                section = .Init;
-            } else if (header.entry < data_limit) {
-                section = .Data;
-            } else {
-                section = .Bss;
-            }
-
-            const base_address = try module.get_base_address(section);
-            module.entry = .{
-                .address = base_address + header.entry,
-                .target_got_address = @intFromPtr(module.get_got().ptr),
-            };
         }
     }
 
