@@ -23,13 +23,7 @@ const std = @import("std");
 const SymbolTable = @import("item_table.zig").SymbolTable;
 const Section = @import("section.zig").Section;
 const Header = @import("header.zig").Header;
-
-// move this to architecture implementation
-pub const ForeignCallContext = extern struct {
-    r9: usize = 0,
-    lr: usize = 0,
-    temp: [2]usize = .{ 0, 0 },
-};
+const Parser = @import("parser.zig").Parser;
 
 pub const GotEntry = extern struct {
     base_register: usize,
@@ -41,42 +35,129 @@ pub const SymbolEntry = struct {
     target_got_address: usize,
 };
 
-pub const Module = struct {
+pub const LoadedSharedData = struct {
+    text: []const u8,
+    init: []const u8,
+    plt: []const u8,
+    xip: bool,
+    exported_symbols: SymbolTable,
+    users: std.DoublyLinkedList, // pid -> reference count
     allocator: std.mem.Allocator,
-    program_memory: ?[]u8 = null,
-    program: ?[]u8 = null,
-    exported_symbols: ?SymbolTable = null,
-    name: ?[]const u8 = null,
-    foreign_call_context: ForeignCallContext,
-    imported_modules: std.ArrayList(Module),
-    // this needs to be corelated with thread info
-    active: bool,
-    entry: ?SymbolEntry = null,
-    header: *const Header = undefined,
-    list_node: std.DoublyLinkedList.Node,
+    process_allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) Module {
-        return .{
+    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, module_node: *std.DoublyLinkedList.Node, xip: bool, header: *Header, parser: *Parser) !*LoadedSharedData {
+        var self = try allocator.create(LoadedSharedData);
+        self.* = .{
+            .xip = xip,
+            .users = .{},
             .allocator = allocator,
-            .foreign_call_context = .{},
+        };
+        self.users.append(module_node);
+        return self;
+    }
+
+    pub fn destory(self: *LoadedSharedData) void {
+        self.allocator.destroy(self);
+    }
+
+    pub fn remove(self: *LoadedSharedData, module_node: *std.DoublyLinkedList.Node) void {
+        self.users.remove(module_node);
+        if (self.users.len() == 0) {
+            // I am not needed anymore
+            self.destroy();
+        }
+    }
+
+    pub fn register(self: *LoadedSharedData, module: *std.DoublyLinkedList.Node) void {
+        self.users.append(module);
+    }
+};
+
+pub const LoadedUniqueData = struct {
+    data: []u8,
+    bss: []u8,
+    got: []u8,
+    allocator: std.mem.Allocator,
+    process_allocator: std.mem.Allocator,
+    _underlaying_memory: []u8,
+
+    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *Header, parser: *Parser) !*LoadedUniqueData {
+        const self = try allocator.create(LoadedUniqueData);
+        // memory is combined just for optimization purposes, they may even fit in single page for small modules
+        const underlaying_memory = try process_allocator.alloc(u8, header.data_length + header.bss_length + header.got_length);
+        self.* = .{
+            .data = underlaying_memory[0..header.data_length],
+            .bss = underlaying_memory[header.data_length..header.bss_length],
+            .got = underlaying_memory[header.data_length + header.bss_length .. header.got_length],
+            .allocator = allocator,
+            .process_allocator = process_allocator,
+            ._underlaying_memory = underlaying_memory,
+        };
+
+        // copy data
+        @memcpy(self.data, parser.get_data());
+        @memset(self.bss, 0);
+        @memcpy(self.got, parser.get_got());
+
+        return self;
+    }
+
+    pub fn destroy(self: *LoadedUniqueData) void {
+        self.process_allocator.free(self._underlaying_memory);
+        self.allocator.destroy(self);
+    }
+};
+
+pub const Module = struct {
+    // this allocator is used for the module itself
+    allocator: std.mem.Allocator,
+    process_allocator: std.mem.Allocator,
+    imported_modules: std.ArrayList(Module),
+    // xip determines if the read only memory is copied to ram
+    xip: bool,
+    shared_data: ?*LoadedSharedData,
+    unique_data: *LoadedUniqueData,
+    // this needs to be corelated with thread info
+    entry: ?SymbolEntry = null,
+    list_node: std.DoublyLinkedList.Node,
+    name: ?[]const u8,
+
+    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
+        const module = try allocator.create(Module);
+        module.* = .{
+            .allocator = allocator,
+            .process_allocator = process_allocator,
             .imported_modules = std.ArrayList(Module).init(allocator),
-            .active = false,
+            .xip = xip,
+            .unique_data = .{},
             .list_node = .{},
         };
+        return module;
+    }
+
+    pub fn add_shared_data(self: *Module, data: *LoadedSharedData) void {
+        data.register(&self.list_node);
+    }
+
+    pub fn destroy(self: *Module) void {
+        if (self.shared_data) |*shared| {
+            shared.remove(self.list_node);
+        }
+        if (self.name) |*n| {
+            self.allocator.free(n);
+        }
+        self.allocator.destroy(self);
+    }
+
+    pub fn set_name(self: *Module, name: []const u8) !void {
+        if (self.name) |*n| {
+            std.allocator.free(n);
+        }
+        self.name = try std.allocator.dupe([]const u8, name);
     }
 
     pub fn set_header(self: *Module, header: *const Header) void {
         self.header = header;
-    }
-
-    pub fn deinit(self: *Module) void {
-        if (self.program_memory) |program| {
-            self.allocator.free(program);
-        }
-        for (self.imported_modules.items) |*module| {
-            module.deinit();
-        }
-        self.imported_modules.deinit();
     }
 
     pub fn allocate_program(self: *Module, program_size: usize) !void {
@@ -136,10 +217,6 @@ pub const Module = struct {
         return null;
     }
 
-    pub fn save_caller_state(self: *Module, context: ForeignCallContext) void {
-        self.foreign_call_context = context;
-    }
-
     const ModuleError = error{
         UnhandledInitAddress,
     };
@@ -196,58 +273,6 @@ pub const Module = struct {
     pub fn process_initializers(self: *Module, stdout: anytype) void {
         _ = self;
         _ = stdout;
-    }
-
-    pub fn is_module_for_program_counter(self: Module, pc: usize, only_active: bool) bool {
-        {
-            const text_start = self.get_base_address(Section.Code);
-            const text_end = text_start + self.text.len;
-            if (pc >= text_start and pc < text_end) {
-                if (self.active or !only_active) {
-                    return true;
-                } else {
-                    return false;
-                }
-            }
-        }
-        {
-            const data_start = self.get_base_address(Section.Data);
-            const data_end = data_start + self.data.?.len;
-            if (pc >= data_start and pc < data_end) {
-                if (self.active or !only_active) {
-                    return true;
-                } else {
-                    return false;
-                }
-            }
-        }
-        {
-            const bss_start = @intFromPtr(self.bss.?.ptr);
-            const bss_end = bss_start + self.bss.?.len;
-            if (pc >= bss_start and pc < bss_end) {
-                if (self.active or !only_active) {
-                    return true;
-                } else {
-                    return false;
-                }
-            }
-        }
-        return false;
-    }
-
-    pub fn find_module_for_program_counter(self: *const Module, pc: usize, only_active: bool) ?*Module {
-        if (self.is_module_for_program_counter(pc, only_active)) {
-            return self;
-        }
-
-        for (self.imported_modules.items) |module| {
-            const maybe_module = module.find_module_for_program_counter(pc, only_active);
-            if (maybe_module) |m| {
-                return m;
-            }
-        }
-
-        return null;
     }
 
     pub fn get_got(self: *const Module) []GotEntry {

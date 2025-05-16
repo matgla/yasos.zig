@@ -180,4 +180,9 @@ pub const Parser = struct {
         const ptr: [*]const u8 = @ptrFromInt(self.plt_address);
         return ptr[0..self.header.plt_length];
     }
+
+    pub fn get_init(self: Parser) []const u8 {
+        const ptr: [*]const u8 = @ptrFromInt(self.init_address);
+        return ptr[0..self.header.init_length];
+    }
 };
