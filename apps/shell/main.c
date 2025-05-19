@@ -97,8 +97,7 @@ void scanline(char *buffer, size_t size) {
           }
           // left arrow
           continue;
-        } 
-
+        }
       }
       continue;
     }
@@ -112,10 +111,10 @@ void scanline(char *buffer, size_t size) {
         if (cursor_pos == i) {
           buffer[i - 1] = '\0';
           printf("\033[D ");
-        } else { 
-          memmove(&buffer[cursor_pos-1], &buffer[cursor_pos], i - cursor_pos);
+        } else {
+          memmove(&buffer[cursor_pos - 1], &buffer[cursor_pos], i - cursor_pos);
           buffer[i - 1] = '\0';
-          printf("\033[D%s ",  &buffer[cursor_pos - 1]);
+          printf("\033[D%s ", &buffer[cursor_pos - 1]);
         }
         cursor_pos--;
         printf("\033[%dD", i - cursor_pos);
@@ -131,12 +130,11 @@ void scanline(char *buffer, size_t size) {
         buffer[cursor_pos] = ch;
         printf("%s", &buffer[cursor_pos]);
         printf("\033[%dD", i - cursor_pos);
-      }
-      else {
+      } else {
         printf("%c", ch);
         buffer[cursor_pos] = ch;
       }
-      
+
       fflush(stdout);
       i++;
       cursor_pos++;
@@ -280,6 +278,7 @@ int main(int argc, char *argv[]) {
     termios_raw = termios_stdout_original;
     termios_raw.c_lflag &= ~(ICANON | ECHO);
     tcsetattr(STDOUT_FILENO, TCSANOW, &termios_raw);
+    char ch;
     while (true) {
       printf("$ ");
       fflush(stdout);

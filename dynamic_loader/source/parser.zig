@@ -89,9 +89,9 @@ pub const Parser = struct {
 
         const text: usize = std.mem.alignForward(usize, exported_array.address() + exported_array.size(), 16);
         const init: usize = text + header.code_length;
-        const data: usize = init + header.init_length;
-        const plt: usize = data + header.data_length;
-        const got: usize = plt + header.plt_length;
+        const plt: usize = init + header.init_length;
+        const data: usize = plt + header.plt_length;
+        const got: usize = data + header.data_length;
         const got_plt: usize = got + header.got_length;
         return Parser{
             .name = name,

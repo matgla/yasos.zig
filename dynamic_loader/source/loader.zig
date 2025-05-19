@@ -126,12 +126,15 @@ pub const Loader = struct {
         try module.relocate_init(init_ptr[0..header.init_length], header);
         module.process_initializers(stdout);
 
-        try self.process_symbol_table_relocations(&parser, module, stdout);
+        try self.process_symbol_table_relocations(&parser, module, stdout, header);
         try self.process_local_relocations(&parser, module, stdout);
         try self.process_data_relocations(&parser, module, stdout);
 
-        stdout.print("[yasld] GOT loaded at 0x{x}\n", .{@intFromPtr(module.get_got().ptr)});
-        stdout.print("[yasld] text loaded at 0x{x} for: {s}\n", .{ @intFromPtr(module.get_text().ptr), module.name.? });
+        stdout.print("[yasld] .text loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
+        stdout.print("[yasld] .plt  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
+        stdout.print("[yasld] .data loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
+        stdout.print("[yasld] .bss  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
+        stdout.print("[yasld] .got  loaded at 0x{x}, entr: {x} for: {s}\n", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
 
         if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
             var section: Section = .Unknown;
@@ -217,18 +220,50 @@ pub const Loader = struct {
         }
     }
 
-    fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
+    fn get_section_address_for_offset(module: *Module, header: *const Header, offset: usize, log: anytype) error{OffsetOutOfRange}!struct { section: usize, offset: usize } {
+        const text_limit: usize = header.code_length;
+        const init_offset: usize = text_limit + header.init_length;
+        const plt_limit: usize = init_offset + header.plt_length;
+        const data_limit: usize = plt_limit + header.data_length;
+        const bss_limit: usize = data_limit + header.bss_length;
+        const got_limit: usize = bss_limit + header.got_length;
+
+        if (offset < text_limit) {
+            return .{ .section = @intFromPtr(module.get_text().ptr), .offset = 0 };
+        } else if (offset < init_offset) {
+            return .{ .section = @intFromPtr(module.get_init().ptr), .offset = text_limit };
+        } else if (offset < plt_limit) {
+            return .{ .section = @intFromPtr(module.get_plt().ptr), .offset = init_offset };
+        } else if (offset < data_limit) {
+            return .{ .section = @intFromPtr(module.get_data().ptr), .offset = plt_limit };
+        } else if (offset < bss_limit) {
+            return .{ .section = @intFromPtr(module.get_bss().ptr), .offset = data_limit };
+        } else if (offset < got_limit) {
+            return .{ .section = @intFromPtr(module.get_got().ptr), .offset = bss_limit };
+        } else {
+            log.debug("Offset: {x} is out of range, text: {x}, init: {x}, plt: {x}, data: {x}, bss: {x}, got: {x}\n", .{ offset, text_limit, init_offset, plt_limit, data_limit, bss_limit, got_limit });
+            return error.OffsetOutOfRange;
+        }
+    }
+
+    fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, stdout: anytype, header: *const Header) !void {
         var got = module.get_got();
         stdout.debug("Processing symbol table relocations for GOT: {x}\n", .{@intFromPtr(got.ptr)});
-        const text = module.get_text();
-        const module_start = @intFromPtr(text.ptr);
         const maybe_init = self.find_symbol(module, "__start_data");
         if (maybe_init == null) {
             stdout.print("[yasld] Can't find symbol '__start_data'\n", .{});
         }
 
         for (0..got.len) |i| {
-            const address = module_start + got[i].symbol_offset;
+            if (i < 3) {
+                continue;
+            } // skip first three entries, they are reserved for the loader itself
+
+            const section_start = Loader.get_section_address_for_offset(module, header, got[i].symbol_offset, stdout) catch |err| {
+                stdout.print("[yasld] Can't find section for GOT[{d}]: {s}\n", .{ i, @errorName(err) });
+                return err;
+            };
+            const address = section_start.section + got[i].symbol_offset - section_start.offset;
             stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
             got[i].base_register = @intFromPtr(got.ptr);
             got[i].symbol_offset = address;
@@ -274,6 +309,8 @@ pub const Loader = struct {
             const relocated = relocated_start_address + rel.target_offset;
             got[rel.index].symbol_offset = relocated;
             got[rel.index].base_register = @intFromPtr(got.ptr);
+
+            logger.debug("Patching GOT[{d}] to: 0x{x}, section: {s}, target_offset: 0x{x}\n", .{ rel.index, got[rel.index].symbol_offset, @tagName(@as(Section, @enumFromInt(rel.section))), rel.target_offset });
         }
     }
 
@@ -281,10 +318,21 @@ pub const Loader = struct {
         for (parser.data_relocations.relocations) |rel| {
             var data_memory_address: usize = @intFromPtr(module.get_data().ptr);
             var rel_to = rel.to;
-            if (rel.to > module.get_data().len) {
+            stdout.debug("Processing data relocation: relto: {x} -> data: {x}\n", .{ rel_to, module.get_data().len });
+            if (rel_to > module.get_data().len) {
                 rel_to -= module.get_data().len;
-                data_memory_address = @intFromPtr(module.get_got().ptr);
+                data_memory_address = @intFromPtr(module.get_bss().ptr);
+                stdout.debug("Processing data relocation: relto: {x} -> bss: {x}\n", .{ rel_to, module.get_bss().len });
+                if (rel_to > module.get_bss().len) {
+                    rel_to -= module.get_bss().len;
+                    data_memory_address = @intFromPtr(module.get_got().ptr);
+                    stdout.debug("Processing data relocation: relto: {x} -> got: {x}\n", .{ rel_to, module.get_got().len * 8 });
+                    if (rel_to > module.get_got().len * 8) {
+                        return LoaderError.DataProcessingFailure;
+                    }
+                }
             }
+
             const address_to_change: usize = data_memory_address + rel_to;
             const target: *usize = @ptrFromInt(address_to_change);
             const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));

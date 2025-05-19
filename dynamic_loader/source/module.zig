@@ -26,13 +26,13 @@ const Header = @import("header.zig").Header;
 const Parser = @import("parser.zig").Parser;
 
 pub const GotEntry = extern struct {
-    base_register: usize,
     symbol_offset: usize,
+    base_register: usize,
 };
 
 pub const SymbolEntry = struct {
-    address: usize,
     target_got_address: usize,
+    address: usize,
 };
 
 pub const LoadedSharedData = struct {
@@ -114,7 +114,7 @@ pub const LoadedUniqueData = struct {
         }
 
         if (header.bss_length > 0) {
-            self.bss = underlaying_memory[header.data_length..header.bss_length];
+            self.bss = underlaying_memory[header.data_length .. header.bss_length + header.data_length];
             @memset(self.bss.?, 0);
         }
 
@@ -229,7 +229,7 @@ pub const Module = struct {
         if (self.shared_data) |shared_data| {
             var it = shared_data.exported_symbols.iter();
             while (it) |symbol| : (it = symbol.next()) {
-                if (std.mem.eql(u8, symbol.data.name(), name)) {
+                if (symbol.data.name().len == name.len and std.mem.eql(u8, symbol.data.name(), name)) {
                     const base = self.get_base_address(@enumFromInt(symbol.data.section)) catch return null;
                     return base + symbol.data.offset;
                 }
@@ -254,12 +254,12 @@ pub const Module = struct {
         var it = self.children.first;
         while (it) |child_node| : (it = child_node.next) {
             const module: *const Module = @fieldParentPtr("list_node", child_node);
-            const maybe_symbol = module.find_symbol(name);
+            const maybe_child_symbol = module.find_local_symbol(name);
             if (module.unique_data) |*data| {
                 if (data.*.got) |*got| {
-                    if (maybe_symbol) |symbol| {
+                    if (maybe_child_symbol) |symbol| {
                         return .{
-                            .address = symbol.address,
+                            .address = symbol,
                             .target_got_address = @intFromPtr(got.ptr),
                         };
                     }
@@ -349,6 +349,24 @@ pub const Module = struct {
         if (self.shared_data) |shared_data| {
             if (shared_data.init) |init| {
                 return init;
+            }
+        }
+        return &.{};
+    }
+
+    pub fn get_plt(self: *const Module) []const u8 {
+        if (self.shared_data) |shared_data| {
+            if (shared_data.plt) |plt| {
+                return plt;
+            }
+        }
+        return &.{};
+    }
+
+    pub fn get_bss(self: *const Module) []u8 {
+        if (self.unique_data) |unique_data| {
+            if (unique_data.bss) |bss| {
+                return bss;
             }
         }
         return &.{};

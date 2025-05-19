@@ -163,18 +163,11 @@ class Application:
         self.text = bytearray(self.text_section["data"])
         text_size = self.text_section["size"]
         
-        # looks like tcc generates regular data in .rodata section sometimes, let's move rodata to .data for now
-        # this requires to move .rodata section just before .data
-        # or mkimage should be able to detect, if .rodata is after .text then we have read only rodata 
-        # if just before .data then we have regular data 
+        # fPIE rodata must be read-write to process relocations before main call 
         self.rodata_is_data = False
         if self.__has_section(".rodata"):
             self.rodata_section = self.__fetch_section(".rodata", self.text_section["size"], True)
-            if self.rodata_section["address"] != self.text_section["size"]:
-                self.rodata_is_data = True
-            else:
-                self.text += bytearray(self.rodata_section["data"])
-                text_size += self.rodata_section["size"]
+            self.rodata_is_data = True
 
         # let's place init arrays in ram and fix addresses in yasld
         if self.__has_section(".init_arrays"):
@@ -450,23 +443,29 @@ class Application:
                         relocation, from_address, offset
                     )
             elif relocation["info_type"] == "R_ARM_RELATIVE":
-                from_address = int(relocation["offset"] - got_offset)
-                data = self.got
-                offset = got_offset                
-                if from_address < 0:
-                    from_address = int(relocation["offset"] - data_offset)
-                    data = self.data
-                    offset = data_offset
-
+                # data offset is base address of all data sections
+                from_address = int(relocation["offset"] - data_offset)
+                original_offset = 0
+                if from_address < len(self.data):
+                    # this is a relocation towards .data
+                    original_offset = struct.unpack_from("<I", self.data, from_address)[0]
+                elif from_address < len(self.data) + len(self.bss):
+                    # this is a relocation towards .bss
+                    raise RuntimeError("How to handle .bss relocation?")
+                elif from_address < len(self.data) + len(self.bss) + len(self.got): 
+                    # this is a relocation towards .got
+                    got_address = int(relocation["offset"] - got_offset)
+                    original_offset = struct.unpack_from("<I", self.got, got_address)[0]
+                else: 
+                    raise RuntimeError("Address outside of data section: " + hex(from_address))
                 section_code = SectionCode.Data
-                original_offset = struct.unpack_from("<I", data, from_address)[0]
 
-                if original_offset - offset < 0:
+                if original_offset - data_offset < 0:
                     # this is a data relocation towards code
                     offset = original_offset << 2 | SectionCode.Code.value
                 else: 
-                    offset = ((original_offset - offset) << 2) | section_code.value
-
+                    offset = ((original_offset - data_offset) << 2) | section_code.value
+                print("Data relocation: " + hex(from_address) + " -> " + hex(offset) + " original: " + hex(relocation["offset"]))
                 self.relocations.add_data_relocation(
                     relocation, from_address, offset
                 )
@@ -759,7 +758,7 @@ class Application:
         for symbol in symbols:
             value = symbol["value"]
             if symbol["section"] == SectionCode.Data:
-                value -= len(self.text) + len(self.init_arrays)
+                value -= len(self.text) + len(self.init_arrays) + len(self.plt)
             elif symbol["section"] == SectionCode.Init:
                 value -= len(self.text)
             # if undefined treat same as text
@@ -931,8 +930,8 @@ class Application:
         struct.pack_into("<H", image, text_offset, len(image))
         image += self.text
         image += self.init_arrays
-        image += self.data
         image += self.plt
+        image += self.data
         image += self.got
         image += self.got_plt
         image += self.arm_extab
