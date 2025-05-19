@@ -67,6 +67,7 @@ pub const HardwareStoredRegisters = extern struct {
     s14: void_or_register(),
     s15: void_or_register(),
     fpscr: void_or_register(),
+    aligner: u32,
 };
 
 pub const SoftwareStoredRegisters = extern struct {
@@ -125,6 +126,7 @@ pub fn create_default_hardware_registers(comptime exit_handler: *const fn () voi
         .s14 = void_or_value(0),
         .s15 = void_or_value(0),
         .fpscr = void_or_value(0),
+        .aligner = 0,
     };
 }
 

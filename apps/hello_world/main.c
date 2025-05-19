@@ -17,11 +17,18 @@
 
 #include <stdio.h>
 
-int some_value = 0;
+static void default_run() {
+  printf("Hello, World!\n");
+}
 
-int main(int argc, char *argv[]) {
-  printf("Hello, World with value: %d\n", some_value);
-  scanf("%d", &some_value);
-  printf("Hello, World with new value: %d\n", some_value);
+static void (*runner)() = default_run;
+
+void set_runner(void (*run)()) {
+  runner = run ? run : default_run;
+}
+
+int main() {
+  set_runner(0);
+  runner();
   return 0;
 }
