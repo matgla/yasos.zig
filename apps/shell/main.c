@@ -33,21 +33,15 @@
 #include <sys/wait.h>
 
 #define MAX_LINE_SIZE 255
+#define MAX_HISTORY_LINES 4
 #define MAX_NUMBER_OF_ARGUMENTS 16
 
-// extern char **environ;
+typedef struct Screen {
+  char lines[MAX_HISTORY_LINES][MAX_LINE_SIZE];
+  int current_line;
+} Screen;
 
-// void _start(int argc, char *argv[]) {
-//   // Initialize the environment
-//   environ = (char **)malloc(sizeof(char *));
-//   environ[0] = NULL;
-
-//   // Call the main function with the provided arguments
-//   int ret = main(argc, argv);
-
-//   // Exit the program with the return value from main
-//   exit(ret);
-// }
+static Screen screen;
 
 char *strip(char *str, size_t length) {
   while (isspace(*str) && (length-- != 0))
@@ -58,6 +52,7 @@ char *strip(char *str, size_t length) {
 void scanline(char *buffer, size_t size) {
   char ch;
   size_t i = 0;
+  size_t cursor_pos = 0;
   int got_not_space = false;
 
   if (size != 0) {
@@ -69,22 +64,82 @@ void scanline(char *buffer, size_t size) {
       continue;
     }
 
+    if (ch == 27) {
+      // handle escape sequence
+      ch = fgetc(stdin);
+      if (ch == '[') {
+        ch = fgetc(stdin);
+        if (ch == 'A') {
+          // up arrow
+          if (screen.current_line < MAX_HISTORY_LINES - 1) {
+            screen.current_line++;
+            printf("\033[1A");
+            printf("\033[K");
+            printf("%s", screen.lines[screen.current_line]);
+            fflush(stdout);
+          }
+          continue;
+        } else if (ch == 'B') {
+          // down arrow
+          continue;
+        } else if (ch == 'C') {
+          if (cursor_pos < i) {
+            ++cursor_pos;
+            printf("\033[C");
+            fflush(stdout);
+          }
+          continue;
+        } else if (ch == 'D') {
+          if (cursor_pos > 0) {
+            --cursor_pos;
+            printf("\033[D");
+            fflush(stdout);
+          }
+          // left arrow
+          continue;
+        } 
+
+      }
+      continue;
+    }
+
     got_not_space = true;
     if (ch == '\t') {
       // handle tab, but for now just backspace
       continue;
     } else if (ch == '\b' || ch == 127) {
-      if (i > 0) {
-        --i;
-        printf("\b \b");
+      if (i > 0 && cursor_pos > 0) {
+        if (cursor_pos == i) {
+          buffer[i - 1] = '\0';
+          printf("\033[D ");
+        } else { 
+          memmove(&buffer[cursor_pos-1], &buffer[cursor_pos], i - cursor_pos);
+          buffer[i - 1] = '\0';
+          printf("\033[D%s ",  &buffer[cursor_pos - 1]);
+        }
+        cursor_pos--;
+        printf("\033[%dD", i - cursor_pos);
+        fflush(stdout);
+        i--;
       }
       continue;
     }
 
     if (i < size - 1 && got_not_space) {
-      printf("%c", ch);
+      if (cursor_pos != i) {
+        memmove(&buffer[cursor_pos + 1], &buffer[cursor_pos], i - cursor_pos);
+        buffer[cursor_pos] = ch;
+        printf("%s", &buffer[cursor_pos]);
+        printf("\033[%dD", i - cursor_pos);
+      }
+      else {
+        printf("%c", ch);
+        buffer[cursor_pos] = ch;
+      }
+      
       fflush(stdout);
-      buffer[i++] = ch;
+      i++;
+      cursor_pos++;
     }
   }
   buffer[i] = '\0';
@@ -228,9 +283,8 @@ int main(int argc, char *argv[]) {
     while (true) {
       printf("$ ");
       fflush(stdout);
-      char buffer[MAX_LINE_SIZE];
-      scanline(buffer, sizeof(buffer));
-      if (parse_command(buffer) == -1)
+      scanline(&screen.lines[screen.current_line], MAX_LINE_SIZE);
+      if (parse_command(&screen.lines[screen.current_line]) == -1)
         break;
     }
 

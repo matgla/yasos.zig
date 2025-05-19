@@ -17,12 +17,12 @@
 # <https://www.gnu.org/licenses/>.
 #
 
-config BOARD_MSPC_V2_DISCARD_IN_CONF
-  bool "MSPC v2"
+config BOARD_PIMORONI_PICO_PLUS2_DISCARD_IN_CONF
+  bool "Pimoroni Pico Plus 2"
 
-if BOARD_MSPC_V2_DISCARD_IN_CONF
+if BOARD_PIMORONI_PICO_PLUS2_DISCARD_IN_CONF
   config CONFIG_BOARD
-    def_string "mspc_v2"
+    def_string "pimoroni_pico_plus2"
 
   choice CHOICE_CPU
     default CPU_RP2350
@@ -38,6 +38,6 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
     default "2MB"
 
   config CONFIG_PSRAM_CS_PIN 
-    default 0
+    default 47
 endif
 

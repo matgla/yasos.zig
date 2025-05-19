@@ -1,9 +1,14 @@
-#!/bin/sh
+#!/bin/bash
 
+if [[ "$(uname)" == "Darwin" ]]; then
+GETOPT_CMD="/opt/homebrew/Cellar/gnu-getopt/2.41/bin/getopt"
+else
+GETOPT_CMD="/usr/bin/getopt"
+fi
 OPTIONS=co:
 LONGOPTIONS=clear,output:
 
-PARSED=$(getopt --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
+PARSED=$($GETOPT_CMD --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
 if [[ $? -ne 0 ]]; then
     # If getopt has complained about anything, it will return a non-zero exit status
     exit 2
@@ -83,7 +88,7 @@ build_cross_compiler()
   echo "Building cross compiler..."
   cd tinycc
   mkdir -p bin
-  ./configure --extra-cflags="-DTCC_DEBUG=2 -g -O0" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -169,7 +174,6 @@ cd ..
 
 if $BUILD_IMAGE; then
   echo "Outputing file to: $OUTPUT_FILE"
-
   rm -rf /tmp/rootfs_temp 
   cp -r rootfs /tmp/rootfs_temp
   cd /tmp/rootfs_temp

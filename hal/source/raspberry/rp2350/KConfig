@@ -31,7 +31,8 @@ if CPU_RP2350
   config CONFIG_CPU_USE_FPU
     def_bool y
 
-
+  config CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+    def_bool y
 
   choice CHOICE_CPU_CORE
     default CPU_CORE_ARM_CORTEX_M33

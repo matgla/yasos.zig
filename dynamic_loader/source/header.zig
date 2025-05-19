@@ -64,36 +64,36 @@ pub const Header = packed struct {
 };
 
 pub fn print_header(header: *const Header, stdout: anytype) void {
-    stdout.write("  YAFF header: {\n");
-    stdout.print("    marker: '{s}' (0x{x}),\n", .{ std.mem.asBytes(&header.marker), header.marker });
-    stdout.print("    type: {s},\n", .{@tagName(@as(Type, @enumFromInt(header.module_type)))});
-    stdout.print("    arch: {s},\n", .{@tagName(@as(Architecture, @enumFromInt(header.arch)))});
-    stdout.print("    yaff_version: {d},\n", .{header.yasiff_version});
-    stdout.print("    code_length: 0x{x},\n", .{header.code_length});
-    stdout.print("    init_length: 0x{x},\n", .{header.init_length});
-    stdout.print("    data_length: 0x{x},\n", .{header.data_length});
-    stdout.print("    bss_length: 0x{x},\n", .{header.bss_length});
-    stdout.print("    entry: 0x{x},\n", .{header.entry});
-    stdout.print("    external_libraries: 0x{x},\n", .{header.external_libraries_amount});
-    stdout.print("    alignment: {d},\n", .{header.alignment});
-    stdout.print("    version: {d}.{d},\n", .{ header.version_major, header.version_minor });
-    stdout.write("    relocations:\n");
-    stdout.print("      symbol_table: {d},\n", .{header.symbol_table_relocations_amount});
-    stdout.print("      local: {d},\n", .{header.local_relocations_amount});
-    stdout.print("      data: {d},\n", .{header.data_relocations_amount});
-    stdout.print("    exported_symbols: {d},\n", .{header.exported_symbols_amount});
-    stdout.print("    imported_symbols: {d},\n", .{header.imported_symbols_amount});
-    stdout.print("    got_size: {d},\n", .{header.got_length});
-    stdout.print("    got_plt_size: {d},\n", .{header.got_plt_length});
-    stdout.print("    plt_size: {d},\n", .{header.plt_length});
-    stdout.print("    arch_section_offset: {d},\n", .{header.arch_section_offset});
-    stdout.print("    imported_libraries_offset: {d},\n", .{header.imported_libraries_offset});
-    stdout.print("    relocations_offset: {d},\n", .{header.relocations_offset});
-    stdout.print("    imported_symbols_offset: {d},\n", .{header.imported_symbols_offset});
-    stdout.print("    exported_symbols_offset: {d},\n", .{header.exported_symbols_offset});
-    stdout.print("    text_offset: {d},\n", .{header.text_offset});
+    stdout.debug("  YAFF header: {{\n", .{});
+    stdout.debug("    marker: '{s}' (0x{x}),\n", .{ std.mem.asBytes(&header.marker), header.marker });
+    stdout.debug("    type: {s},\n", .{@tagName(@as(Type, @enumFromInt(header.module_type)))});
+    stdout.debug("    arch: {s},\n", .{@tagName(@as(Architecture, @enumFromInt(header.arch)))});
+    stdout.debug("    yaff_version: {d},\n", .{header.yasiff_version});
+    stdout.debug("    code_length: 0x{x},\n", .{header.code_length});
+    stdout.debug("    init_length: 0x{x},\n", .{header.init_length});
+    stdout.debug("    data_length: 0x{x},\n", .{header.data_length});
+    stdout.debug("    bss_length: 0x{x},\n", .{header.bss_length});
+    stdout.debug("    entry: 0x{x},\n", .{header.entry});
+    stdout.debug("    external_libraries: 0x{x},\n", .{header.external_libraries_amount});
+    stdout.debug("    alignment: {d},\n", .{header.alignment});
+    stdout.debug("    version: {d}.{d},\n", .{ header.version_major, header.version_minor });
+    stdout.debug("    relocations:\n", .{});
+    stdout.debug("      symbol_table: {d},\n", .{header.symbol_table_relocations_amount});
+    stdout.debug("      local: {d},\n", .{header.local_relocations_amount});
+    stdout.debug("      data: {d},\n", .{header.data_relocations_amount});
+    stdout.debug("    exported_symbols: {d},\n", .{header.exported_symbols_amount});
+    stdout.debug("    imported_symbols: {d},\n", .{header.imported_symbols_amount});
+    stdout.debug("    got_size: {d},\n", .{header.got_length});
+    stdout.debug("    got_plt_size: {d},\n", .{header.got_plt_length});
+    stdout.debug("    plt_size: {d},\n", .{header.plt_length});
+    stdout.debug("    arch_section_offset: {d},\n", .{header.arch_section_offset});
+    stdout.debug("    imported_libraries_offset: {d},\n", .{header.imported_libraries_offset});
+    stdout.debug("    relocations_offset: {d},\n", .{header.relocations_offset});
+    stdout.debug("    imported_symbols_offset: {d},\n", .{header.imported_symbols_offset});
+    stdout.debug("    exported_symbols_offset: {d},\n", .{header.exported_symbols_offset});
+    stdout.debug("    text_offset: {d},\n", .{header.text_offset});
 
-    stdout.write("  }\n");
+    stdout.debug("  }}\n", .{});
 }
 
 comptime {

@@ -36,27 +36,41 @@ pub const SymbolEntry = struct {
 };
 
 pub const LoadedSharedData = struct {
-    text: []const u8,
-    init: []const u8,
-    plt: []const u8,
+    text: ?[]const u8,
+    init: ?[]const u8,
+    plt: ?[]const u8,
     xip: bool,
     exported_symbols: SymbolTable,
     users: std.DoublyLinkedList, // pid -> reference count
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
 
-    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, module_node: *std.DoublyLinkedList.Node, xip: bool, header: *Header, parser: *Parser) !*LoadedSharedData {
+    pub fn create(
+        allocator: std.mem.Allocator,
+        process_allocator: std.mem.Allocator,
+        module_node: *std.DoublyLinkedList.Node,
+        xip: bool,
+        parser: *const Parser,
+    ) !*LoadedSharedData {
         var self = try allocator.create(LoadedSharedData);
-        self.* = .{
-            .xip = xip,
-            .users = .{},
-            .allocator = allocator,
-        };
+
+        if (xip) {
+            self.* = .{
+                .text = parser.get_text(),
+                .init = parser.get_init(),
+                .plt = parser.get_plt(),
+                .xip = xip,
+                .exported_symbols = parser.exported_symbols,
+                .users = .{},
+                .allocator = allocator,
+                .process_allocator = process_allocator,
+            };
+        }
         self.users.append(module_node);
         return self;
     }
 
-    pub fn destory(self: *LoadedSharedData) void {
+    pub fn destroy(self: *LoadedSharedData) void {
         self.allocator.destroy(self);
     }
 
@@ -74,30 +88,42 @@ pub const LoadedSharedData = struct {
 };
 
 pub const LoadedUniqueData = struct {
-    data: []u8,
-    bss: []u8,
-    got: []u8,
+    data: ?[]u8,
+    bss: ?[]u8,
+    got: ?[]GotEntry,
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
     _underlaying_memory: []u8,
 
-    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *Header, parser: *Parser) !*LoadedUniqueData {
+    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *const Header, parser: *const Parser) !*LoadedUniqueData {
         const self = try allocator.create(LoadedUniqueData);
         // memory is combined just for optimization purposes, they may even fit in single page for small modules
         const underlaying_memory = try process_allocator.alloc(u8, header.data_length + header.bss_length + header.got_length);
+        const got_pointer: [*]GotEntry = @ptrFromInt(@intFromPtr(underlaying_memory.ptr) + header.data_length + header.bss_length);
         self.* = .{
-            .data = underlaying_memory[0..header.data_length],
-            .bss = underlaying_memory[header.data_length..header.bss_length],
-            .got = underlaying_memory[header.data_length + header.bss_length .. header.got_length],
+            .data = null,
+            .bss = null,
+            .got = null,
             .allocator = allocator,
             .process_allocator = process_allocator,
             ._underlaying_memory = underlaying_memory,
         };
+        if (header.data_length > 0) {
+            self.data = underlaying_memory[0..header.data_length];
+            @memcpy(self.data.?, parser.get_data());
+        }
+
+        if (header.bss_length > 0) {
+            self.bss = underlaying_memory[header.data_length..header.bss_length];
+            @memset(self.bss.?, 0);
+        }
+
+        if (header.got_length > 0) {
+            self.got = got_pointer[0 .. header.got_length / @sizeOf(GotEntry)];
+            @memcpy(self._underlaying_memory[header.data_length + header.bss_length ..], parser.get_got());
+        }
 
         // copy data
-        @memcpy(self.data, parser.get_data());
-        @memset(self.bss, 0);
-        @memcpy(self.got, parser.get_got());
 
         return self;
     }
@@ -112,25 +138,27 @@ pub const Module = struct {
     // this allocator is used for the module itself
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
-    imported_modules: std.ArrayList(Module),
     // xip determines if the read only memory is copied to ram
     xip: bool,
     shared_data: ?*LoadedSharedData,
-    unique_data: *LoadedUniqueData,
+    unique_data: ?*LoadedUniqueData,
     // this needs to be corelated with thread info
     entry: ?SymbolEntry = null,
     list_node: std.DoublyLinkedList.Node,
     name: ?[]const u8,
+    children: std.DoublyLinkedList,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
         module.* = .{
             .allocator = allocator,
             .process_allocator = process_allocator,
-            .imported_modules = std.ArrayList(Module).init(allocator),
             .xip = xip,
-            .unique_data = .{},
+            .shared_data = null,
+            .unique_data = null,
             .list_node = .{},
+            .name = null,
+            .children = .{},
         };
         return module;
     }
@@ -139,78 +167,103 @@ pub const Module = struct {
         data.register(&self.list_node);
     }
 
+    pub fn append_child(self: *Module, child: *Module) void {
+        self.children.append(&child.list_node);
+    }
+
     pub fn destroy(self: *Module) void {
         if (self.shared_data) |*shared| {
-            shared.remove(self.list_node);
+            shared.*.remove(&self.list_node);
         }
-        if (self.name) |*n| {
+        if (self.name) |n| {
             self.allocator.free(n);
         }
         self.allocator.destroy(self);
     }
 
     pub fn set_name(self: *Module, name: []const u8) !void {
-        if (self.name) |*n| {
-            std.allocator.free(n);
+        if (self.name) |n| {
+            self.allocator.free(n);
         }
-        self.name = try std.allocator.dupe([]const u8, name);
-    }
-
-    pub fn set_header(self: *Module, header: *const Header) void {
-        self.header = header;
-    }
-
-    pub fn allocate_program(self: *Module, program_size: usize) !void {
-        self.program_memory = try self.allocator.alloc(u8, program_size + 16);
-        const bytes_to_align = @as(usize, @intFromPtr(self.program_memory.?.ptr)) % 16;
-        self.program = self.program_memory.?[bytes_to_align..];
-    }
-
-    // imported modules must use it's own memory thus cannot be shared
-    pub fn allocate_modules(self: *Module, number_of_modules: usize) !void {
-        _ = try self.imported_modules.addManyAsSlice(number_of_modules);
-        for (self.imported_modules.items) |*module| {
-            module.* = Module.init(self.allocator);
-        }
+        self.name = try self.allocator.dupe(u8, name);
     }
 
     pub fn get_base_address(self: Module, section: Section) error{UnknownSection}!usize {
         switch (section) {
-            .Code => return @intFromPtr(self.program.?.ptr),
-            .Data => return @intFromPtr(self.program.?.ptr) + self.header.code_length + self.header.init_length + self.header.plt_length,
-            .Init => return @intFromPtr(self.program.?.ptr) + self.header.code_length,
-            .Bss => return @intFromPtr(self.program.?.ptr) + self.header.code_length + self.header.data_length + self.header.init_length + self.header.plt_length,
-            .Unknown => return error.UnknownSection,
+            .Code => {
+                if (self.shared_data) |shared_data| {
+                    if (shared_data.text) |*text| {
+                        return @intFromPtr(text.ptr);
+                    }
+                }
+            },
+            .Init => {
+                if (self.shared_data) |shared_data| {
+                    if (shared_data.init) |*init| {
+                        return @intFromPtr(init.ptr);
+                    }
+                }
+            },
+            .Data => {
+                if (self.unique_data) |unique_data| {
+                    if (unique_data.data) |*data| {
+                        return @intFromPtr(data.ptr);
+                    }
+                }
+            },
+            .Bss => {
+                if (self.unique_data) |unique_data| {
+                    if (unique_data.bss) |*bss| {
+                        return @intFromPtr(bss.ptr);
+                    }
+                }
+            },
+            else => {
+                return error.UnknownSection;
+            },
         }
+        return error.UnknownSection;
     }
 
     pub fn find_local_symbol(self: Module, name: []const u8) ?usize {
-        var it = self.exported_symbols.?.iter();
-        while (it) |symbol| : (it = symbol.next()) {
-            if (std.mem.eql(u8, symbol.data.name(), name)) {
-                const base = self.get_base_address(@enumFromInt(symbol.data.section)) catch return null;
-                return base + symbol.data.offset;
+        if (self.shared_data) |shared_data| {
+            var it = shared_data.exported_symbols.iter();
+            while (it) |symbol| : (it = symbol.next()) {
+                if (std.mem.eql(u8, symbol.data.name(), name)) {
+                    const base = self.get_base_address(@enumFromInt(symbol.data.section)) catch return null;
+                    return base + symbol.data.offset;
+                }
             }
         }
         return null;
     }
 
-    pub fn find_symbol(self: Module, name: []const u8) ?SymbolEntry {
+    pub fn find_symbol(self: *const Module, name: []const u8) ?SymbolEntry {
         const maybe_local_symbol = self.find_local_symbol(name);
-        if (maybe_local_symbol) |symbol| {
-            return .{
-                .address = symbol,
-                .target_got_address = @intFromPtr(self.get_got().ptr),
-            };
+        if (self.unique_data) |*data| {
+            if (data.*.got) |got| {
+                if (maybe_local_symbol) |symbol| {
+                    return .{
+                        .address = symbol,
+                        .target_got_address = @intFromPtr(got.ptr),
+                    };
+                }
+            }
         }
 
-        for (self.imported_modules.items) |module| {
+        var it = self.children.first;
+        while (it) |child_node| : (it = child_node.next) {
+            const module: *const Module = @fieldParentPtr("list_node", child_node);
             const maybe_symbol = module.find_symbol(name);
-            if (maybe_symbol) |symbol| {
-                return .{
-                    .address = symbol.address,
-                    .target_got_address = @intFromPtr(module.get_got().ptr),
-                };
+            if (module.unique_data) |*data| {
+                if (data.*.got) |*got| {
+                    if (maybe_symbol) |symbol| {
+                        return .{
+                            .address = symbol.address,
+                            .target_got_address = @intFromPtr(got.ptr),
+                        };
+                    }
+                }
             }
         }
 
@@ -221,50 +274,40 @@ pub const Module = struct {
         UnhandledInitAddress,
     };
 
-    pub fn get_text(self: *Module) []u8 {
-        return self.program.?[0..self.header.code_length];
-    }
-
-    pub fn get_init(self: *Module) []u8 {
-        const init_start = self.header.code_length;
-        const init_end = init_start + self.header.init_length;
-        return self.program.?[init_start..init_end];
-    }
-
-    pub fn get_data(self: *Module) []u8 {
-        const data_start = self.header.code_length + self.header.init_length + self.header.plt_length;
-        const data_end = data_start + self.header.data_length;
-        return self.program.?[data_start..data_end];
-    }
-
-    pub fn get_bss(self: *Module) []u8 {
-        const bss_start = self.header.code_length + self.header.init_length + self.header.data_length + self.header.bss_length;
-        const bss_end = bss_start + self.header.bss_length;
-        return self.program.?[bss_start..bss_end];
-    }
-
-    pub fn relocate_init(self: *Module, initializers: []const u8) !void {
-        var init_data = self.get_init();
-        @memcpy(init_data, initializers);
-        const text_end: usize = self.header.code_length;
-        const init_end: usize = text_end + self.header.init_length;
-        const data_end: usize = init_end + self.header.data_length;
-        const bss_end: usize = data_end + self.header.bss_length;
-
-        for (0..init_data.len / 4) |i| {
-            const entry: *u32 = @ptrCast(@alignCast(&init_data[i * 4]));
-            if (entry.* < text_end) {
-                entry.* = entry.* + @intFromPtr(self.get_text().ptr);
-            } else if (entry.* < init_end) {
-                entry.* = entry.* + @intFromPtr(self.get_init().ptr);
-            } else if (entry.* < data_end) {
-                entry.* = entry.* + @intFromPtr(self.get_data().ptr);
-            } else if (entry.* < bss_end) {
-                entry.* = entry.* + @intFromPtr(self.get_bss().ptr);
-            } else {
-                return ModuleError.UnhandledInitAddress;
-            }
+    pub fn relocate_init(self: *Module, initializers: []const u8, header: *const Header) !void {
+        _ = self;
+        _ = header;
+        if (initializers.len > 0) {
+            @panic("relocate_init not implemented");
         }
+        //     var init: []const u8 = undefined;
+
+        //     if (self.shared_data) |shared_data| {
+        //         if (shared_data.init) |*i| {
+        //             init = i;
+        //         }
+        //     }
+
+        //     @memcpy(init_data, initializers);
+        //     const text_end: usize = header.code_length;
+        //     const init_end: usize = text_end + header.init_length;
+        //     const data_end: usize = init_end + header.data_length;
+        //     const bss_end: usize = data_end + header.bss_length;
+
+        //     for (0..init_data.len / 4) |i| {
+        //         const entry: *u32 = @ptrCast(@alignCast(&init_data[i * 4]));
+        //         if (entry.* < text_end) {
+        //             entry.* = entry.* + @intFromPtr(self.get_text().ptr);
+        //         } else if (entry.* < init_end) {
+        //             entry.* = entry.* + @intFromPtr(self.get_init().ptr);
+        //         } else if (entry.* < data_end) {
+        //             entry.* = entry.* + @intFromPtr(self.get_data().ptr);
+        //         } else if (entry.* < bss_end) {
+        //             entry.* = entry.* + @intFromPtr(self.get_bss().ptr);
+        //         } else {
+        //             return ModuleError.UnhandledInitAddress;
+        //         }
+        //     }
     }
 
     // process initializers using C-symbols
@@ -276,24 +319,54 @@ pub const Module = struct {
     }
 
     pub fn get_got(self: *const Module) []GotEntry {
-        const got_start = self.header.code_length + self.header.data_length + self.header.init_length + self.header.bss_length + self.header.plt_length;
-        const got_end = (self.header.got_length / 4);
-
-        return @as([*]GotEntry, @ptrFromInt(@intFromPtr(self.program.?.ptr) + got_start))[0..got_end];
-    }
-    pub fn get_got_plt(self: *const Module) []usize {
-        const got_plt_start = self.header.code_length + self.header.data_length + self.header.init_length + self.header.bss_length + self.header.got_length + self.header.plt_length;
-        const got_plt_end = (self.header.got_plt_length / 4);
-
-        return @as([*]usize, @ptrFromInt(@intFromPtr(self.program.?.ptr) + got_plt_start))[0..got_plt_end];
+        if (self.unique_data) |*data| {
+            if (data.*.got) |got| {
+                return got;
+            }
+        }
+        return &.{};
     }
 
-    pub fn get_plt(self: *const Module) []usize {
-        const plt_start = self.header.code_length + self.header.data_length + self.header.init_length + self.header.bss_length;
-        const plt_end = (self.header.plt_length / 4);
-
-        return @as([*]usize, @ptrFromInt(@intFromPtr(self.program.?.ptr) + plt_start))[0..plt_end];
+    pub fn get_text(self: *const Module) []const u8 {
+        if (self.shared_data) |shared_data| {
+            if (shared_data.text) |text| {
+                return text;
+            }
+        }
+        return &.{};
     }
+
+    pub fn get_data(self: *const Module) []u8 {
+        if (self.unique_data) |unique_data| {
+            if (unique_data.data) |data| {
+                return data;
+            }
+        }
+        return &.{};
+    }
+
+    pub fn get_init(self: *const Module) []const u8 {
+        if (self.shared_data) |shared_data| {
+            if (shared_data.init) |init| {
+                return init;
+            }
+        }
+        return &.{};
+    }
+
+    // pub fn get_got_plt(self: *const Module) []usize {
+    //     const got_plt_start = self.header.code_length + self.header.data_length + self.header.init_length + self.header.bss_length + self.header.got_length + self.header.plt_length;
+    //     const got_plt_end = (self.header.got_plt_length / 4);
+
+    //     return @as([*]usize, @ptrFromInt(@intFromPtr(self.program.?.ptr) + got_plt_start))[0..got_plt_end];
+    // }
+
+    // pub fn get_plt(self: *const Module) []usize {
+    //     const plt_start = self.header.code_length + self.header.data_length + self.header.init_length + self.header.bss_length;
+    //     const plt_end = (self.header.plt_length / 4);
+
+    //     return @as([*]usize, @ptrFromInt(@intFromPtr(self.program.?.ptr) + plt_start))[0..plt_end];
+    // }
 
     // pub fn find_module_with_got(self: *const Module, got_address: usize) ?*Module {
     //     if (got_address == @as(usize, @intFromPtr(self.get_got().ptr))) {

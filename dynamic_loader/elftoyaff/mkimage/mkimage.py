@@ -218,7 +218,6 @@ class Application:
         self.bss_section = self.__fetch_section(".bss", bss_section_address)
         self.bss = bytearray(self.bss_section["data"])
 
-
         self.got_section_address = bss_section_address + len(self.bss)
 
         if self.__has_section(".got"):
@@ -392,7 +391,7 @@ class Application:
                     )
                 )
 
-    def __process_data_relocations(self, init_offset, data_offset):
+    def __process_data_relocations(self, init_offset, data_offset, got_offset):
         self.logger.verbose(
             "Processing data relocations with init offset: "
             + hex(init_offset)
@@ -451,11 +450,15 @@ class Application:
                         relocation, from_address, offset
                     )
             elif relocation["info_type"] == "R_ARM_RELATIVE":
-                from_address = int(relocation["offset"] - data_offset)
+                from_address = int(relocation["offset"] - got_offset)
+                data = self.got
+                offset = got_offset                
+                if from_address < 0:
+                    from_address = int(relocation["offset"] - data_offset)
+                    data = self.data
+                    offset = data_offset
 
-                data = self.data
                 section_code = SectionCode.Data
-                offset = data_offset
                 original_offset = struct.unpack_from("<I", data, from_address)[0]
 
                 if original_offset - offset < 0:
@@ -590,9 +593,11 @@ class Application:
         if self.rodata_is_data:
             data_start = self.rodata_section["address"]
 
+        got_start = self.got_section["address"]
         self.__process_data_relocations(
             init_offset, 
             data_start,
+            got_start,
         )
         self.__dump_relocations()
 

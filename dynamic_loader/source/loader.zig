@@ -51,21 +51,21 @@ pub const Loader = struct {
 
     // mapping from name to loaded instances
     // pid to module mapping done inside kernel itself
-    modules_list: std.AutoHashMap([]const u8, std.DoublyLinkedList),
+    modules_list: std.StringHashMap(std.DoublyLinkedList),
     kernel_allocator: std.mem.Allocator,
 
     pub fn create(file_resolver: FileResolver, kernel_allocator: std.mem.Allocator) Loader {
         return .{
             .file_resolver = file_resolver,
-            .modules_list = std.AutoHashMap(u32, std.DoublyLinkedList).init(kernel_allocator),
-            .allocator = kernel_allocator,
+            .modules_list = std.StringHashMap(std.DoublyLinkedList).init(kernel_allocator),
+            .kernel_allocator = kernel_allocator,
         };
     }
 
-    pub fn load_executable(self: Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Executable {
+    pub fn load_executable(self: *Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Executable {
         const executable: Executable = .{
             .module = try Module.create(
-                self.allocator,
+                self.kernel_allocator,
                 process_allocator,
                 true,
             ),
@@ -74,27 +74,24 @@ pub const Loader = struct {
         return executable;
     }
 
-    pub fn load_library(self: Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Module {
-        var library: *Module = try Module.create(self.allocator, process_allocator, true);
-        try self.load_module(&library, module, stdout);
+    pub fn load_library(self: *Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !*Module {
+        const library: *Module = try Module.create(self.kernel_allocator, process_allocator, true);
+        try self.load_module(library, module, stdout);
         return library;
     }
 
     pub fn unload_module(self: *Loader, module: *Module) void {
-        var maybe_list = self.modules_list.getPtr(module.name);
-        if (maybe_list) |*list| {
-            list.remove(module.list_node);
-            module.destroy();
+        if (module.name) |name| {
+            var maybe_list = self.modules_list.getPtr(name);
+            if (maybe_list) |*list| {
+                list.*.remove(&module.list_node);
+                module.destroy();
+            }
         }
-        return error.ModuleNotFound;
-    }
-
-    fn is_already_loaded(self: *Loader, name: []const u8) bool {
-        return self.modules_list.contains(name);
     }
 
     fn load_module(self: *Loader, module: *Module, module_address: *const anyopaque, stdout: anytype) !void {
-        // stdout.write("[yasld] parsing header\n");
+        stdout.debug("[yasld] parsing header\n", .{});
         const header = self.process_header(module_address) catch |err| {
             stdout.write("Wrong magic cookie, not a yaff file\n");
             return err;
@@ -112,7 +109,8 @@ pub const Loader = struct {
         const maybe_existing_module = self.modules_list.getPtr(parser.name);
         if (maybe_existing_module) |*loaded| {
             stdout.print("Module is already loaded, propagating .text for: {s}", .{parser.name});
-            if (loaded.shared_data) |*data| {
+            const existing_module: *Module = @fieldParentPtr("list_node", loaded.*.first.?);
+            if (existing_module.shared_data) |data| {
                 module.add_shared_data(data);
             } else {
                 stdout.print("Module '{s}' is already loaded, but shared data missing\n", .{parser.name});
@@ -122,18 +120,18 @@ pub const Loader = struct {
 
         // import modules
         try self.process_data(header, &parser, module, stdout);
-        module.exported_symbols = parser.exported_symbols;
+        // module.exported_symbols = parser.exported_symbols;
 
         const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
-        try module.relocate_init(init_ptr[0..header.init_length]);
+        try module.relocate_init(init_ptr[0..header.init_length], header);
         module.process_initializers(stdout);
 
         try self.process_symbol_table_relocations(&parser, module, stdout);
-        try self.process_local_relocations(&parser, module);
+        try self.process_local_relocations(&parser, module, stdout);
         try self.process_data_relocations(&parser, module, stdout);
 
-        // stdout.print("[yasld] GOT loaded at 0x{x}\n", .{@intFromPtr(module.get_got().ptr)});
-        stdout.print("[yasld] text loaded at 0x{x} for: {s}\n", .{ @intFromPtr(module.program.?.ptr), module.name.? });
+        stdout.print("[yasld] GOT loaded at 0x{x}\n", .{@intFromPtr(module.get_got().ptr)});
+        stdout.print("[yasld] text loaded at 0x{x} for: {s}\n", .{ @intFromPtr(module.get_text().ptr), module.name.? });
 
         if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
             var section: Section = .Unknown;
@@ -158,12 +156,10 @@ pub const Loader = struct {
             };
         }
     }
-    fn import_child_modules(self: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) LoaderError!void {
+    fn import_child_modules(self: *Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) LoaderError!void {
         if (header.external_libraries_amount == 0) {
             return;
         }
-
-        try module.allocate_modules(header.external_libraries_amount);
 
         var it = parser.imported_libraries.iter();
         var index: usize = 0;
@@ -181,8 +177,9 @@ pub const Loader = struct {
                 if (@as(Type, @enumFromInt(library_header.module_type)) != Type.Library) {
                     return LoaderError.DependencyIsNotLibrary;
                 }
-
-                self.load_module(&module.imported_modules.items[index], address, stdout) catch |err| {
+                const child = try Module.create(module.allocator, module.process_allocator, true);
+                module.append_child(child);
+                self.load_module(child, address, stdout) catch |err| {
                     stdout.print("Can't load child module '{s}': {s}\n", .{ library.data.name(), @errorName(err) });
                     return error.ChildLoadingFailure;
                 };
@@ -194,51 +191,26 @@ pub const Loader = struct {
     }
 
     fn process_data(_: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        // _ = stdout;
+        _ = stdout;
         if (module.shared_data == null) {
             // we are first module that uses that data, initialization must be done
-            const shared_data = LoadedSharedData.create(module.allocator, module.list_node, module.xip);
-            if (module.xip) {
-                const text = parser.get_text();
-                const init = parser.get_init();
-                const plt = parser.get_plt();
-                shared_data.*.text = text;
-                shared_data.*.init = init;
-                shared_data.*.plt = plt;
-                module.shared_data = shared_data;
-            } else {}
+            const shared_data = try LoadedSharedData.create(
+                module.allocator,
+                module.process_allocator,
+                &module.list_node,
+                module.xip,
+                parser,
+            );
+            module.shared_data = shared_data;
         }
 
         // unique data must be always copied to RAM
-        module.unique_data = LoadedUniqueData.create(
+        module.unique_data = try LoadedUniqueData.create(
             module.allocator,
             module.process_allocator,
             header,
             parser,
         );
-
-        const plt_start = header.code_length + header.init_length;
-        const plt_end = plt_start + header.plt_length;
-        const plt_data = parser.get_plt();
-        stdout.print("[yasld] copying .plt from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(plt_data.ptr), @intFromPtr(&module.program.?[plt_start]), plt_data.len });
-        @memcpy(module.program.?[plt_start..plt_end], plt_data);
-
-        const data_start = plt_end;
-        const data_end = data_start + header.data_length;
-
-        stdout.print("[yasld] copying .data from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(data_initializer.ptr), @intFromPtr(&module.program.?[data_start]), data_initializer.len });
-        @memcpy(module.program.?[data_start..data_end], data_initializer);
-        const bss_start = data_end;
-        const bss_end = bss_start + header.bss_length;
-
-        @memset(module.program.?[bss_start..bss_end], 0);
-
-        // const got_start = bss_end;
-        stdout.print("[yasld] intializing .got at: 0x{x}\n", .{@intFromPtr(&module.program.?[bss_end])});
-        // const got_end = got_start + header.got_length;
-        // const got_data = parser.get_got();
-        // stdout.print("[yasld] copying .got from: 0x{x} to: 0x{x}, size: {d}\n", .{ @intFromPtr(got_data.ptr), @intFromPtr(&module.program.?[got_start]), got_data.len });
-        // @memcpy(module.program.?[got_start..got_end], got_data);
 
         if (header.got_plt_length != 0) {
             @panic("Support for .got.plt is not implemented yet");
@@ -247,6 +219,7 @@ pub const Loader = struct {
 
     fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
         var got = module.get_got();
+        stdout.debug("Processing symbol table relocations for GOT: {x}\n", .{@intFromPtr(got.ptr)});
         const text = module.get_text();
         const module_start = @intFromPtr(text.ptr);
         const maybe_init = self.find_symbol(module, "__start_data");
@@ -293,8 +266,9 @@ pub const Loader = struct {
         return null;
     }
 
-    fn process_local_relocations(_: Loader, parser: *const Parser, module: *Module) !void {
+    fn process_local_relocations(_: Loader, parser: *const Parser, module: *Module, logger: anytype) !void {
         var got = module.get_got();
+        logger.debug("Processing local relocations for GOT: 0x{x}\n", .{@intFromPtr(got.ptr)});
         for (parser.local_relocations.relocations) |rel| {
             const relocated_start_address: usize = try module.get_base_address(@enumFromInt(rel.section));
             const relocated = relocated_start_address + rel.target_offset;
@@ -304,14 +278,18 @@ pub const Loader = struct {
     }
 
     fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        _ = stdout;
-        const data_memory = module.get_data();
         for (parser.data_relocations.relocations) |rel| {
-            const address_to_change: usize = @intFromPtr(data_memory.ptr) + rel.to;
+            var data_memory_address: usize = @intFromPtr(module.get_data().ptr);
+            var rel_to = rel.to;
+            if (rel.to > module.get_data().len) {
+                rel_to -= module.get_data().len;
+                data_memory_address = @intFromPtr(module.get_got().ptr);
+            }
+            const address_to_change: usize = data_memory_address + rel_to;
             const target: *usize = @ptrFromInt(address_to_change);
             const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));
             const address_from: usize = base_address_from + rel.from;
-            // stdout.print("Patching from: 0x{x} to: 0x{x}, base: {x}\n", .{ rel.from, rel.to, base_address_from });
+            stdout.debug("Patching from: 0x{x} to: 0x{x}, address_from: {x}, target: {x}\n", .{ rel.from, rel.to, address_from, @intFromPtr(target) });
 
             target.* = address_from;
         }
@@ -325,3 +303,16 @@ pub const Loader = struct {
         return header;
     }
 };
+
+var loader_object: ?Loader = null;
+
+pub fn init(file_resolver: anytype, allocator: std.mem.Allocator) void {
+    loader_object = Loader.create(file_resolver, allocator);
+}
+
+pub fn get_loader() ?*Loader {
+    if (loader_object) |*loader| {
+        return loader;
+    }
+    return null;
+}

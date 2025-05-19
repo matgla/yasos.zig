@@ -23,3 +23,5 @@ pub const Executable = @import("executable.zig").Executable;
 pub const Environment = @import("environment.zig").Environment;
 pub const SymbolEntry = @import("module.zig").SymbolEntry;
 pub const Module = @import("module.zig").Module;
+pub const get_loader = @import("loader.zig").get_loader;
+pub const loader_init = @import("loader.zig").init;
