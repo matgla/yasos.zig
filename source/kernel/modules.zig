@@ -64,11 +64,10 @@ fn traverse_directory(file: *IFile, context: *anyopaque) bool {
 
 var modules_list: std.AutoHashMap(u32, yasld.Executable) = undefined;
 var libraries_list: std.AutoHashMap(u32, std.DoublyLinkedList) = undefined;
-var loader: yasld.Loader = undefined;
 var kernel_allocator: std.mem.Allocator = undefined;
 
 pub fn init(allocator: std.mem.Allocator) void {
-    loader = yasld.Loader.create(&file_resolver);
+    yasld.loader_init(&file_resolver, allocator);
     modules_list = std.AutoHashMap(u32, yasld.Executable).init(allocator);
     libraries_list = std.AutoHashMap(u32, std.DoublyLinkedList).init(allocator);
     kernel_allocator = allocator;
@@ -92,16 +91,23 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
             // copy file to memory before running
             @panic("Implement image copying to memory");
         }
-        const executable = loader.load_executable(header_address, log, allocator) catch |err| {
-            return err;
-        };
-        if (modules_list.getPtr(pid)) |prev| {
-            prev.deinit();
-            _ = modules_list.remove(pid);
+        if (yasld.get_loader()) |loader| {
+            var loader_logger = log.*;
+            loader_logger.debug_enabled = true;
+            loader_logger.prefix = "[yasld]";
+            const executable = loader.*.load_executable(header_address, loader_logger, allocator) catch |err| {
+                return err;
+            };
+            if (modules_list.getPtr(pid)) |prev| {
+                prev.deinit();
+                _ = modules_list.remove(pid);
+            }
+            modules_list.put(pid, executable) catch |err| return err;
+            const exec_ptr: *yasld.Executable = modules_list.getPtr(pid).?;
+            return exec_ptr;
+        } else {
+            log.print("Error: Yasld is not initialized\n", .{});
         }
-        modules_list.put(pid, executable) catch |err| return err;
-        const exec_ptr: *yasld.Executable = modules_list.getPtr(pid).?;
-        return exec_ptr;
     }
     return std.posix.AccessError.FileNotFound;
 }
@@ -124,19 +130,22 @@ pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: 
             // copy file to memory before running
             @panic("Implement image copying to memory");
         }
-        const library = kernel_allocator.create(yasld.Module) catch |err| return err;
-        library.* = loader.load_library(header_address, log, allocator) catch |err| {
-            return err;
-        };
+        if (yasld.get_loader()) |loader| {
+            const library = loader.*.load_library(header_address, log, allocator) catch |err| {
+                return err;
+            };
 
-        if (!libraries_list.contains(pid)) {
-            libraries_list.put(pid, .{}) catch |err| return err;
+            if (!libraries_list.contains(pid)) {
+                libraries_list.put(pid, .{}) catch |err| return err;
+            }
+            const maybe_list = libraries_list.getPtr(pid);
+            if (maybe_list) |list| {
+                list.append(&library.list_node);
+            }
+            return library;
+        } else {
+            log.print("Error: Yasld is not initialized\n", .{});
         }
-        const maybe_list = libraries_list.getPtr(pid);
-        if (maybe_list) |list| {
-            list.append(&library.list_node);
-        }
-        return library;
     }
     return std.posix.AccessError.FileNotFound;
 }
@@ -154,6 +163,8 @@ pub fn release_shared_library(pid: u32, library: *yasld.Module) void {
     const maybe_list = libraries_list.getPtr(pid);
     if (maybe_list) |*list| {
         list.*.remove(&library.list_node);
-        library.deinit();
+        if (yasld.get_loader()) |loader| {
+            loader.*.unload_module(library);
+        }
     }
 }

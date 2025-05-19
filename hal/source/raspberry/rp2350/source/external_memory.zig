@@ -23,6 +23,8 @@ const c = @cImport({
     @cInclude("hardware/structs/qmi.h");
 });
 
+const config = @import("config");
+
 const Mmio = @import("raspberry_common").mmio.Mmio;
 
 pub const QmiM = extern struct {
@@ -397,7 +399,7 @@ pub const ExternalMemory = struct {
     }
 
     fn init(self: *ExternalMemory) bool {
-        c.gpio_set_function(0, c.GPIO_FUNC_XIP_CS1);
+        c.gpio_set_function(config.psram.cs_pin, c.GPIO_FUNC_XIP_CS1);
         qmi_reinitialize_flash();
         const init_code = qmi_initialize_m1();
         if (init_code > 0) {

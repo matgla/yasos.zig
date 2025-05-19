@@ -53,12 +53,26 @@ const KernelLog = struct {
 const Logger = struct {
     log: KernelLog,
     writer: ?KernelLog.Writer,
+    debug_enabled: bool,
+    prefix: ?[]const u8 = null,
 
     pub fn print(self: *const Logger, comptime str: []const u8, args: anytype) void {
         // Writing to kernel log is not critical and if not working
         // there is no alternative implemented
         if (self.writer) |writer| {
             _ = writer.print(str, args) catch {};
+        }
+    }
+
+    pub fn debug(self: *const Logger, comptime str: []const u8, args: anytype) void {
+        if (self.writer) |writer| {
+            if (self.debug_enabled) {
+                if (self.prefix) |p| {
+                    _ = writer.write(p) catch {};
+                    _ = writer.write(" ") catch {};
+                }
+                _ = writer.print(str, args) catch {};
+            }
         }
     }
 
@@ -79,6 +93,7 @@ pub var kernel_log = Logger{
         .writeFn = null,
     },
     .writer = null,
+    .debug_enabled = false,
 };
 
 pub const WriteError = error{

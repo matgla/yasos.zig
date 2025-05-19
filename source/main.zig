@@ -210,7 +210,7 @@ export fn kernel_process() void {
     const maybe_process = process_manager.instance.get_current_process();
     var pid: u32 = 0;
     if (maybe_process) |p| {
-        log.write("- setting default streams\n");
+        log.write(" - setting default streams\n");
         const maybe_uart_file = uart_driver.idriver().ifile();
         if (maybe_uart_file) |uart_file| {
             p.fds.put(0, .{

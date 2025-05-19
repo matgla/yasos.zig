@@ -20,6 +20,8 @@
 
 const Module = @import("module.zig").Module;
 
+const get_loader = @import("loader.zig").get_loader;
+
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: usize) i32;
 extern fn call_entry(address: usize, got: usize) i32;
 
@@ -39,6 +41,8 @@ pub const Executable = struct {
     }
 
     pub fn deinit(self: *Executable) void {
-        self.module.deinit();
+        if (get_loader()) |loader| {
+            loader.*.unload_module(self.module);
+        }
     }
 };

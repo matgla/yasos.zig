@@ -49,4 +49,10 @@ config FLASH_MEMORY_SIZE
     string "Flash memory size in format like: 1024K" 
     depends on FIRMWARE_IN_FLASH
 
+menu "PSRAM"
+config CONFIG_PSRAM_CS_PIN
+    int "Pin for PSRAM chip selection"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+endmenu
+
 endmenu
