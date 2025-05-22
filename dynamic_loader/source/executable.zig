@@ -30,7 +30,7 @@ pub const Executable = struct {
 
     pub fn main(self: Executable, argv: [*c][*c]u8, argc: i32) error{MainNotExits}!i32 {
         if (self.module.entry) |entry| {
-            return call_entry(entry.address, entry.target_got_address);
+            return call_main(argc, argv, entry.address, entry.target_got_address);
         }
 
         const maybe_symbol = self.module.find_symbol("_start");

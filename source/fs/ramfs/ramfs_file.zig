@@ -30,6 +30,8 @@ const RamFsData = @import("ramfs_data.zig").RamFsData;
 const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
 
+const log = &@import("../../log/kernel_log.zig").kernel_log;
+
 pub const RamFsFile = struct {
     /// VTable for IFile interface
     const VTable = IFile.VTable{
@@ -103,10 +105,12 @@ pub const RamFsFile = struct {
                     return -1;
                 }
                 self._position = @intCast(offset);
+                return @intCast(self._position);
             },
             c.SEEK_END => {
                 if (self._data.data.items.len >= offset) {
                     self._position = self._data.data.items.len - @as(usize, @intCast(offset));
+                    return @intCast(self._position);
                 } else {
                     // set errno
                     return -1;
@@ -118,6 +122,7 @@ pub const RamFsFile = struct {
                     return -1;
                 }
                 self._position = @intCast(new_position);
+                return @intCast(self._position);
             },
             else => return -1,
         }

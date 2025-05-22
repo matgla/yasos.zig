@@ -755,7 +755,9 @@ class Application:
 
     def __build_binary_symbol_table_for(self, symbols):
         table = bytearray()
+        print(len(symbols))
         for symbol in symbols:
+            print("Imported: ", symbol["name"])
             value = symbol["value"]
             if symbol["section"] == SectionCode.Data:
                 value -= len(self.text) + len(self.init_arrays) + len(self.plt)
@@ -804,6 +806,7 @@ class Application:
                 raise RuntimeError(
                     "Symbol {} not found in symbol table.".format(rel["name"])
                 )
+            print("Symbol: ", symbol["name"], "index: ", symbol_table_index)
             table.append({"index": rel["index"] << 1 | rel["is_exported_symbol"], "offset": symbol_table_index})
 
         for rel in local_relocations:
