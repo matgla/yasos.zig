@@ -170,7 +170,7 @@ build_makefile cowsay
 build_makefile ascii_animations
 build_makefile textvaders
 build_makefile hello_world
-# build_makefile hexdump
+build_makefile hexdump
 
 cd ..
 
