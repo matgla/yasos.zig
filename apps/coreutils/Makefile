@@ -1,6 +1,6 @@
 CC ?= armv8m-tcc
 CFLAGS = -fPIE -fpie -g -mcpu=cortex-m33 -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
-LDFLAGS = -fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 
+LDFLAGS = -fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4, -Wl,-oformat=yaff
 SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 
@@ -23,19 +23,19 @@ build/cat.o: cat.c prepare
 build/echo.o: echo.c prepare
 	$(CC) $(CFLAGS) -c $< -o build/echo.o
 
-build/ls.elf: build/ls.o
+build/ls: build/ls.o
 	$(CC) $(LDFLAGS) $^ -o $@
-build/cat.elf: build/cat.o
+build/cat: build/cat.o
 	$(CC) $(LDFLAGS) $^ -o $@
-build/echo.elf: build/echo.o
+build/echo: build/echo.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
 
-install: build/ls.elf build/cat.elf build/echo.elf
+install: build/ls build/cat build/echo
 	mkdir -p $(BINDIR)
-	cp build/ls.elf $(BINDIR)
-	cp build/cat.elf $(BINDIR)
-	cp build/echo.elf $(BINDIR)
+	cp build/ls $(BINDIR)
+	cp build/cat $(BINDIR)
+	cp build/echo $(BINDIR)
 
 clean:
 	rm -rf build

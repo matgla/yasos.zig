@@ -4,27 +4,21 @@ LDFLAGS = -g -fvisibility=hidden -g
 SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 
-TARGET = build/hello
+TARGET = build/hexdump
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 INCLUDEDIR ?= $(PREFIX)/include
 
 # Rules
-all: $(TARGET) $(TARGET).elf
+all: $(TARGET)
 
 build/%.o: %.c
 	mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) -Wl,-oformat=yaff $^ -o $@
-
-
-$(TARGET).elf: $(OBJS)
-	$(CC) $(LDFLAGS) -Wl,-oformat=elf32-littlearm $^ -o $@
-
-
+	$(CC) $(LDFLAGS) $^ -o $@
 
 install: $(TARGET) 
 	mkdir -p $(BINDIR)

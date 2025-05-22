@@ -63,6 +63,7 @@ if $CLEAR; then
   rm -rf libs/pthread/build
   rm -rf libs/yasos_curses/build
   rm -rf apps/textvaders/build
+  rm -rf apps/hexdump/build
   rm -rf libs/libm/build
 
   rm -rf libs/tinycc/bin
@@ -88,7 +89,7 @@ build_cross_compiler()
   echo "Building cross compiler..."
   cd tinycc
   mkdir -p bin
-  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  ./configure --extra-cflags="-DTCC_DEBUG=2 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -109,7 +110,7 @@ build_c_compiler()
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   # gcc -o armv8m-tcc.o -c tcc.c -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM_ARCHV8M -DCONFIG_TCC_CROSSPREFIX="\"armv8m-\"" -I. -DTCC_GITHASH="\"2025-05-11 armv8m@ec701fe2*\"" -DTCC_DEBUG=2 -g -O0 -Wdeclaration-after-statement -Wno-unused-result
 
-  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
+  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-DTCC_DEBUG=2 -g -O0 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=yaff" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -169,44 +170,16 @@ build_makefile cowsay
 build_makefile ascii_animations
 build_makefile textvaders
 build_makefile hello_world
+# build_makefile hexdump
 
 cd ..
 
 if $BUILD_IMAGE; then
   echo "Outputing file to: $OUTPUT_FILE"
-  rm -rf /tmp/rootfs_temp 
-  cp -r rootfs /tmp/rootfs_temp
-  cd /tmp/rootfs_temp
-  rm usr/bin/tcc
-  rm usr/bin/armv8m-tcc
-  rm usr/lib/libtcc.a
-
-  for file in **/*.so
-  do
-    if [ -f "$file" ]; then  # Check if it's a file
-      mv $file $file.bak
-      $SCRIPT_DIR/dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file.bak --type shared_library -o $file --verbose
-      if [ $? -ne 0 ]; then
-        echo "Error: mkimage failed for $file"
-        exit 1
-      fi  
-      rm $file.bak 
-    fi
-  done
-
-  for file in **/*.elf
-  do
-    if [ -f "$file" ]; then  # Check if it's a file
-      $SCRIPT_DIR/dynamic_loader/elftoyaff/mkimage/mkimage.py -i $file --type shared_library -o $(dirname $file)/$(basename "$file" .elf) --verbose
-      if [ $? -ne 0 ]; then
-        echo "Error: mkimage failed for $file"
-        exit 1
-      fi 
-      rm $file 
-    fi
-  done
-  cd ..
-
-  genromfs -f $OUTPUT_FILE -d rootfs_temp -V rootfs 
-  cp rootfs.img $SCRIPT_DIR
+  rm -f rootfs/bin/armv8m-tcc
+  rm -f rootfs/lib/libc.a
+  rm -rf rootfs/usr/share
+  rm -f rootfs/bin/tcc
+  mv rootfs/bin/tcc.elf rootfs/bin/tcc
+  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs 
 fi

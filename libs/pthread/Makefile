@@ -15,7 +15,7 @@ LIBDIR ?= $(PREFIX)/lib
 INCLUDEDIR ?= $(PREFIX)/include
 
 # Rules
-all: $(TARGET_SHARED) $(TARGET_STATIC)
+all: $(TARGET_SHARED) $(TARGET_STATIC) $(TARGET_SHARED).elf
 
 prepare: 
 	mkdir -p build
@@ -23,8 +23,11 @@ prepare:
 build/%.o: %.c prepare
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(TARGET_SHARED): $(OBJS)
+$(TARGET_SHARED).elf: $(OBJS)
 	$(CC) $(LDFLAGS) $^ -o $@
+
+$(TARGET_SHARED): $(OBJS)
+	$(CC) $(LDFLAGS) -Wl,-oformat=yaff $^ -o $@
 
 $(TARGET_STATIC): $(OBJS)
 	ar rcs $@ $^

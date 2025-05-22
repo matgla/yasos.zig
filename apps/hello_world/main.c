@@ -15,20 +15,22 @@
  along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <stdint.h>
 #include <stdio.h>
-
-static void default_run() {
-  printf("Hello, World!\n");
-}
-
-static void (*runner)() = default_run;
-
-void set_runner(void (*run)()) {
-  runner = run ? run : default_run;
-}
-
 int main() {
-  set_runner(0);
-  runner();
+  printf("Hello, World!\n");
+
+  /* Compute and store final offset */
+  uint32_t x = 0x1a2;
+  uint16_t lo = 0xf7ff;
+  uint16_t hi = 0xfffe;
+  int s = (x >> 24) & 1;
+  printf("x: %x, x >> 24: %x, after s: %x\n", x, x >> 24, s);
+  int i1 = (x >> 23) & 1;
+  printf("x >> 23: %x, after i1: %x\n", x >> 24, i1);
+
+  int j1 = s ^ (i1 ^ 1);
+  printf("i1 ^ 1: %x, s ^: %x\n", i1 ^ 1, s ^ (i1 ^ 1));
+
   return 0;
 }

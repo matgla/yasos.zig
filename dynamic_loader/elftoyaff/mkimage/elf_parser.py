@@ -63,6 +63,8 @@ class ElfParser:
             for section in elf.iter_sections():
                 if not isinstance(section, SymbolTableSection):
                     continue
+                if section.name != ".dynsym":
+                    continue 
 
                 for symbol in section.iter_symbols():
                 
