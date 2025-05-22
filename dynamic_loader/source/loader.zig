@@ -91,7 +91,7 @@ pub const Loader = struct {
     }
 
     fn load_module(self: *Loader, module: *Module, module_address: *const anyopaque, stdout: anytype) !void {
-        stdout.debug("[yasld] parsing header\n", .{});
+        stdout.debug("parsing header\n", .{});
         const header = self.process_header(module_address) catch |err| {
             stdout.write("Wrong magic cookie, not a yaff file\n");
             return err;
@@ -130,11 +130,11 @@ pub const Loader = struct {
         try self.process_local_relocations(&parser, module, stdout);
         try self.process_data_relocations(&parser, module, stdout);
 
-        stdout.print("[yasld] .text loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
-        stdout.print("[yasld] .plt  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
-        stdout.print("[yasld] .data loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
-        stdout.print("[yasld] .bss  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
-        stdout.print("[yasld] .got  loaded at 0x{x}, entr: {x} for: {s}\n", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
+        stdout.debug(".text loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
+        stdout.debug(".plt  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
+        stdout.debug(".data loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
+        stdout.debug(".bss  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
+        stdout.debug(".got  loaded at 0x{x}, entr: {x} for: {s}\n", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
 
         if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
             var section: Section = .Unknown;
@@ -170,7 +170,7 @@ pub const Loader = struct {
             it = library.next();
             index += 1;
         }) {
-            stdout.print("[yasld] loading child module '{s}'\n", .{library.data.name()});
+            stdout.debug("loading child module '{s}'\n", .{library.data.name()});
             const maybe_address = self.file_resolver(library.data.name());
             if (maybe_address) |address| {
                 const library_header = self.process_header(address) catch {
@@ -251,7 +251,7 @@ pub const Loader = struct {
         stdout.debug("Processing symbol table relocations for GOT: {x}\n", .{@intFromPtr(got.ptr)});
         const maybe_init = self.find_symbol(module, "__start_data");
         if (maybe_init == null) {
-            stdout.print("[yasld] Can't find symbol '__start_data'\n", .{});
+            stdout.debug("[yasld] Can't find symbol '__start_data'\n", .{});
         }
 
         for (0..got.len) |i| {
@@ -264,7 +264,7 @@ pub const Loader = struct {
                 return err;
             };
             const address = section_start.section + got[i].symbol_offset - section_start.offset;
-            stdout.print("[yasld] Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
+            stdout.debug("Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
             got[i].base_register = @intFromPtr(got.ptr);
             got[i].symbol_offset = address;
         }
@@ -279,7 +279,7 @@ pub const Loader = struct {
             if (maybe_symbol) |symbol| {
                 const maybe_symbol_entry = self.find_symbol(module, symbol.name());
                 if (maybe_symbol_entry) |symbol_entry| {
-                    stdout.print("[yasld] Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}\n", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });
+                    stdout.debug("Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}\n", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });
                     got[rel.index].symbol_offset = symbol_entry.address;
                     got[rel.index].base_register = symbol_entry.target_got_address;
                 } else {

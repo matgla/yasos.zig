@@ -93,7 +93,7 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
         }
         if (yasld.get_loader()) |loader| {
             var loader_logger = log.*;
-            loader_logger.debug_enabled = true;
+            loader_logger.debug_enabled = false;
             loader_logger.prefix = "[yasld]";
             const executable = loader.*.load_executable(header_address, loader_logger, allocator) catch |err| {
                 log.print("loading '{s}' failed: {s}\n", .{ path, @errorName(err) });

@@ -89,7 +89,7 @@ build_cross_compiler()
   echo "Building cross compiler..."
   cd tinycc
   mkdir -p bin
-  ./configure --extra-cflags="-DTCC_DEBUG=2 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -110,7 +110,7 @@ build_c_compiler()
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   # gcc -o armv8m-tcc.o -c tcc.c -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM_ARCHV8M -DCONFIG_TCC_CROSSPREFIX="\"armv8m-\"" -I. -DTCC_GITHASH="\"2025-05-11 armv8m@ec701fe2*\"" -DTCC_DEBUG=2 -g -O0 -Wdeclaration-after-statement -Wno-unused-result
 
-  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-DTCC_DEBUG=2 -g -O0 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=yaff" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
+  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=yaff" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
   if [ $? -ne 0 ]; then
     exit -1;
   fi
