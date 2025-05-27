@@ -19,3 +19,6 @@
 [submodule "apps/textvaders"]
 	path = apps/textvaders
 	url = git@github.com:matgla/textvaders.git
+[submodule "apps/yasvi"]
+	path = apps/yasvi
+	url = git@github.com:matgla/yasvi.git

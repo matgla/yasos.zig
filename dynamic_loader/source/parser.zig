@@ -87,7 +87,7 @@ pub const Parser = struct {
             .root = @as(*const Symbol, @ptrFromInt(imported_array.address() + imported_array_size)),
         };
 
-        const text: usize = std.mem.alignForward(usize, exported_array.address() + exported_array.size(), 16);
+        const text: usize = @intFromPtr(header) + header.text_offset;
         const init: usize = text + header.code_length;
         const plt: usize = init + header.init_length;
         const data: usize = plt + header.plt_length;

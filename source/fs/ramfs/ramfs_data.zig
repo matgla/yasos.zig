@@ -25,6 +25,8 @@ const config = @import("config");
 
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
+const log = &@import("../../log/kernel_log.zig").kernel_log;
+
 pub const RamFsDataError = error{
     FileNameTooLong,
 };
@@ -33,7 +35,7 @@ pub const RamFsData = struct {
     /// File type, users may use that field
     type: FileType,
     /// File contents
-    data: std.ArrayList(u8),
+    data: std.ArrayListAligned(u8, .@"16"),
 
     /// Buffer for filename, do not use it except of this module, instead please use: `RamFsData.name`
     _name_buffer: [config.ramfs.max_filename]u8,
@@ -43,7 +45,7 @@ pub const RamFsData = struct {
         }
         var obj = RamFsData{
             .type = filetype,
-            .data = std.ArrayList(u8).init(allocator),
+            .data = std.ArrayListAligned(u8, .@"16").init(allocator),
             ._name_buffer = undefined,
         };
 
