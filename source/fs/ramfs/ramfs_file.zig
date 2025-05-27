@@ -79,6 +79,7 @@ pub const RamFsFile = struct {
         }
         const length = @min(self._data.data.items.len - self._position, buffer.len);
         @memcpy(buffer[0..length], self._data.data.items[self._position .. self._position + length]);
+        log.print("\n", .{});
         self._position += length;
         return @intCast(length);
     }
