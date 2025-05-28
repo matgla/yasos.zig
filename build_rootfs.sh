@@ -65,6 +65,7 @@ if $CLEAR; then
   rm -rf apps/textvaders/build
   rm -rf apps/hexdump/build
   rm -rf libs/libm/build
+  rm -rf libs/apps/yasvi/build
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
