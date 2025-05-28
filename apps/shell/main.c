@@ -36,12 +36,32 @@
 #define MAX_HISTORY_LINES 4
 #define MAX_NUMBER_OF_ARGUMENTS 16
 
+static struct termios termios_original;
+static struct termios termios_stdout_original;
+static struct termios termios_raw;
+
 typedef struct Screen {
   char lines[MAX_HISTORY_LINES][MAX_LINE_SIZE];
   int current_line;
 } Screen;
 
 static Screen screen;
+
+static void enable_raw_mode() {
+  tcgetattr(STDIN_FILENO, &termios_original);
+  tcgetattr(STDOUT_FILENO, &termios_stdout_original);
+  termios_raw = termios_original;
+  termios_raw.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
+  termios_raw = termios_stdout_original;
+  termios_raw.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(STDOUT_FILENO, TCSANOW, &termios_raw);
+}
+
+static void disable_raw_mode() {
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original);
+  tcsetattr(STDOUT_FILENO, TCSANOW, &termios_stdout_original);
+}
 
 char *strip(char *str, size_t length) {
   while (isspace(*str) && (length-- != 0))
@@ -206,6 +226,7 @@ int execute_command(const char *command, char *args[]) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
     char cwd[255];
+    disable_raw_mode();
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
       strcat(cwd, "/");
       strcat(cwd, command);
@@ -214,6 +235,7 @@ int execute_command(const char *command, char *args[]) {
       }
     }
     execvp(command, args);
+    enable_raw_mode();
     exit(0);
   } else {
     int rc = 0;
@@ -267,17 +289,7 @@ int parse_command(char *buffer) {
 
 int main(int argc, char *argv[]) {
   if (isatty(STDIN_FILENO)) {
-    struct termios termios_original;
-    struct termios termios_stdout_original;
-    struct termios termios_raw = {};
-    tcgetattr(STDIN_FILENO, &termios_original);
-    tcgetattr(STDOUT_FILENO, &termios_stdout_original);
-    termios_raw = termios_original;
-    termios_raw.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
-    termios_raw = termios_stdout_original;
-    termios_raw.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDOUT_FILENO, TCSANOW, &termios_raw);
+    enable_raw_mode();
     char ch;
     while (true) {
       printf("$ ");
@@ -287,8 +299,7 @@ int main(int argc, char *argv[]) {
         break;
     }
 
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original);
-    tcsetattr(STDOUT_FILENO, TCSAFLUSH, &termios_stdout_original);
+    disable_raw_mode();
     // run interactive mode
   } else {
     // run script processor
