@@ -1,0 +1,2 @@
+zsh: no such file or directory: build/vi
+zsh: no such file or directory: build/vi
