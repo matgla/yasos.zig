@@ -16,6 +16,11 @@ fi
 
 eval set -- "$PARSED"
 
+if [[ ! -v CC ]]; then
+  CC=armv8m-tcc
+else 
+  echo "Using CC: $CC"
+fi
 # Default value
 CLEAR=false
 BUILD_IMAGE=false
@@ -65,7 +70,7 @@ if $CLEAR; then
   rm -rf apps/textvaders/build
   rm -rf apps/hexdump/build
   rm -rf libs/libm/build
-  rm -rf libs/apps/yasvi/build
+  rm -rf apps/yasvi/build
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
@@ -129,11 +134,11 @@ build_c_compiler()
 build_makefile()
 {
   cd $1
-  make CC=armv8m-tcc -j4
+  make CC=$CC -j4
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make CC=armv8m-tcc install PREFIX=$PREFIX
+  make CC=$CC install PREFIX=$PREFIX
   if [ $? -ne 0 ]; then
     exit -1;
   fi
