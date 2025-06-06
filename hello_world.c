@@ -5,7 +5,8 @@ int main() {
   printf("Hello, World!\n");
   printf("This is a simple C program.\n");
   printf("Please provide number: ");
-  scanf("%d", number);
+  fflush(stdout);
+  scanf("%d", &number);
   printf("You entered: %d\n", number);
   return 0;
 }

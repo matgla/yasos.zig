@@ -59,8 +59,9 @@ static void enable_raw_mode() {
 }
 
 static void disable_raw_mode() {
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original);
-  tcsetattr(STDOUT_FILENO, TCSANOW, &termios_stdout_original);
+  termios_raw.c_lflag |= (ICANON | ECHO);
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
+  tcsetattr(STDOUT_FILENO, TCSANOW, &termios_raw);
 }
 
 char *strip(char *str, size_t length) {
@@ -235,10 +236,10 @@ int execute_command(const char *command, char *args[]) {
       }
     }
     execvp(command, args);
-    enable_raw_mode();
     exit(0);
   } else {
     int rc = 0;
+    enable_raw_mode();
     waitpid(pid, &rc, 0);
   }
   // try to call command
