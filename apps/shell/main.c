@@ -228,7 +228,6 @@ int execute_command(const char *command, char *args[]) {
   } else if (pid == 0) {
     char cwd[255];
 
-    printf("Executing command child: %s\n", command);
     disable_raw_mode();
     int rc = 0;
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
@@ -239,13 +238,9 @@ int execute_command(const char *command, char *args[]) {
         exit(0);
       }
     }
-    printf("alternative execv for command rc(%d): %s\n", rc, command);
     rc = execvp(command, args);
-    printf("alternative execv rc(%d): %s\n", rc, command);
-
     exit(0);
   } else {
-    printf("We are in parent process: %d\n", pid);
     int rc = 0;
     enable_raw_mode();
     waitpid(pid, &rc, 0);
