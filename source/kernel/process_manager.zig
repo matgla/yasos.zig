@@ -176,7 +176,6 @@ pub const ProcessManager = struct {
 
             // switch to me
             reload_current_task();
-            //hal.irq.trigger(.pendsv);
 
             return 0;
         }
