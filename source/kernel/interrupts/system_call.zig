@@ -32,7 +32,7 @@ const process_manager = @import("../process_manager.zig");
 
 const handlers = @import("syscall_handlers.zig");
 
-extern fn store_and_switch_to_next_task() void;
+extern fn store_and_switch_to_next_task(lr: u32) void;
 
 // mov to arch file
 inline fn get_lr() usize {
@@ -127,15 +127,20 @@ const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
     var arg_to_call = arg;
     if (number == c.sys_vfork) {
-        const lr = get_lr();
-        arg_to_call = @ptrCast(&lr);
+        const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(out));
+        const ctx: handlers.VForkContext = .{
+            .lr = get_lr(),
+            .result = &c_result.*.result,
+        };
+        arg_to_call = @ptrCast(&ctx);
     }
     write_result(out, syscall_lookup_table[number](arg_to_call));
 }
 
 export fn irq_pendsv() void {
+    const lr: usize = get_lr();
     if (process_manager.instance.scheduler.schedule_next()) {
-        store_and_switch_to_next_task();
+        store_and_switch_to_next_task(lr);
     }
 }
 

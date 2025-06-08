@@ -39,7 +39,10 @@ pub const FileHeader = struct {
     memory: []const u8,
     start_index: usize,
 
-    pub fn init(memory: []const u8, start_index: usize) FileHeader {
+    pub fn init(memory: []const u8, start_index: usize) ?FileHeader {
+        if (start_index >= memory.len) {
+            return null;
+        }
         return .{
             .memory = memory,
             .start_index = start_index,

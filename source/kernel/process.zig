@@ -44,6 +44,8 @@ fn exit_handler() void {
     system_call.trigger(c.sys_exit, null, null);
 }
 
+extern fn reload_current_task() void;
+
 pub fn ProcessInterface(comptime implementation: anytype) type {
     return struct {
         const Self = @This();
@@ -78,20 +80,22 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             Terminated,
         };
 
-        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype, cwd: []const u8) !Self {
+        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype, cwd: []const u8) !*Self {
             pid_counter += 1;
+            const process = try allocator.create(Self);
+
             var memory_pool = ProcessPageAllocator.create(pid_counter);
             const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, .@"8", stack_size);
 
             if (comptime config.process.use_stack_overflow_detection) {
                 @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
             }
-            pid_counter += 1;
             const stack_position = implementation.prepare_process_stack(stack, &exit_handler, process_entry, null);
             const cwd_handle = try allocator.alloc(u8, cwd.len + 1);
             @memcpy(cwd_handle[0..cwd.len], cwd);
             cwd_handle[cwd.len] = 0;
-            return Self{
+
+            process.* = .{
                 .state = State.Ready,
                 .priority = 0,
                 .impl = .{},
@@ -108,25 +112,29 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .cwd = cwd_handle,
                 .node = .{},
             };
+            return process;
         }
 
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
-        pub fn vfork(self: *Self, lr: usize, result: usize) !Self {
+        pub fn vfork(self: *Self, lr: usize, result: usize) !*Self {
+            _ = lr;
+            _ = result;
             // allocate stack copy
+            const process = try self._allocator.create(Self);
             pid_counter += 1;
             var memory_pool = ProcessPageAllocator.create(pid_counter);
             const stack: []align(8) u8 = try memory_pool.std_allocator().alignedAlloc(u8, .@"8", self.stack.len);
 
             const stack_position = self.stack_position;
-            self.stack_position = arch_process.dump_registers_on_stack(result, pid_counter, lr, @intFromPtr(&context_switch_return_pop_single));
+            // _ = arch_process.dump_registers_on_stack(result, pid_counter, lr, @intFromPtr(&context_switch_return_pop_single));
             @memcpy(stack, self.stack);
             const parent_stack = self.stack;
             self.stack = stack;
             self.has_own_stack = false;
             const cwd_handle = try self._allocator.alloc(u8, self.cwd.len);
             @memcpy(cwd_handle, self.cwd);
-            return Self{
+            process.* = .{
                 .state = State.Ready,
                 .priority = self.priority,
                 .impl = .{},
@@ -143,6 +151,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 .cwd = cwd_handle,
                 .node = .{},
             };
+            return process;
         }
 
         pub fn deinit(self: *Self) void {
@@ -194,7 +203,24 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
         }
 
         pub fn set_stack_pointer(self: *Self, ptr: *u8) void {
-            self.stack_position = ptr;
+            // if the process is using its parent stack, then we have to copy stack to parent
+            // and set stack position to the freshly pushed registers
+            if (!self.has_own_stack) {
+                // temporary hack
+                if (self.blocked_by_process) |p| {
+                    if (@intFromPtr(ptr) < @intFromPtr(p.stack_position)) {
+                        const diff = @intFromPtr(p.stack_position) - @intFromPtr(ptr);
+                        self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) - diff);
+                    } else {
+                        const diff = @intFromPtr(ptr) - @intFromPtr(p.stack_position);
+                        self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) + diff);
+                    }
+                    @memcpy(self.stack, p.stack);
+                    p.stack_position = ptr;
+                }
+            } else {
+                self.stack_position = ptr;
+            }
         }
 
         pub fn stack_usage(self: Self) usize {
@@ -233,6 +259,7 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
                 self.restore_stack();
                 p.reevaluate_state();
                 self.blocks_process = null;
+                // reload_current_task();
             }
         }
 

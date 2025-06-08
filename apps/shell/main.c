@@ -227,15 +227,18 @@ int execute_command(const char *command, char *args[]) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
     char cwd[255];
+
     disable_raw_mode();
+    int rc = 0;
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
       strcat(cwd, "/");
       strcat(cwd, command);
-      if (execv(cwd, args) == 0) {
+      rc = execv(cwd, args);
+      if (rc == 0) {
         exit(0);
       }
     }
-    execvp(command, args);
+    rc = execvp(command, args);
     exit(0);
   } else {
     int rc = 0;

@@ -70,15 +70,23 @@ pub const ProcessManager = struct {
             if (p.pid == pid) {
                 p.unblock_parent();
                 const allocator = p._allocator;
-                p.deinit();
                 self.processes.remove(&p.node);
-                allocator.destroy(p);
                 dynamic_loader.release_executable(pid);
-                if (self.scheduler.schedule_next()) {
-                    switch_to_next_task();
-                } else {
-                    @panic("ProcessManager: No process to schedule\n");
+                p.deinit();
+                allocator.destroy(p);
+                if (self.scheduler.current == &p.node) {
+                    self.scheduler.current = null;
+                    if (self.scheduler.schedule_next()) {
+                        switch_to_next_task();
+                    } else {
+                        @panic("ProcessManager: No process to schedule\n");
+                    }
                 }
+                // if (self.scheduler.schedule_next()) {
+                //     switch_to_next_task();
+                // } else {
+                //     @panic("ProcessManager: No process to schedule\n");
+                // }
                 break;
             }
         }
@@ -114,12 +122,9 @@ pub const ProcessManager = struct {
     }
 
     pub fn vfork(self: *Self, lr: usize, result: usize) !i32 {
-        var new_process = self.allocator.create(Process) catch {
-            return -1;
-        };
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |current_process| {
-            new_process.* = current_process.vfork(lr, result) catch {
+            const new_process = current_process.vfork(lr, result) catch {
                 return -1;
             };
 
@@ -128,9 +133,9 @@ pub const ProcessManager = struct {
             };
             self.processes.append(&new_process.node);
             // switch without context switch
-            self.scheduler.current = &new_process.node;
+            // self.scheduler.current = &new_process.node;
 
-            return 0; //@intCast(node.data.pid);
+            return @intCast(new_process.pid);
         }
         return -1;
     }
