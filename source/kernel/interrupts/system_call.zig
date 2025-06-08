@@ -127,8 +127,12 @@ const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
     var arg_to_call = arg;
     if (number == c.sys_vfork) {
-        const lr = get_lr();
-        arg_to_call = @ptrCast(&lr);
+        const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(out));
+        const ctx: handlers.VForkContext = .{
+            .lr = get_lr(),
+            .result = &c_result.*.result,
+        };
+        arg_to_call = @ptrCast(&ctx);
     }
     write_result(out, syscall_lookup_table[number](arg_to_call));
 }

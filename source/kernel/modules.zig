@@ -25,7 +25,6 @@ const fs = @import("fs/vfs.zig");
 const FileMemoryMapAttributes = @import("fs/ifile.zig").FileMemoryMapAttributes;
 const IoctlCommonCommands = @import("fs/ifile.zig").IoctlCommonCommands;
 
-var null_log = &@import("../log/kernel_log.zig").null_log;
 const log = &@import("../log/kernel_log.zig").kernel_log;
 
 const ModuleContext = struct {
@@ -93,7 +92,7 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
         }
         if (yasld.get_loader()) |loader| {
             var loader_logger = log.*;
-            loader_logger.debug_enabled = false;
+            loader_logger.debug_enabled = true;
             loader_logger.prefix = "[yasld]";
             const executable = loader.*.load_executable(header_address, loader_logger, allocator) catch |err| {
                 log.print("loading '{s}' failed: {s}\n", .{ path, @errorName(err) });

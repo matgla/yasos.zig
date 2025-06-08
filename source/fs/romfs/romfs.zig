@@ -48,7 +48,11 @@ pub const RomFs = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, memory: []const u8) ?RomFs {
-        const fs = FileSystemHeader.init(memory);
+        const maybe_fs_size = FileSystemHeader.get_romfs_size(memory);
+        if (maybe_fs_size == null) {
+            return null;
+        }
+        const fs = FileSystemHeader.init(@as([]const u8, memory.ptr[0..@intCast(maybe_fs_size.?)]));
         if (fs) |root| {
             return .{
                 .root = root,
@@ -117,46 +121,53 @@ pub const RomFs = struct {
         const path_without_trailing_separator = std.mem.trimRight(u8, path, "/");
         var it = try std.fs.path.componentIterator(path);
         var component = it.first();
-        var node = self.root.first_file_header();
+        var maybe_node = self.root.first_file_header();
+        if (maybe_node == null) {
+            return null;
+        }
         while (component) |part| : (component = it.next()) {
-            while (!std.mem.eql(u8, node.name(), part.name)) {
-                const maybe_node = node.next();
+            while (!std.mem.eql(u8, maybe_node.?.name(), part.name)) {
+                maybe_node = maybe_node.?.next();
                 if (maybe_node == null) {
                     return null;
                 }
-                node = maybe_node.?;
             }
 
             // if symbolic link then fetch target node
-            if (node.filetype() == FileType.SymbolicLink) {
-                // iterate through link
-                const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", node.data() }) catch return null;
-                defer self.allocator.free(relative);
-                const link_node = self.get_file_header(relative);
-                if (link_node) |subpath| {
-                    node = subpath;
+            if (maybe_node) |node| {
+                if (node.filetype() == FileType.SymbolicLink) {
+                    // iterate through link
+                    const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", node.data() }) catch return null;
+                    defer self.allocator.free(relative);
+                    maybe_node = self.get_file_header(relative);
                 }
             }
 
-            // if last component then return
-            if (path_without_trailing_separator.len == part.path.len) {
-                if (node.filetype() == FileType.HardLink) {
-                    // if hard link then get it
-                    return FileHeader.init(node.memory, node.specinfo());
+            if (maybe_node) |node| {
+                // if last component then return
+                if (path_without_trailing_separator.len == part.path.len) {
+                    if (node.filetype() == FileType.HardLink) {
+                        // if hard link then get it
+                        return FileHeader.init(node.memory, node.specinfo());
+                    }
+                    return maybe_node;
                 }
-                return node;
             }
 
-            if (node.filetype() == FileType.Directory) {
-                node = FileHeader.init(node.memory, node.specinfo());
+            if (maybe_node) |node| {
+                if (node.filetype() == FileType.Directory) {
+                    maybe_node = FileHeader.init(node.memory, node.specinfo());
+                }
             }
         }
 
-        if (node.filetype() == FileType.HardLink) {
-            // if hard link then get it
-            return FileHeader.init(node.memory, node.specinfo());
+        if (maybe_node) |node| {
+            if (node.filetype() == FileType.HardLink) {
+                // if hard link then get it
+                return FileHeader.init(node.memory, node.specinfo());
+            }
         }
-        return node;
+        return maybe_node;
     }
 
     fn get(ctx: *anyopaque, path: []const u8) ?IFile {

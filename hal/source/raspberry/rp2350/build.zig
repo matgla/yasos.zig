@@ -51,8 +51,22 @@ fn configureCmake(b: *std.Build) ![]const u8 {
 
         const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
         std.log.info("{s}", .{configure_project});
+
+        const build_pioasm = b.run(&.{ cmake_exe, "--build", @as([]const u8, cmake_binary_dir), "--target", "pioasmBuild" });
+        std.log.info("{s}", .{build_pioasm});
     };
     return cmake_binary_dir;
+}
+
+fn generate_pio(b: *std.Build, file: []const u8, picosdk: []const u8) !void {
+    std.debug.print("Generating PIO file: {s}\n", .{file});
+    const pioasm = b.pathJoin(&.{ picosdk, "pioasm", "pioasm" });
+    const pio_file = b.path(b.pathJoin(&.{ "source", file }));
+    const output_filename = try std.mem.concat(b.allocator, u8, &.{ file, ".h" });
+    const output_file = b.pathJoin(&.{ picosdk, "generated", output_filename });
+
+    _ = b.run(&.{ pioasm, @as([]const u8, pio_file.getPath(b)), @as([]const u8, output_file) });
+    std.log.info("Generated PIO file: {s}", .{output_file});
 }
 
 pub fn build(b: *std.Build) !void {
@@ -66,6 +80,10 @@ pub fn build(b: *std.Build) !void {
     });
 
     const picosdk = try configureCmake(b);
+    try generate_pio(b, "mmc.pio", picosdk);
+
+    hal.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated" }) });
+
     const halInterface = b.dependency("hal_interface", .{ .optimize = optimize, .target = target });
     hal.addImport("hal_interface", halInterface.module("hal_interface"));
 
@@ -75,6 +93,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     hal.addImport("raspberry_common", raspberry_common);
+    raspberry_common.addImport("hal_interface", halInterface.module("hal_interface"));
 
     const hal_common = b.addModule("hal_common", .{
         .root_source_file = b.path("../../common/common.zig"),
@@ -119,7 +138,9 @@ pub fn build(b: *std.Build) !void {
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/pico_base_headers/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_uart/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2350/hardware_regs/include"));
+
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2350/pico_platform/include"));
+    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_common/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_compiler/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_sections/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_panic/include"));
@@ -129,6 +150,7 @@ pub fn build(b: *std.Build) !void {
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_pll/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_irq/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_gpio/include"));
+    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_pio/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_sync/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_vreg/include"));
 
@@ -170,6 +192,7 @@ pub fn build(b: *std.Build) !void {
             "../../../libs/pico-sdk/src/rp2_common/hardware_xosc/xosc.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_ticks/ticks.c",
+            "../../../libs/pico-sdk/src/rp2_common/hardware_pio/pio.c",
         },
         .flags = &.{"-std=c23"},
     });

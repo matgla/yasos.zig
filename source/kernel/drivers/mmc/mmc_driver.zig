@@ -1,33 +1,28 @@
+// Copyright (c) 2025 Mateusz Stadnik
 //
-// uart_driver.zig
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-// Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
 //
-// This program is free software: you can redistribute it and/or
-// modify it under the terms of the GNU General Public License
-// as published by the Free Software Foundation, either version
-// 3 of the License, or (at your option) any later version.
-//
-// This program is distributed in the hope that it will be
-// useful, but WITHOUT ANY WARRANTY; without even the implied
-// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
-// PURPOSE. See the GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General
-// Public License along with this program. If not, see
-// <https://www.gnu.org/licenses/>.
-//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
 
 const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
-const UartFile = @import("uart_file.zig").UartFile;
+const MmcFile = @import("mmc_file.zig").MmcFile;
 
-pub fn UartDriver(comptime UartType: anytype) type {
+pub fn MmcDriver(comptime MmcType: anytype) type {
     return struct {
         const Self = @This();
-        const uart = UartType;
+        const mmc = MmcType;
 
         const VTable = IDriver.VTable{
             .load = load,
@@ -37,7 +32,6 @@ pub fn UartDriver(comptime UartType: anytype) type {
         };
 
         _allocator: std.mem.Allocator,
-        // object is owner of the file handle
 
         pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
             const object = try allocator.create(Self);
@@ -63,12 +57,12 @@ pub fn UartDriver(comptime UartType: anytype) type {
         }
 
         fn load(_: *anyopaque) !void {
-            uart.flush();
-            uart.init(.{
-                .baudrate = 921600,
-            }) catch |err| {
-                return err;
-            };
+            try mmc.init(.{
+                .bus_width = 4,
+                .clock_speed = 50_000_000,
+                .timeout_ms = 1000,
+                .use_dma = false,
+            });
         }
 
         fn unload(_: *anyopaque) bool {
@@ -77,7 +71,7 @@ pub fn UartDriver(comptime UartType: anytype) type {
 
         fn ifile(ctx: *anyopaque) ?IFile {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            var file = UartFile(uart).new(self._allocator) catch {
+            const file = MmcFile(mmc).new(self._allocator) catch {
                 return null;
             };
             return file.ifile();
@@ -85,7 +79,7 @@ pub fn UartDriver(comptime UartType: anytype) type {
 
         fn _destroy(ctx: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            self.destroy();
+            self._allocator.destroy(self);
         }
     };
 }

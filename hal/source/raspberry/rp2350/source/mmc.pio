@@ -1,0 +1,47 @@
+.define mmc_irq_num 7
+
+.program mmc_clk
+.side_set 1
+.wrap_target
+    irq mmc_irq_num   side 1
+    irq clear mmc_irq_num   side 0
+.wrap
+
+.program mmc_cmd_or_dat
+.origin 0
+public no_arg_state_wait_high:
+    set pins, 0b1111
+    set pindirs, 0b1111
+public no_arg_state_waiting_for_cmd:
+    out exec, 16
+
+public state_send_bits:
+    out x, 16
+    wait 0 irq mmc_irq_num 
+send_loop1:
+    out pins, 1
+    jmp x-- send_loop1
+
+public state_inline_instruction:
+    out exec, 16
+.wrap_target
+    out exec, 16
+
+public state_receive_bits:
+    out x, 16
+    set pindirs, 0
+    wait 1 pin, 0
+    wait 0 pin, 0
+    wait 0 irq mmc_irq_num
+public wrap_for_4bit_receive:
+receive_loop1:
+    in pins, 1
+    jmp x-- receive_loop1
+.wrap 
+
+public wrap_target_for_4bit_receive:
+receive_loop4:
+    in pins, 4
+    jmp x-- receive_loop4
+    out exec, 16
+
