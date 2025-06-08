@@ -25,13 +25,17 @@ build/echo.o: echo.c prepare
 
 build/ls: build/ls.o
 	$(CC) $(LDFLAGS) $^ -o $@
+
+build/ls.elf: build/ls.o
+	$(CC) $(LDFLAGS) $^ -Wl,-oformat=elf32-littlearm -o $@
+
 build/cat: build/cat.o
 	$(CC) $(LDFLAGS) $^ -o $@
 build/echo: build/echo.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
 
-install: build/ls build/cat build/echo
+install: build/ls build/cat build/echo build/ls.elf
 	mkdir -p $(BINDIR)
 	cp build/ls $(BINDIR)
 	cp build/cat $(BINDIR)

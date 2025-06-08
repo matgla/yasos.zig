@@ -54,6 +54,7 @@ const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 const DriverFs = @import("kernel/drivers/driverfs.zig").DriverFs;
 
 const UartDriver = @import("kernel/drivers/uart/uart_driver.zig").UartDriver;
+const MmcDriver = @import("kernel/drivers/mmc/mmc_driver.zig").MmcDriver;
 
 const process_memory_pool = @import("kernel/process_memory_pool.zig");
 const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
@@ -61,19 +62,6 @@ const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
     _ = @import("kernel/system_stubs.zig");
-}
-
-fn qmi_delay(counter: usize) linksection(".kernel_ramfuncs") void {
-    var index: usize = 0;
-    while (index < counter) : (index += 1) {
-        asm volatile (
-            \\nop
-        );
-    }
-}
-
-fn slicify(ptr: [*]u8, len: usize) []u8 {
-    return ptr[0..len];
 }
 
 fn initialize_board() void {
@@ -90,9 +78,6 @@ fn initialize_board() void {
     if (hal.external_memory.enable()) {
         hal.external_memory.dump_configuration(log);
         log.print("External memory found\n", .{});
-        // asm volatile (
-        //     \\bkpt 0
-        // );
         if (hal.external_memory.perform_post(log)) {
             log.print("External memory post test passed\n", .{});
         } else {
@@ -116,51 +101,12 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     while (true) {}
 }
 
-var mutex: Mutex = .{};
-
-var module: ?*anyopaque = null;
-
-const ModuleContext = struct {
-    path: []const u8,
-    address: ?*const anyopaque,
-};
-
-fn traverse_directory(file: *IFile, context: *anyopaque) bool {
-    var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    if (std.mem.eql(u8, module_context.path, file.name())) {
-        var attr: FileMemoryMapAttributes = .{
-            .is_memory_mapped = false,
-            .mapped_address_r = null,
-            .mapped_address_w = null,
-        };
-        _ = file.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        if (attr.mapped_address_r) |address| {
-            module_context.address = address;
-            return false;
-        }
-    }
-    return true;
-}
-
-fn file_resolver(name: []const u8) ?*const anyopaque {
-    log.print("searching for dependency: {s}\n", .{name});
-    var context: ModuleContext = .{
-        .path = name,
-        .address = null,
-    };
-    _ = fs.ivfs().traverse("/lib", traverse_directory, &context);
-    if (context.address) |address| {
-        return address;
-    }
-    return null;
-}
-
 export fn kernel_process() void {
     log.write(" - initializing dynamic loader\n");
     dynamic_loader.init(malloc_allocator);
     log.write(" - creating virtual file system\n");
     fs.vfs_init(malloc_allocator);
-    const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..0x100000]);
+    const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..16]);
 
     if (maybe_romfs == null) {
         log.print("RomFS not found at: 0x{x}\n", .{0x10080000});
@@ -168,13 +114,12 @@ export fn kernel_process() void {
     }
 
     var romfs = maybe_romfs.?;
-    var ramfs = RamFs.init(malloc_allocator) catch |err| {
-        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
-        return;
-    };
-
     fs.vfs().mount_filesystem("/", romfs.ifilesystem()) catch |err| {
         log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.ifilesystem().name(), @errorName(err) });
+        return;
+    };
+    var ramfs = RamFs.init(malloc_allocator) catch |err| {
+        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
         return;
     };
 
@@ -202,10 +147,19 @@ export fn kernel_process() void {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-    if (!driverfs.load_all()) {
-        log.print("Can't load all drivers\n", .{});
+    var mmc_driver = MmcDriver(&board.mmc.mmc0).new(malloc_allocator) catch |err| {
+        log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
         return;
-    }
+    };
+
+    driverfs.append(mmc_driver.idriver()) catch |err| {
+        log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
+        return;
+    };
+    driverfs.load_all() catch |err| {
+        log.print("Can't load driver with error: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     const maybe_process = process_manager.instance.get_current_process();
     var pid: u32 = 0;
@@ -291,7 +245,7 @@ pub export fn main() void {
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
     });
-    spawn.root_process(&kernel_process, null, 1024 * 64) catch @panic("Can't spawn root process: ");
+    spawn.root_process(&kernel_process, null, 1024 * 16) catch @panic("Can't spawn root process: ");
     process.init();
     while (true) {}
 }

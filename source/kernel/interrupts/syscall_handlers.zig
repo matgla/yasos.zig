@@ -34,6 +34,8 @@ const c = @import("../../libc_imports.zig").c;
 const dynamic_loader = @import("../modules.zig");
 const yasld = @import("yasld");
 
+const hal = @import("hal");
+
 const E = enum(u16) {
     EINVAL = c.EINVAL,
 };
@@ -96,6 +98,11 @@ pub const CreateProcessCall = struct {
 
 pub const SemaphoreEvent = struct {
     object: *Semaphore,
+};
+
+pub const VForkContext = extern struct {
+    lr: usize,
+    result: *volatile c.pid_t,
 };
 
 extern fn switch_to_next_task() void;
@@ -275,10 +282,10 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
-    const lr: *const volatile usize = @ptrCast(@alignCast(arg));
-    var result: c.pid_t = -1;
-    _ = try process_manager.instance.vfork(lr.*, @intFromPtr(&result));
-    return 0;
+    const ctx: *const volatile VForkContext = @ptrCast(@alignCast(arg));
+    const result = try process_manager.instance.vfork(ctx.lr, @intFromPtr(ctx.result));
+    hal.irq.trigger(.pendsv);
+    return result;
 }
 
 pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {

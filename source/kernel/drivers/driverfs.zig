@@ -113,13 +113,11 @@ pub const DriverFs = struct {
         try self._container.append(driver);
     }
 
-    pub fn load_all(self: *DriverFs) bool {
-        var success: bool = true;
+    pub fn load_all(self: *DriverFs) !void {
         for (self._container.items) |driver| {
-            if (!driver.load()) {
-                success = false;
-            }
+            driver.load() catch |err| {
+                return err;
+            };
         }
-        return success;
     }
 };

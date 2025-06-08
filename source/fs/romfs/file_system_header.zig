@@ -26,6 +26,17 @@ const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 pub const FileSystemHeader = struct {
     memory: []const u8,
 
+    pub fn get_romfs_size(memory: []const u8) ?usize {
+        if (memory.len < 12) {
+            return null;
+        }
+        const marker = memory[0..8];
+        if (!std.mem.eql(u8, marker, "-rom1fs-")) {
+            return null;
+        }
+        return std.mem.bigToNative(u32, std.mem.bytesToValue(u32, memory[8..12]));
+    }
+
     pub fn init(memory: []const u8) ?FileSystemHeader {
         const marker = memory[0..8];
         if (!std.mem.eql(u8, marker, "-rom1fs-")) {
@@ -65,7 +76,7 @@ pub const FileSystemHeader = struct {
         return std.mem.sliceTo(self.memory[16..], 0);
     }
 
-    pub fn first_file_header(self: FileSystemHeader) FileHeader {
+    pub fn first_file_header(self: FileSystemHeader) ?FileHeader {
         const file_header_index = 16 + self.name().len;
         const remainder = file_header_index % 16;
         const padded_index = if (remainder == 0) file_header_index else (file_header_index + (16 - remainder));

@@ -27,6 +27,7 @@ pub const internal = struct {
     pub const Irq = @import("cortex-m").Irq;
     pub const ExternalMemory = @import("source/external_memory.zig").ExternalMemory;
     pub const Memory = @import("source/memory.zig").Memory;
+    pub const Mmc = @import("source/mmc.zig").Mmc;
 };
 
 pub const uart = @import("hal_interface").uart;
@@ -36,6 +37,7 @@ pub const irq = @import("hal_interface").irq.Irq(internal.Irq).create();
 pub const atomic = @import("hal_interface").atomic.AtomicInterface(internal.HardwareAtomic);
 pub var external_memory = @import("hal_interface").external_memory.ExternalMemory(internal.ExternalMemory).create();
 pub const memory = @import("hal_interface").memory.Memory(internal.Memory).create();
+pub const mmc = @import("hal_interface").mmc;
 
 pub const hw_atomic = internal.HardwareAtomic;
 

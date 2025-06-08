@@ -25,7 +25,6 @@ const fs = @import("fs/vfs.zig");
 const FileMemoryMapAttributes = @import("fs/ifile.zig").FileMemoryMapAttributes;
 const IoctlCommonCommands = @import("fs/ifile.zig").IoctlCommonCommands;
 
-var null_log = &@import("../log/kernel_log.zig").null_log;
 const log = &@import("../log/kernel_log.zig").kernel_log;
 
 const ModuleContext = struct {

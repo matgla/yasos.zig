@@ -26,14 +26,14 @@ pub const IDriver = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        load: *const fn (ctx: *anyopaque) bool,
+        load: *const fn (ctx: *anyopaque) anyerror!void,
         unload: *const fn (ctx: *anyopaque) bool,
         ifile: *const fn (ctx: *anyopaque) ?IFile,
         destroy: *const fn (ctx: *anyopaque) void,
     };
 
-    pub fn load(self: IDriver) bool {
-        return self.vtable.load(self.ptr);
+    pub fn load(self: IDriver) !void {
+        try self.vtable.load(self.ptr);
     }
 
     pub fn unload(self: IDriver) bool {
