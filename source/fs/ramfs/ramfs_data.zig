@@ -35,7 +35,7 @@ pub const RamFsData = struct {
     /// File type, users may use that field
     type: FileType,
     /// File contents
-    data: std.ArrayListAligned(u8, .@"16"),
+    data: std.ArrayListAligned(u8, .@"8"),
 
     /// Buffer for filename, do not use it except of this module, instead please use: `RamFsData.name`
     _name_buffer: [config.ramfs.max_filename]u8,
@@ -45,7 +45,7 @@ pub const RamFsData = struct {
         }
         var obj = RamFsData{
             .type = filetype,
-            .data = std.ArrayListAligned(u8, .@"16").init(allocator),
+            .data = std.ArrayListAligned(u8, .@"8").init(allocator),
             ._name_buffer = undefined,
         };
 

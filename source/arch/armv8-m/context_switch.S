@@ -54,8 +54,8 @@ load_context:
 .thumb_func
 store_and_switch_to_next_task:
   cpsid i // better to not interrupt that operation from nested IRQ
+  mov r1, r0 
   mrs r0, psp 
-  mov r1, lr
   vstmdb r0!, {s16-s31}
   stmdb r0!, {r1, r4-r12}
   

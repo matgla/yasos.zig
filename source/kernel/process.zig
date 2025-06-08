@@ -208,8 +208,13 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             if (!self.has_own_stack) {
                 // temporary hack
                 if (self.blocked_by_process) |p| {
-                    const diff = @intFromPtr(ptr) - @intFromPtr(p.stack_position);
-                    self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) + diff);
+                    if (@intFromPtr(ptr) < @intFromPtr(p.stack_position)) {
+                        const diff = @intFromPtr(p.stack_position) - @intFromPtr(ptr);
+                        self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) - diff);
+                    } else {
+                        const diff = @intFromPtr(ptr) - @intFromPtr(p.stack_position);
+                        self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) + diff);
+                    }
                     @memcpy(self.stack, p.stack);
                     p.stack_position = ptr;
                 }
