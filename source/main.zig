@@ -34,6 +34,10 @@ const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
 
 const panic_helper = @import("arch").panic;
 
+// RP2350-only board bring-up (overclock + external PSRAM). Other targets (e.g.
+// the QEMU mps2-an505 build) skip it entirely — see initialize_board().
+const is_rp2350 = std.mem.eql(u8, config.cpu.cpu, "rp2350");
+
 // Overclock support — exported from crt.zig, called after UART init
 extern fn apply_overclock() u32;
 extern fn overclock_get_target_khz() u32;
@@ -112,23 +116,25 @@ fn initialize_board() void {
 
     kernel.stdout.set_output(&board.uart.uart0, @TypeOf(board.uart.uart0).write_some_opaque);
 
-    const oc_result = apply_overclock();
+    if (comptime is_rp2350) {
+        const oc_result = apply_overclock();
 
-    // Reconfigure UART baud — apply_overclock switches clk_peri to PLL_USB (48 MHz)
-    board.uart.uart0.set_baudrate(921600);
+        // Reconfigure UART baud — apply_overclock switches clk_peri to PLL_USB (48 MHz)
+        board.uart.uart0.set_baudrate(921600);
 
-    // Dump registers AFTER overclock
-    if (oc_result != 0) {
-        kernel.log.err("overclock FAILED with code {d}", .{oc_result});
-    }
-
-    if (hal.external_memory.enable()) {
-        hal.external_memory.dump_configuration();
-        if (hal.external_memory.perform_post()) {} else {
-            kernel.log.err("External memory post test failed", .{});
+        // Dump registers AFTER overclock
+        if (oc_result != 0) {
+            kernel.log.err("overclock FAILED with code {d}", .{oc_result});
         }
-    } else {
-        kernel.log.err("No external memory found", .{});
+
+        if (hal.external_memory.enable()) {
+            hal.external_memory.dump_configuration();
+            if (hal.external_memory.perform_post()) {} else {
+                kernel.log.err("External memory post test failed", .{});
+            }
+        } else {
+            kernel.log.err("No external memory found", .{});
+        }
     }
 }
 
@@ -188,6 +194,19 @@ fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !voi
     kernel.fs.get_vfs().mount_filesystem(point, ifs) catch |err| {
         kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.interface.name(), @errorName(err) });
     };
+}
+
+fn mount_fatdisk(allocator: std.mem.Allocator) !void {
+    const fat_driver_base = try kernel.driver.FlashDriver(@TypeOf(board.flash.fatdisk0)).InstanceType.create(allocator, board.flash.fatdisk0, "fatdisk0");
+    var fat_driver = try fat_driver_base.interface.new(allocator);
+    var fnode = try fat_driver.interface.node();
+    defer fnode.delete();
+    var maybe_file = fnode.as_file();
+    if (maybe_file) |*file| {
+        const rootfs = try allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*));
+        file.interface.delete();
+        try mount_filesystem(rootfs, "/mnt");
+    }
 }
 
 fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) !void {
@@ -269,7 +288,11 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     var node = try flash_driver.interface.node();
     const maybe_flashfile = node.as_file();
     if (maybe_flashfile) |flash| {
-        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, 0x100000)), "/");
+        // On the rp2350 board the rootfs lives 1 MB into flash; boards may
+        // override this (e.g. the QEMU build embeds the romfs at the mapping base).
+        const romfs_offset: usize = if (@hasDecl(board, "romfs_offset")) board.romfs_offset else 0x100000;
+        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, romfs_offset)), "/");
+        var root_mounted = false;
         var maybe_mmcpart0 = driverfs.data().get("mmc0p0") catch null;
         if (maybe_mmcpart0) |*mmcnode| {
             var maybe_file = mmcnode.as_file();
@@ -277,16 +300,44 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
                 const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*)) catch null;
                 file.interface.delete();
                 if (maybe_rootfs) |rootfs| {
-                    mount_filesystem(rootfs, "/root") catch {};
+                    if (mount_filesystem(rootfs, "/root")) |_| {
+                        root_mounted = true;
+                    } else |err| {
+                        kernel.log.err("can't mount mmc rootfs at /root: {s}", .{@errorName(err)});
+                    }
                 }
 
                 mmcnode.delete();
             }
         }
+
+        // Boards without a persistent MMC-backed rootfs (e.g. the QEMU
+        // mps2-an505 host-test target) leave /root as a read-only romfs
+        // directory, which breaks anything that needs to write there (the tcc
+        // smoke suite uploads sources into /root/ci). Fall back to a writable
+        // RamFs so /root is usable; it is volatile across resets, which is fine
+        // because the smoke harness re-uploads its sources after each relaunch.
+        if (!root_mounted) {
+            mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/root") catch |err| {
+                kernel.log.err("can't mount fallback RamFs at /root: {s}", .{@errorName(err)});
+            };
+        }
         const tmp_allocator = try tmp_filesystem_allocator(allocator);
         try mount_filesystem(try allocate_filesystem(tmp_allocator, RamFs.InstanceType.init(tmp_allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
         try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
+
+        // Host-readable FAT block device (QEMU host-test target only). When the
+        // guest runs under a host-mmap'd RAM the host pre-loads a FAT image into
+        // the `fatdisk0` window, so this mounts at /mnt and the host can exchange
+        // files with the guest (test sources in, compiled binaries out) without
+        // a kernel rebuild. Under a plain-RAM launch the window is garbage so the
+        // FatFs mount fails; that is caught and /mnt is simply left unmounted.
+        if (@hasDecl(board.flash, "fatdisk0")) {
+            mount_fatdisk(allocator) catch |err| {
+                kernel.log.info("fatdisk not mounted at /mnt: {s}", .{@errorName(err)});
+            };
+        }
     }
 
     return;

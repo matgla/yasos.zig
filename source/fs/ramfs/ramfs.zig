@@ -124,7 +124,12 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) anyerror!void {
         if (path.len == 0) {
-            return kernel.errno.ErrnoSet.InvalidArgument;
+            // An empty relative path means the filesystem's own mount-point
+            // root (e.g. `mkdir /root` when a RamFs is mounted at /root). That
+            // directory already exists, so report EEXIST rather than EINVAL —
+            // otherwise `mkdir -p /root/a/b` aborts on the first component and
+            // never creates the children.
+            return kernel.errno.ErrnoSet.FileExists;
         }
         var maybe_node = self.get(path) catch |err| blk: {
             if (err != kernel.errno.ErrnoSet.NoEntry) {

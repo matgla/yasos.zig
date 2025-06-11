@@ -207,8 +207,17 @@ pub fn init() void {
 pub fn initialize_context_switching() void {
     std.log.err("Initializing ARM Cortex-M context switching...", .{});
     hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
-    hal.irq.set_priority(.pendsv, 0xfe);
-    hal.irq.set_priority(.systick, 0xff);
+    // PendSV MUST be the lowest-priority exception. The context switch performed
+    // inside the PendSV handler exits via an exception-return into the switched-to
+    // task instead of returning to whatever it interrupted. If PendSV could
+    // preempt SysTick (or SVCall), that preempted handler's exception frame is
+    // abandoned and its ACTIVE bit (SHCSR.SYSTICKACT/PENDSVACT) is stranded set,
+    // which corrupts exception nesting so PendSV can never become pending->active
+    // again -> all further context switches stall. Keeping PendSV strictly below
+    // SysTick makes SysTick return first (clearing SYSTICKACT) and PendSV
+    // tail-chain afterwards.
+    hal.irq.set_priority(.systick, 0xfe);
+    hal.irq.set_priority(.pendsv, 0xff);
 }
 
 pub const ArmProcess = struct {

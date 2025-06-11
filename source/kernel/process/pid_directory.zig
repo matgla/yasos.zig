@@ -22,6 +22,7 @@ const kernel = @import("../kernel.zig");
 const log = std.log.scoped(.@"vfs/procfs/pid_directory");
 
 const PidStatFile = @import("pidstat_file.zig").PidStatFile;
+const MapsFile = @import("maps_file.zig").MapsFile;
 
 const PidIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
     pub const Self = @This();
@@ -34,6 +35,7 @@ const PidIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struc
             ._items = &.{
                 "stat",
                 "status",
+                "maps",
             },
         });
     }
@@ -100,6 +102,10 @@ pub const PidDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
         }
         if (std.mem.eql(u8, "status", nodename)) {
             result.* = try PidStatFile.InstanceType.create_node(self._allocator, self._pid, true);
+            return;
+        }
+        if (std.mem.eql(u8, "maps", nodename)) {
+            result.* = try MapsFile.InstanceType.create_node(self._allocator, self._pid);
             return;
         }
 
@@ -175,6 +181,7 @@ test "PidDirectory.ShouldIterateFiles" {
     var count: usize = 0;
     var found_stat = false;
     var found_status = false;
+    var found_maps = false;
 
     while (iterator.interface.next()) |entry| {
         count += 1;
@@ -186,11 +193,16 @@ test "PidDirectory.ShouldIterateFiles" {
             found_status = true;
             try std.testing.expectEqual(kernel.fs.FileType.File, entry.kind);
         }
+        if (std.mem.eql(u8, entry.name, "maps")) {
+            found_maps = true;
+            try std.testing.expectEqual(kernel.fs.FileType.File, entry.kind);
+        }
     }
 
-    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(usize, 3), count);
     try std.testing.expect(found_stat);
     try std.testing.expect(found_status);
+    try std.testing.expect(found_maps);
 }
 
 test "PidDirectory.ShouldHandleMultipleIterators" {
@@ -214,8 +226,8 @@ test "PidDirectory.ShouldHandleMultipleIterators" {
         count2 += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 2), count1);
-    try std.testing.expectEqual(@as(usize, 2), count2);
+    try std.testing.expectEqual(@as(usize, 3), count1);
+    try std.testing.expectEqual(@as(usize, 3), count2);
 }
 
 test "PidDirectory.ShouldFormatPidCorrectly" {
@@ -258,9 +270,10 @@ test "PidIterator.ShouldIterateAllEntries" {
         try std.testing.expectEqual(kernel.fs.FileType.File, entry.kind);
     }
 
-    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+    try std.testing.expectEqual(@as(usize, 3), entries.items.len);
     try std.testing.expectEqualStrings("stat", entries.items[0]);
     try std.testing.expectEqualStrings("status", entries.items[1]);
+    try std.testing.expectEqualStrings("maps", entries.items[2]);
 }
 
 test "PidIterator.ShouldReturnNullAfterEnd" {

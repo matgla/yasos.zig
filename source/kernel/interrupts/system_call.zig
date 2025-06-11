@@ -49,6 +49,20 @@ const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
 var context_switch_enabled: bool = true;
 var counter: i32 = 0;
 
+// Set true once the very first task has been switched in by
+// switch_to_the_first_task (via process_set_next_task). Until then PendSV must
+// NOT perform a context switch: the first switch into the root process is done
+// with a plain `bx entry` (the root's saved EXC_RETURN slot holds the raw entry
+// address, not a 0xFFxxxxxx magic). Doing that from a PendSV handler is not an
+// exception return, so PendSV would be left permanently ACTIVE
+// (SHCSR.PENDSVACT), silently killing all future context switches.
+var scheduler_running: bool = false;
+
+pub fn mark_scheduler_running() void {
+    const ptr: *volatile bool = &scheduler_running;
+    ptr.* = true;
+}
+
 pub fn block_context_switch() void {
     const blocked: usize = arch.sync.save_and_disable_interrupts();
     defer arch.sync.restore_interrupts(blocked);
@@ -76,6 +90,13 @@ export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") us
     const ptr: *volatile bool = &context_switch_enabled;
 
     if (!ptr.*) {
+        return 3;
+    }
+    // The first task switch is performed by switch_to_the_first_task, not by
+    // PendSV. Ignore PendSV until then so an early SysTick cannot strand
+    // SHCSR.PENDSVACT (see scheduler_running above).
+    const running: *volatile bool = &scheduler_running;
+    if (!running.*) {
         return 3;
     }
     switch (process_manager.instance.schedule_next()) {

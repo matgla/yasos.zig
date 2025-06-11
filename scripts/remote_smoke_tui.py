@@ -1801,12 +1801,202 @@ gdb_args+=( -ex "target extended-remote :3333" )
     run_remote_tty_script(config, remote_script)
 
 
+def run_remote_gdb_live(
+    config: dict[str, Any],
+    remote_kernel: str,
+    gdb_bin: str,
+    target_command: str,
+    gdb_script_arg: str,
+    board: Any,
+    adapter_speed: str,
+    serial_device: str,
+    local_repo_path: str,
+) -> None:
+    """Live GDB attach: arm breakpoints/watchpoints BEFORE user code runs.
+
+    Flow:
+      1. Rescue-DP reset, then OpenOCD ``reset halt`` leaving the GDB server up
+         (target halted at the reset vector).
+      2. Launch a background serial sender that opens the UART, waits for the
+         shell prompt, and types *target_command* — but the board only boots
+         once GDB ``continue``s, so it blocks until then.
+      3. Start GDB in the foreground with the user script (which arms HW
+         breakpoints / a DWT watchpoint, then ``continue``s).  The board boots,
+         the sender fires the command, and the corruptor halts the core at its
+         own PC.
+    """
+    import base64
+
+    # Serial sender for live mode: NO target reset (GDB/OpenOCD own the core);
+    # just wait for the prompt — which appears only after GDB continues — then
+    # send the command and keep draining the UART into the log until killed.
+    serial_live_py = r'''
+import serial
+import sys
+import time
+
+serial_device = sys.argv[1]
+target_command = sys.argv[2]
+log_path = sys.argv[3]
+
+PROMPT = b"$ "
+BOOT_WAIT = 240  # board boots only after GDB issues `continue`
+
+print(f"[live-serial] opening {serial_device} @921600; waiting for boot prompt "
+      f"(GDB must `continue` the halted target)...", file=sys.stderr)
+ser = serial.Serial(serial_device, 921600, timeout=1)
+ser.reset_input_buffer()
+
+logf = open(log_path, "wb")
+tail = b""
+sent = False
+start = time.time()
+while True:
+    chunk = ser.read(256)
+    if chunk:
+        logf.write(chunk)
+        logf.flush()
+        tail = (tail + chunk)[-256:]
+        if not sent and tail.endswith(PROMPT):
+            print("[live-serial] prompt seen; sending command", file=sys.stderr)
+            ser.write((target_command + "\n").encode())
+            sent = True
+    elif not sent and time.time() - start > BOOT_WAIT:
+        print("[live-serial] WARNING: no boot prompt within "
+              f"{BOOT_WAIT}s; still waiting (Ctrl-C in GDB to abort)", file=sys.stderr)
+        start = time.time()
+'''
+    serial_script_b64 = base64.b64encode(serial_live_py.encode()).decode()
+
+    remote_script = f"""set -euo pipefail
+remote_repo={shlex.quote(str(config["remote_repo_path"]))}
+local_repo={shlex.quote(local_repo_path)}
+interface_cfg={shlex.quote(board.interface_cfg)}
+target_cfg={shlex.quote(board.target_cfg)}
+adapter_speed={shlex.quote(adapter_speed)}
+gdb_bin={shlex.quote(gdb_bin)}
+remote_kernel={shlex.quote(remote_kernel)}
+serial_device={shlex.quote(serial_device)}
+target_command={shlex.quote(target_command)}
+gdb_script={gdb_script_arg}
+
+cd "$remote_repo"
+
+UART_LOG=/tmp/yasos-gdb-live-uart.log
+SERIAL_PY=/tmp/yasos-gdb-live-serial.py
+
+cleanup() {{
+    if [[ -n "${{serial_pid:-}}" ]]; then
+        kill "$serial_pid" 2>/dev/null || true
+        wait "$serial_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${{openocd_pid:-}}" ]]; then
+        kill "$openocd_pid" 2>/dev/null || true
+        wait "$openocd_pid" 2>/dev/null || true
+    fi
+}}
+trap cleanup EXIT INT TERM
+
+# -- Detect serial device if not specified --
+if [[ -z "$serial_device" ]]; then
+    serial_device=$(python3 -c "
+import serial.tools.list_ports
+for p in serial.tools.list_ports.comports(include_links=False):
+    print(p.device)
+    break
+" 2>/dev/null || true)
+fi
+if [[ -z "$serial_device" ]]; then
+    echo "ERROR: No serial device found. Set serial_device in config." >&2
+    exit 1
+fi
+
+echo "Live GDB watchpoint mode"
+echo "Using serial device: $serial_device"
+echo "Target command (sent after GDB continues): $target_command"
+
+echo "{serial_script_b64}" | base64 -d > "$SERIAL_PY"
+
+# -- Rescue DP reset to clear any overclock/fault state from a prior crash --
+openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \\
+    -c "adapter speed 5000" -c "init" -c "exit" >/tmp/yasos-openocd-rescue.log 2>&1 || true
+sleep 1
+
+# -- reset HALT with the GDB server left running (target stopped at reset) --
+openocd -f "$interface_cfg" -f "$target_cfg" \\
+    -c "adapter speed $adapter_speed" \\
+    -c "init" \\
+    -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
+openocd_pid=$!
+
+ready=0
+for _ in $(seq 1 50); do
+    if python3 - <<'PY'
+import socket
+sock = socket.socket()
+sock.settimeout(0.2)
+try:
+    sock.connect(("127.0.0.1", 3333))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+raise SystemExit(0)
+PY
+    then
+    ready=1
+    break
+    fi
+    if ! kill -0 "$openocd_pid" 2>/dev/null; then
+    echo "OpenOCD terminated unexpectedly. Log follows:" >&2
+    cat /tmp/yasos-openocd.log >&2 || true
+    exit 1
+    fi
+    sleep 0.2
+done
+if [[ "$ready" != "1" ]]; then
+    echo "Timed out waiting for OpenOCD GDB server on port 3333. Log follows:" >&2
+    cat /tmp/yasos-openocd.log >&2 || true
+    exit 1
+fi
+
+echo "OpenOCD ready (target halted at reset). Starting background serial sender..."
+echo "UART log: $UART_LOG"
+
+# Background sender waits for the prompt (which only appears after GDB continues).
+python3 "$SERIAL_PY" "$serial_device" "$target_command" "$UART_LOG" &
+serial_pid=$!
+
+echo "Starting GDB (live attach). The script arms breakpoints, then `continue`."
+echo "After a hit, run: yasld-load $UART_LOG   to symbolize."
+
+gdb_args=(
+    "$gdb_bin" "$remote_kernel"
+    -ex "source scripts/yasld_gdb.py"
+    -ex "directory $remote_repo"
+    -ex "target extended-remote :3333"
+)
+
+if [[ "$local_repo" != "$remote_repo" ]]; then
+    gdb_args+=( -ex "set substitute-path $local_repo $remote_repo" )
+fi
+
+if [[ -n "$gdb_script" ]]; then
+    gdb_args+=(-x "$gdb_script")
+fi
+
+"${{gdb_args[@]}}"
+"""
+    run_remote_tty_script(config, remote_script)
+
+
 def run_remote_gdb_debug(
     config: dict[str, Any],
     remote_kernel: str,
     gdb_bin: str,
     target_command: str,
     gdb_script: str | None = None,
+    live: bool = False,
 ) -> None:
     """Automated GDB debug workflow:
 
@@ -1819,6 +2009,16 @@ def run_remote_gdb_debug(
     7. Source yasld_gdb.py, load symbols from the captured log
     8. Optionally source/run a GDB script
     9. Drop into interactive GDB (or return output if scripted)
+
+    When *live* is True the ordering is inverted for catching faults in the act:
+    GDB attaches to a reset-HALTED target FIRST (so a script can arm HW
+    breakpoints / DWT watchpoints before any user code runs), then a background
+    serial sender types *target_command* only AFTER the GDB script issues
+    ``continue`` and the board reaches the shell prompt.  The corruptor then
+    stops the core at its own PC.  The GDB script must use absolute addresses
+    (yasld symbols are not loaded up front in live mode — no crash log exists
+    yet; run ``yasld-load /tmp/yasos-gdb-live-uart.log`` interactively after the
+    hit to symbolize).
     """
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
@@ -1828,6 +2028,20 @@ def run_remote_gdb_debug(
     gdb_script_arg = ""
     if gdb_script:
         gdb_script_arg = shlex.quote(gdb_script)
+
+    if live:
+        run_remote_gdb_live(
+            config,
+            remote_kernel,
+            gdb_bin,
+            target_command=target_command,
+            gdb_script_arg=gdb_script_arg,
+            board=board,
+            adapter_speed=adapter_speed,
+            serial_device=serial_device,
+            local_repo_path=local_repo_path,
+        )
+        return
 
     # Build the serial capture Python script as a separate string to avoid
     # nested triple-quote issues inside the bash f-string.
@@ -1995,10 +2209,27 @@ echo ""
 echo "Phase 2: Resetting target (halt) and starting GDB..."
 
 # -- Phase 2: Reset-halt via OpenOCD, then start GDB with symbol loading --
-openocd -f "$interface_cfg" -f "$target_cfg" \\
-    -c "adapter speed $adapter_speed" \\
-    -c "init" \\
-    -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
+# Rescue DP reset first: after a phase-1 crash the core can be left in a
+# faulted/overclocked state where `reset halt` alone leaves the DAP unable to
+# read registers (gdb sees 'E0E' -> "program is not being run").  The rescue
+# config recovers the DP so the subsequent gdb session can read regs / arm
+# DWT watchpoints.
+if [[ "${{YASOS_GDB_POSTMORTEM:-0}}" == "1" ]]; then
+  # Post-mortem: halt the still-running (panic-looping) board WITHOUT reset, so
+  # PSRAM (heap/stack) stays valid for inspection.
+  openocd -f "$interface_cfg" -f "$target_cfg" \\
+      -c "adapter speed $adapter_speed" \\
+      -c "init" \\
+      -c "halt" >/tmp/yasos-openocd.log 2>&1 &
+else
+  openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \\
+      -c "adapter speed 5000" -c "init" -c "exit" >/tmp/yasos-openocd-rescue.log 2>&1 || true
+  sleep 1
+  openocd -f "$interface_cfg" -f "$target_cfg" \\
+      -c "adapter speed $adapter_speed" \\
+      -c "init" \\
+      -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
+fi
 openocd_pid=$!
 
 ready=0
@@ -2172,6 +2403,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gdb-debug", action="store_true", help="Automated GDB debug: reset target, run a command via serial, capture yasld log, reset-halt, start GDB with symbols loaded. Requires --cmd.")
     parser.add_argument("--cmd", help="Target command to execute over serial before GDB attach (used with --gdb-debug). Example: --cmd 'tcc 15_recursion.c'")
     parser.add_argument("--gdb-script", help="Path to a GDB script file to source after connecting and loading symbols (used with --gdb-debug).")
+    parser.add_argument("--gdb-live", action="store_true", help="Live variant of --gdb-debug: attach GDB to a reset-HALTED target FIRST so the --gdb-script can arm HW breakpoints / DWT watchpoints before user code runs, then a background serial sender types --cmd after the script issues `continue`. Catches faults at the corruptor's own PC. Requires --gdb-debug, --cmd and --gdb-script.")
     parser.add_argument("--log-cli-level", help="Set pytest --log-cli-level for this run (e.g. INFO, DEBUG, WARNING). Passed through to the remote pytest invocation.")
     parser.add_argument("--profile", action="store_true", help="Enable TCC performance profiling. Captures per-phase bench breakdown and per-syscall cycle counts from the kernel. Results are saved alongside the timing report.")
     parser.add_argument("--force-flash", action="store_true", help="Upload and flash existing kernel/rootfs artifacts without rebuilding. Forces reflash even if remote hashes match.")
@@ -2204,6 +2436,10 @@ def main() -> int:
             raise RunnerError("--gdb-debug and --gdb cannot be used together")
         if args.gdb_debug and not args.cmd:
             raise RunnerError("--gdb-debug requires --cmd to specify the target command")
+        if args.gdb_live and not args.gdb_debug:
+            raise RunnerError("--gdb-live requires --gdb-debug")
+        if args.gdb_live and not args.gdb_script:
+            raise RunnerError("--gdb-live requires --gdb-script (the script that arms the watchpoint)")
 
         if args.reconfigure or not cache_exists:
             initial_config = cached if cache_exists else dict(DEFAULT_CONFIG)
@@ -2310,6 +2546,7 @@ def main() -> int:
                 gdb_bin,
                 target_command=args.cmd,
                 gdb_script=args.gdb_script,
+                live=args.gdb_live,
             )
             print("Remote GDB debug session finished.")
             return 0

@@ -51,6 +51,11 @@ REMOTE_PERSISTENT_OUTPUT_DIR = posixpath.join(REMOTE_CI_ROOT, "output")
 
 EXTRA_TCC_CFLAGS = tuple(os.environ.get("YASOS_EXTRA_TCC_CFLAGS", "").split()) if os.environ.get("YASOS_EXTRA_TCC_CFLAGS", "").strip() else ()
 
+# On-target compiles take longer than ordinary shell commands, so the compile
+# phase always waits at least this long; a per-testcase ``timeout`` overrides
+# it for known-slow cases (it also raises the run-phase silence limit).
+COMPILE_TIMEOUT = float(os.environ.get("YASOS_SMOKE_COMPILE_TIMEOUT", "5"))
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TINYCC_TESTS_ROOT = REPO_ROOT / "libs" / "tinycc" / "tests"
 GCC_TESTS_DIR = TINYCC_TESTS_ROOT / "gcctestsuite"
@@ -101,6 +106,9 @@ NATIVE_TARGET_SKIP_TESTS = {
     "memcpy-a4": "test is to huge to run on the embedded target",
     "memcpy-a8": "test is to huge to run on the embedded target",
     "107_mibench_remaining": "test is too large to run on the embedded target",
+    # 16384 macro-expanded cleanup blocks need ~60MB of compiler heap (host
+    # measurement); the whole on-target process pool is ~7MB → genuine OOM.
+    "115_cleanup_macro_unroll": "compile-time OOM: needs ~60MB heap, target pool is 7MB",
 }
 
 IGNORE_NATIVE_TARGET_SKIP_TESTS = os.environ.get("YASOS_SMOKE_RERUN_FAILED", "").strip().lower() in {
@@ -158,6 +166,9 @@ class TccTestCase:
     expected_error_patterns: tuple[str, ...] = ()
     skip_reason: Optional[str] = None
     xfail_reason: Optional[str] = None
+    # Serial timeout (seconds) for this case's compile wait and run-phase
+    # silence limit; None keeps the suite defaults.
+    timeout: Optional[float] = None
 
 
 REGISTERED_SINGLE_FILE_TESTS = [
@@ -755,7 +766,7 @@ def remote_output_path(filename, testcase=None):
 
 def get_remote_hash(remote_path, session):
     session.write_command("sha256sum " + shlex.quote(remote_path))
-    data = session.wait_for_prompt_except_logs()
+    data = session.wait_for_prompt_except_logs(timeout=COMPILE_TIMEOUT)
     if not data:
         return None
 
@@ -998,7 +1009,7 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
             f"echo {COMPILE_MARKER_PREFIX}$compile_status"
         )
         old_timeout = session.serial.timeout
-        session.serial.timeout = old_timeout * 2
+        session.serial.timeout = testcase.timeout or max(COMPILE_TIMEOUT, old_timeout)
         _t_compile = start_timer()
         try:
             compile_lines = session.wait_for_prompt_except_logs()
@@ -1067,12 +1078,57 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
         run_command = shlex.quote(output_binary)
         if quoted_args:
             run_command = f"{run_command} {quoted_args}"
+
+        use_float_tolerance = testcase.name in FLOAT_TOLERANCE_TESTS or testcase.name in IR_TESTS_FLOAT_TOLERANCE
+
+        # Validate stdout as it streams in so a miscompile that prints a wrong
+        # value — or runs away printing forever, like a broken do/while loop —
+        # fails on the offending line instead of blocking until the serial read
+        # times out (which buffers megabytes of garbage first).
+        run_state = {"index": 0, "reason": None}
+
+        def _validate_run_line(line):
+            if line.startswith(EXIT_MARKER_PREFIX):
+                return False
+            index = run_state["index"]
+            if index < len(runtime_expected_lines):
+                expected_line = runtime_expected_lines[index]
+                run_state["index"] = index + 1
+                if use_float_tolerance:
+                    matched = lines_match_with_float_tolerance(
+                        expected_line, line, FLOAT_RELATIVE_TOLERANCE
+                    )
+                else:
+                    matched = expected_line in line
+                if not matched:
+                    run_state["reason"] = (
+                        f"expected '{expected_line}' in output, got '{line}'"
+                    )
+                    return True
+                return False
+            # Every expected line already matched; any further output before the
+            # exit marker means the program produced more than expected. Only
+            # treat this as authoritative when the test fully specifies its
+            # output (runtime_expected_lines non-empty) — gcc-torture cases only
+            # check the exit code and may legitimately print extra lines.
+            if runtime_expected_lines:
+                run_state["reason"] = (
+                    f"unexpected extra output '{line}' after "
+                    f"{len(runtime_expected_lines)} expected line(s)"
+                )
+                return True
+            return False
+
         session.write_command(f"{run_command}; echo {EXIT_MARKER_PREFIX}$?")
         _t_execute = start_timer()
-        data_lines = session.wait_for_prompt_except_logs()
+        data_lines, run_aborted = session.wait_for_prompt_streaming(
+            _validate_run_line, timeout=testcase.timeout
+        )
         if timing is not None:
             timing.execute_ms = elapsed_ms(_t_execute)
             attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
+
+        assert not run_aborted, run_state["reason"]
 
         actual_exit_code = None
         filtered_lines = []
@@ -1083,7 +1139,6 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
             filtered_lines.append(line)
 
         assert actual_exit_code is not None, f"missing exit status in output: {data_lines}"
-        use_float_tolerance = testcase.name in FLOAT_TOLERANCE_TESTS or testcase.name in IR_TESTS_FLOAT_TOLERANCE
         for index, expected_line in enumerate(runtime_expected_lines):
             actual_line = filtered_lines[index].strip()
             if use_float_tolerance:
@@ -1093,7 +1148,11 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
                 assert expected_line in actual_line, f"expected '{expected_line}' in '{filtered_lines}'"
         assert actual_exit_code == expected_exit_code, f"expected exit code {expected_exit_code}, got {actual_exit_code}"
     finally:
-        if cleanup_paths:
+        # Skip cleanup when the target is being reset (e.g. we aborted early on a
+        # runaway program or it crashed): the foreground job is still running, so
+        # the rm command would never echo back and the reset wipes /tmp anyway.
+        needs_reset = getattr(session, "target_needs_reset", False)
+        if cleanup_paths and not needs_reset:
             session.write_command(
                 "rm -f " + " ".join(shlex.quote(cleanup_path) for cleanup_path in cleanup_paths)
             )

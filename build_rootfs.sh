@@ -99,6 +99,7 @@ mkdir -p rootfs/usr/lib
 mkdir -p rootfs/proc
 mkdir -p rootfs/root
 mkdir -p rootfs/home
+mkdir -p rootfs/mnt
 cd rootfs
 if [ ! -e lib ] && [ ! -L lib ]; then
   ln -s usr/lib lib
@@ -242,7 +243,7 @@ build_c_compiler()
 
   NATIVE_TCC_DEBUG_CONFIG=""
   NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
-  NATIVE_TCC_DEBUG_OPT="-O1"
+  NATIVE_TCC_DEBUG_OPT="${NATIVE_TCC_OPT_OVERRIDE:--O1}"
   if $DEBUG_TCC; then
     NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O1"
     NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
@@ -285,7 +286,20 @@ build_c_compiler()
     if [ $? -ne 0 ]; then
       exit -1;
     fi
-    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
+    # The cross-compiler stage compiled the arch/ISA objects (armv8m-arch) and
+    # the IR/core objects with the host gcc (x86).  The nested arch Makefile keys
+    # recompilation on source timestamps only — not on the active CC or config.h —
+    # so a plain `make armv8m-tcc` here re-archives those host objects into
+    # armv8m-arch/arm/libarm.a, and the native armv8m-tcc link rejects them with
+    # "invalid object file".  Drop all cross-stage build objects so the native
+    # bootstrap recompiles everything with armv8m-tcc for the ARM target.
+    rm -rf armv8m-arch armv8m-ir armv8m-*.o *.o
+    # Archive the backend library with the host `ar`, not the cross-prefixed
+    # `armv8m-tcc -ar`: the arch Makefile bundles libthumb.a into libarm.a via
+    # ar's MRI batch mode (`ar -M`), which tcc's built-in archiver does not
+    # support.  Archiving is target-agnostic, so the host ar handles the ARM
+    # objects fine.
+    VERBOSE=1 make armv8m-tcc -j8 AR=ar LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
 
     if [ $? -ne 0 ]; then
       exit -1;
@@ -345,7 +359,8 @@ build_c_compiler()
         fi
       done
     fi
-    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
+    # Use the host `ar` for the backend archive (MRI mode); see stage 1 above.
+    VERBOSE=1 make armv8m-tcc -j8 AR=ar LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
     if [ $? -ne 0 ]; then
       exit -1;
     fi

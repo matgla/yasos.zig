@@ -21,10 +21,18 @@ class FakeSession:
     def write_command(self, command: str) -> None:
         self.commands.append(command)
 
-    def wait_for_prompt_except_logs(self):
+    def wait_for_prompt_except_logs(self, timeout=None):
         assert self._responses, "unexpected wait_for_prompt_except_logs call"
         response = self._responses.pop(0)
         return list(response)
+
+    def wait_for_prompt_streaming(self, on_line=None, timeout=None):
+        response = self.wait_for_prompt_except_logs()
+        if on_line is not None:
+            for line in response:
+                if on_line(line):
+                    return response, True
+        return response, False
 
 
 def _cleanup_command(session: FakeSession) -> str | None:

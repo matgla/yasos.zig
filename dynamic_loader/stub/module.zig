@@ -31,11 +31,15 @@ pub const LoadedUniqueData = struct {
     got: ?[]usize,
 };
 
+var empty_section = [_]u8{};
+
 pub const Module = struct {
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
     xip: bool,
     list_node: std.DoublyLinkedList.Node,
+    child_list_node: std.DoublyLinkedList.Node,
+    children: std.DoublyLinkedList,
     entry: ?SymbolEntry,
     name: ?[]const u8,
     unique_data: ?LoadedUniqueData,
@@ -47,6 +51,8 @@ pub const Module = struct {
             .process_allocator = process_allocator,
             .xip = xip,
             .list_node = .{},
+            .child_list_node = .{},
+            .children = .{},
             .entry = null,
             .name = "dummy_module",
             .unique_data = null,
@@ -56,6 +62,34 @@ pub const Module = struct {
 
     pub fn destroy(self: *Module) void {
         self.allocator.destroy(self);
+    }
+
+    // Section accessors mirroring the real Module API so kernel code that
+    // renders /proc/<pid>/maps (source/kernel/modules.zig) compiles against
+    // this host-test stub.
+    pub fn get_text(self: *const Module) []const u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_plt(self: *const Module) []const u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_data(self: *const Module) []u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_bss(self: *const Module) []u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_got(self: *const Module) []const u8 {
+        _ = self;
+        return empty_section[0..];
     }
 
     pub fn find_symbol(self: *Module, name: []const u8) ?SymbolEntry {

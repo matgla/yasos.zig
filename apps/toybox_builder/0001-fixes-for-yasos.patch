@@ -636,11 +636,11 @@ index 664f9cf4..0616050f 100644
    if (fff) *fff = ff;
 
    return ff->pl ? ff->pl->lineno : ff->lineno;
-@@ -1418,6 +1418,7 @@ static int free_process(struct sh_process *pp)
-   rc = pp->exit;
+@@ -1420,6 +1420,7 @@ static struct sh_process *free_process(struct sh_process *pp)
    if (!--pp->refcount) {
      llist_traverse(pp->delete, llist_free_arg);
 +    if (pp->arg.v) free(pp->arg.v);
+     unredirect(&pp->urd);
      free(pp);
    }
 

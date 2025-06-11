@@ -101,7 +101,13 @@ extern fn switch_to_main_task(lr: usize, with_fpu: bool) void;
 var main_process_stack_pointer_before_scheduler_started: usize = 0;
 
 pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
-    main_process_stack_pointer_before_scheduler_started = @intCast(@as(isize, @intCast(@intFromPtr(arg))) + kernel.process.get_offset_of_hardware_stored_registers(config.cpu.use_fpu));
+    // Apply the (signed, usually negative) register-frame offset to the stack
+    // pointer in unsigned/wrapping space. Casting the pointer through `isize`
+    // first overflows on targets whose stacks live at/above 0x80000000 (e.g.
+    // the QEMU mps2 kernel stack), tripping the "integer does not fit" panic.
+    const base: usize = @intFromPtr(arg);
+    const offset: isize = kernel.process.get_offset_of_hardware_stored_registers(config.cpu.use_fpu);
+    main_process_stack_pointer_before_scheduler_started = base +% @as(usize, @bitCast(offset));
     std.log.info("Starting root process with stack pointer: {x}", .{main_process_stack_pointer_before_scheduler_started});
     switch_to_the_first_task(if (config.cpu.use_fpu) 1 else 0);
     return 0;
@@ -437,7 +443,10 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
 pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    return file.interface.ioctl(context.op, @ptrFromInt(@as(usize, @intCast(context.arg))));
+    // arg is a signed ssize_t carrying "int or void*"; a user pointer at/above
+    // 0x80000000 is negative as ssize_t, so reinterpret the bits (@bitCast)
+    // rather than @intCast (which would trip "integer does not fit").
+    return file.interface.ioctl(context.op, @ptrFromInt(@as(usize, @bitCast(context.arg))));
 }
 
 pub fn sys_gettimeofday(arg: *const volatile anyopaque) !i32 {
@@ -569,7 +578,8 @@ pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
     defer kernel.process.unblock_context_switch();
     const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @intCast(context.arg))));
+    // See sys_ioctl: arg is a signed ssize_t that may hold a high user pointer.
+    return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @bitCast(context.arg))));
 }
 pub fn sys_remove(arg: *const volatile anyopaque) !i32 {
     _ = arg;

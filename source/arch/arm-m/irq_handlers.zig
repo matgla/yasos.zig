@@ -38,6 +38,17 @@ const usage_fault_stkof_mask: u32 = 1 << 20;
 const stack_overflow_exit_code: c_int = -1;
 
 export fn irq_hard_fault() void {
+    // Capture callee-saved regs (r4-r11) BEFORE any handler code can clobber
+    // them. On exception entry these are NOT auto-stacked, so they still hold
+    // the faulting context's values. Needed to diagnose frame-pointer (r7/r11)
+    // corruption that manifests as a bogus `mov sp, rN` STKOF.
+    var callee: [8]usize = undefined;
+    asm volatile (
+        \\ stmia %[p], {r4-r11}
+        :
+        : [p] "{r0}" (&callee),
+        : .{ .memory = true }
+    );
     const exc_return = read_exception_return();
     const active_stack_address = read_fault_stack_pointer();
     const frame_ptr: *volatile FaultFrame = @ptrFromInt(active_stack_address);
@@ -59,6 +70,10 @@ export fn irq_hard_fault() void {
     log.err(
         "  stacked r0=0x{X:0>8} r1=0x{X:0>8} r2=0x{X:0>8} r3=0x{X:0>8} r12=0x{X:0>8} psr=0x{X:0>8}",
         .{ frame.r0, frame.r1, frame.r2, frame.r3, frame.r12, frame.psr },
+    );
+    log.err(
+        "  r4=0x{X:0>8} r5=0x{X:0>8} r6=0x{X:0>8} r7=0x{X:0>8} r8=0x{X:0>8} r9=0x{X:0>8} r10=0x{X:0>8} r11=0x{X:0>8}",
+        .{ callee[0], callee[1], callee[2], callee[3], callee[4], callee[5], callee[6], callee[7] },
     );
     log.err("  PSP=0x{X:0>8} MSP=0x{X:0>8} PSPLIM=0x{X:0>8} MSPLIM=0x{X:0>8}", .{ psp, msp, psplim, msplim });
     log.err("  CFSR=0x{X:0>8} HFSR=0x{X:0>8} MMFAR=0x{X:0>8} BFAR=0x{X:0>8}", .{ cfsr_raw, hfsr_raw, mmfar, bfar });

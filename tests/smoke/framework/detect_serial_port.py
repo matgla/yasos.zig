@@ -1,13 +1,16 @@
 import serial
 import serial.tools.list_ports
-import pyudev
 
-def allowed_probes_list(): 
+def allowed_probes_list():
     return [
         '2e8a:000c',  # Raspberry Pi Debugprobe on Pico (CMSIS-DAP)
     ]
 
 def detect_probe_serial_port():
+    # Imported lazily so QEMU-mode runs (which never probe hardware) don't
+    # require libudev/pyudev to be installed.
+    import pyudev
+
     ports = serial.tools.list_ports.comports(include_links=False)
     for port in ports :
         context = pyudev.Context()

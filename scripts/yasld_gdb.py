@@ -152,7 +152,7 @@ try:
             if not os.path.isfile(log_path):
                 gdb.write(f"Error: file not found: {log_path}\n")
                 return
-            with open(log_path, "r") as f:
+            with open(log_path, "r", errors="replace") as f:
                 text = f.read()
 
             libs = parse_log(text)
@@ -203,7 +203,7 @@ except ImportError:
 def main():
     if len(sys.argv) > 1:
         log_path = sys.argv[1]
-        with open(log_path, "r") as f:
+        with open(log_path, "r", errors="replace") as f:
             text = f.read()
     else:
         text = sys.stdin.read()

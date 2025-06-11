@@ -238,6 +238,60 @@ pub fn release_executable(pid: c.pid_t) void {
     log.info("release_executable: pid={d} done kernel_used={d} alloc_count={d}", .{ pid, kernel.memory.heap.malloc.get_usage(), kernel.memory.heap.malloc.get_counter() });
 }
 
+fn append_section(buffer: []u8, name: []const u8, section: []const u8, address: usize, size: usize) usize {
+    const written = std.fmt.bufPrint(buffer, "{s} {s} 0x{x} 0x{x}\n", .{ name, section, address, size }) catch return 0;
+    return written.len;
+}
+
+fn format_module(module: *const yasld.Module, buffer: []u8, depth: usize) usize {
+    const name = module.name orelse "?";
+    var written: usize = 0;
+    const text = module.get_text();
+    const plt = module.get_plt();
+    const data = module.get_data();
+    const bss = module.get_bss();
+    const got = module.get_got();
+    written += append_section(buffer[written..], name, ".text", @intFromPtr(text.ptr), text.len);
+    written += append_section(buffer[written..], name, ".plt", @intFromPtr(plt.ptr), plt.len);
+    written += append_section(buffer[written..], name, ".data", @intFromPtr(data.ptr), data.len);
+    written += append_section(buffer[written..], name, ".bss", @intFromPtr(bss.ptr), bss.len);
+    written += append_section(buffer[written..], name, ".got", @intFromPtr(got.ptr), got.len);
+
+    // Shared libraries imported by this module are tracked as child modules
+    // (module.children), not in the kernel libraries_list. Recurse so the map
+    // includes libc/libm/etc. The depth guard bounds runaway/cyclic graphs;
+    // a shared dependency may legitimately appear under more than one parent.
+    if (depth < 8) {
+        var maybe_child = module.children.first;
+        while (maybe_child) |node| : (maybe_child = node.next) {
+            const child: *yasld.Module = @fieldParentPtr("child_list_node", node);
+            written += format_module(child, buffer[written..], depth + 1);
+        }
+    }
+    return written;
+}
+
+/// Render the load mapping (executable then shared libraries) for `pid` into
+/// `buffer` as lines of "<module> <section> 0x<addr> 0x<size>". Returns the
+/// number of bytes written. Used by /proc/<pid>/maps so module load addresses
+/// can be retrieved on demand instead of scraped from log output.
+pub fn format_maps(pid: c.pid_t, buffer: []u8) usize {
+    var written: usize = 0;
+    if (modules_list.getPtr(pid)) |entry| {
+        if (entry.executable) |*executable| {
+            written += format_module(executable.module, buffer[written..], 0);
+        }
+    }
+    if (libraries_list.getPtr(pid)) |list| {
+        var maybe_node = list.first;
+        while (maybe_node) |node| : (maybe_node = node.next) {
+            const library: *yasld.Module = @fieldParentPtr("list_node", node);
+            written += format_module(library, buffer[written..], 0);
+        }
+    }
+    return written;
+}
+
 pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
     const maybe_list = libraries_list.getPtr(pid);
     if (maybe_list) |list| {

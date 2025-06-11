@@ -24,6 +24,7 @@
     .dependencies = .{
         .@"mcu/rp2040" = .{ .path = "source/raspberry/rp2040" },
         .@"mcu/rp2350" = .{ .path = "source/raspberry/rp2350" },
+        .@"mcu/qemu_mps2" = .{ .path = "source/arm/qemu_mps2" },
         .@"mcu/host" = .{ .path = "source/host/host" },
         .hal_interface = .{
             .path = "interface",

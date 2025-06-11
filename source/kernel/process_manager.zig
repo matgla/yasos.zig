@@ -534,6 +534,9 @@ pub fn deinitialize_process_manager() void {
 }
 
 pub export fn process_set_next_task() *const u8 {
+    // The first invocation is from switch_to_the_first_task; from here on PendSV
+    // is allowed to drive context switches (see system_call.scheduler_running).
+    system_call.mark_scheduler_running();
     if (instance._scheduler.get_next()) |task| {
         instance._scheduler.update_current();
         instance.core[hal.cpu.coreid()] = task;
