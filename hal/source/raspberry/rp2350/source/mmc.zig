@@ -26,13 +26,27 @@ const interface = @import("hal_interface");
 
 const picosdk = @import("picosdk.zig").picosdk;
 
-const mmc_pio = @cImport({
+const mmc_program = @cImport({
     @cInclude("mmc.pio.h");
 });
+
+pub fn delay_ticks(delay: u32) void {
+    var d = delay;
+    while (d > 0) {
+        d -= 1;
+        asm volatile ("nop");
+    }
+}
 
 pub fn Mmc(comptime pio_index: usize, comptime clk_pio_sm: usize, comptime data_pio_sm: usize, comptime cmd_pio_sm: usize, comptime pins: interface.mmc.Pins) type {
     return struct {
         const Self = @This();
+        const EncodedCommand = struct {
+            command: u32,
+            argument: u32,
+            cycles: u32,
+        };
+
 
         const pioid = get_pio(pio_index);
         cmd_or_dat_offset: u32 = 0,
@@ -49,147 +63,76 @@ pub fn Mmc(comptime pio_index: usize, comptime clk_pio_sm: usize, comptime data_
         }
 
         pub fn init(self: *Self, comptime config: interface.mmc.Config) interface.mmc.InitializeError!void {
-            _ = self;
-            _ = config;
-            _ = cmd_pio_sm;
             _ = data_pio_sm;
-            _ = clk_pio_sm;
-            _ = pins;
-            // self.initialize_gpio(config);
+            self.initialize_pio(config);
         }
 
-        // fn initialize_gpio(self: *Self, comptime config: interface.mmc.Config) void {
-        // picosdk.gpio_set_function(@intCast(pins.clk), picosdk.GPIO_FUNC_PIO1);
-        // picosdk.gpio_set_function(@intCast(pins.cmd), picosdk.GPIO_FUNC_PIO1);
-        // picosdk.gpio_set_function(@intCast(pins.d0), picosdk.GPIO_FUNC_PIO1);
-        // picosdk.gpio_set_pulls(@intCast(pins.clk), false, true);
-        // picosdk.gpio_set_pulls(@intCast(pins.cmd), true, false);
-        // picosdk.gpio_set_pulls(@intCast(pins.d0), true, false);
-        // picosdk.gpio_set_function(@intCast(pins.d0 + 1), picosdk.GPIO_FUNC_PIO1);
-        // picosdk.gpio_set_function(@intCast(pins.d0 + 2), picosdk.GPIO_FUNC_PIO1);
-        // picosdk.gpio_set_function(@intCast(pins.d0 + 3), picosdk.GPIO_FUNC_PIO1);
+        fn get_response_cycles(cmd: u32) u32 {
+            return if (cmd == 41) 64 else 48;
+        }
 
-        // self.cmd_or_dat_offset = @intCast(picosdk.pio_add_program(pioid, @ptrCast(&mmc_pio.mmc_cmd_or_dat_program)));
-        // self.clk_program_offset = @intCast(picosdk.pio_add_program(pioid, @ptrCast(&mmc_pio.mmc_clk_program)));
+        fn encode_command(cmd: u32, arg: u32) EncodedCommand {
+            var buffer: [2]u32 = undefined;
+            buffer[0] = ((0x40 | (cmd & 0x3f)) << 24) | ((arg >> 8) & 0xffffff);
+            var calc = std.hash.crc.Crc7Mmc.init();
+            buffer[1] = ((arg & 0xff) << 8) << 16;
+            calc.update(std.mem.sliceAsBytes(buffer[0..1])[0..6]);
+            const crc = calc.final();
+            buffer[1] |= (((@as(u32, crc) << 1) | 1) << 16);
+            return .{
+                .command = buffer[0],
+                .argument = buffer[1] | 0xffff,
+                .cycles = 48 + get_response_cycles(cmd) - 1,
+            };
+        }
 
-        // var c = mmc_pio.mmc_clk_program_get_default_config(self.clk_program_offset);
-        // picosdk.sm_config_set_sideset_pins(@ptrCast(&c), pins.clk);
-        // _ = picosdk.pio_sm_init(pioid, clk_pio_sm, self.clk_program_offset, @ptrCast(&c));
+        fn transmit_command(command: EncodedCommand) void {
+            std.mem.doNotOptimizeAway(mmc_program.mmc_transmit_command(@ptrCast(pioid), cmd_pio_sm, clk_pio_sm, command.command, command.argument, command.cycles));
+        }
 
-        // c = mmc_pio.mmc_cmd_or_dat_program_get_default_config(self.cmd_or_dat_offset);
-        // picosdk.sm_config_set_out_pins(@ptrCast(&c), pins.cmd, 1);
-        // picosdk.sm_config_set_set_pins(@ptrCast(&c), pins.cmd, 1);
-        // picosdk.sm_config_set_in_pins(@ptrCast(&c), pins.cmd);
-        // picosdk.sm_config_set_in_shift(@ptrCast(&c), false, true, 32);
-        // picosdk.sm_config_set_out_shift(@ptrCast(&c), false, true, 32);
-        // _ = picosdk.pio_sm_init(pioid, cmd_pio_sm, self.cmd_or_dat_offset, @ptrCast(&c));
+        fn initialize_pio(self: *Self, comptime config: interface.mmc.Config) void {
+            _ = self;
+            _ = config;
+            var offset: c_int = 0;
+            picosdk.gpio_set_function(@intCast(pins.clk), picosdk.GPIO_FUNC_PIO0);
+            picosdk.gpio_set_function(@intCast(pins.cmd), picosdk.GPIO_FUNC_PIO0);
+            picosdk.gpio_set_function(@intCast(pins.d0), picosdk.GPIO_FUNC_PIO0);
+            picosdk.gpio_set_function(@intCast(pins.d0 + 1), picosdk.GPIO_FUNC_PIO0);
+            picosdk.gpio_set_function(@intCast(pins.d0 + 2), picosdk.GPIO_FUNC_PIO0);
+            picosdk.gpio_set_function(@intCast(pins.d0 + 3), picosdk.GPIO_FUNC_PIO0);
+            picosdk.gpio_set_pulls(@intCast(pins.clk), true, false);
+            picosdk.gpio_set_pulls(@intCast(pins.cmd), true, false);
+            picosdk.gpio_set_pulls(@intCast(pins.d0), true, false);
+            picosdk.gpio_set_pulls(@intCast(pins.d0 + 1), true, false);
+            picosdk.gpio_set_pulls(@intCast(pins.d0 + 2), true, false);
+            picosdk.gpio_set_pulls(@intCast(pins.d0 + 3), true, false);
 
-        // c = mmc_pio.mmc_cmd_or_dat_program_get_default_config(self.cmd_or_dat_offset);
-        // picosdk.sm_config_set_out_pins(@ptrCast(&c), pins.d0, config.bus_width);
-        // picosdk.sm_config_set_set_pins(@ptrCast(&c), pins.d0, config.bus_width);
-        // picosdk.sm_config_set_in_pins(@ptrCast(&c), pins.d0);
-        // picosdk.sm_config_set_in_shift(@ptrCast(&c), false, true, 32);
-        // picosdk.sm_config_set_out_shift(@ptrCast(&c), false, true, 32);
-        // _ = picosdk.pio_sm_init(pioid, data_pio_sm, self.cmd_or_dat_offset, @ptrCast(&c));
+            // _ = picosdk.pio_claim_free_sm_and_add_program_for_gpio_range(@ptrCast(&mmc_program.mmc_command_program), &pio, &sm, &offset, pins.clk, 1, true);
+            offset = picosdk.pio_add_program(@ptrCast(pioid), @ptrCast(&mmc_program.mmc_command_program));
+            mmc_program.mmc_command_program_init(@ptrCast(pioid), clk_pio_sm, @intCast(offset), pins.clk);
+            picosdk.pio_sm_set_clkdiv_int_frac(@ptrCast(pioid), clk_pio_sm, 200, 0);
 
-        // // just for initialization we must set slow clock
-        // self.set_clock_divider_for(50);
+            // _ = picosdk.pio_claim_free_sm_and_add_program_for_gpio_range(@ptrCast(&mmc_program.mmc_command_transmit_program), &pio_cmd, &sm_cmd, &offset_cmd, pins.cmd, 1, true);
+            offset = picosdk.pio_add_program(pioid, @ptrCast(&mmc_program.mmc_command_transmit_program));
+            mmc_program.mmc_command_transmit_program_init(@ptrCast(pioid), cmd_pio_sm, @intCast(offset), pins.cmd);
+            picosdk.pio_sm_set_clkdiv_int_frac(pioid, cmd_pio_sm, 200, 0);
 
-        // picosdk.pio_sm_exec(pioid, cmd_pio_sm, picosdk.pio_encode_jmp(mmc_pio.mmc_cmd_or_dat_offset_no_arg_state_wait_high));
-        // picosdk.pio_sm_exec(pioid, data_pio_sm, picosdk.pio_encode_jmp(mmc_pio.mmc_cmd_or_dat_offset_no_arg_state_waiting_for_cmd));
-        // const data_pin_mask = (1 << config.bus_width) - 1;
-        // const all_pin_mask = @as(u64, @intCast(data_pin_mask << pins.d0)) | (1 << pins.cmd) | (1 << pins.clk);
-        // picosdk.pio_sm_set_pindirs_with_mask64(pioid, clk_pio_sm, all_pin_mask, all_pin_mask);
-        // picosdk.pio_sm_exec(pioid, data_pio_sm, picosdk.pio_encode_set(picosdk.pio_pins, data_pin_mask));
+            picosdk.pio_enable_sm_mask_in_sync(pioid, (1 << clk_pio_sm) | (1 << cmd_pio_sm));
+            // picosdk.pio_sm_set_enabled(pioid, cmd_pio_sm, true);
 
-        // picosdk.pio_sm_put(pioid, cmd_pio_sm, mmc_pio_cmd(mmc_pio.mmc_cmd_or_dat_offset_state_send_bits, 80 - 1));
-        // picosdk.pio_sm_put(pioid, cmd_pio_sm, 0xffffffff);
-        // picosdk.pio_sm_put(pioid, cmd_pio_sm, 0xffffffff);
-        // picosdk.pio_sm_put(pioid, cmd_pio_sm, 0xffff0000 | picosdk.pio_encode_jmp(mmc_pio.mmc_cmd_or_dat_offset_no_arg_state_wait_high));
-        // picosdk.pio_enable_sm_mask_in_sync(pioid, (1 << clk_pio_sm) | (1 << data_pio_sm) | (1 << cmd_pio_sm));
+            transmit_command(encode_command(0, 0)); // CMD0
+            transmit_command(encode_command(17, 0)); // CMD0
 
-        // var response_buffer: [5]u32 = {};
-        // }
+            // mmc_program.mmc_transmit_command(@ptrCast(pioid), cmd_pio_sm, clk_pio_sm, 0x30415555, 0xffaadfff, 48 - 1); // CMD0
+            // delay_ticks(100000); // wait for PIO to be ready
+            // picosdk.pio_sm_put(pioid, cmd_pio_sm, 32);
 
-        // fn mmc_command(packed_command: u64, buffer: []u32, length: u32) i32 {
-        //     var rc: u32 = acquiesce_sm(@intCast(cmd_pio_sm));
-        //     if (rc < 0) {
-        //         return rc;
-        //     }
-        //     picosdk.pio_sm_set_enabled(pioid, @intCast(cmd_pio_sm), false);
-        //     picosdk.pio_sm_put(pioid, @intCast(cmd_pio_sm), mmc_pio_cmd(mmc_pio.mmc_cmd_or_dat_offset_state_send_bits, 48 - 1));
-        //     picosdk.pio_sm_put(pioid, @intCast(cmd_pio_sm), @intCast(packed_command));
-        //     picosdk.pio_sm_put(pioid, @intCast(cmd_pio_sm), @intCast(packed_command >> 32));
-        //     if (length > 0) {
-        //         rc =
-        //     }
-        // }
+            // std.mem.doNotOptimizeAway(picosdk.pio_sm_put(pioid, cmd_pio_sm, 0x30410001));
+            // std.mem.doNotOptimizeAway(picosdk.pio_sm_put(pioid, cmd_pio_sm, 0xff00ffff));
+            // picosdk.pio_sm_put(pioid, cmd_pio_sm, 0xff5555ff); // send CMD55
 
-        // fn safe_wait_tx_empty(pio: picosdk.PIO, sm: u32) i32 {
-        //     var wobble: i32 = 0;
-        //     while (!picosdk.pio_sm_is_tx_fifo_empty(pio, sm)) {
-        //         wobble += 1;
-        //         if (wobble > 1000000) {
-        //             return -1;
-        //         }
-        //     }
-        //     return 0;
-        // }
-
-        // fn acquiesce_sm(sm: i32) i32 {
-        //     const rc = safe_wait_tx_empty(pioid, @intCast(sm));
-        //     if (rc < 0) {
-        //         return rc;
-        //     }
-        //     var foo: u32 = 0;
-        //     var timeout: u32 = 1000000;
-        //     while (timeout > 0) {
-        //         timeout -= 1;
-        //         const addr: u32 = pioid.*.sm[sm].addr;
-        //         foo |= 1 << addr;
-        //         if (addr == mmc_pio.mmc_cmd_or_dat_offset_no_arg_state_waiting_for_cmd) {
-        //             break;
-        //         }
-        //     }
-        //     if (timeout == 0) {
-        //         return -1;
-        //     }
-        //     return 0;
-        // }
-
-        // fn mmc_pio_cmd(cmd: u32, param: u32) u32 {
-        //     return (picosdk.pio_encode_jmp(cmd) << 16) | param;
-        // }
-        // fn set_clock_divider_for(_: *Self, div: u16) void {
-        //     picosdk.pio_sm_set_clkdiv_int_frac(pioid, clk_pio_sm, div, 0);
-        //     picosdk.pio_sm_set_clkdiv_int_frac(pioid, data_pio_sm, div, 0);
-        //     picosdk.pio_sm_set_clkdiv_int_frac(pioid, cmd_pio_sm, div, 0);
-        //     picosdk.pio_clkdiv_restart_sm_mask(pioid, (1 << clk_pio_sm) | (1 << data_pio_sm) | (1 << cmd_pio_sm));
-        // }
-
-        // fn start_single_dma(dma_channel: u32, sm: u32, buffer: []u32, byte_length: u32, bswap: bool, sniff: bool) i32 {
-        //     picosdk.gpio_set_mask(1);
-        //     const word_length: u32 = (byte_length + 3) / 4;
-        //     var c = picosdk.dma_channel_get_default_config(dma_channel);
-        //     picosdk.channel_config_set_bswap(@ptrCast(&c), bswap);
-        //     picosdk.channel_config_set_read_increment(@ptrCast(&c), false);
-        //     picosdk.channel_config_set_write_increment(@ptrCast(&c), true);
-        //     picosdk.channel_config_set_dreq(@ptrCast(&c), picosdk.pio_get_dreq(pioid, sm, false));
-        //     picosdk.dma_channel_configure(
-        //         dma_channel,
-        //         @ptrCast(&c),
-        //         buffer.ptr,
-        //         @ptrCast(&pioid.*.rxf[sm]),
-        //         word_length,
-        //         false
-        //     );
-        //     if (sniff) {
-        //         picosdk.dma_sniffer_enable(dma_channel, picosdk.DMA_SNIFF_CTRL_CALC_VALUE_CRC16, true);
-        //         picosdk.dma_hw.*.sniff_data = 0;
-        //     }
-        //     picosdk.dma_channel_start(dma_channel);
-        //     picosdk.gpio_clr_mask(1);
-        //     return 0;
-        // }
+            // picosdk.pio_sm_put(pioid, cmd_pio_sm, 0xad);
+            // picosdk.pio_sm_put(pioid, clk_pio_sm, 64); // additonal 1 dummy cycle to synchronize
+        }
     };
 }

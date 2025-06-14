@@ -121,6 +121,7 @@ pub const Builder = struct {
             exe.link_data_sections = true;
             exe.link_gc_sections = true;
             _ = try toolchain.decorateModuleWithArmToolchain(b, exe.root_module, target);
+            exe.root_module.sanitize_c = .trap;
             exe.root_module.addImport("board", boardModule);
             exe.root_module.addImport("hal", mcu.module("hal"));
             const config_module = b.addModule("config", .{

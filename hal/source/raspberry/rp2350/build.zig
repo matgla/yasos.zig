@@ -44,29 +44,36 @@ fn configureCmake(b: *std.Build) ![]const u8 {
     std.log.info("CMake: {s}", .{cmake_exe});
 
     const cmake_binary_dir = b.pathJoin(&.{ b.cache_root.path.?, "pico_sdk_generated" });
-    _ = std.fs.openDirAbsolute(cmake_binary_dir, .{}) catch {
-        const cache_dir = try std.fs.openDirAbsolute(b.cache_root.path.?, .{});
-        _ = try cache_dir.makePath("pico_sdk_generated");
-        std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
+    std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
+    const cmake_binary_dir_absolute = std.fs.cwd().realpathAlloc(b.allocator, cmake_binary_dir) catch |err| {
+        if (err == error.FileNotFound) {
+            const cache_dir_absolute = try std.fs.cwd().realpathAlloc(b.allocator, b.cache_root.path.?);
+            const cache_dir = try std.fs.openDirAbsolute(cache_dir_absolute, .{});
+            _ = try cache_dir.makePath("pico_sdk_generated");
+            std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
 
-        const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
-        std.log.info("{s}", .{configure_project});
+            const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
+            std.log.info("{s}", .{configure_project});
 
-        const build_pioasm = b.run(&.{ cmake_exe, "--build", @as([]const u8, cmake_binary_dir), "--target", "pioasmBuild" });
-        std.log.info("{s}", .{build_pioasm});
+            const build_pioasm = b.run(&.{ cmake_exe, "--build", @as([]const u8, cmake_binary_dir), "--target", "pioasmBuild" });
+            std.log.info("{s}", .{build_pioasm});
+            return cmake_binary_dir;
+        }
+        return err;
     };
+    _ = cmake_binary_dir_absolute;
+
     return cmake_binary_dir;
 }
 
-fn generate_pio(b: *std.Build, file: []const u8, picosdk: []const u8) !void {
-    std.debug.print("Generating PIO file: {s}\n", .{file});
+fn generate_pio(b: *std.Build, file: []const u8, picosdk: []const u8) !std.Build.LazyPath {
     const pioasm = b.pathJoin(&.{ picosdk, "pioasm", "pioasm" });
     const pio_file = b.path(b.pathJoin(&.{ "source", file }));
     const output_filename = try std.mem.concat(b.allocator, u8, &.{ file, ".h" });
     const output_file = b.pathJoin(&.{ picosdk, "generated", output_filename });
-
-    _ = b.run(&.{ pioasm, @as([]const u8, pio_file.getPath(b)), @as([]const u8, output_file) });
-    std.log.info("Generated PIO file: {s}", .{output_file});
+    const cmd = b.addSystemCommand(&.{ pioasm, @as([]const u8, pio_file.getPath(b)) });
+    cmd.has_side_effects = true;
+    return cmd.addOutputFileArg(output_file);
 }
 
 pub fn build(b: *std.Build) !void {
@@ -80,7 +87,13 @@ pub fn build(b: *std.Build) !void {
     });
 
     const picosdk = try configureCmake(b);
-    try generate_pio(b, "mmc.pio", picosdk);
+
+    const mmc_pio = try generate_pio(b, "mmc.pio", picosdk);
+
+    hal.addAnonymousImport("mmc_pio", .{
+        .root_source_file = mmc_pio,
+    });
+    hal.addIncludePath(mmc_pio.dirname());
 
     hal.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated" }) });
 
@@ -175,6 +188,7 @@ pub fn build(b: *std.Build) !void {
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_flash/include"));
 
     hal.addCMacro("PICO_RP2350", "1");
+    hal.addCMacro("PICO_USE_GPIO_COPROCESSOR", "0");
 
     hal.addCSourceFiles(.{
         .files = &.{

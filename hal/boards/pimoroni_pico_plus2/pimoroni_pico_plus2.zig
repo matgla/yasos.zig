@@ -13,8 +13,8 @@ pub const psram = struct {
 
 pub const mmc = struct {
     pub var mmc0 = hal.mmc.Mmc(0, 0, 1, 2, .{
-        .clk = 7,
-        .cmd = 24,
-        .d0 = 25,
+        .clk = 2,
+        .cmd = 18,
+        .d0 = 19,
     }, hal.internal.Mmc).create();
 };
