@@ -71,20 +71,18 @@ fn initialize_board() void {
 
     log.attach_to(.{
         .state = &board.uart.uart0,
-
         .method = @TypeOf(board.uart.uart0).write_some_opaque,
     });
     log.write(" - initialization of external memory\n\n");
     if (hal.external_memory.enable()) {
-        hal.external_memory.dump_configuration(log);
-        log.print("External memory found\n", .{});
-        if (hal.external_memory.perform_post(log)) {
-            log.print("External memory post test passed\n", .{});
-        } else {
-            log.print("External memory post test failed\n", .{});
-        }
+        // hal.external_memory.dump_configuration(log);
+        // log.print("External memory found\n", .{});
+        // if (hal.external_memory.perform_post(log)) {
+        //     log.print("External memory post test passed\n", .{});
+        // } else {
+        //     log.print("External memory post test failed\n", .{});
+        // }
     }
-    log.write("Memory initialization finished\n");
 }
 
 // must be in root module file, otherwise won't be used

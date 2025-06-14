@@ -17,4 +17,6 @@ pub const picosdk = @cImport({
     @cInclude("hardware/pio.h");
     @cInclude("hardware/gpio.h");
     @cInclude("hardware/uart.h");
+    @cInclude("hardware/clocks.h");
+    @cInclude("pico/time.h");
 });

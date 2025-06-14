@@ -1,47 +1,63 @@
-.define mmc_irq_num 7
+; based on https://github.com/raspberrypi/pico-extras/blob/master/src/rp2_common/pico_sd_card/sd_card.pio
 
-.program mmc_clk
+.define mmc_irq 7
+
+.program mmc_command
 .side_set 1
-.wrap_target
-    irq mmc_irq_num   side 1
-    irq clear mmc_irq_num   side 0
+.wrap_target 
+    irq mmc_irq             side 0
+    out x, 32               side 0
+    irq clear mmc_irq       side 0 [2]
+command_loop:
+    nop                     side 1 
+    jmp x-- command_loop    side 0
+
 .wrap
 
-.program mmc_cmd_or_dat
+.program mmc_command_transmit
 .origin 0
-public no_arg_state_wait_high:
-    set pins, 0b1111
-    set pindirs, 0b1111
-public no_arg_state_waiting_for_cmd:
-    out exec, 16
-
-public state_send_bits:
-    out x, 16
-    wait 0 irq mmc_irq_num 
-send_loop1:
-    out pins, 1
-    jmp x-- send_loop1
-
-public state_inline_instruction:
-    out exec, 16
 .wrap_target
-    out exec, 16
+    set pindirs, 0b1 
+    set pins, 0b1
+    wait 0 irq mmc_irq 
+send_loop1:
+    out pins, 1     
+    jmp !OSRE, send_loop1 
+.wrap
 
-public state_receive_bits:
-    out x, 16
-    set pindirs, 0
-    wait 1 pin, 0
-    wait 0 pin, 0
-    wait 0 irq mmc_irq_num
-public wrap_for_4bit_receive:
-receive_loop1:
-    in pins, 1
-    jmp x-- receive_loop1
-.wrap 
+% c-sdk {
+    void mmc_command_program_init(PIO pio, uint sm, uint offset, uint clock_pin) {
+        pio_sm_config c = mmc_command_program_get_default_config(offset); 
+        pio_sm_set_consecutive_pindirs(pio, sm, clock_pin, 1, true);
+        sm_config_set_sideset_pins(&c, clock_pin);
+        sm_config_set_in_shift(&c, false, true, 32);
+        sm_config_set_out_shift(&c, false, true, 32);
+        pio_sm_init(pio, sm, offset, &c);
+    }
 
-public wrap_target_for_4bit_receive:
-receive_loop4:
-    in pins, 4
-    jmp x-- receive_loop4
-    out exec, 16
+    void mmc_command_transmit_program_init(PIO pio, uint sm, uint offset, uint cmd_pin) {
+        pio_sm_config c = mmc_command_transmit_program_get_default_config(offset); 
+        sm_config_set_in_shift(&c, false, true, 32);
+        sm_config_set_out_shift(&c, false, true, 32);
+        sm_config_set_out_pins(&c, cmd_pin, 1);
+        sm_config_set_set_pins(&c, cmd_pin, 1);
+        pio_sm_init(pio, sm, offset, &c);
+    }
 
+    inline bool mmc_has_ongoing_transmission(PIO pio, uint sm) {
+        volatile pio_hw_t* pio_v = (volatile pio_hw_t *)pio;
+        volatile pio_sm_hw_t *sm_v = &pio_v->sm[sm];
+        return ((sm_v->execctrl & PIO_SM0_EXECCTRL_EXEC_STALLED_BITS) != 0) 
+            && (pio_v->fstat & (1u << (PIO_FSTAT_TXEMPTY_LSB + sm)) == 0);
+    }
+
+    void mmc_transmit_command(PIO pio, uint cmd_sm, uint clk_sm, uint command, uint argument, uint clocks) {
+        while (mmc_has_ongoing_transmission(pio, clk_sm));
+        while (pio_sm_is_tx_fifo_full(pio, cmd_sm));
+        *(volatile uint32_t *)&pio->txf[cmd_sm] = command;
+        while (pio_sm_is_tx_fifo_full(pio, cmd_sm));
+        *(volatile uint32_t *)&pio->txf[cmd_sm] = argument;
+        while (pio_sm_is_tx_fifo_full(pio, clk_sm));
+        *(volatile uint32_t *)&pio->txf[clk_sm] = clocks - 1;
+    }
+%}
