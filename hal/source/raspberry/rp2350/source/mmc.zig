@@ -47,6 +47,7 @@ pub fn Mmc(comptime pio_index: usize, comptime clk_pio_sm: usize, comptime data_
             cycles: u32,
         };
 
+
         const pioid = get_pio(pio_index);
         cmd_or_dat_offset: u32 = 0,
         clk_program_offset: u32 = 0,
