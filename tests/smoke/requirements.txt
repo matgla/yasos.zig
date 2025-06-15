@@ -1,0 +1,4 @@
+pytest==8.4.0
+pyserial==3.5
+pyudev==0.24.3
+pyocd @ git+https://github.com/pyocd/pyOCD.git@develop

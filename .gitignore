@@ -11,3 +11,4 @@ rootfs/
 .cache/
 build/
 rootfs.img
+__pycache__/
