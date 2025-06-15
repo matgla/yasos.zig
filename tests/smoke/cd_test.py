@@ -31,7 +31,6 @@ def test_change_dir():
     assert line == "/"
  
     session.write_command("cd bin")
-    line = session.read_line()
     session.write_command("ls")
     line = session.read_line()
     assert set(["ls", "cat", "sh"]).issubset(line.split())
@@ -41,7 +40,6 @@ def test_change_dir():
     assert line == "/bin"
 
     session.write_command("cd ..")
-    line = session.read_line()
     session.write_command("pwd")
     line = session.read_line()
     assert line == "/"

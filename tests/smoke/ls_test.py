@@ -26,7 +26,6 @@ from .framework.session import Session
 
 class TestLs:
     def setup_class(self):
-        print("Setting up TestLs")
         self.session = Session()
 
     def test_list_rootfs(self):
@@ -36,7 +35,6 @@ class TestLs:
 
     def test_list_bin(self):
         self.session.write_command("cd bin")
-        line = self.session.read_line()
         self.session.write_command("ls")
         line = self.session.read_line()
         assert set(["ls", "cat", "sh"]).issubset(line.split())

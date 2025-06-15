@@ -8,16 +8,17 @@ jobs:
   smoke_tests:
     runs-on: [self-hosted, pimoroni_pico_plus2]
     steps:
-    - name: Build yasos
-      run: |
-        zig build -Doptimize=ReleaseFast
-    - name: Build rootfs
-      run: |
-        ./build_rootfs.sh -c -o rootfs.img
-    - name: Prepare environment
-      run: |
-        ./tests/smoke/prepare.sh
+      - uses: actions/checkout@v3
+      - name: Build yasos
+        run: |
+          zig build -Doptimize=ReleaseFast
+      - name: Build rootfs
+        run: |
+          ./build_rootfs.sh -c -o rootfs.img
+      - name: Prepare environment
+        run: |
+          ./tests/smoke/prepare.sh
 
-    - name: Run smoke tests
-      run: |
-        ./tests/smoke/run_tests.sh
+      - name: Run smoke tests
+        run: |
+          ./tests/smoke/run_tests.sh

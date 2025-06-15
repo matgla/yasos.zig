@@ -32,7 +32,9 @@ class Session:
             Session.serial_port = detect_probe_serial_port()
         if Session.serial_port is None:
             raise RuntimeError("No serial port found for the debug probe.")
-        self.serial = serial.Serial(Session.serial_port, 921600, timeout=2)
+        self.serial = serial.Serial(Session.serial_port, 921600, timeout=10)
+        self.serial.flushInput()
+        self.serial.flushOutput()
         self.reset_target()
         self.wait_for_prompt()
 
@@ -43,7 +45,8 @@ class Session:
 
     def write_command(self, command):
         self.serial.write((command + '\n').encode('utf-8'))
-        assert command in self.serial.readline().decode('utf-8').strip()
+        line = self.serial.readline().decode('utf-8').strip()
+        assert command in line, f"expected command '{command}' not found in: {line}"
 
     def read_line(self):
         line = self.serial.readline().decode('utf-8').strip()
