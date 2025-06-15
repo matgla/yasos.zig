@@ -1,0 +1,24 @@
+name: Yasos Smoke Tests
+on: 
+  push: 
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke_tests:
+    runs-on: [self-hosted, pimoroni_pico_plus2]
+    steps:
+      - name: Cleanup workspace 
+        run: |
+          rm -rf "$GITHUB_WORKSPACE" 
+          mkdir -p "$GITHUB_WORKSPACE"
+      - uses: actions/checkout@v3
+        with: 
+          submodules: 'recursive'
+      - name: Prepare environment
+        run: |
+          ./tests/smoke/prepare.sh
+
+      - name: Run smoke tests
+        run: |
+          ./tests/smoke/run_tests.sh
