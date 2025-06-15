@@ -1,0 +1,4 @@
+{
+    "target_mcu": "rp2350",
+    "baudrate": 921600,
+}

@@ -32,13 +32,23 @@ fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
 }
 
 fn configure_kconfig(b: *std.Build) *std.Build.Step.Run {
-    const argv = [_][]const u8{ "./yasos_venv/bin/python", "-m", "menuconfig", "KConfig" };
+    const argv = [_][]const u8{ "./yasos_venv/bin/python", "-m", "menuconfig", "Kconfig" };
+    const command = b.addSystemCommand(&argv);
+    return command;
+}
+
+fn configure_defconfig_kconfig(b: *std.Build) *std.Build.Step.Run {
+    const argv = [_][]const u8{
+        "./yasos_venv/bin/python",
+        "-m",
+        "defconfig",
+    };
     const command = b.addSystemCommand(&argv);
     return command;
 }
 
 fn generate_config(b: *std.Build) *std.Build.Step.Run {
-    const argv = [_][]const u8{ "./yasos_venv/bin/python", "./kconfiglib/generate.py", "--input", ".config", "-k", "KConfig", "-o", "config" };
+    const argv = [_][]const u8{ "./yasos_venv/bin/python", "./kconfiglib/generate.py", "--input", ".config", "-k", "Kconfig", "-o", "config" };
     const command = b.addSystemCommand(&argv);
     return command;
 }
@@ -68,8 +78,10 @@ fn load_config(b: *std.Build) !Config {
 
 pub fn build(b: *std.Build) !void {
     const clean = b.option(bool, "clean", "clean before configuration") orelse false;
+    const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
     const venv = prepare_venv(b);
     const configure = configure_kconfig(b);
+    const configure_defconfig = configure_defconfig_kconfig(b);
     const generate = generate_config(b);
 
     if (clean) {
@@ -78,51 +90,73 @@ pub fn build(b: *std.Build) !void {
     }
 
     configure.step.dependOn(&venv.step);
+    configure_defconfig.step.dependOn(&venv.step);
     generate.step.dependOn(&venv.step);
+    generate.has_side_effects = true;
 
     const menuconfig = b.step("menuconfig", "Execute menuconfig UI");
-    generate.step.dependOn(&configure.step);
     menuconfig.dependOn(&generate.step);
-    generate.has_side_effects = true;
-    const cwd = std.fs.cwd();
+    const defconfig = b.step("defconfig", "Execute defconfig");
+    defconfig.dependOn(&generate.step);
 
-    const config_directory: std.fs.Dir = cwd.openDir("config", .{}) catch {
+    if (defconfig_file) |file| {
+        configure_defconfig.addArg(file);
+    }
+    const cwd = std.fs.cwd();
+    var has_config = true;
+    const maybe_config_directory: ?std.fs.Dir = cwd.openDir("config", .{}) catch blk: {
+        has_config = false;
+        break :blk null;
+    };
+    var maybe_config_exists: ?std.fs.File.Stat = null;
+    if (maybe_config_directory) |config_directory| {
+        maybe_config_exists = config_directory.statFile("config.json") catch blk: {
+            has_config = false;
+            break :blk null;
+        };
+    }
+
+    if (defconfig_file) |_| {
+        generate.step.dependOn(&configure_defconfig.step);
+    } else {
+        generate.step.dependOn(&configure.step);
+    }
+
+    if (!has_config) {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
         return;
-    };
-    const config_exists = config_directory.statFile("config.json") catch {
-        std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
-        return;
-    };
+    }
 
     const optimize = b.standardOptimizeOption(.{});
 
-    if (config_exists.kind == .file) {
-        const config_path = try config_directory.realpathAlloc(b.allocator, "config.json");
-        const config = try load_config(b);
-        const boardDep = b.dependency("yasos_hal", .{
-            .board = @as([]const u8, config.board),
-            .root_file = @as([]const u8, b.pathFromRoot("source/main.zig")),
-            .optimize = optimize,
-            .name = @as([]const u8, "yasos_kernel"),
-            .config_file = @as([]const u8, config_path),
-        });
-        b.installArtifact(boardDep.artifact("yasos_kernel"));
-        boardDep.artifact("yasos_kernel").addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
-        boardDep.artifact("yasos_kernel").addIncludePath(b.path("source/sys/include"));
-        boardDep.artifact("yasos_kernel").addIncludePath(b.path("."));
+    if (maybe_config_exists) |config_exists| {
+        if (config_exists.kind == .file) {
+            const config_path = try maybe_config_directory.?.realpathAlloc(b.allocator, "config.json");
+            const config = try load_config(b);
+            const boardDep = b.dependency("yasos_hal", .{
+                .board = @as([]const u8, config.board),
+                .root_file = @as([]const u8, b.pathFromRoot("source/main.zig")),
+                .optimize = optimize,
+                .name = @as([]const u8, "yasos_kernel"),
+                .config_file = @as([]const u8, config_path),
+            });
+            b.installArtifact(boardDep.artifact("yasos_kernel"));
+            boardDep.artifact("yasos_kernel").addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
+            boardDep.artifact("yasos_kernel").addIncludePath(b.path("source/sys/include"));
+            boardDep.artifact("yasos_kernel").addIncludePath(b.path("."));
 
-        const yasld = b.dependency("yasld", .{
-            .optimize = optimize,
-            .target = boardDep.artifact("yasos_kernel").root_module.resolved_target.?,
-        });
+            const yasld = b.dependency("yasld", .{
+                .optimize = optimize,
+                .target = boardDep.artifact("yasos_kernel").root_module.resolved_target.?,
+            });
 
-        boardDep.artifact("yasos_kernel").root_module.addImport("yasld", yasld.module("yasld"));
-        boardDep.artifact("yasos_kernel").root_module.addIncludePath(b.path("."));
+            boardDep.artifact("yasos_kernel").root_module.addImport("yasld", yasld.module("yasld"));
+            boardDep.artifact("yasos_kernel").root_module.addIncludePath(b.path("."));
 
-        _ = boardDep.module("board");
-    } else {
-        std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
+            _ = boardDep.module("board");
+        } else {
+            std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
+        }
     }
 
     const tests = b.addTest(.{
