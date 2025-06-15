@@ -9,6 +9,8 @@ jobs:
     runs-on: [self-hosted, pimoroni_pico_plus2]
     steps:
       - uses: actions/checkout@v3
+        with: 
+          submodules: 'recursive'
       - name: Prepare environment
         run: |
           ./tests/smoke/prepare.sh
