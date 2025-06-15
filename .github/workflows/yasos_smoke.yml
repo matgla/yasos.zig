@@ -8,6 +8,10 @@ jobs:
   smoke_tests:
     runs-on: [self-hosted, pimoroni_pico_plus2]
     steps:
+      - name: Cleanup workspace 
+        run: |
+          rm -rf ./* || true 
+          rm -rf ./.??* || true
       - uses: actions/checkout@v3
         with: 
           submodules: 'recursive'
