@@ -63,9 +63,9 @@ const MountPoint = struct {
         var it = self.children.pop();
         while (it) |node| {
             const child: *MountPoint = @fieldParentPtr("list_node", node);
+            child.deinit(allocator);
             it = self.children.pop();
-            child.data.deinit(allocator);
-            allocator.destroy(&child.list_node);
+            allocator.destroy(child);
         }
     }
 };
@@ -95,17 +95,13 @@ pub const MountPoints = struct {
         }
     }
 
-    pub fn find_longest_matching_point(self: *MountPoints, path: []const u8) struct {
+    pub fn find_longest_matching_point(self: *MountPoints, path: []const u8) ?struct {
         left: []const u8,
         point: *MountPoint,
         parent: ?*MountPoint,
     } {
         if (self.root == null) {
-            return .{
-                .left = &.{},
-                .point = undefined,
-                .parent = null,
-            };
+            return null;
         }
         var maybe_node: ?*MountPoint = &self.root.?;
         var last_matched_point: *MountPoint = &self.root.?;
@@ -179,7 +175,11 @@ pub const MountPoints = struct {
             return MountPointError.MountPointNotAbsolutePath;
         }
 
-        const longest_matching_point = self.find_longest_matching_point(path);
+        const maybe_longest_matching_point = self.find_longest_matching_point(path);
+        if (maybe_longest_matching_point == null) {
+            return MountPointError.RootNotMounted;
+        }
+        const longest_matching_point = maybe_longest_matching_point.?;
         if (longest_matching_point.left.len == 0) {
             return MountPointError.MountPointInUse;
         }
@@ -193,7 +193,11 @@ pub const MountPoints = struct {
     }
 
     pub fn umount(self: *MountPoints, path: []const u8) !void {
-        const longest_matching_point = self.find_longest_matching_point(path);
+        const maybe_longest_matching_point = self.find_longest_matching_point(path);
+        if (maybe_longest_matching_point == null) {
+            return MountPointError.NotMounted;
+        }
+        const longest_matching_point = maybe_longest_matching_point.?;
         if (longest_matching_point.left.len != 0) {
             return MountPointError.NotMounted;
         }
@@ -238,8 +242,8 @@ const FileSystemStub = struct {
     fn umount(_: *anyopaque) i32 {
         return 0;
     }
-    fn create(_: *anyopaque, _: []const u8, _: i32) i32 {
-        return 0;
+    fn create(_: *anyopaque, _: []const u8, _: i32) ?IFile {
+        return null;
     }
     fn mkdir(_: *anyopaque, _: []const u8, _: i32) i32 {
         return 0;
@@ -299,66 +303,73 @@ test "mount childs" {
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
     var fsstub = FileSystemStub{};
+    var maybe_child = sut.find_longest_matching_point("/a/b/x/d");
+    try std.testing.expect(maybe_child == null);
+
     try sut.mount_filesystem("/", fsstub.ifilesystem());
     try sut.mount_filesystem("/a/b", fsstub.ifilesystem());
 
     try std.testing.expect(sut.root != null);
-    try std.testing.expectEqual(1, sut.root.?.children.len);
+    try std.testing.expectEqual(1, sut.root.?.children.len());
+    maybe_child = sut.find_longest_matching_point("/a/b/x/d");
 
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
-    try std.testing.expectEqualStrings("a/b", sut.root.?.children.first.?.data.path);
+    try std.testing.expect(maybe_child != null);
+    var child = maybe_child.?;
+    try std.testing.expectEqualStrings("x/d", child.left);
+    try std.testing.expectEqualStrings("a/b", child.point.path);
+    try std.testing.expect(child.parent != null);
+    try std.testing.expectEqualStrings("/", child.parent.?.path);
+
+    maybe_child = sut.find_longest_matching_point("/a/c");
+    try std.testing.expect(maybe_child != null);
+
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("a/c", child.left);
+    try std.testing.expectEqualStrings("/", child.point.path);
+    try std.testing.expect(child.parent != null);
+    try std.testing.expectEqualStrings("/", child.parent.?.path);
+
+    maybe_child = sut.find_longest_matching_point("a/c/d");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("a/c/d", child.left);
+    try std.testing.expectEqualStrings("/", child.point.path);
+    try std.testing.expect(child.parent != null);
+    try std.testing.expectEqualStrings("/", child.parent.?.path);
 
     try sut.mount_filesystem("/a/c", fsstub.ifilesystem());
-
-    try std.testing.expect(sut.root != null);
-    try std.testing.expectEqual(2, sut.root.?.children.len);
-
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.last.?.data.children.len);
-
-    try std.testing.expectEqualStrings("a/b", sut.root.?.children.first.?.data.path);
-    try std.testing.expectEqualStrings("a/c", sut.root.?.children.last.?.data.path);
-
-    try sut.mount_filesystem("/a/d", fsstub.ifilesystem());
-
-    try std.testing.expect(sut.root != null);
-    try std.testing.expectEqual(3, sut.root.?.children.len);
-
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.next.?.data.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.last.?.data.children.len);
-
-    try std.testing.expectEqualStrings("a/b", sut.root.?.children.first.?.data.path);
-    try std.testing.expectEqualStrings("a/c", sut.root.?.children.first.?.next.?.data.path);
-    try std.testing.expectEqualStrings("a/d", sut.root.?.children.last.?.data.path);
+    maybe_child = sut.find_longest_matching_point("a/c/d");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("d", child.left);
+    try std.testing.expectEqualStrings("a/c", child.point.path);
+    try std.testing.expect(child.parent != null);
+    try std.testing.expectEqualStrings("/", child.parent.?.path);
 
     try sut.mount_filesystem("/a/c/a/c/", fsstub.ifilesystem());
-
-    try std.testing.expect(sut.root != null);
-    try std.testing.expectEqual(3, sut.root.?.children.len);
-
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
-    try std.testing.expectEqual(1, sut.root.?.children.first.?.next.?.data.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.last.?.data.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.next.?.data.children.first.?.data.children.len);
-
-    try std.testing.expectEqualStrings("a/b", sut.root.?.children.first.?.data.path);
-    try std.testing.expectEqualStrings("a/c", sut.root.?.children.first.?.next.?.data.children.first.?.data.path);
-    try std.testing.expectEqualStrings("a/d", sut.root.?.children.last.?.data.path);
+    maybe_child = sut.find_longest_matching_point("a/c/a");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("a", child.left);
+    try std.testing.expectEqualStrings("a/c", child.point.path);
+    try std.testing.expect(child.parent != null);
+    try std.testing.expectEqualStrings("/", child.parent.?.path);
+    maybe_child = sut.find_longest_matching_point("a/c/a/c/d/u/p");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("d/u/p", child.left);
+    try std.testing.expectEqualStrings("a/c", child.point.path);
+    try std.testing.expect(child.parent != null);
+    try std.testing.expectEqualStrings("a/c", child.parent.?.path);
 
     try sut.mount_filesystem("/a/c/a/c/e", fsstub.ifilesystem());
-
-    try std.testing.expect(sut.root != null);
-    try std.testing.expectEqual(3, sut.root.?.children.len);
-
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
-    try std.testing.expectEqual(1, sut.root.?.children.first.?.next.?.data.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.last.?.data.children.len);
-    try std.testing.expectEqual(1, sut.root.?.children.first.?.next.?.data.children.first.?.data.children.len);
-
-    try std.testing.expectEqualStrings("a/c", sut.root.?.children.first.?.next.?.data.path);
-    try std.testing.expectEqualStrings("a/c", sut.root.?.children.first.?.next.?.data.children.first.?.data.path);
-    try std.testing.expectEqualStrings("e", sut.root.?.children.first.?.next.?.data.children.first.?.data.children.first.?.data.path);
+    maybe_child = sut.find_longest_matching_point("/a/c/a/c/e/deep/path/is/here");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("deep/path/is/here", child.left);
+    try std.testing.expectEqualStrings("e", child.point.path);
+    try std.testing.expect(child.parent != null);
+    try std.testing.expectEqualStrings("a/c", child.parent.?.path);
 
     try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.ifilesystem()));
     try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fsstub.ifilesystem()));
@@ -400,20 +411,63 @@ test "remove childs" {
     try sut.mount_filesystem("/a/c/e", fsstub.ifilesystem());
     try sut.mount_filesystem("/a/c/e/c/f", fsstub.ifilesystem());
 
-    try std.testing.expectEqual(2, sut.root.?.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
-    try std.testing.expectEqual(2, sut.root.?.children.last.?.data.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.last.?.data.children.first.?.data.children.len);
-    try std.testing.expectEqual(1, sut.root.?.children.last.?.data.children.last.?.data.children.len);
+    var maybe_child = sut.find_longest_matching_point("/a/c/e/c/f/deep/path");
+    try std.testing.expect(maybe_child != null);
+    var child = maybe_child.?;
+    try std.testing.expectEqualStrings("deep/path", child.left);
+    maybe_child = sut.find_longest_matching_point("/a/b/c");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("c", child.left);
 
-    try std.testing.expectError(MountPointError.NotMounted, sut.umount("/x/d"));
-    try sut.umount("/a/c/e");
-    try std.testing.expectEqual(2, sut.root.?.children.len);
-    try std.testing.expectEqual(0, sut.root.?.children.first.?.data.children.len);
-    try std.testing.expectEqual(1, sut.root.?.children.last.?.data.children.len);
-    try sut.umount("/a/b");
-    try std.testing.expectEqual(1, sut.root.?.children.len);
-    try std.testing.expectEqual(1, sut.root.?.children.last.?.data.children.len);
-    try sut.umount("/");
-    try std.testing.expect(sut.root == null);
+    maybe_child = sut.find_longest_matching_point("/a/c/d");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("d", child.left);
+
+    maybe_child = sut.find_longest_matching_point("/a/c/a/c/x");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("x", child.left);
+
+    maybe_child = sut.find_longest_matching_point("/a/c/e/f");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("f", child.left);
+
+    maybe_child = sut.find_longest_matching_point("/a/b");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("", child.left);
+
+    _ = try sut.umount("/a/c");
+
+    maybe_child = sut.find_longest_matching_point("/a/c/e/c/f/deep/path");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("a/c/e/c/f/deep/path", child.left);
+    maybe_child = sut.find_longest_matching_point("/a/b/c");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("c", child.left);
+
+    maybe_child = sut.find_longest_matching_point("/a/c/d");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("a/c/d", child.left);
+
+    maybe_child = sut.find_longest_matching_point("/a/c/a/c/x");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("a/c/a/c/x", child.left);
+
+    maybe_child = sut.find_longest_matching_point("/a/c/e/f");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("a/c/e/f", child.left);
+
+    maybe_child = sut.find_longest_matching_point("/a/b");
+    try std.testing.expect(maybe_child != null);
+    child = maybe_child.?;
+    try std.testing.expectEqualStrings("", child.left);
 }

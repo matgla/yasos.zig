@@ -31,24 +31,21 @@ fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
     return install_requirements_args_command;
 }
 
-fn configure_kconfig(b: *std.Build) *std.Build.Step.Run {
-    const argv = [_][]const u8{ "./yasos_venv/bin/python", "-m", "menuconfig", "Kconfig" };
+fn configure_kconfig(b: *std.Build, target: []const u8, module: []const u8) *std.Build.Step.Run {
+    const argv = [_][]const u8{ "./yasos_venv/bin/python", "-m", module };
     const command = b.addSystemCommand(&argv);
-    return command;
-}
-
-fn configure_defconfig_kconfig(b: *std.Build) *std.Build.Step.Run {
-    const argv = [_][]const u8{
-        "./yasos_venv/bin/python",
-        "-m",
-        "defconfig",
+    const config_dir = b.pathJoin(&.{ "config", target });
+    std.fs.cwd().makePath(config_dir) catch |err| {
+        std.debug.print("Failed to create config directory: {s}\n", .{@errorName(err)});
+        return command;
     };
-    const command = b.addSystemCommand(&argv);
+    const config_path = b.pathJoin(&.{ config_dir, ".config" });
+    command.setEnvironmentVariable("KCONFIG_CONFIG", config_path);
     return command;
 }
 
-fn generate_config(b: *std.Build) *std.Build.Step.Run {
-    const argv = [_][]const u8{ "./yasos_venv/bin/python", "./kconfiglib/generate.py", "--input", ".config", "-k", "Kconfig", "-o", "config" };
+fn generate_config(b: *std.Build, config_file: []const u8, config_output: []const u8) *std.Build.Step.Run {
+    const argv = [_][]const u8{ "./yasos_venv/bin/python", "./kconfiglib/generate.py", "--input", config_file, "-k", "Kconfig", "-o", config_output };
     const command = b.addSystemCommand(&argv);
     return command;
 }
@@ -59,9 +56,8 @@ const Config = struct {
     cpu_arch: []const u8,
 };
 
-fn load_config(b: *std.Build) !Config {
-    const config_directory = try std.fs.cwd().openDir("config", .{});
-    const file = try config_directory.openFile("config.json", .{ .mode = .read_only });
+fn load_config(b: *std.Build, config_file: []const u8) !Config {
+    const file = try std.fs.cwd().openFile(config_file, .{ .mode = .read_only });
     defer file.close();
 
     const data = try file.readToEndAlloc(b.allocator, 4096);
@@ -80,9 +76,9 @@ pub fn build(b: *std.Build) !void {
     const clean = b.option(bool, "clean", "clean before configuration") orelse false;
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
     const venv = prepare_venv(b);
-    const configure = configure_kconfig(b);
-    const configure_defconfig = configure_defconfig_kconfig(b);
-    const generate = generate_config(b);
+    const configure = configure_kconfig(b, "target", "menuconfig");
+    const configure_defconfig = configure_kconfig(b, "target", "defconfig");
+    const generate = generate_config(b, "config/target/.config", "config/target");
 
     if (clean) {
         std.fs.cwd().deleteTree("config") catch {};
@@ -104,10 +100,11 @@ pub fn build(b: *std.Build) !void {
     }
     const cwd = std.fs.cwd();
     var has_config = true;
-    const maybe_config_directory: ?std.fs.Dir = cwd.openDir("config", .{}) catch blk: {
+    var maybe_config_directory: ?std.fs.Dir = cwd.openDir("config/target", .{}) catch blk: {
         has_config = false;
         break :blk null;
     };
+
     var maybe_config_exists: ?std.fs.File.Stat = null;
     if (maybe_config_directory) |config_directory| {
         maybe_config_exists = config_directory.statFile("config.json") catch blk: {
@@ -132,7 +129,8 @@ pub fn build(b: *std.Build) !void {
     if (maybe_config_exists) |config_exists| {
         if (config_exists.kind == .file) {
             const config_path = try maybe_config_directory.?.realpathAlloc(b.allocator, "config.json");
-            const config = try load_config(b);
+            std.debug.print("Using configuration file: {s}\n", .{config_path});
+            const config = try load_config(b, config_path);
             const boardDep = b.dependency("yasos_hal", .{
                 .board = @as([]const u8, config.board),
                 .root_file = @as([]const u8, b.pathFromRoot("source/main.zig")),
@@ -165,15 +163,17 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .root_source_file = b.path("tests.zig"),
     });
+    const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
+    generate_defconfig_for_tests.has_side_effects = true;
+    tests.step.dependOn(&generate_defconfig_for_tests.step);
     b.installArtifact(tests);
     tests.linkLibC();
     const config_module = b.addModule("test_config", .{
-        .root_source_file = b.path("config/config.zig"),
+        .root_source_file = b.path("config/tests/config.zig"),
     });
-
     tests.root_module.addImport("config", config_module);
-
-    const run_tests_step = b.step("tests", "Run Yasos tests");
+    const run_tests_step = b.step("test", "Run Yasos tests");
     const run_tests = b.addRunArtifact(tests);
     run_tests_step.dependOn(&run_tests.step);
+    tests.root_module.addIncludePath(b.path("."));
 }
