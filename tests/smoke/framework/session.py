@@ -33,13 +33,15 @@ class Session:
         if Session.serial_port is None:
             raise RuntimeError("No serial port found for the debug probe.")
         self.serial = serial.Serial(Session.serial_port, 921600, timeout=10)
-        self.serial.flushInput()
+        self.serial.read_all()
         self.serial.flushOutput()
         self.reset_target()
         self.wait_for_prompt()
+        while self.serial.inWaiting() > 0:
+            self.wait_for_prompt()
 
     def wait_for_prompt(self):
-        line = self.serial.read_until("$".encode('utf-8')).decode('utf-8').strip()
+        line = self.serial.read_until("$ ".encode('utf-8')).decode('utf-8').strip()
         if not line.endswith("$"):
             raise RuntimeError("Prompt not found after reset")
 
