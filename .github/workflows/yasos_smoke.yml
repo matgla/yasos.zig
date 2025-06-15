@@ -9,12 +9,6 @@ jobs:
     runs-on: [self-hosted, pimoroni_pico_plus2]
     steps:
       - uses: actions/checkout@v3
-      - name: Build yasos
-        run: |
-          zig build -Doptimize=ReleaseFast
-      - name: Build rootfs
-        run: |
-          ./build_rootfs.sh -c -o rootfs.img
       - name: Prepare environment
         run: |
           ./tests/smoke/prepare.sh
