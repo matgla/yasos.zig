@@ -120,12 +120,27 @@ pub const Builder = struct {
             exe.link_function_sections = true;
             exe.link_data_sections = true;
             exe.link_gc_sections = true;
-            _ = try toolchain.decorateModuleWithArmToolchain(b, exe.root_module, target);
+            if (config.cpu) |cpu| {
+                if (std.mem.eql(u8, cpu, "host")) {} else {
+                    _ = try toolchain.decorateModuleWithArmToolchain(b, exe.root_module, target);
+                }
+            }
             exe.root_module.sanitize_c = .trap;
             exe.root_module.addImport("board", boardModule);
             exe.root_module.addImport("hal", mcu.module("hal"));
+
+            const config_zig = b.dupe(config_file);
+            const config_without_ext = std.mem.trimEnd(u8, config_zig, ".json");
+            const config_zig_ext = try std.mem.concat(b.allocator, u8, &.{ config_without_ext, ".zig" });
+            const cwd_path = std.fs.cwd().realpathAlloc(b.allocator, ".") catch |err| {
+                return err;
+            };
+            const hal_path = b.pathJoin(&.{ cwd_path, "hal" });
+            const config_zig_relative = std.fs.path.relative(b.allocator, hal_path, config_zig_ext) catch |err| {
+                return err;
+            };
             const config_module = b.addModule("config", .{
-                .root_source_file = b.path("../config/config.zig"),
+                .root_source_file = b.path(config_zig_relative),
             });
             mcu.module("hal").addImport("config", config_module);
             exe.root_module.addImport("config", config_module);
