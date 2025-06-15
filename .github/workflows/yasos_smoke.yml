@@ -1,7 +1,11 @@
 name: Yasos Smoke Tests
-on: [push, pull_request]
+on: 
+  push: 
+    branches: [main]
+  pull_request:
+
 jobs:
-  smoke-tests:
+  smoke_tests:
     runs-on: [self-hosted, pimoroni_pico_plus2]
     - name: Build yasos
       run: |
