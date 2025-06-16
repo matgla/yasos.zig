@@ -32,3 +32,5 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
 
 COPY tests/smoke/requirements.txt /opt/smoke/requirements.txt 
 RUN pip3 install --break-system-packages -r /opt/smoke/requirements.txt
+
+RUN apt-get install -y genromfs

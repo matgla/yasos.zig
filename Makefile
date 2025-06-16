@@ -1,4 +1,4 @@
-CONTAINER_VERSION ?= v0.10
+CONTAINER_VERSION ?= v0.11
 
 start_env:
 	podman run --device=/dev/ttyACM0 --userns=keep-id -v $(shell pwd):/workspace -w /workspace -it matgla/yasos_zig_dev:${CONTAINER_VERSION}
