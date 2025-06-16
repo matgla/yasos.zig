@@ -17,8 +17,4 @@ jobs:
           submodules: 'recursive'
       - name: Run Smoke Tests
         run: |
-          make pull_container 
-          make start_env 
-          ./tests/smoke/prepare.sh
-          ./tests/smoke/run_tests.sh
-          exit
+          make run_smoke_tests

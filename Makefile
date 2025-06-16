@@ -15,3 +15,10 @@ pull_container:
 
 clean: 
 	rm -rf zig-out .zig-cache config yasos_venv 
+
+prepare_smoke: pull_container
+	podman run --device=/dev/ttyACM0 --device=/dev/bus/usb --userns=keep-id -v $(shell pwd):/workspace -w /workspace -it matgla/yasos_zig_dev:${CONTAINER_VERSION} ./tests/smoke/prepare.sh
+
+run_smoke_tests: prepare_smoke
+	podman run --device=/dev/ttyACM0 --device=/dev/bus/usb --userns=keep-id -v $(shell pwd):/workspace -w /workspace -it matgla/yasos_zig_dev:${CONTAINER_VERSION} ./tests/smoke/run_tests.sh 
+
