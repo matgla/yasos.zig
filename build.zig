@@ -74,7 +74,7 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
 pub fn build(b: *std.Build) !void {
     const clean_step = b.step("clean", "Clean build artifacts");
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
-    // clean_step.dependOn(&b.addRemoveDirTree(b.path(b.install_path)).step);
+    const run_tests_step = b.step("test", "Run Yasos tests");
     if (@import("builtin").os.tag != .windows) {
         clean_step.dependOn(&b.addRemoveDirTree(b.path("zig-cache")).step);
         clean_step.dependOn(&b.addRemoveDirTree(b.path("config")).step);
@@ -121,12 +121,31 @@ pub fn build(b: *std.Build) !void {
         generate.step.dependOn(&configure.step);
     }
 
+    const optimize = b.standardOptimizeOption(.{});
+    const tests = b.addTest(.{
+        .name = "yasos_tests",
+        .target = b.standardTargetOptions(.{}),
+        .optimize = optimize,
+        .root_source_file = b.path("tests.zig"),
+    });
+    const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
+    generate_defconfig_for_tests.step.dependOn(&venv.step);
+    generate_defconfig_for_tests.has_side_effects = true;
+    tests.step.dependOn(&generate_defconfig_for_tests.step);
+    b.installArtifact(tests);
+    tests.linkLibC();
+    const config_module = b.addModule("test_config", .{
+        .root_source_file = b.path("config/tests/config.zig"),
+    });
+    tests.root_module.addImport("config", config_module);
+    const run_tests = b.addRunArtifact(tests);
+    run_tests_step.dependOn(&run_tests.step);
+    tests.root_module.addIncludePath(b.path("."));
+
     if (!has_config) {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
         return;
     }
-
-    const optimize = b.standardOptimizeOption(.{});
 
     if (maybe_config_exists) |config_exists| {
         if (config_exists.kind == .file) {
@@ -158,24 +177,4 @@ pub fn build(b: *std.Build) !void {
             std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
         }
     }
-
-    const tests = b.addTest(.{
-        .name = "yasos_tests",
-        .target = b.standardTargetOptions(.{}),
-        .optimize = optimize,
-        .root_source_file = b.path("tests.zig"),
-    });
-    const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
-    generate_defconfig_for_tests.has_side_effects = true;
-    tests.step.dependOn(&generate_defconfig_for_tests.step);
-    b.installArtifact(tests);
-    tests.linkLibC();
-    const config_module = b.addModule("test_config", .{
-        .root_source_file = b.path("config/tests/config.zig"),
-    });
-    tests.root_module.addImport("config", config_module);
-    const run_tests_step = b.step("test", "Run Yasos tests");
-    const run_tests = b.addRunArtifact(tests);
-    run_tests_step.dependOn(&run_tests.step);
-    tests.root_module.addIncludePath(b.path("."));
 }
