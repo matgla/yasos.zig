@@ -1,4 +1,4 @@
-CONTAINER_VERSION ?= v0.9
+CONTAINER_VERSION ?= v0.10
 
 start_env:
 	podman run --userns=keep-id -v $(shell pwd):/workspace -w /workspace -it matgla/yasos_zig_dev:${CONTAINER_VERSION}

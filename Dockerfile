@@ -29,3 +29,6 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
     && cd /opt/arm-none-eabi-gcc && tar -xf gcc.tar.xz --strip-components=1 \
     && rm /opt/zig/zig.tar.xz \
     && rm /opt/arm-none-eabi-gcc/gcc.tar.xz 
+
+COPY tests/smoke/requirements.txt /opt/smoke/requirements.txt 
+RUN pip3 install --break-system-packages -r /opt/smoke/requirements.txt
