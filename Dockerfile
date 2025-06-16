@@ -1,7 +1,41 @@
-FROM ubuntu:latest
+FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y wget software-properties-common
-RUN add-apt-repository -y ppa:ubuntu-toolchain-r/test
+ARG TARGETPLATFORM
+ARG ZIG_VERSION="0.15.0-dev.828+3ce8d19f7"
+ARG ARM_NONE_EABI_GCC_VERSION="14.2.rel1"
 
-RUN apt-get install -y gcc-14 g++-14 build-essential
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 140 --slave /usr/bin/g++ g++ /usr/bin/g++-14 --slave /usr/bin/gcov gcov /usr/bin/gcov-14 
+ENV PATH="/opt/zig:/opt/arm-none-eabi-gcc/bin:$PATH"
+
+RUN apt-get update -y
+RUN apt-get install -y make cmake
+RUN apt-get install -y python3 python3-pip python3-venv
+RUN apt-get install -y wget 
+RUN apt-get install -y git
+
+RUN mkdir -p /opt/zig
+RUN mkdir -p /opt/arm-none-eabi-gcc
+
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+    export ZIG_ARCH="x86_64"; \ 
+    elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+    export ZIG_ARCH="aarch64"; \
+    else \
+    echo "Unknown TARGET_PLATFORM: $TARGETPLATFORM"; \
+    exit 1; \
+    fi \
+    && wget "https://ziglang.org/builds/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -O /opt/zig/zig.tar.xz \
+    && wget "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_NONE_EABI_GCC_VERSION}/binrel/arm-gnu-toolchain-${ARM_NONE_EABI_GCC_VERSION}-${ZIG_ARCH}-arm-none-eabi.tar.xz" -O /opt/arm-none-eabi-gcc/gcc.tar.xz \
+    && cd /opt/zig && tar -xf zig.tar.xz --strip-components=1 \
+    && cd /opt/arm-none-eabi-gcc && tar -xf gcc.tar.xz --strip-components=1 \
+    && rm /opt/zig/zig.tar.xz \
+    && rm /opt/arm-none-eabi-gcc/gcc.tar.xz 
+
+COPY tests/smoke/requirements.txt /opt/smoke/requirements.txt 
+RUN pip3 install --break-system-packages -r /opt/smoke/requirements.txt
+
+RUN apt-get install -y genromfs
+
+RUN apt-get install -y libusb-1.0-0-dev libtool build-essential
+RUN apt-get install -y pkg-config
+RUN cd /opt && git clone https://github.com/raspberrypi/openocd.git
+RUN cd /opt/openocd && ./bootstrap && ./configure --disable-werror && make -j$(nproc) && make install
