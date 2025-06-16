@@ -1,7 +1,7 @@
 CONTAINER_VERSION ?= v0.11
 
 start_env:
-	podman run --device=/dev/ttyACM0 --userns=keep-id -v $(shell pwd):/workspace -w /workspace -it matgla/yasos_zig_dev:${CONTAINER_VERSION}
+	podman run --device=/dev/ttyACM0 --device=/dev/bus/usb --userns=keep-id -v $(shell pwd):/workspace -w /workspace -it matgla/yasos_zig_dev:${CONTAINER_VERSION}
 
 build_container:
 	podman manifest create -a matgla/yasos_zig_dev:${CONTAINER_VERSION}
