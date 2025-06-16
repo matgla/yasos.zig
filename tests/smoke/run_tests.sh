@@ -7,11 +7,9 @@ pytest -W error -s
 
 if [ $? -ne 0 ]; then
     echo "Tests failed"
-    deactivate
     cd `pwd`
     exit 1
 fi
 
-deactivate
 cd `pwd`
  
