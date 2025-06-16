@@ -66,19 +66,28 @@ pub const VirtualFileSystem = struct {
     fn create(ctx: *anyopaque, path: []const u8, mode: i32) ?IFile {
         const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
         const maybe_node = self.mount_points.find_longest_matching_point(path);
-        return maybe_node.point.filesystem.create(maybe_node.left, mode);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.create(node.left, mode);
+        }
+        return null;
     }
 
     fn mkdir(ctx: *anyopaque, path: []const u8, mode: i32) i32 {
         const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
         const maybe_node = self.mount_points.find_longest_matching_point(path);
-        return maybe_node.point.filesystem.mkdir(maybe_node.left, mode);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.mkdir(node.left, mode);
+        }
+        return -1;
     }
 
     fn remove(ctx: *anyopaque, path: []const u8) i32 {
         const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
         const maybe_node = self.mount_points.find_longest_matching_point(path);
-        return maybe_node.point.filesystem.remove(maybe_node.left);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.remove(node.left);
+        }
+        return -1;
     }
 
     fn name(_: *const anyopaque) []const u8 {
@@ -88,19 +97,29 @@ pub const VirtualFileSystem = struct {
     fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
         const maybe_node = self.mount_points.find_longest_matching_point(path);
-        return maybe_node.point.filesystem.traverse(maybe_node.left, callback, user_context);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.traverse(node.left, callback, user_context);
+        }
+        return -1;
     }
 
     fn get(ctx: *anyopaque, path: []const u8) ?IFile {
         const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
         const maybe_node = self.mount_points.find_longest_matching_point(path);
-        return maybe_node.point.filesystem.get(maybe_node.left);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.get(node.left);
+        }
+        return null;
     }
 
     fn has_path(ctx: *anyopaque, path: []const u8) bool {
         const self: *VirtualFileSystem = @ptrCast(@alignCast(ctx));
         const maybe_node = self.mount_points.find_longest_matching_point(path);
-        return maybe_node.point.filesystem.has_path(maybe_node.left);
+        if (maybe_node) |*node| {
+            // Check if the filesystem has the path
+            return node.point.filesystem.has_path(node.left);
+        }
+        return false;
     }
 };
 
