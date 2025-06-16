@@ -19,7 +19,6 @@
 //
 const std = @import("std");
 const hal = @import("yasos_hal");
-var cmake: ?[]const u8 = null;
 var gcc: ?[]const u8 = null;
 
 fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
@@ -73,17 +72,20 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
 }
 
 pub fn build(b: *std.Build) !void {
-    const clean = b.option(bool, "clean", "clean before configuration") orelse false;
+    const clean_step = b.step("clean", "Clean build artifacts");
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
+    // clean_step.dependOn(&b.addRemoveDirTree(b.path(b.install_path)).step);
+    if (@import("builtin").os.tag != .windows) {
+        clean_step.dependOn(&b.addRemoveDirTree(b.path("zig-cache")).step);
+        clean_step.dependOn(&b.addRemoveDirTree(b.path("config")).step);
+        clean_step.dependOn(&b.addRemoveDirTree(b.path("zig-out")).step);
+        clean_step.dependOn(&b.addRemoveDirTree(b.path("yasos_venv")).step);
+    }
+
     const venv = prepare_venv(b);
     const configure = configure_kconfig(b, "target", "menuconfig");
     const configure_defconfig = configure_kconfig(b, "target", "defconfig");
     const generate = generate_config(b, "config/target/.config", "config/target");
-
-    if (clean) {
-        std.fs.cwd().deleteTree("config") catch {};
-        std.fs.cwd().deleteFile(".config") catch {};
-    }
 
     configure.step.dependOn(&venv.step);
     configure_defconfig.step.dependOn(&venv.step);
