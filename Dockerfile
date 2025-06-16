@@ -34,3 +34,8 @@ COPY tests/smoke/requirements.txt /opt/smoke/requirements.txt
 RUN pip3 install --break-system-packages -r /opt/smoke/requirements.txt
 
 RUN apt-get install -y genromfs
+
+RUN apt-get install -y libusb-1.0-0-dev libtool build-essential
+RUN apt-get install -y pkg-config
+RUN cd /opt && git clone https://github.com/raspberrypi/openocd.git
+RUN cd /opt/openocd && ./bootstrap && ./configure --disable-werror && make -j$(nproc) && make install
