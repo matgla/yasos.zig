@@ -21,4 +21,4 @@ jobs:
       - name: Execute tests 
         shell: bash
         run: 
-          zig build tests --summary all
+          zig build test --summary all
