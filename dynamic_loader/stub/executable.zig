@@ -1,5 +1,5 @@
 //
-// cpu.zig
+// executable.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,26 +18,18 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const std = @import("std");
+const Module = @import("module.zig").Module;
 
-const clock = @cImport({
-    @cInclude("hardware/clocks.h");
-});
+pub const Executable = struct {
+    module: *Module,
 
-pub const Cpu = struct {
-    pub fn name() []const u8 {
-        return "HOST";
+    pub fn main(self: Executable, argv: [*c][*c]u8, argc: i32) error{MainNotExits}!i32 {
+        _ = self;
+        _ = argv;
+        _ = argc;
     }
 
-    pub fn frequency() u64 {
-        return 123000000;
-    }
-
-    pub fn number_of_cores() u8 {
-        return 4;
-    }
-
-    pub fn coreid() u8 {
-        return 1;
+    pub fn deinit(self: *Executable) void {
+        _ = self;
     }
 };

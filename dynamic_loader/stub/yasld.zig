@@ -1,5 +1,5 @@
 //
-// cpu.zig
+// yasld.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,26 +18,5 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const std = @import("std");
-
-const clock = @cImport({
-    @cInclude("hardware/clocks.h");
-});
-
-pub const Cpu = struct {
-    pub fn name() []const u8 {
-        return "HOST";
-    }
-
-    pub fn frequency() u64 {
-        return 123000000;
-    }
-
-    pub fn number_of_cores() u8 {
-        return 4;
-    }
-
-    pub fn coreid() u8 {
-        return 1;
-    }
-};
+pub const Executable = @import("executable.zig").Executable;
+pub const Module = @import("module.zig").Module;

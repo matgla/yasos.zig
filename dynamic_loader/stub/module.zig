@@ -1,5 +1,5 @@
 //
-// cpu.zig
+// module.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -20,24 +20,29 @@
 
 const std = @import("std");
 
-const clock = @cImport({
-    @cInclude("hardware/clocks.h");
-});
+pub const SymbolEntry = struct {
+    target_got_address: usize,
+    address: usize,
+};
 
-pub const Cpu = struct {
-    pub fn name() []const u8 {
-        return "HOST";
+pub const Module = struct {
+    allocator: std.mem.Allocator,
+    process_allocator: std.mem.Allocator,
+    xip: bool,
+
+    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
+        const module = try allocator.create(Module);
+        module.* = .{
+            .allocator = allocator,
+            .process_allocator = process_allocator,
+            .xip = xip,
+        };
+        return module;
     }
 
-    pub fn frequency() u64 {
-        return 123000000;
-    }
-
-    pub fn number_of_cores() u8 {
-        return 4;
-    }
-
-    pub fn coreid() u8 {
-        return 1;
+    pub fn find_symbol(self: *Module, name: []const u8) ?*SymbolEntry {
+        _ = self;
+        _ = name;
+        return null; // Placeholder for symbol lookup logic
     }
 };

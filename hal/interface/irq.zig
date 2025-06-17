@@ -35,7 +35,7 @@ pub fn Irq(comptime IrqImpl: anytype) type {
             IrqImpl.enable(irq);
         }
 
-        pub fn set_priority(_: Self, irq: IrqType, priority: usize) void {
+        pub fn set_priority(_: Self, irq: IrqType, priority: u32) void {
             IrqImpl.set_priority(irq, priority);
         }
 
