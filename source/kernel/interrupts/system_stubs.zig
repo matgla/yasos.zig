@@ -19,19 +19,19 @@
 //
 
 const std = @import("std");
-const log = &@import("../log/kernel_log.zig").kernel_log;
+const log = &@import("../../log/kernel_log.zig").kernel_log;
 
-const c = @import("../libc_imports.zig").c;
-const fs = @import("fs/vfs.zig");
-const IFile = @import("fs/ifile.zig").IFile;
-const systick = @import("interrupts/systick.zig");
-const time = @import("time.zig");
+const c = @import("../../libc_imports.zig").c;
+const fs = @import("../fs/vfs.zig");
+const IFile = @import("../fs/ifile.zig").IFile;
+const systick = @import("systick.zig");
+const time = @import("../time.zig");
 
 const config = @import("config");
 
-const process_manager = @import("process_manager.zig");
-const FileType = @import("fs/ifile.zig").FileType;
-const handlers = @import("interrupts/syscall_handlers.zig");
+const process_manager = @import("../process_manager.zig");
+const FileType = @import("../fs/ifile.zig").FileType;
+const handlers = @import("syscall_handlers.zig");
 
 pub export fn _exit(code: c_int) void {
     const maybe_process = process_manager.instance.get_current_process();

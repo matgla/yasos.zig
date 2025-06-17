@@ -31,25 +31,24 @@ const log = &@import("../../log/kernel_log.zig").kernel_log;
 const process_manager = @import("../process_manager.zig");
 
 const handlers = @import("syscall_handlers.zig");
+const arch = @import("arch");
 comptime {
     _ = @import("arch");
+    const config = @import("config");
+    if (config.cpu.uses_newlib) {
+        _ = @import("system_stubs.zig");
+    }
 }
 
 extern fn store_and_switch_to_next_task(lr: u32) void;
 
-pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) void {
-    const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
-    const result: i32 = result_or_error catch |err| {
-        c_result.*.err = @intFromError(err);
-        c_result.*.result = -1;
-        return;
-    };
-
-    c_result.*.result = result;
-    c_result.*.err = -1;
-}
-
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
+
+fn context_switch_handler(lr: usize) void {
+    if (process_manager.instance.scheduler.schedule_next()) {
+        store_and_switch_to_next_task(lr);
+    }
+}
 
 fn sys_unhandled_factory(comptime i: usize) type {
     return struct {
@@ -119,6 +118,31 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
+pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) void {
+    const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
+    const result: i32 = result_or_error catch |err| {
+        c_result.*.err = @intFromError(err);
+        c_result.*.result = -1;
+        return;
+    };
+
+    c_result.*.result = result;
+    c_result.*.err = -1;
+}
+
+pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque, lr: usize) void {
+    var arg_to_call = arg;
+    if (number == c.sys_vfork) {
+        const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(out));
+        const ctx: handlers.VForkContext = .{
+            .lr = lr,
+            .result = &c_result.*.result,
+        };
+        arg_to_call = @ptrCast(&ctx);
+    }
+    write_result(out, syscall_lookup_table[number](arg_to_call));
+}
+
 // can be called only from the user process, not from the kernel
 pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) void {
     var svc_arg: *const anyopaque = undefined;
@@ -132,4 +156,9 @@ pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) v
     }
 
     hal.irq.trigger_supervisor_call(number, svc_arg, svc_out);
+}
+
+pub fn init() void {
+    arch.irq_handlers.set_system_call_handler(system_call_handler);
+    arch.irq_handlers.set_context_switch_handler(context_switch_handler);
 }

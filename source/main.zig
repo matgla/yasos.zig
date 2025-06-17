@@ -58,6 +58,7 @@ const MmcDriver = @import("kernel/drivers/mmc/mmc_driver.zig").MmcDriver;
 
 const process_memory_pool = @import("kernel/process_memory_pool.zig");
 const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
+const system_call = @import("kernel/interrupts/system_call.zig");
 
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
@@ -243,6 +244,7 @@ pub export fn main() void {
     process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
         .manager = &process_manager.instance,
     });
+    system_call.init();
     spawn.root_process(&kernel_process, null, 1024 * 16) catch @panic("Can't spawn root process: ");
     process.init();
     while (true) {}

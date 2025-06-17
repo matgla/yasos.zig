@@ -18,35 +18,52 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+// const log = &@import("../../log/kernel_log.zig").kernel_log;
+// const log = @import("kernel_log");
 
 const arch = @import("assembly.zig");
 
+const c = @cImport({
+    @cInclude("source/sys/include/syscall.h");
+});
+
 export fn irq_hard_fault() void {
-    log.print("PANIC: Hard Fault occured!\n", .{});
+    // log.print("PANIC: Hard Fault occured!\n", .{});
     while (true) {
         asm volatile (
             \\ wfi
         );
     }
 }
+pub const VForkContext = extern struct {
+    lr: usize,
+    result: *volatile c.pid_t,
+};
 
-pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
-    var arg_to_call = arg;
-    if (number == c.sys_vfork) {
-        const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(out));
-        const ctx: handlers.VForkContext = .{
-            .lr = arch.get_lr(),
-            .result = &c_result.*.result,
-        };
-        arg_to_call = @ptrCast(&ctx);
+const ContextSwitchHandler = *const fn (lr: usize) void;
+const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque, lr: usize) void;
+
+var context_switch_handler: ?ContextSwitchHandler = null;
+var system_call_handler: ?SystemCallHandler = null;
+
+export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+    const lr: usize = arch.get_lr();
+    if (system_call_handler) |handler| {
+        handler(number, arg, out, lr);
     }
-    write_result(out, syscall_lookup_table[number](arg_to_call));
 }
 
 export fn irq_pendsv() void {
-    const lr: u32 = arch.get_lr();
-    if (process_manager.instance.scheduler.schedule_next()) {
-        store_and_switch_to_next_task(lr);
+    const lr: usize = arch.get_lr();
+    if (context_switch_handler) |handler| {
+        handler(lr);
     }
+}
+
+pub fn set_context_switch_handler(handler: ContextSwitchHandler) void {
+    context_switch_handler = handler;
+}
+
+pub fn set_system_call_handler(handler: SystemCallHandler) void {
+    system_call_handler = handler;
 }
