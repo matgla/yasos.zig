@@ -160,7 +160,6 @@ pub fn build(b: *std.Build) !void {
                 .config_file = @as([]const u8, config_path),
             });
             b.installArtifact(boardDep.artifact("yasos_kernel"));
-            boardDep.artifact("yasos_kernel").addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
             boardDep.artifact("yasos_kernel").addIncludePath(b.path("source/sys/include"));
             boardDep.artifact("yasos_kernel").addIncludePath(b.path("."));
 
@@ -172,6 +171,18 @@ pub fn build(b: *std.Build) !void {
 
             boardDep.artifact("yasos_kernel").root_module.addImport("yasld", yasld.module("yasld"));
             boardDep.artifact("yasos_kernel").root_module.addIncludePath(b.path("."));
+            const arch_module = b.addModule("arch", .{
+                .root_source_file = b.path(b.fmt("source/arch/{s}/arch.zig", .{config.cpu_arch})),
+            });
+
+            if (std.mem.eql(u8, config.cpu_arch, "armv6-m") || std.mem.eql(u8, config.cpu_arch, "armv8-m")) {
+                const arch_arm_m = b.addModule("arm_m", .{
+                    .root_source_file = b.path("source/arch/arm-m/arch.zig"),
+                });
+                arch_module.addImport("arm_m", arch_arm_m);
+            }
+            arch_module.addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
+            boardDep.artifact("yasos_kernel").root_module.addImport("arch", arch_module);
 
             _ = boardDep.module("board");
         } else {

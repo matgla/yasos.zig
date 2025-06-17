@@ -24,13 +24,16 @@ const c = @import("../libc_imports.zig").c;
 const log = &@import("../log/kernel_log.zig").kernel_log;
 
 const config = @import("config");
-const arch_process = @import("../arch/arch.zig").process;
+const arch_process = @import("arch").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
 const IFile = @import("fs/ifile.zig").IFile;
 const process_memory_pool = @import("process_memory_pool.zig");
 const ProcessPageAllocator = @import("malloc.zig").ProcessPageAllocator;
 const system_call = @import("interrupts/system_call.zig");
+const systick = @import("interrupts/systick.zig");
+
+const hal = @import("hal");
 
 var pid_counter: u32 = 0;
 
@@ -338,9 +341,20 @@ pub fn ProcessInterface(comptime implementation: anytype) type {
             return fd;
         }
 
-        pub fn sleep_for_us(self: *Self, us: u32) void {
+        pub fn sleep_for_us(self: *Self, us: u64) void {
+            const start = systick.get_system_ticks();
+            var elapsed: u64 = 0;
+            const ptr: *volatile u64 = &elapsed;
+            while (ptr.* < us / 1000) {
+                // context switch, we are waiting for condition
+                hal.irq.trigger(.pendsv);
+                ptr.* = systick.get_system_ticks() - start;
+            }
             _ = self;
-            _ = us;
+        }
+
+        pub fn sleep_for_ms(self: *Self, ms: u32) void {
+            self.sleep_for_us(@as(u64, @intCast(ms)) * 1000);
         }
     };
 }

@@ -25,7 +25,6 @@ const hal = @import("hal");
 const process_manager = @import("../process_manager.zig");
 
 var tick_counter: u64 = 0;
-const ticks_per_event = 1000;
 var last_time: u64 = 0;
 
 export fn irq_systick() void {

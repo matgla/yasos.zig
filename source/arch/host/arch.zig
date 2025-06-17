@@ -1,5 +1,5 @@
 //
-// time.zig
+// arch.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -20,21 +20,7 @@
 
 const std = @import("std");
 
-pub const Time = struct {
-    const Self = @This();
-    pub const SysTick = struct {
-        pub fn init(_: SysTick, ticks: u32) !void {
-            _ = ticks;
-        }
-        pub fn enable(_: SysTick) void {}
-        pub fn disable(_: SysTick) void {}
-    };
+const config = @import("config");
 
-    pub fn sleep_ms(ms: u64) void {
-        Time.sleep_us(ms * 1000);
-    }
-
-    pub fn sleep_us(us: u64) void {
-        std.Thread.sleep(u64(us) * 1000);
-    }
-};
+pub const process = @import("process.zig");
+pub const irq_handlers = @import("arm-m").irq_handlers;

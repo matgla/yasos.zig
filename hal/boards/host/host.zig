@@ -6,3 +6,8 @@ pub const uart = struct {
     pub const uart0 = hal.uart.Uart(std.posix.STDOUT_FILENO, .{}, hal.internal.Uart).create();
     pub const uart1 = hal.uart.Uart(std.posix.STDERR_FILENO, .{}, hal.internal.Uart).create();
 };
+
+// pub const mmc = struct {
+//     pub var mmc0 = hal.mmc.Mmc(
+//     }, hal.internal.Mmc).create();
+// };

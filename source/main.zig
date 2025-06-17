@@ -61,7 +61,7 @@ const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
 
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
-    _ = @import("kernel/system_stubs.zig");
+    _ = @import("arch");
 }
 
 fn initialize_board() void {
@@ -145,15 +145,15 @@ export fn kernel_process() void {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-    var mmc_driver = MmcDriver(&board.mmc.mmc0).new(malloc_allocator) catch |err| {
-        log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
-        return;
-    };
+    // var mmc_driver = MmcDriver(&board.mmc.mmc0).new(malloc_allocator) catch |err| {
+    //     log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
+    //     return;
+    // };
 
-    driverfs.append(mmc_driver.idriver()) catch |err| {
-        log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
-        return;
-    };
+    // driverfs.append(mmc_driver.idriver()) catch |err| {
+    //     log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
+    //     return;
+    // };
     driverfs.load_all() catch |err| {
         log.print("Can't load driver with error: {s}\n", .{@errorName(err)});
         return;
