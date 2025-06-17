@@ -205,6 +205,17 @@ pub const Loader = struct {
         // (see source/kernel/process/maps_file.zig). Keep them at debug level so
         // they don't pollute the UART — in particular so they cannot corrupt the
         // binary zmodem stream used for serial file uploads during testing.
+        // Concise one-line load summary at info level: this is the runtime
+        // base map needed to symbolize fault PCs against the on-disk ELFs
+        // (module .text/.data/.got bases). Correlate with the adjacent
+        // "yasld-bench ... pid=N" line in modules.zig to attach a pid.
+        log.info("loaded '{s}': .text=0x{x}(+0x{x}) .data=0x{x} .got=0x{x}", .{
+            module.name.?,
+            @intFromPtr(module.get_text().ptr),
+            module.get_text().len,
+            @intFromPtr(module.get_data().ptr),
+            @intFromPtr(module.get_got().ptr),
+        });
         log.debug(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
         log.debug(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
         log.debug(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });

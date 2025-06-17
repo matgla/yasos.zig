@@ -150,7 +150,12 @@ def main():
 
     # 1. fresh backing file, 2. FAT image w/ inputs, 3. splice into backing.
     Path(args.backing).unlink(missing_ok=True)
-    subprocess.run(["truncate", "-s", f"{args.ram_mb}M", args.backing], check=True)
+    fill = os.environ.get("QEMU_FILL")  # e.g. "ff"/"a5": pre-fill RAM w/ garbage to mimic HW uninit memory
+    if fill:
+        Path(args.backing).write_bytes(bytes([int(fill, 16)]) * (args.ram_mb * 1024 * 1024))
+        print(f">> pre-filled {args.ram_mb}M backing with 0x{fill}")
+    else:
+        subprocess.run(["truncate", "-s", f"{args.ram_mb}M", args.backing], check=True)
     build_image(args.img, puts, FATDISK_SIZE // 1024)
     splice_in(args.backing, args.img)
 

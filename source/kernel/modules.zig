@@ -41,7 +41,14 @@ const log = std.log.scoped(.loader);
 
 fn log_loader_timing(kind: []const u8, path: []const u8, pid: c.pid_t, start_us: u64) void {
     const elapsed_us = hal.time.get_time_us() - start_us;
-    log.err("yasld-bench {s} path={s} pid={d} us={d}", .{ kind, path, pid, elapsed_us });
+    // Include kernel-heap usage so an accumulating leak across the suite (the
+    // suspected "memory full" cause) is visible on every load, not only on
+    // release. A monotonically climbing kernel_used here is the smoking gun.
+    log.err("yasld-bench {s} path={s} pid={d} us={d} kernel_used={d} allocs={d}", .{
+        kind, path, pid, elapsed_us,
+        kernel.memory.heap.malloc.get_usage(),
+        kernel.memory.heap.malloc.get_counter(),
+    });
 }
 
 fn file_resolver(name: []const u8) ?*const anyopaque {

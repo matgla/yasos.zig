@@ -39,7 +39,7 @@ if BOARD_PIMORONI_PICO_PLUS2_DISCARD_IN_CONF
     default "0x10000000"
 
   config FLASH_MEMORY_SIZE
-    default "2MB"
+    default "16MB"
 
   config CONFIG_PSRAM_CS_PIN
     default 47
@@ -54,6 +54,13 @@ if BOARD_PIMORONI_PICO_PLUS2_DISCARD_IN_CONF
     default 8
 
   config CONFIG_PSRAM_MAX_FREQUENCY_HZ
+    # APS6404L spec ceiling (~133 MHz SCK). The previous 84 MHz cap worked
+    # around pagebreak=NONE, where QMI ran one linear burst across page
+    # boundaries toward the tCEM limit; QMI M1 timing now uses pagebreak=1024
+    # (external_memory.zig), which breaks bursts at the page boundary and keeps
+    # them in spec, so the cap is no longer needed. Note: at clkdiv = max(2,
+    # ceil(sysclk/this)), SCK == sysclk/2 == 75 MHz at the 150 MHz sysclk either
+    # way; this ceiling only raises SCK when the CPU is overclocked higher.
     default 133000000
 
   config CONFIG_PSRAM_CE_MAX_LOW_US

@@ -311,6 +311,9 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
             context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
+            // Safe, serialized point to flush the buffered kernel log to SD
+            // (no-op unless CONFIG_INSTRUMENTATION_LOG_TO_SD and data pending).
+            kernel.file_log.drain();
             return 0;
         }
     }
@@ -345,6 +348,8 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
                 process.record_tty_output(context.fd, data[0..@intCast(context.result.*)]);
             }
         }
+        // Safe, serialized point to flush the buffered kernel log to SD.
+        kernel.file_log.drain();
         return 0;
     }
     return -1;

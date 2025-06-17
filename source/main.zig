@@ -88,6 +88,13 @@ pub const std_options: std.Options = .{
     }, .{
         .scope = .@"mmc/sdio",
         .level = .debug,
+    }, .{
+        // Surface `release_executable: pid=.. kernel_used=.. alloc_count=..` so
+        // a kernel-heap leak that accumulates across the (no-reboot) suite —
+        // the suspected cause of tcc "memory full" on tiny inputs — shows up as
+        // a climbing kernel_used/alloc_count trend in the serial log.
+        .scope = .loader,
+        .level = .info,
     } },
 };
 
@@ -326,6 +333,13 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         try mount_filesystem(try allocate_filesystem(tmp_allocator, RamFs.InstanceType.init(tmp_allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
         try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
+
+        // Persist the kernel log to the SD card (only when /root is the real
+        // MMC-backed rootfs; on the volatile RamFs fallback we skip it to avoid
+        // growing the kernel heap without bound).
+        if (root_mounted) {
+            kernel.file_log.init();
+        }
 
         // Host-readable FAT block device (QEMU host-test target only). When the
         // guest runs under a host-mmap'd RAM the host pre-loads a FAT image into

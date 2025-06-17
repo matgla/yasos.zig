@@ -31,10 +31,15 @@
 # logs are collected into .cache/qemu_smoke_logs/ (analogous to the remote
 # runner's .cache/remote_smoke_logs/); cleared and repopulated every run.
 #
+# The GCC torture smoke tests (tcc_suite_test.py gcc_compile/gcc_execute) are
+# enabled by default; the gcc-testsuite submodule under libs/tinycc is fetched
+# (shallow) on first use. Disable with YASOS_SMOKE_ENABLE_GCC_TORTURE=0.
+#
 # Environment overrides (consumed by tests/smoke/framework/qemu.py):
 #   YASOS_QEMU_BIN, YASOS_QEMU_MACHINE, YASOS_QEMU_CPU,
 #   YASOS_QEMU_EXTRA_ARGS, YASOS_QEMU_BOOT_TIMEOUT
 #   YASOS_QEMU_OPTIMIZE   zig optimize mode for the build (default ReleaseFast)
+#   YASOS_SMOKE_ENABLE_GCC_TORTURE   default 1 here; set 0 to skip GCC torture
 #
 set -euo pipefail
 
@@ -59,7 +64,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-build) DO_BUILD=0; shift ;;
         --rebuild-rootfs) REBUILD_ROOTFS=1; shift ;;
-        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
         --) shift; while [ "$#" -gt 0 ]; do PYTEST_ARGS+=("$1"); shift; done ;;
         *) PYTEST_ARGS+=("$1"); shift ;;
     esac
@@ -100,6 +105,22 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 "$VENV/bin/pip" install --quiet --disable-pip-version-check \
     pyserial==3.5 pytest==8.4.0 pytest-rerunfailures==14.0 pytest-xdist==3.8.0
+
+# GCC torture smoke tests run by default; pass YASOS_SMOKE_ENABLE_GCC_TORTURE=0
+# to skip them. The test sources live in the gcc-testsuite submodule nested
+# inside libs/tinycc — fetch it (shallow) on first use. A user-provided
+# GCC_TORTURE_PATH points at an external checkout, so no fetch is needed then.
+export YASOS_SMOKE_ENABLE_GCC_TORTURE="${YASOS_SMOKE_ENABLE_GCC_TORTURE:-1}"
+case "$YASOS_SMOKE_ENABLE_GCC_TORTURE" in
+    1|true|yes|on)
+        GCC_TORTURE_DIR="$REPO_ROOT/libs/tinycc/tests/gcctestsuite/gcc-testsuite/gcc/testsuite/gcc.c-torture"
+        if [ -z "${GCC_TORTURE_PATH:-}" ] && [ ! -d "$GCC_TORTURE_DIR" ]; then
+            echo ">> Fetching gcc-testsuite submodule (first run, shallow clone)"
+            git -C "$REPO_ROOT/libs/tinycc" submodule update --init --depth 1 \
+                tests/gcctestsuite/gcc-testsuite
+        fi
+        ;;
+esac
 
 export YASOS_QEMU_KERNEL="$KERNEL"
 echo ">> Running smoke tests on QEMU ($(basename "$KERNEL"))"

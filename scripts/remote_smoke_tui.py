@@ -26,6 +26,8 @@ REMOTE_SMOKE_LOGS_DIR = REPO_ROOT / ".cache" / "remote_smoke_logs"
 KERNEL_ARTIFACT = REPO_ROOT / "zig-out" / "bin" / "yasos_kernel"
 ROOTFS_ARTIFACT = REPO_ROOT / "rootfs.img"
 ROOTFS_HASH_PATH = REPO_ROOT / ".cache" / "rootfs_source_hash"
+DEFCONFIG_HASH_PATH = REPO_ROOT / ".cache" / "defconfig_hash"
+GENERATED_CONFIG_PATH = REPO_ROOT / "config" / "target" / ".config"
 SMOKE_REQUIREMENTS = REPO_ROOT / "tests" / "smoke" / "requirements.txt"
 
 # Directories and files whose content determines whether rootfs needs rebuilding.
@@ -109,6 +111,36 @@ def _save_rootfs_hash(debug: bool) -> None:
     ROOTFS_HASH_PATH.write_text(_rootfs_sources_hash(debug) + "\n")
 
 
+def _defconfig_hash(defconfig_rel: str) -> str:
+    """Hash the active defconfig file (plus its path) so edits are detected."""
+    digest = hashlib.sha256()
+    digest.update(defconfig_rel.encode())
+    try:
+        digest.update((REPO_ROOT / defconfig_rel).read_bytes())
+    except OSError:
+        pass
+    return digest.hexdigest()
+
+
+def _defconfig_is_up_to_date(defconfig_rel: str) -> bool:
+    """True when the generated .config exists and was built from this defconfig.
+
+    Returns False whenever the defconfig content changed, the generated config
+    is missing, or we have no record of the last-built defconfig — any of which
+    must trigger a defconfig regeneration plus a full rebuild.
+    """
+    if not GENERATED_CONFIG_PATH.exists():
+        return False
+    if not DEFCONFIG_HASH_PATH.exists():
+        return False
+    return DEFCONFIG_HASH_PATH.read_text().strip() == _defconfig_hash(defconfig_rel)
+
+
+def _save_defconfig_hash(defconfig_rel: str) -> None:
+    DEFCONFIG_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DEFCONFIG_HASH_PATH.write_text(_defconfig_hash(defconfig_rel) + "\n")
+
+
 @dataclass(frozen=True)
 class BoardProfile:
     key: str
@@ -139,7 +171,7 @@ BOARD_PROFILES = {
 }
 
 OPTIMIZE_OPTIONS = ["ReleaseFast", "ReleaseSafe", "Debug", "ReleaseSmall"]
-SMOKE_TCC_OPT_LEVEL_OPTIONS = ["-O0", "-O1"]
+SMOKE_TCC_OPT_LEVEL_OPTIONS = ["-O0", "-O1", "-O2"]
 
 DEFAULT_CONFIG = {
     "board": "pimoroni_pico_plus2_and_vga",
@@ -967,6 +999,9 @@ def build_local_artifacts(
             ],
             cwd=REPO_ROOT,
         )
+        # Record the defconfig we just regenerated from so the next run can
+        # detect edits and force another full rebuild.
+        _save_defconfig_hash(board.defconfig)
     if config.get("profile"):
         if _set_kconfig_option("CONFIG_INSTRUMENTATION_PERF_PROFILING"):
             print("Enabled CONFIG_INSTRUMENTATION_PERF_PROFILING for profiling.")
@@ -1252,7 +1287,7 @@ usb_power_reset() {
 openocd_reset_halt() {
     # Catch the CPU before it runs bad firmware after a power cycle.
     # Try normal reset halt first; if that fails, use rescue DP.
-    if openocd -f "$interface_cfg" -f "$target_cfg" \
+    if openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \
         -c "adapter speed $adapter_speed" \
         -c "init" -c "reset halt" -c "exit" 2>/dev/null; then
         return 0
@@ -1272,6 +1307,25 @@ openocd_rescue_reset() {
     fi
     # After rescue, the chip is halted. Give it a moment.
     sleep 1
+    return 0
+}
+
+openocd_mass_erase() {
+    # Nuclear recovery for a wedged chip. Rescue-halt the core (so no bad
+    # firmware is running), then erase ALL of flash. After this there is no
+    # auto-running image left to re-wedge the QSPI into Quad I/O mode on the
+    # next boot, so the following program+verify starts from a clean slate.
+    # Erases the rootfs too, so callers must reflash BOTH kernel and rootfs.
+    openocd_rescue_reset || true
+    echo "Mass-erasing flash to recover wedged target..." >&2
+    if ! openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \
+        -c "adapter speed 1000" \
+        -c "init" -c "reset halt" \
+        -c "flash erase_sector 0 0 last" \
+        -c "exit" 2>&1; then
+        echo "mass-erase failed" >&2
+        return 1
+    fi
     return 0
 }
 
@@ -1303,35 +1357,53 @@ if (( flash_kernel || flash_rootfs )); then
     # overclock firmware — avoids CRC checksum mismatches during verify.
     openocd_rescue_reset 2>/dev/null || true
 
-    openocd_cmd=(
-        openocd
-        -f "$interface_cfg"
-        -f "$target_cfg"
-        -c "adapter speed $adapter_speed"
-        -c "init"
-        -c "reset halt"
-    )
-    if (( flash_rootfs )); then
-        openocd_cmd+=( -c "program $remote_rootfs $rootfs_address" )
-    fi
-    if (( flash_kernel )); then
-        openocd_cmd+=( -c "program $remote_kernel verify" )
-    fi
-    openocd_cmd+=( -c "reset run" -c "exit" )
-
     flash_ok=0
-    for flash_attempt in 1 2 3; do
+    # Programming bursts a lot of CMSIS-DAP traffic; the configured speed (often
+    # 20000 kHz, fine for interactive debug) desyncs the probe under that load
+    # ("CMSIS-DAP command mismatch"). Cap the FIRST program attempt at 8000 kHz;
+    # on any failure drop to 4000 kHz (then lower) — a wedged QSPI / marginal SWD
+    # link flashes far more reliably slow.
+    flash_speed=$adapter_speed
+    if (( flash_speed > 8000 )); then
+        flash_speed=8000
+    fi
+    for flash_attempt in 1 2 3 4; do
+        openocd_cmd=(
+            openocd
+            -c "set USE_CORE 0"
+            -f "$interface_cfg"
+            -f "$target_cfg"
+            -c "adapter speed $flash_speed"
+            -c "init"
+            -c "reset halt"
+        )
+        if (( flash_rootfs )); then
+            openocd_cmd+=( -c "program $remote_rootfs $rootfs_address" )
+        fi
+        if (( flash_kernel )); then
+            openocd_cmd+=( -c "program $remote_kernel verify" )
+        fi
+        openocd_cmd+=( -c "reset run" -c "exit" )
+
         if "${openocd_cmd[@]}"; then
             flash_ok=1
             break
         fi
-        echo "Flash attempt $flash_attempt failed, resetting target and retrying..." >&2
-        if (( flash_attempt == 1 )); then
-            # First retry: rescue DP clears double-fault lockups quickly
-            echo "Trying rescue DP reset..." >&2
-            openocd_rescue_reset
-        elif (( flash_attempt == 2 )); then
-            # Last retry: full USB power-cycle to recover from any state
+
+        # Reduce adapter speed for the next attempt (floor 1000 kHz).
+        if (( flash_speed > 4000 )); then
+            flash_speed=4000
+        elif (( flash_speed > 2000 )); then
+            flash_speed=2000
+        else
+            flash_speed=1000
+        fi
+        echo "Flash attempt $flash_attempt failed; rescuing target and retrying at ${flash_speed}kHz..." >&2
+        # Always run the rescue DP script to clear QSPI Quad I/O / double-fault
+        # lockups before retrying.
+        openocd_rescue_reset || true
+        # From the 2nd failure on, escalate to a full USB power-cycle.
+        if (( flash_attempt >= 2 )); then
             if usb_power_reset; then
                 echo "USB power-cycle complete, halting target..." >&2
                 openocd_reset_halt || openocd_rescue_reset
@@ -1340,9 +1412,28 @@ if (( flash_kernel || flash_rootfs )); then
                 openocd_rescue_reset
             fi
         fi
+        # LAST-DITCH only before the final retry: mass-erase flash. This wipes
+        # the whole flash chip
+        # (~2 min at low SWD speed) and forces a full kernel+rootfs reflash, so
+        # it must NOT run on transient link glitches (CMSIS-DAP command mismatch
+        # / USB drops) — doing so amplifies a glitch into an erased, unbootable
+        # board. Only reach for it after rescue-DP + speed backoff + USB
+        # power-cycle have all failed, i.e. a genuinely wedged auto-running image.
+        if (( flash_attempt >= 3 && flash_attempt < 4 )); then
+            if openocd_mass_erase; then
+                flash_kernel=1
+                if [[ -n "$remote_rootfs" ]]; then
+                    flash_rootfs=1
+                else
+                    echo "Mass erase wiped rootfs, but this run has no rootfs artifact to restore." >&2
+                    echo "Re-run with a full flash (--force/--force-flash), not --force-kernel-flash." >&2
+                    exit 1
+                fi
+            fi
+        fi
     done
     if (( ! flash_ok )); then
-        echo "ERROR: flashing failed after 3 attempts" >&2
+        echo "ERROR: flashing failed after 4 attempts" >&2
         exit 1
     fi
 
@@ -1563,6 +1654,79 @@ openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -
     run_command(cmd, input_text=remote_script)
 
 
+def run_remote_rescue(config: dict[str, Any]) -> None:
+    """Force-recover a wedged RP2350 over the rescue debug port.
+
+    For when ordinary flashing keeps failing: connect via the rescue DP (works
+    even while the core is stuck running bad firmware / QSPI is wedged in Quad
+    I/O mode), halt, then mass-erase all of flash. After this no auto-running
+    image survives to re-wedge the QSPI, so a subsequent --force / --force-flash
+    starts from a clean slate. The chip is left halted and erased; this wipes
+    BOTH kernel and rootfs, so reflash both afterwards.
+    """
+    board = BOARD_PROFILES[config["board"]]
+    remote_script = """set -euo pipefail
+remote_repo=$1
+interface_cfg=$2
+target_cfg=$3
+
+cd "$remote_repo"
+
+echo "Rescue DP reset (force-halt the core)..." >&2
+openocd -f "$interface_cfg" -f target/rp2350-rescue.cfg \
+    -c "adapter speed 5000" -c "init" -c "exit" 2>&1 || true
+sleep 1
+
+echo "Mass-erasing flash at 1000 kHz (slow = reliable on a wedged QSPI)..." >&2
+openocd -f "$interface_cfg" -f "$target_cfg" \
+    -c "adapter speed 1000" \
+    -c "init" -c "reset halt" \
+    -c "flash erase_sector 0 0 last" \
+    -c "exit"
+
+echo "Flash erased; target halted. Reflash with: remote_smoke_tui.py --force" >&2
+"""
+    cmd = ssh_base(config) + [
+        "bash",
+        "-s",
+        "--",
+        str(config["remote_repo_path"]),
+        board.interface_cfg,
+        board.target_cfg,
+    ]
+    run_command(cmd, input_text=remote_script)
+
+
+def run_remote_connect(config: dict[str, Any]) -> None:
+    """Open an interactive serial console to the target over SSH.
+
+    No build, flash, or reset — just attach to the board's UART so the user can
+    drive the shell. Uses pyserial's miniterm (already a remote dependency) over
+    an SSH-allocated TTY. Exit the console with Ctrl-].
+    """
+    serial_device = str(config.get("serial_device", "")).strip()
+    baud = "921600"
+    script = f"""set -euo pipefail
+serial_device={shlex.quote(serial_device)}
+baud={shlex.quote(baud)}
+if [[ -z "$serial_device" ]]; then
+    serial_device=$(python3 -c "
+import serial.tools.list_ports
+for p in serial.tools.list_ports.comports(include_links=False):
+    print(p.device)
+    break
+" 2>/dev/null || true)
+fi
+if [[ -z "$serial_device" ]]; then
+    echo 'ERROR: No serial device found. Set serial_device in the runner config.' >&2
+    exit 1
+fi
+echo "Connecting to $serial_device @ ${{baud}} baud. Exit with Ctrl-]" >&2
+exec python3 -m serial.tools.miniterm --raw "$serial_device" "$baud"
+"""
+    run_remote_tty_script(config, script)
+
+
 def run_remote_power_reset(config: dict[str, Any]) -> None:
     uhubctl_hub = str(config.get("uhubctl_hub", "")).strip()
     uhubctl_port = str(config.get("uhubctl_port", "")).strip()
@@ -1725,7 +1889,7 @@ def run_remote_gdb(config: dict[str, Any], remote_kernel: str, gdb_bin: str, res
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
     local_repo_path = REPO_ROOT.as_posix()
-    openocd_init = 'openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init"'
+    openocd_init = 'openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init"'
     if reset_before_connect:
         openocd_init += ' -c "reset halt"'
     remote_script = f"""set -euo pipefail
@@ -1785,7 +1949,7 @@ if [[ "$ready" != "1" ]]; then
 fi
 
 gdb_args=(
-    "$gdb_bin" "$remote_kernel"
+    "$gdb_bin" -nx "$remote_kernel"
     -ex "source scripts/yasld_gdb.py"
     -ex "directory $remote_repo"
 )
@@ -1923,7 +2087,7 @@ openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \\
 sleep 1
 
 # -- reset HALT with the GDB server left running (target stopped at reset) --
-openocd -f "$interface_cfg" -f "$target_cfg" \\
+openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \\
     -c "adapter speed $adapter_speed" \\
     -c "init" \\
     -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
@@ -1967,11 +2131,11 @@ echo "UART log: $UART_LOG"
 python3 "$SERIAL_PY" "$serial_device" "$target_command" "$UART_LOG" &
 serial_pid=$!
 
-echo "Starting GDB (live attach). The script arms breakpoints, then `continue`."
+echo 'Starting GDB (live attach). The script arms breakpoints, then continue.'
 echo "After a hit, run: yasld-load $UART_LOG   to symbolize."
 
 gdb_args=(
-    "$gdb_bin" "$remote_kernel"
+    "$gdb_bin" -nx "$remote_kernel"
     -ex "source scripts/yasld_gdb.py"
     -ex "directory $remote_repo"
     -ex "target extended-remote :3333"
@@ -2217,7 +2381,7 @@ echo "Phase 2: Resetting target (halt) and starting GDB..."
 if [[ "${{YASOS_GDB_POSTMORTEM:-0}}" == "1" ]]; then
   # Post-mortem: halt the still-running (panic-looping) board WITHOUT reset, so
   # PSRAM (heap/stack) stays valid for inspection.
-  openocd -f "$interface_cfg" -f "$target_cfg" \\
+  openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \\
       -c "adapter speed $adapter_speed" \\
       -c "init" \\
       -c "halt" >/tmp/yasos-openocd.log 2>&1 &
@@ -2225,7 +2389,7 @@ else
   openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \\
       -c "adapter speed 5000" -c "init" -c "exit" >/tmp/yasos-openocd-rescue.log 2>&1 || true
   sleep 1
-  openocd -f "$interface_cfg" -f "$target_cfg" \\
+  openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \\
       -c "adapter speed $adapter_speed" \\
       -c "init" \\
       -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
@@ -2270,7 +2434,7 @@ echo "UART log: $UART_LOG"
 
 # Build GDB command with yasld-load from captured log
 gdb_args=(
-    "$gdb_bin" "$remote_kernel"
+    "$gdb_bin" -nx "$remote_kernel"
     -ex "source scripts/yasld_gdb.py"
     -ex "directory $remote_repo"
     -ex "target extended-remote :3333"
@@ -2369,6 +2533,10 @@ def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namesp
     elif args.tests:
         runtime_config["pytest_args"] = " ".join(shlex.quote(test) for test in args.tests)
 
+    if getattr(args, "keyword", None):
+        existing = str(runtime_config.get("pytest_args", "")).strip()
+        runtime_config["pytest_args"] = f"{existing} -k {shlex.quote(args.keyword)}".strip()
+
     if args.log_cli_level:
         existing = str(runtime_config.get("pytest_args", "")).strip()
         runtime_config["pytest_args"] = f"{existing} --log-cli-level={shlex.quote(args.log_cli_level)}"
@@ -2391,15 +2559,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gdb", action="store_true", help="Build locally, sync debug artifacts to the remote repository, then start an interactive remote GDB attach session over SSH without flashing. Combine with --reset to reset-halt before attaching.")
     parser.add_argument("--flash-only", action="store_true", help="Upload and flash artifacts on the remote host, then stop without running pytest.")
     parser.add_argument("--reset", action="store_true", help="Reset the configured target through OpenOCD on the remote host before exiting, or reset-halt before attaching when combined with --gdb.")
+    parser.add_argument("--rescue", action="store_true", help="Force-recover a wedged RP2350: connect via the rescue debug port, halt, and mass-erase all flash so no auto-running image can re-wedge the QSPI. Use when flashing keeps failing. Wipes kernel AND rootfs; reflash both with --force afterwards.")
+    parser.add_argument("--connect", action="store_true", help="Open an interactive serial console to the target over SSH (no build, flash, or reset). Exit the console with Ctrl-].")
     parser.add_argument("--power-reset", nargs="?", const="auto", default=None, metavar="HUB", help="Power-cycle the target via uhubctl on the remote host. Pass 'auto' (default) to detect the hub from the debug probe, or a hub path like '1-1'. Useful when the target is hung and OpenOCD cannot connect.")
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
     parser.add_argument("--rerun-failed", action="store_true", help="Run only tests that failed in the previous remote pytest run by passing --lf to pytest. If no last-failed cache exists on the remote host, runs no tests instead of the full suite.")
     parser.add_argument("--with-gcc-torture", dest="with_gcc_torture", action="store_true", default=None, help="Enable GCC torture smoke tests for this run. Also syncs libs/tinycc/tests/gcctestsuite and exports YASOS_SMOKE_ENABLE_GCC_TORTURE=1 remotely.")
-    parser.add_argument("--smoke-tcc-opt-level", choices=SMOKE_TCC_OPT_LEVEL_OPTIONS, help="Select the GCC-torture optimization level used by smoke tests. Keeps remote smoke on one opt layer even though TinyCC's native test matrix runs both -O0 and -O1.")
+    parser.add_argument("--smoke-tcc-opt-level", choices=SMOKE_TCC_OPT_LEVEL_OPTIONS, help="Select the GCC-torture optimization level used by smoke tests. Keeps remote smoke on one opt layer even though TinyCC's native test matrix runs -O0, -O1 and -O2.")
     parser.add_argument("--gcc-test-suite-only", action="store_true", help="Run only GCC torture tests. Implies --with-gcc-torture and filters pytest to -m gcc_torture.")
     parser.add_argument("--extra-tcc-cflags", help="Extra CFLAGS passed to every TCC compilation during smoke tests. Example: --extra-tcc-cflags='-O1'.")
     parser.add_argument("--pytest-args", help="Override cached pytest arguments for this run only. Example: --pytest-args 'tests/smoke -k shell_test'.")
     parser.add_argument("--tests", nargs="+", help="Run an explicit list of pytest paths or nodeids for this run only.")
+    parser.add_argument("-k", dest="keyword", metavar="EXPRESSION", help="Pytest -k keyword expression to filter tests for this run, like run_qemu_smoke.sh. Appended to the effective pytest args, so it composes with --tests and --pytest-args. Example: -k 00_assignment.")
     parser.add_argument("--gdb-debug", action="store_true", help="Automated GDB debug: reset target, run a command via serial, capture yasld log, reset-halt, start GDB with symbols loaded. Requires --cmd.")
     parser.add_argument("--cmd", help="Target command to execute over serial before GDB attach (used with --gdb-debug). Example: --cmd 'tcc 15_recursion.c'")
     parser.add_argument("--gdb-script", help="Path to a GDB script file to source after connecting and loading symbols (used with --gdb-debug).")
@@ -2409,7 +2580,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-flash", action="store_true", help="Upload and flash existing kernel/rootfs artifacts without rebuilding. Forces reflash even if remote hashes match.")
     parser.add_argument("--force-kernel-flash", action="store_true", help="Upload and flash only the kernel artifact without rebuilding. Skips rootfs entirely.")
     parser.add_argument("--list-boards", action="store_true", help="Print supported board identifiers and exit.")
-    parser.add_argument("--list-tests", action="store_true", help="Print available pytest nodeids for the smoke suite and exit. Honors --tests, --pytest-args, and --with-gcc-torture.")
+    parser.add_argument("--list-tests", action="store_true", help="Print available pytest nodeids for the smoke suite and exit. Honors --tests, --pytest-args, -k, and --with-gcc-torture.")
     return parser.parse_args()
 
 
@@ -2452,6 +2623,25 @@ def main() -> int:
             config = validate_config(cached)
             save_cache(config)
 
+        if args.connect:
+            print("Opening interactive serial console to the target (Ctrl-] to exit).")
+            run_remote_connect(config)
+            return 0
+
+        # A changed defconfig must regenerate config/target/.config AND force a
+        # full rebuild — otherwise the build silently reuses a stale generated
+        # config (e.g. an old CPU clock) and the flashed firmware does not match
+        # the defconfig that was edited.
+        board = BOARD_PROFILES[config["board"]]
+        if not _defconfig_is_up_to_date(board.defconfig):
+            if not apply_defconfig or not args.force:
+                print(
+                    f"defconfig {board.defconfig} changed since last build "
+                    "(or no record) — regenerating .config and forcing a full rebuild."
+                )
+            apply_defconfig = True
+            args.force = True
+
         runtime_config = apply_runtime_pytest_overrides(config, args)
         runtime_config["remote_repo_path"] = prepare_remote_repo_path(config)
 
@@ -2461,6 +2651,13 @@ def main() -> int:
             print(f"Running remote USB power-cycle reset (hub={hub_override}).")
             run_remote_power_reset(runtime_config)
             print("Remote power-cycle reset completed successfully.")
+            return 0
+
+        if args.rescue:
+            print("Running RP2350 rescue: rescue-DP halt + flash mass-erase.")
+            run_remote_rescue(runtime_config)
+            print("Rescue completed. Flash erased — reflash both kernel and "
+                  "rootfs with --force.")
             return 0
 
         if args.reset and not args.gdb:

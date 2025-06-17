@@ -147,6 +147,10 @@ class QemuTarget:
         self._launch_qemu()
         return self._open_serial()
 
+    def is_alive(self) -> bool:
+        """True while the qemu process is running (its PTY is usable)."""
+        return self.proc is not None and self.proc.poll() is None
+
     def reset(self) -> serial.Serial:
         """Reboot the target by relaunching qemu; returns a fresh serial."""
         self.stop()

@@ -47,17 +47,19 @@ double ldexp(double x, int exp) {
   if (x == 0.0 || exp == 0)
     return x;
   
-  // Use exponent manipulation for correct IEEE 754 behavior
-  // ldexp(x, n) = x * 2^n
-  
-  // Split exp into manageable chunks to avoid overflow
+  // ldexp(x, n) = x * 2^n, applied in chunks of exact powers of two.
+  // The chunk must satisfy 1L << step within a 32-bit long: the previous
+  // cap of 1023 made `1L << 53` undefined (long is 32-bit here), so
+  // ldexp(1.0, 53) returned 0 — which broke tcc's hex-float literal
+  // parsing on target (-0x1.0p53 became -0.0, gcc-torture ieee/pr28634
+  // looped forever).
   while (exp > 0) {
-    int step = (exp > 1023) ? 1023 : exp;
+    int step = (exp > 30) ? 30 : exp;
     x *= (double)(1L << step);
     exp -= step;
   }
   while (exp < 0) {
-    int step = (exp < -1023) ? -1023 : exp;
+    int step = (exp < -30) ? -30 : exp;
     x /= (double)(1L << (-step));
     exp -= step;
   }

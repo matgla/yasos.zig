@@ -143,8 +143,14 @@ def pytest_runtest_teardown(item):
     if session is None:
         return
     try:
-        commands = item.stash.get(test_command_hooks_key, {"setup": (), "teardown": ()})
-        _run_target_commands(session, commands["teardown"])
+        if Session.target_crashed:
+            # Board is wedged in a panic; running teardown commands on it would
+            # just time out. Reboot and pull the persisted kernel logs off the
+            # SD card into this test's log instead.
+            session.collect_crash_logs()
+        else:
+            commands = item.stash.get(test_command_hooks_key, {"setup": (), "teardown": ()})
+            _run_target_commands(session, commands["teardown"])
     finally:
         session.close()
 

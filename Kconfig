@@ -111,6 +111,20 @@ menu "Logging & Instrumentation"
       and exposes a sys_perf_dump syscall to retrieve the results.
       TCC will also emit a detailed bench breakdown when this is active.
 
+  config CONFIG_INSTRUMENTATION_LOG_TO_SD
+    prompt "Mirror kernel log to SD card (/root/logs)"
+    def_bool "false"
+    help
+      Mirror every kernel log line to /root/logs/kernel.log on the SD card
+      (rotating the previous boot to kernel.prev.log), in addition to the
+      serial console. Only takes effect when /root is the MMC-backed rootfs.
+
+      EXPERIMENTAL / may be unstable: the mirror writes synchronously from the
+      logging context, and the RP2350 SDIO driver (PIO+DMA, non-reentrant) can
+      bus-fault when driven from arbitrary log contexts (e.g. the dynamic
+      loader). Leave disabled unless you are actively debugging and accept the
+      risk; the serial console captures the same lines safely.
+
   choice "Log level"
     prompt "Log level"
     config CONFIG_INSTRUMENTATION_LOG_ERROR

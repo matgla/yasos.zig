@@ -87,13 +87,20 @@ store_no_fpu:
 .global store_and_switch_to_next_task
 .thumb_func
 store_and_switch_to_next_task:
-  push {r4, lr}
+  // Use r1 (not r4) as the stack-alignment filler for the saved lr. r4 is a
+  // callee-saved register: switch_to_next_task -> arm_load_registers_from_stack
+  // loads the INCOMING task's r4-r11, so popping a saved r4 here would clobber
+  // the new task's r4 with the outgoing task's value (it then resumes with the
+  // wrong r4). r1 is caller-saved and is reloaded from the incoming task's
+  // hardware exception frame when the caller does `bx r0`, so clobbering it is
+  // harmless; r0 (the incoming EXC_RETURN) is preserved for that `bx r0`.
+  push {r1, lr}
   // let's check if fpu is used by current task
   push {r0, r1}
   bl arch_store_registers_on_stack
   pop {r0, r1}
   bl switch_to_next_task
-  pop {r4, pc}
+  pop {r1, pc}
 
 .global dispatch_syscall
 .thumb_func

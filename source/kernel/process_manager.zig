@@ -549,6 +549,13 @@ export fn get_stack_bottom() *const u8 {
     return instance.core[hal.cpu.coreid()].get_stack_bottom();
 }
 
+// Read directly from `core` without locking: this is called from the HardFault
+// handler where the system is already wedged and taking the context-switch lock
+// would be unsafe.
+export fn get_current_pid() c.pid_t {
+    return instance.core[hal.cpu.coreid()].pid;
+}
+
 export fn get_stack_top() *const u8 {
     return instance.core[hal.cpu.coreid()].get_stack_top();
 }

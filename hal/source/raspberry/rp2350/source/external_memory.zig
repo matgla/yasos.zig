@@ -124,6 +124,12 @@ pub const Qmi = extern struct {
 
 const qmi: *volatile Qmi = @ptrFromInt(0x400d0000);
 
+// Uncached, translated XIP window for chip-select 1 (PSRAM). Offset 0x1000000
+// past XIP_NOCACHE_NOALLOC_BASE (0x14000000) skips the 16 MB CS0 (flash)
+// aperture. Accesses here bypass the XIP cache, so reads exercise the real
+// PSRAM read pipeline — essential for rxdelay calibration to be meaningful.
+const psram_nocache_base: usize = 0x15000000;
+
 const PsramCommands = struct {
     const QuadEnable: u32 = 0x35;
     const QuadEnd: u32 = 0xf5;
@@ -173,9 +179,94 @@ fn qmi_configure_timings() void {
         .select_hold = 3,
         .select_setup = 0,
         ._reserved1 = 0,
-        .pagebreak = c.QMI_M1_TIMING_PAGEBREAK_VALUE_NONE,
+        // Force CE to deassert at every 1024-byte page (matches Pimoroni's
+        // reference PSRAM driver). With NONE, a single CE-low QMI burst runs
+        // linearly across APS6404L page boundaries toward the tCEM limit, which
+        // caps the reliable SCK at ~84 MHz and produces intermittent single-bit
+        // read corruption above that (see CONFIG_PSRAM_MAX_FREQUENCY_HZ note).
+        // Breaking at the page boundary respects tCEM and resets the read
+        // pipeline, allowing a higher SCK to be re-tried via rxdelay tuning.
+        .pagebreak = c.QMI_M1_TIMING_PAGEBREAK_VALUE_1024,
         .cooldown = 1,
     });
+}
+
+// Maximum value of the 3-bit rxdelay field in QMI_M1_TIMING.
+const psram_rxdelay_max: u8 = 7;
+
+fn qmi_set_rxdelay(rxdelay: u3) void {
+    // Read-modify-write so the rest of the calibrated timing word is preserved.
+    qmi.*.m[1].timing.update(.{ .rxdelay = rxdelay });
+    // Flush the QMI read pipeline so the next access samples with the new delay.
+    qmi_dummy_read();
+}
+
+// Write a wrapping-LCG pattern over an uncached PSRAM region and read it back.
+// Two complementary seeds toggle every data line in both directions, stressing
+// the rxdelay sample point. Returns true only if every byte read back matches.
+fn qmi_rxdelay_probe() bool {
+    // 8 KiB crosses several 1024-byte page boundaries (the pagebreak unit) while
+    // staying fast enough to sweep all eight delays during boot.
+    const probe_len: u32 = 8 * 1024;
+    const data = slicify(@as([*]volatile u8, @ptrFromInt(psram_nocache_base)), probe_len);
+    const seeds = [_]u8{ 0xa5, 0x5a };
+    for (seeds) |seed| {
+        var v: u8 = seed;
+        for (data) |*i| {
+            i.* = v;
+            v = v *% 31 +% 17;
+        }
+        v = seed;
+        for (data) |*i| {
+            const expected = v;
+            v = v *% 31 +% 17;
+            if (i.* != expected) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Sweep every rxdelay value, find the widest contiguous window that reads back
+// cleanly, and park rxdelay in the centre of that window for maximum setup/hold
+// margin. This makes the PSRAM interface self-tune to whatever system clock the
+// board is actually running at (e.g. 618 MHz overclock) instead of relying on a
+// fixed frequency-threshold guess. Leaves the configured default untouched if
+// nothing passes, so a failed sweep degrades to the previous behaviour.
+fn qmi_calibrate_rxdelay() void {
+    var best_start: i32 = -1;
+    var best_len: u32 = 0;
+    var run_start: i32 = -1;
+
+    var d: u8 = 0;
+    while (d <= psram_rxdelay_max) : (d += 1) {
+        qmi_set_rxdelay(@intCast(d));
+        const ok = qmi_rxdelay_probe();
+        log.debug("PSRAM rxdelay {d}: {s}", .{ d, if (ok) "pass" else "fail" });
+        if (ok) {
+            if (run_start < 0) run_start = @intCast(d);
+            const run_len = d - @as(u8, @intCast(run_start)) + 1;
+            if (run_len > best_len) {
+                best_len = run_len;
+                best_start = run_start;
+            }
+        } else {
+            run_start = -1;
+        }
+    }
+
+    if (best_len == 0) {
+        log.err("PSRAM rxdelay calibration failed, keeping configured default", .{});
+        // Restore the configured default that the sweep last overwrote.
+        qmi_configure_timings();
+        return;
+    }
+
+    const start: u32 = @intCast(best_start);
+    const chosen: u3 = @intCast(start + (best_len - 1) / 2);
+    log.info("PSRAM rxdelay calibrated: window [{d}..{d}], chosen {d}", .{ start, start + best_len - 1, chosen });
+    qmi_set_rxdelay(chosen);
 }
 
 fn qmi_configure_commands() void {
@@ -392,7 +483,11 @@ pub const ExternalMemory = struct {
             qmi_configure_commands();
             qmi_configure_timings();
             qmi_dummy_read();
-            const addr: *volatile u32 = @ptrFromInt(0x15000000);
+            // Auto-tune the read sample point for the current system clock; the
+            // fixed rxdelay from qmi_configure_timings() only holds at stock
+            // speeds and corrupts reads once the core is overclocked.
+            qmi_calibrate_rxdelay();
+            const addr: *volatile u32 = @ptrFromInt(psram_nocache_base);
             addr.* = 0x12345678;
             if (addr.* != 0x12345678) {
                 self._initialized = false;

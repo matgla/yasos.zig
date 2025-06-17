@@ -21,6 +21,7 @@ pub const memory = @import("memory/memory.zig");
 pub const log = @import("kernel_log.zig").log;
 pub const kernel_stdout_log = @import("kernel_log.zig").kernel_stdout_log;
 pub const stdout = @import("stdout.zig");
+pub const file_log = @import("file_log.zig");
 
 pub const process = struct {
     pub const process_manager = @import("process_manager.zig");

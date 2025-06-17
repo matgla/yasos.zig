@@ -219,7 +219,14 @@ export fn apply_overclock() u32 {
     // The working test uses sleep_ms(100). Add ~100ms: 150MHz / 2 cyc * 0.1s = 7.5M
     c.overclock_delay_cycles(7_500_000);
 
-    if (comptime clock_freq_mhz == 150) return 1;
+    // NOTE: Previously we early-returned at 150 MHz (the boot frequency) on the
+    // assumption that no reconfiguration was needed. That left clk_peri on its
+    // boot source instead of PLL_USB and left flash/PSRAM on bootrom timing,
+    // which fails to boot on the current pico_plus2 config (16 MB flash, 84 MHz
+    // PSRAM). Run the full, proven overclock sequence at 150 MHz too: re-locking
+    // PLL_SYS to 150 MHz via overclock_apply() is the same RAM-resident sequence
+    // used for 618 MHz (which itself starts from the 150 MHz boot PLL), so it is
+    // safe, and it gives a consistent clk_peri/flash setup at every frequency.
 
     const target_khz: u32 = comptime pll_params.actual_freq_mhz * 1000;
 

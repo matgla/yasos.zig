@@ -48,6 +48,10 @@ class Session:
     backend = None
     target_needs_reset = True
     target_crashed = False
+    # While True, _record_serial_output does not scan for crash markers. Set
+    # during post-crash log collection so the markers contained in the dumped
+    # kernel.prev.log don't re-flag the (already rebooted) target as crashed.
+    _collecting = False
     file = None
     prompt = "$ "
     crash_markers = (
@@ -63,6 +67,11 @@ class Session:
                 Session.backend = qemu.QemuTarget()
                 Session.serial = Session.backend.start()
                 Session.serial_port = Session.backend.label
+                Session.target_needs_reset = True
+            elif not Session.backend.is_alive() or Session.serial is None or not Session.serial.is_open:
+                # qemu died mid-test (guest fault, semihosting exit, ...);
+                # the shared PTY is gone and every serial op would EIO.
+                Session.serial = Session.backend.reset()
                 Session.target_needs_reset = True
             self.serial = Session.serial
         else:
@@ -94,6 +103,8 @@ class Session:
             return
         self.file.write(text)
         self.file.flush()
+        if Session._collecting:
+            return
         normalized = text.lower()
         if any(marker in normalized for marker in Session.crash_markers):
             Session.target_crashed = True
@@ -148,30 +159,70 @@ class Session:
         return recovered.endswith(Session.prompt)
 
     def _prepare_target(self):
-        if Session.target_needs_reset:
-            self.serial.reset_input_buffer()
-            self.reset_target()
-            self.serial.reset_input_buffer()
-            self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
-            while self.serial.in_waiting > 0:
-                self.wait_for_prompt_except_logs()
-            Session.target_needs_reset = False
-            Session.target_crashed = False
-        elif not self._try_recover_prompt():
-            self.file.write("Prompt recovery failed, resetting target.\n")
-            self.file.flush()
-            Session.target_needs_reset = True
-            self.serial.reset_input_buffer()
-            self.reset_target()
-            self.serial.reset_input_buffer()
-            self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
-            while self.serial.in_waiting > 0:
-                self.wait_for_prompt_except_logs()
-            Session.target_needs_reset = False
-            Session.target_crashed = False
+        needs_reset = Session.target_needs_reset
+        if not needs_reset:
+            try:
+                needs_reset = not self._try_recover_prompt()
+            except (OSError, serial.SerialException):
+                # Dead PTY / unplugged probe: every serial op raises EIO, so
+                # only a full target reset can bring the session back.
+                needs_reset = True
+            if needs_reset:
+                self.file.write("Prompt recovery failed, resetting target.\n")
+                self.file.flush()
+                Session.target_needs_reset = True
+        if needs_reset:
+            self._reset_and_wait_for_prompt()
 
         self.write_command("cd /")
         self.wait_for_prompt_except_logs()
+
+    def _reset_and_wait_for_prompt(self):
+        try:
+            self.serial.reset_input_buffer()
+        except (OSError, serial.SerialException):
+            pass  # serial already dead; reset_target replaces/revives it
+        self.reset_target()
+        self.serial.reset_input_buffer()
+        self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
+        while self.serial.in_waiting > 0:
+            self.wait_for_prompt_except_logs()
+        Session.target_needs_reset = False
+        Session.target_crashed = False
+
+    def collect_crash_logs(self):
+        """After a crash: reboot the board and pull the persisted kernel logs
+        off the SD card into this test's log file.
+
+        The kernel rotates /root/logs/kernel.log -> kernel.prev.log on every
+        boot, so after this reset kernel.prev.log holds the full log of the run
+        that just crashed (dynamic-loader load addresses, pre-fault kernel
+        messages). The live HardFault postmortem is already in this file from
+        the serial stream; this appends the persisted context next to it and
+        leaves the target at a clean prompt for the next test.
+        """
+        self.file.write("\n===== crash detected: rebooting to collect persisted SD logs =====\n")
+        self.file.flush()
+        try:
+            self._reset_and_wait_for_prompt()
+        except (OSError, serial.SerialException, RuntimeError) as exc:
+            self.file.write(f"crash-log collection: target reset failed: {exc}\n")
+            self.file.flush()
+            return
+        Session._collecting = True
+        try:
+            for name in ("kernel.prev.log", "kernel.log"):
+                path = f"/root/logs/{name}"
+                self.file.write(f"\n----- {path} (persisted) -----\n")
+                self.file.flush()
+                try:
+                    self.write_command(f"cat {path}")
+                    self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
+                except (OSError, serial.SerialException, RuntimeError, AssertionError) as exc:
+                    self.file.write(f"(could not read {path}: {exc})\n")
+                    self.file.flush()
+        finally:
+            Session._collecting = False
 
     def wait_for_prompt(self, timeout=None):
         return self.wait_for_data("$ ", timeout=timeout)

@@ -20,7 +20,7 @@ from .timing import CaseTiming, timing_results, start_timer, elapsed_ms, attach_
 from .profiling import profiling_enabled, extract_profile_lines, record_profile
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import importlib.util
 
 import logging
@@ -77,6 +77,18 @@ GCC_OPT_LEVELS = _gcc_conftest.get_opt_levels(
     env_var="YASOS_SMOKE_TCC_OPT_LEVELS",
     default=("-O0",),
 )
+# The remote TUI selects a single optimization level (default -O0). The
+# gcc-torture suites iterate GCC_OPT_LEVELS to tag their ids; the tests2 and
+# ir_tests suites instead prepend this single selected level to every test's
+# cflags so the chosen -O flag is actually passed to tcc (it previously only
+# reached the gcc-torture cases). -O0 matches tcc's default, so the default
+# smoke run is unchanged.
+SMOKE_OPT_CFLAGS = tuple(GCC_OPT_LEVELS[:1])
+
+
+def _with_smoke_opt(cflags):
+    """Prepend the selected smoke optimization level to a test's cflags."""
+    return SMOKE_OPT_CFLAGS + tuple(cflags)
 discover_gcc_execute_tests = _gcc_conftest.discover_gcc_execute_tests
 discover_gcc_compile_tests = _gcc_conftest.discover_gcc_compile_tests
 should_skip_gcc_test = _gcc_conftest.should_skip_gcc_test
@@ -98,8 +110,6 @@ NATIVE_TARGET_SKIP_TESTS = {
     "compile/limits-caselabels": "memory and performance optimization needed",
     "compile/limits-declparen": "compile-time process stack overflow on target",
     # execute/ tests — compile phase exhausts process stack before link/run
-    "unroll-1": "compile-time process stack overflow on target",
-    "builtins/strcat-chk": "compile-time process stack overflow on target",
     "memcpy-a1": "test is to huge to run on the embedded target",
     "memclr": "test is to huge to run on the embedded target",
     "memcpy-a2": "test is to huge to run on the embedded target",
@@ -117,6 +127,112 @@ IGNORE_NATIVE_TARGET_SKIP_TESTS = os.environ.get("YASOS_SMOKE_RERUN_FAILED", "")
     "yes",
     "on",
 }
+
+# Default user-process stack on the target, in KiB
+# (CONFIG_PROCESS_DEFAULT_STACK_SIZE).
+DEFAULT_TARGET_STACK_KIB = 32
+
+# Tests whose on-target compile needs a deeper compiler-recursion stack than
+# the 32 KiB process default. toybox `ulimit -s <KiB>` adjusts its PARENT's
+# RLIMIT_STACK via prlimit — i.e. the test shell's — and execve reallocates
+# the stack to the limit, so the raised limit applies to the tcc process the
+# shell spawns for the compile. The shell's limit is restored in the same
+# command line right after the compile. Keys match NATIVE_TARGET_SKIP_TESTS
+# (directory-prefixed _test_key, or plain stem).
+COMPILE_STACK_KIB_TESTS = {
+    # ~40-level nested switch/if: recursive-descent parsing needs ~32 KiB of
+    # stack even on the host, so the target's 32 KiB stack overflows (STKOF).
+    "compile/pr113623": 64,
+    # Deep expression recursion: host cross-tcc needs ~64 KiB for both.
+    "unroll-1": 128,
+    "builtins/strcat-chk": 128,
+    # Still skipped (NATIVE_TARGET_SKIP_TESTS): limits-exprparen and
+    # limits-structnest need ~8 MiB of compiler stack on the host, far above
+    # the 1 MiB CONFIG_PROCESS_MAX_STACK_SIZE hard limit; limits-declparen
+    # needs ~1 MiB, right at the cap and too heavy for the real target.
+}
+
+
+def _compile_stack_kib(test_path: Path) -> Optional[int]:
+    """Per-test compile stack override (KiB), or None for the default."""
+    value = COMPILE_STACK_KIB_TESTS.get(_gcc_conftest._test_key(test_path))
+    if value is None:
+        value = COMPILE_STACK_KIB_TESTS.get(test_path.stem)
+    return value
+
+
+# Tests whose on-target compile legitimately exceeds the 5 s COMPILE_TIMEOUT —
+# large single-file sources that take real hardware longer than the serial
+# wait. They fail deterministically with "Prompt not found" while the session
+# log shows the compile completing fine moments later (the output is drained
+# during cleanup). Measured on a 600 MHz RP2350; keep generous margin for
+# lower clocks. Values are serial-timeout seconds for the compile wait (also
+# raises the run-phase silence limit). Keys: directory-prefixed _test_key or
+# plain stem for gcc-torture, full filename for tests2/ir_tests.
+COMPILE_TIMEOUT_TESTS = {
+    # gcc-torture compile: macro/argument-count stress files
+    "limits-fnargs": 30,
+    "limits-stringlit": 30,
+    "pr34093": 30,
+    # gcc-torture execute (20040705-*/20040709-* #include 20040629-1.c)
+    "20040629-1": 30,
+    "20040705-1": 30,
+    "20040705-2": 30,
+    "20040709-1": 30,
+    "20040709-2": 30,
+    "20040709-3": 30,
+    "arith-rand-ll": 30,
+    "pr53645-2": 30,
+    "pr92904": 30,
+    "scal-to-vec1": 30,
+    "strlen-5": 30,
+    # ir_tests / tests2
+    "mibench_rijndael.c": 30,
+    "95_bitfields.c": 30,
+}
+
+
+def _compile_timeout(test_path: Path) -> Optional[float]:
+    """Per-test compile serial-timeout override (seconds), or None."""
+    value = COMPILE_TIMEOUT_TESTS.get(_gcc_conftest._test_key(test_path))
+    if value is None:
+        value = COMPILE_TIMEOUT_TESTS.get(test_path.stem)
+    return value
+
+
+_DG_STACK_SIZE_PATTERN = re.compile(r'dg-require-stack-size\s+"([^"]+)"')
+_DG_STACK_EXPR_PATTERN = re.compile(r"^[0-9a-fxA-FX\s*+()-]+$")
+
+
+def _run_stack_kib(test_path: Path) -> Optional[int]:
+    """Run-phase stack requirement (KiB), or None for the 32 KiB default.
+
+    gcc-torture tests sized for hosts overflow the 32 KiB target stack with
+    a genuine STKOF — QEMU only detects it when an interrupt stacks while SP
+    is below PSPLIM, so without a raise these fail intermittently. The need
+    is taken from the test's `dg-require-stack-size "<expr>"` directive when
+    present, with a margin for libc/frame overhead.
+    """
+    try:
+        text = test_path.read_text(errors="ignore")
+    except OSError:
+        return None
+    match = _DG_STACK_SIZE_PATTERN.search(text)
+    if not match:
+        return None
+    expr = match.group(1).strip()
+    if not _DG_STACK_EXPR_PATTERN.match(expr):
+        return None
+    try:
+        required_bytes = int(eval(expr, {"__builtins__": {}}, {}))  # arithmetic only
+    except Exception:
+        return None
+    # Round up, double for -O0 frame bloat (tcc spills/temps can double the
+    # declared need), plus a fixed libc/frame margin.
+    kib = -(-required_bytes // 1024) * 2 + 64
+    if kib <= DEFAULT_TARGET_STACK_KIB:
+        return None
+    return min(kib, 1024)  # CONFIG_PROCESS_MAX_STACK_SIZE hard cap
 
 
 def _native_skip_reason(test_path: Path) -> Optional[str]:
@@ -169,9 +285,16 @@ class TccTestCase:
     # Serial timeout (seconds) for this case's compile wait and run-phase
     # silence limit; None keeps the suite defaults.
     timeout: Optional[float] = None
+    # Stack limit (KiB) raised around the on-target compile via `ulimit -s`;
+    # None keeps the target's default process stack.
+    compile_stack_kib: Optional[int] = None
+    # Stack limit (KiB) raised around the whole test (incl. the run phase);
+    # from LARGE_STACK_TESTS or the test's dg-require-stack-size directive.
+    run_stack_kib: Optional[int] = None
 
 
 REGISTERED_SINGLE_FILE_TESTS = [
+    "90_min_repro.c",
     "00_assignment.c",
     "01_comment.c",
     "02_printf.c",
@@ -350,6 +473,15 @@ FLOAT_TOLERANCE_TESTS = {
 # 119_random_stuff.c has a 256KB struct on the stack passed by value.
 LARGE_STACK_TESTS = {
     "119_random_stuff.c": 1024,
+    # gcc-torture tests sized for hosts (STACK_SIZE undefined → big defaults):
+    # genuine STKOF on the 32 KiB default process stack, not miscompiles.
+    # QEMU only detects the violation when an interrupt stacks while SP is
+    # below PSPLIM, so these failed intermittently (worse under -n N load).
+    # (tests WITH a dg-require-stack-size directive are handled generically
+    # by _run_stack_kib; only directive-less ones need entries here)
+    "memcpy-1.c": 384,   # two 128 KiB (1<<17) local arrays
+    "980605-1.c": 256,   # char ar[200000/2] = ~100 KiB
+    "multi-ix.c": 192,   # 40 x int[500] = ~80 KiB
 }
 
 # Sources stay in the remote source tree; only compiler outputs use /tmp.
@@ -424,17 +556,20 @@ def build_tcc_test_cases():
     for source_name in REGISTERED_SINGLE_FILE_TESTS:
         if source_name in SMOKE_DISABLED_TESTS:
             continue
-        test_cases.append(TccTestCase(test_id=source_name, name=source_name, sources=(source_name,)))
+        test_cases.append(TccTestCase(test_id=source_name, name=source_name, sources=(source_name,),
+                                      cflags=SMOKE_OPT_CFLAGS,
+                                      timeout=COMPILE_TIMEOUT_TESTS.get(source_name)))
 
     for source_name, args in REGISTERED_TESTS_WITH_ARGS:
         if source_name in SMOKE_DISABLED_TESTS:
             continue
-        test_cases.append(TccTestCase(test_id=source_name, name=source_name, sources=(source_name,), args=args))
+        test_cases.append(TccTestCase(test_id=source_name, name=source_name, sources=(source_name,),
+                                      cflags=SMOKE_OPT_CFLAGS, args=args))
 
     for test_case in REGISTERED_MULTI_FILE_TESTS:
         if any(source_name in SMOKE_DISABLED_TESTS for source_name in test_case.sources):
             continue
-        test_cases.append(test_case)
+        test_cases.append(replace(test_case, cflags=_with_smoke_opt(test_case.cflags)))
 
     for source_name in REGISTERED_TAGGED_TEST_FILES:
         if source_name in SMOKE_DISABLED_TESTS:
@@ -446,7 +581,7 @@ def build_tcc_test_cases():
                     test_id=f"{source_name}[{tag}]",
                     name=source_name,
                     sources=(source_name,),
-                    cflags=(f"-D{tag}",),
+                    cflags=_with_smoke_opt((f"-D{tag}",)),
                     expected_lines=tuple(expectation["lines"]),
                     expected_exit_code=expectation["exit_code"],
                     expected_compile_failure=expectation["expected_compile_failure"],
@@ -545,8 +680,10 @@ def build_ir_test_cases():
             test_id=f"ir_tests/{filename}",
             name=filename,
             sources=(filename,),
+            cflags=SMOKE_OPT_CFLAGS,
             source_dir=ir_tests_path,
             skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
+            timeout=COMPILE_TIMEOUT_TESTS.get(filename),
         ))
 
     return test_cases
@@ -603,6 +740,10 @@ def build_gcc_execute_test_cases():
                     source_dir=gcc_execute_path,
                     skip_reason=skip_reason,
                     xfail_reason=opt_xfail_reason,
+                    timeout=_compile_timeout(gcc_case.source),
+                    compile_stack_kib=_compile_stack_kib(gcc_case.source),
+                    run_stack_kib=LARGE_STACK_TESTS.get(relative_source.name)
+                    or _run_stack_kib(gcc_case.source),
                 )
             )
 
@@ -634,6 +775,8 @@ def build_gcc_compile_test_cases():
                     expected_error_patterns=tuple(gcc_case.expected_error_patterns),
                     skip_reason=skip_reason,
                     xfail_reason=xfail_reason,
+                    timeout=_compile_timeout(gcc_case.source),
+                    compile_stack_kib=_compile_stack_kib(gcc_case.source),
                 )
             )
 
@@ -1001,10 +1144,19 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
     if extra_cflags:
         extra_cflags += " "
 
+    stack_raise = ""
+    stack_restore = ""
+    if testcase.compile_stack_kib:
+        stack_raise = f"ulimit -s {testcase.compile_stack_kib}; "
+        stack_restore = f"ulimit -s {DEFAULT_TARGET_STACK_KIB}; "
+
     try:
         session.write_command(
+            f"{stack_raise}"
+            f"{os.environ.get('YASOS_TCC_ENV_PREFIX', '')}"
             f"tcc {bench_flag}{compile_mode_flag}{extra_cflags}{compile_args} -o {shlex.quote(output_binary)}; "
             f"compile_status=$?; "
+            f"{stack_restore}"
             f"if [ $compile_status -eq 0 ] && [ ! -e {shlex.quote(output_binary)} ]; then compile_status=254; fi; "
             f"echo {COMPILE_MARKER_PREFIX}$compile_status"
         )
@@ -1177,6 +1329,83 @@ if ENABLE_GCC_TORTURE_SMOKE and GCC_TORTURE_PATH.exists():
     gcc_execute_test_cases = sorted(build_gcc_execute_test_cases(), key=lambda testcase: testcase.test_id)
 
 
+def _failure_is_real(session, exc):
+    """Decide whether a testcase failure is a genuine compiler/device fault or
+    a transient serial glitch.
+
+    Real failures are not retried:
+      * a device crash (HardFault / kernel halt) — flagged on the session via
+        ``Session.target_crashed`` from the serial crash markers;
+      * a genuine compile-time out-of-memory — tcc prints ``memory full``.
+
+    Everything else (most commonly a UART truncation/desync where the stream is
+    cut mid-command and the prompt is never seen) is treated as transient.
+    """
+    if getattr(session, "target_crashed", False):
+        return True, "device crash"
+    if "memory full" in str(exc).lower():
+        return True, "compile-time OOM ('memory full')"
+    return False, None
+
+
+def _resync_prompt_for_rerun(session):
+    """Best-effort recovery of a clean shell prompt before a rerun.
+
+    Interrupts any stuck foreground job (Ctrl-C), drains stale serial output and
+    waits for a fresh prompt, so the retry starts from a known-good state.
+    """
+    try:
+        session.serial.write(b"\x03")  # kill a stuck/runaway foreground job
+    except Exception:
+        pass
+    for _ in range(3):
+        try:
+            if session._try_recover_prompt():
+                return True
+        except Exception:
+            break
+    return False
+
+
+def run_case_with_optional_rerun(testcase, session, request, temp_source_plan, progress, timing):
+    """Upload + compile/run a testcase, rerunning ONCE on a transient failure.
+
+    A device crash or a compile-time ``memory full`` is a real failure and is
+    reported immediately. Any other failure is assumed to be a transient serial
+    glitch and is retried a single time on a resynced prompt; if the retry also
+    fails it is reported as-is (a deterministic miscompile fails both times).
+    """
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            upload_state = upload_test_sources(testcase, session)
+            progress.update(upload_state)
+            progress.update("compiling" if attempt == 1 else "rerunning")
+            compile_testcase(
+                testcase,
+                session,
+                timing=timing,
+                current_item_id=request.node.nodeid,
+                temp_source_plan=temp_source_plan,
+            )
+            return
+        except Exception as exc:
+            real, reason = _failure_is_real(session, exc)
+            if real or attempt == max_attempts:
+                if real:
+                    logger.warning(
+                        "%s: real failure (%s), not rerunning", testcase.test_id, reason
+                    )
+                raise
+            first_line = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+            logger.warning(
+                "%s: transient failure (attempt %d/%d), rerunning once: %s",
+                testcase.test_id, attempt, max_attempts, first_line,
+            )
+            progress.update("retry")
+            _resync_prompt_for_rerun(session)
+
+
 
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.parametrize('testcase', test_cases, ids=[testcase.test_id for testcase in test_cases])
@@ -1208,15 +1437,8 @@ def test_run_tcc_test_suite(request, testcase):
 
     timing = CaseTiming(test_id=testcase.test_id)
     try:
-        upload_state = upload_test_sources(testcase, session)
-        progress.update(upload_state)
-        progress.update("compiling")
-        compile_testcase(
-            testcase,
-            session,
-            timing=timing,
-            current_item_id=request.node.nodeid,
-            temp_source_plan=temp_source_plan,
+        run_case_with_optional_rerun(
+            testcase, session, request, temp_source_plan, progress, timing
         )
     except Exception:
         progress.finish("failed")
@@ -1251,15 +1473,8 @@ def test_run_ir_test_suite(request, testcase):
 
     timing = CaseTiming(test_id=testcase.test_id)
     try:
-        upload_state = upload_test_sources(testcase, session)
-        progress.update(upload_state)
-        progress.update("compiling")
-        compile_testcase(
-            testcase,
-            session,
-            timing=timing,
-            current_item_id=request.node.nodeid,
-            temp_source_plan=temp_source_plan,
+        run_case_with_optional_rerun(
+            testcase, session, request, temp_source_plan, progress, timing
         )
     except Exception:
         progress.finish("failed")
@@ -1296,15 +1511,8 @@ def test_run_gcc_compile_torture_suite(request, testcase):
 
     timing = CaseTiming(test_id=testcase.test_id)
     try:
-        upload_state = upload_test_sources(testcase, session)
-        progress.update(upload_state)
-        progress.update("compiling")
-        compile_testcase(
-            testcase,
-            session,
-            timing=timing,
-            current_item_id=request.node.nodeid,
-            temp_source_plan=temp_source_plan,
+        run_case_with_optional_rerun(
+            testcase, session, request, temp_source_plan, progress, timing
         )
     except Exception:
         progress.finish("failed")
@@ -1339,23 +1547,28 @@ def test_run_gcc_execute_torture_suite(request, testcase):
 
     progress = ProgressLine(testcase.test_id)
 
+    # Tests whose RUN phase needs more than the 32 KiB default process stack
+    # (large main() locals, STACK_SIZE-sized arrays). The violation is only
+    # detected when an interrupt stacks while SP is below PSPLIM, so without
+    # the raise these fail intermittently (more often under parallel load).
+    original_stack_size = None
+    required_stack_kb = testcase.run_stack_kib
+    if required_stack_kb is not None:
+        original_stack_size = _read_stack_size(session)
+        _set_stack_size(session, required_stack_kb)
+
     timing = CaseTiming(test_id=testcase.test_id)
     try:
-        upload_state = upload_test_sources(testcase, session)
-        progress.update(upload_state)
-        progress.update("compiling")
-        compile_testcase(
-            testcase,
-            session,
-            timing=timing,
-            current_item_id=request.node.nodeid,
-            temp_source_plan=temp_source_plan,
+        run_case_with_optional_rerun(
+            testcase, session, request, temp_source_plan, progress, timing
         )
     except Exception:
         progress.finish("failed")
         raise
     finally:
         timing_results.append(timing)
+        if original_stack_size is not None:
+            _set_stack_size(session, original_stack_size)
     progress.finish("ok")
 
 

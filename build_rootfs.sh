@@ -242,11 +242,14 @@ build_c_compiler()
   YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
 
   NATIVE_TCC_DEBUG_CONFIG=""
-  NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
+  # -DCONFIG_TCC_DEBUG enables the on-target `-dump-ir` / `-dump-ir-passes=` flags
+  # (libtcc.c gates them under #ifdef CONFIG_TCC_DEBUG) so the native compiler can
+  # dump IR on-device for HW-vs-QEMU codegen comparison.
+  NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0 -DCONFIG_TCC_DEBUG"
   NATIVE_TCC_DEBUG_OPT="${NATIVE_TCC_OPT_OVERRIDE:--O1}"
   if $DEBUG_TCC; then
     NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O1"
-    NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
+    NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1 -DCONFIG_TCC_DEBUG"
     NATIVE_TCC_DEBUG_OPT="-O1"
   fi
 
