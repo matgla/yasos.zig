@@ -1,5 +1,5 @@
 //
-// cpu.zig
+// atomic.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -15,29 +15,26 @@
 //
 // You should have received a copy of the GNU General
 // Public License along with this program. If not, see
-// <https://www.gnu.org/licenses/>.
+// <https://www.gnu.org|/licenses/>.
 //
 
 const std = @import("std");
 
-const clock = @cImport({
-    @cInclude("hardware/clocks.h");
-});
+var mutexes: [32]?std.Thread.Mutex = undefined;
 
-pub const Cpu = struct {
-    pub fn name() []const u8 {
-        return "HOST";
+pub const HardwareAtomic = struct {
+    pub fn lock(comptime id: u32) void {
+        if (id >= 32) @compileError("Host supports only 32 hardware spinlocks");
+        if (mutexes[id] == null) {
+            mutexes[id] = .{};
+        }
+        mutexes[id].?.lock();
     }
 
-    pub fn frequency() u64 {
-        return 123000000;
-    }
-
-    pub fn number_of_cores() u8 {
-        return 4;
-    }
-
-    pub fn coreid() u8 {
-        return 1;
+    pub fn unlock(comptime id: u32) void {
+        if (id >= 32) @compileError("Host supports only 32 hardware spinlocks");
+        if (mutexes[id]) |*mutex| {
+            mutex.unlock();
+        }
     }
 };

@@ -1,5 +1,5 @@
 //
-// cpu.zig
+// irq.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -20,24 +20,24 @@
 
 const std = @import("std");
 
-const clock = @cImport({
-    @cInclude("hardware/clocks.h");
-});
+pub const Irq = struct {
+    pub const Type = enum {
+        systick,
+        pendsv,
+        supervisor_call,
+    };
 
-pub const Cpu = struct {
-    pub fn name() []const u8 {
-        return "HOST";
+    pub fn disable(_: Type) void {}
+    pub fn set_priority(irq: Type, priority: u32) void {
+        std.debug.print("TODO: implement setting priority for IRQ {s} to {d}\n", .{ @tagName(irq), priority });
+    }
+    pub fn trigger_supervisor_call(_: u32, _: *const volatile anyopaque, _: *volatile anyopaque) void {
+        std.debug.print("TODO: implement triggering supervisor call\n", .{});
     }
 
-    pub fn frequency() u64 {
-        return 123000000;
-    }
-
-    pub fn number_of_cores() u8 {
-        return 4;
-    }
-
-    pub fn coreid() u8 {
-        return 1;
+    pub fn trigger(irq: Type) void {
+        switch (irq) {
+            else => std.debug.print("TODO: implement triggering IRQ {s}\n", .{@tagName(irq)}),
+        }
     }
 };

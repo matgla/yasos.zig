@@ -33,5 +33,32 @@ pub fn Uart(comptime index: usize, comptime _: interface.uart.Pins) type {
             _ = try std.posix.write(fd, data);
             return data.len;
         }
+
+        pub fn is_writable(_: Self) bool {
+            return true; // Always writable for host UART
+        }
+
+        pub fn is_readable(_: Self) bool {
+            return true; // Always readable for host UART
+        }
+
+        pub fn getc(_: Self) !u8 {
+            var byte: u8 = 0;
+            const bytes_read = try std.posix.read(Self.fd, &byte, 1);
+            if (bytes_read == 0) {
+                return error.EndOfFile; // No data available
+            }
+            return byte;
+        }
+
+        pub fn read(_: Self, buffer: []u8) !usize {
+            const bytes_read = try std.posix.read(Self.fd, buffer);
+            if (bytes_read == 0) {
+                return error.EndOfFile; // No data available
+            }
+            return bytes_read;
+        }
+
+        pub fn flush(_: Self) void {}
     };
 }
