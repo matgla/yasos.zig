@@ -167,6 +167,7 @@ pub fn build(b: *std.Build) !void {
             const yasld = b.dependency("yasld", .{
                 .optimize = optimize,
                 .target = boardDep.artifact("yasos_kernel").root_module.resolved_target.?,
+                .cpu_arch = @as([]const u8, config.cpu_arch),
             });
 
             boardDep.artifact("yasos_kernel").root_module.addImport("yasld", yasld.module("yasld"));

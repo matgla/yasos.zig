@@ -357,19 +357,6 @@ pub const ExternalMemory = struct {
         return self._psram_size;
     }
 
-    pub fn do_few_reads(self: ExternalMemory) i32 {
-        _ = self;
-        const data = slicify(
-            @as([*]u8, @ptrFromInt(0x1d000000)),
-            128, // * 1024,
-        );
-        var sum: i32 = 0;
-        for (0..1024) |i| {
-            sum += data[i];
-        }
-        return sum;
-    }
-
     pub fn perform_post(self: *ExternalMemory, stdout: anytype) bool {
         var prng = std.Random.DefaultPrng.init(1000);
 

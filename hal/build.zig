@@ -121,7 +121,9 @@ pub const Builder = struct {
             exe.link_data_sections = true;
             exe.link_gc_sections = true;
             if (config.cpu) |cpu| {
-                if (std.mem.eql(u8, cpu, "host")) {} else {
+                if (std.mem.eql(u8, cpu, "host")) {
+                    exe.linkLibC();
+                } else {
                     _ = try toolchain.decorateModuleWithArmToolchain(b, exe.root_module, target);
                 }
             }
