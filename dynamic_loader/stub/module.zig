@@ -29,6 +29,8 @@ pub const Module = struct {
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
     xip: bool,
+    list_node: std.DoublyLinkedList.Node,
+    entry: ?SymbolEntry,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -36,13 +38,18 @@ pub const Module = struct {
             .allocator = allocator,
             .process_allocator = process_allocator,
             .xip = xip,
+            .list_node = .{},
+            .entry = null,
         };
         return module;
     }
 
-    pub fn find_symbol(self: *Module, name: []const u8) ?*SymbolEntry {
+    pub fn find_symbol(self: *Module, name: []const u8) ?SymbolEntry {
         _ = self;
         _ = name;
-        return null; // Placeholder for symbol lookup logic
+        return .{
+            .target_got_address = 0,
+            .address = 0,
+        };
     }
 };

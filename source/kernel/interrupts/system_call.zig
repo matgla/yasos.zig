@@ -35,10 +35,10 @@ const handlers = @import("syscall_handlers.zig");
 extern fn store_and_switch_to_next_task(lr: u32) void;
 
 // mov to arch file
-inline fn get_lr() usize {
+inline fn get_lr() u32 {
     return asm volatile (
         \\ mov %[ret], lr
-        : [ret] "=r" (-> usize),
+        : [ret] "=r" (-> u32),
     );
 }
 
@@ -138,7 +138,7 @@ pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *vola
 }
 
 export fn irq_pendsv() void {
-    const lr: usize = get_lr();
+    const lr: u32 = get_lr();
     if (process_manager.instance.scheduler.schedule_next()) {
         store_and_switch_to_next_task(lr);
     }

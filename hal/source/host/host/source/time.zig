@@ -1,5 +1,5 @@
 //
-// yasld.zig
+// time.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -20,12 +20,12 @@
 
 const std = @import("std");
 
-pub const Executable = @import("executable.zig").Executable;
-pub const Module = @import("module.zig").Module;
-pub const get_loader = @import("loader.zig").get_loader;
-pub const SymbolEntry = @import("module.zig").SymbolEntry;
+pub const Time = struct {
+    pub fn sleep_ms(ms: u64) void {
+        Time.sleep_us(ms * 1000);
+    }
 
-pub fn loader_init(file_resolver: anytype, allocator: std.mem.Allocator) void {
-    _ = file_resolver;
-    _ = allocator;
-}
+    pub fn sleep_us(us: u64) void {
+        std.Thread.sleep(u64(us) * 1000);
+    }
+};
