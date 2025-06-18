@@ -60,6 +60,8 @@ const process_memory_pool = @import("kernel/process_memory_pool.zig");
 const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
 const system_call = @import("kernel/interrupts/system_call.zig");
 
+const panic_helper = @import("arch").panic;
+
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
     _ = @import("arch");
@@ -90,12 +92,8 @@ fn initialize_board() void {
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     log.write("****************** PANIC **********************\n");
     log.print("KERNEL PANIC: {s}.\n", .{msg});
+    panic_helper.dump_stack_trace(log, @returnAddress());
 
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(@returnAddress(), null);
-    while (stack.next()) |address| : (index += 1) {
-        log.print("  {d: >3}: 0x{X:0>8}\n", .{ index, address - 1 });
-    }
     log.write("***********************************************\n");
     while (true) {}
 }

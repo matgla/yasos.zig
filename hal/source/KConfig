@@ -42,9 +42,6 @@ endchoice
 config CONFIG_CPU_HAS_FPU
     bool 
 
-config CONFIG_CPU_USES_NEWLIB
-    bool "CPU requires newlib"
-
 config CONFIG_CPU_USE_FPU 
     bool "Use floating point unit"
     depends on CONFIG_CPU_HAS_FPU 

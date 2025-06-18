@@ -121,10 +121,10 @@ pub const ProcessManager = struct {
         p.state = Process.State.Ready;
     }
 
-    pub fn vfork(self: *Self, lr: usize, result: usize) !i32 {
+    pub fn vfork(self: *Self) !i32 {
         const maybe_current_process = self.scheduler.get_current();
         if (maybe_current_process) |current_process| {
-            const new_process = current_process.vfork(lr, result) catch {
+            const new_process = current_process.vfork() catch {
                 return -1;
             };
 

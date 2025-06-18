@@ -175,13 +175,14 @@ pub fn build(b: *std.Build) !void {
                 .root_source_file = b.path(b.fmt("source/arch/{s}/arch.zig", .{config.cpu_arch})),
             });
 
+            const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
+            arch_module.addImport("hal", hal_module);
             if (std.mem.eql(u8, config.cpu_arch, "armv6-m") or std.mem.eql(u8, config.cpu_arch, "armv8-m")) {
                 const arch_arm_m = b.addModule("arm-m", .{
                     .root_source_file = b.path("source/arch/arm-m/arch.zig"),
                 });
                 arch_module.addImport("arm-m", arch_arm_m);
                 const config_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("config").?;
-                const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
 
                 arch_module.addImport("config", config_module);
                 arch_arm_m.addImport("config", config_module);

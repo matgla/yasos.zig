@@ -39,5 +39,8 @@ if BOARD_PIMORONI_PICO_PLUS2_DISCARD_IN_CONF
 
   config CONFIG_PSRAM_CS_PIN 
     default 47
+
+  config CONFIG_BUILD_USE_NEWLIB 
+    default y
 endif
 

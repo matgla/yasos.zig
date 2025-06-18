@@ -41,15 +41,14 @@ pub const VForkContext = extern struct {
 };
 
 const ContextSwitchHandler = *const fn (lr: usize) void;
-const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque, lr: usize) void;
+const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
 
 var context_switch_handler: ?ContextSwitchHandler = null;
 var system_call_handler: ?SystemCallHandler = null;
 
 export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
-    const lr: usize = arch.get_lr();
     if (system_call_handler) |handler| {
-        handler(number, arg, out, lr);
+        handler(number, arg, out);
     }
 }
 

@@ -15,21 +15,10 @@
 
 const std = @import("std");
 
-pub const Process = struct {};
-pub fn prepare_process_stack(
-    stack: []u8,
-    comptime exit_handler: *const fn () void,
-    entry_point: ?*const anyopaque,
-    arg: ?*const anyopaque,
-) *u8 {
-    _ = exit_handler;
-    _ = entry_point;
-    _ = arg;
-    return @ptrCast(stack.ptr);
+pub fn dump_stack_trace(log: anytype, address: usize) void {
+    var index: usize = 0;
+    var stack = std.debug.StackIterator.init(address, null);
+    while (stack.next()) |return_address| : (index += 1) {
+        log.print("  {d: >3}: 0x{X:0>8}\n", .{ index, return_address - 1 });
+    }
 }
-
-pub fn initialize_context_switching() void {}
-
-pub fn init() void {}
-
-pub const HostProcess = struct {};

@@ -22,3 +22,5 @@ pub const irq_handlers = @import("irq_handlers.zig");
 comptime {
     _ = @import("irq_handlers.zig");
 }
+pub const panic = @import("panic.zig");
+pub const HardwareProcess = @import("process.zig").ArmProcess;

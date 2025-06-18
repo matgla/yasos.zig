@@ -282,8 +282,8 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
-    const ctx: *const volatile VForkContext = @ptrCast(@alignCast(arg));
-    const result = try process_manager.instance.vfork(ctx.lr, @intFromPtr(ctx.result));
+    _ = arg;
+    const result = try process_manager.instance.vfork();
     hal.irq.trigger(.pendsv);
     return result;
 }

@@ -35,12 +35,12 @@ const arch = @import("arch");
 comptime {
     _ = @import("arch");
     const config = @import("config");
-    if (config.cpu.uses_newlib) {
+    if (config.build.use_newlib) {
         _ = @import("system_stubs.zig");
     }
 }
 
-extern fn store_and_switch_to_next_task(lr: u32) void;
+extern fn store_and_switch_to_next_task(lr: usize) void;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
 
@@ -130,17 +130,8 @@ pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) voi
     c_result.*.err = -1;
 }
 
-pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque, lr: usize) void {
-    var arg_to_call = arg;
-    if (number == c.sys_vfork) {
-        const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(out));
-        const ctx: handlers.VForkContext = .{
-            .lr = lr,
-            .result = &c_result.*.result,
-        };
-        arg_to_call = @ptrCast(&ctx);
-    }
-    write_result(out, syscall_lookup_table[number](arg_to_call));
+pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+    write_result(out, syscall_lookup_table[number](arg));
 }
 
 // can be called only from the user process, not from the kernel
@@ -150,9 +141,18 @@ pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) v
 
     if (arg) |a| {
         svc_arg = a;
+    } else {
+        const a: i32 = 0;
+        svc_arg = @ptrCast(&a);
     }
     if (out) |o| {
         svc_out = o;
+    } else {
+        var o: c.syscall_result = .{
+            .result = 0,
+            .err = 0,
+        };
+        svc_out = @ptrCast(&o);
     }
 
     hal.irq.trigger_supervisor_call(number, svc_arg, svc_out);

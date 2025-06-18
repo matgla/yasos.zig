@@ -24,9 +24,6 @@ if CPU_HOST
   config CONFIG_CPU 
     def_string "host"
 
-  config CONFIG_CPU_USES_NEWLIB
-    def_bool y
-
   choice CHOICE_CPU_FAMILY
     default CPU_FAMILY_HOST
   endchoice
