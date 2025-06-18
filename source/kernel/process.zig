@@ -117,7 +117,7 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
             process.* = .{
                 .state = State.Ready,
                 .priority = self.priority,
-                .impl = try process.impl.vfork(memory_pool.std_allocator()),
+                .impl = try self.impl.vfork(memory_pool.std_allocator()),
                 .pid = pid_counter,
                 ._allocator = self._allocator,
                 .current_core = 0,
