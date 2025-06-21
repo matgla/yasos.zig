@@ -1,5 +1,63 @@
 const std = @import("std");
 
+fn addDecl(comptime interface: anytype, d: anytype) std.builtin.Type.StructField {
+    const FieldType = @TypeOf(@field(interface, d.name));
+    return .{
+        .name = d.name,
+        .type = FieldType,
+        .default_value_ptr = @field(interface, d.name),
+        .is_comptime = true,
+        .alignment = @alignOf(FieldType),
+    };
+}
+
+fn genDecl(comptime obj: anytype, name: [:0]const u8) std.builtin.Type.StructField {
+    const FieldType = @TypeOf(obj);
+    return .{
+        .name = name,
+        .type = FieldType,
+        .default_value_ptr = obj,
+        .is_comptime = true,
+        .alignment = @alignOf(FieldType),
+    };
+}
+
+const InterfaceType = struct {
+    // deriving replaces vtable
+    pub fn derive(comptime ChildType: anytype) type {
+        _ = ChildType;
+        return u32;
+    }
+};
+
+const ShapeVTable = struct {
+    draw: *const fn (*const anyopaque) void,
+    set_size: *const fn (*anyopaque, u32) void,
+    get_size: *const fn (*const anyopaque) u32,
+};
+
+fn Interface(comptime declarations: type) type {
+    comptime var fields: []const std.builtin.Type.StructField = std.meta.fields(declarations);
+    for (std.meta.declarations(declarations)) |d| {
+        fields = fields ++ &[_]std.builtin.Type.StructField{addDecl(declarations, d)};
+    }
+    fields = fields ++ &[_]std.builtin.Type.StructField{genDecl(InterfaceType.derive, "derive")};
+    fields = fields ++ &[_]std.builtin.Type.StructField{.{
+        .name = "_vtable",
+        .type = @TypeOf(ShapeVTable),
+        .default_value_ptr = ShapeVTable,
+        .is_comptime = true,
+        .alignment = @alignOf(@TypeOf(ShapeVTable)),
+    }};
+
+    return @Type(.{ .@"struct" = .{
+        .layout = .auto,
+        .is_tuple = false,
+        .fields = fields,
+        .decls = &.{},
+    } });
+}
+
 fn deduce_type(info: anytype, object_type: anytype) type {
     if (info.pointer.is_const) {
         return *const object_type;
@@ -32,16 +90,16 @@ fn wrap1(fun: anytype, objtype: anytype, name: []const u8) type {
             const self: object_type = @ptrCast(@alignCast(ptr));
             return @field(@TypeOf(self.*), name)(self, arg);
         }
-        comptime {
-            if (params.len > 1) {
-                const call1 = struct {
-                    pub fn call(ptr: params[0].type.?, arg: params[1].type.?) return_type {
-                        const self: object_type = @ptrCast(@alignCast(ptr));
-                        return @field(@TypeOf(self.*), name)(self, arg);
-                    }
-                };
-            }
-        }
+        // comptime {
+        //     if (params.len > 1) {
+        //         const call1 = struct {
+        //             pub fn call(ptr: params[0].type.?, arg: params[1].type.?) return_type {
+        //                 const self: object_type = @ptrCast(@alignCast(ptr));
+        //                 return @field(@TypeOf(self.*), name)(self, arg);
+        //             }
+        //         };
+        //     }
+        // }
     };
 }
 
@@ -188,6 +246,12 @@ pub fn deduce(a: anytype) type {
     //     return var2;
     // }
 }
+
+// const InterfaceType = struct {
+//    pub fn derive(comptime Child) type {
+
+//     }
+// };
 pub fn main() void {
     // const result = var1(some_fun1, 1);
     // const result2 = var1(some_float1, 3.12);
@@ -235,4 +299,47 @@ pub fn main() void {
     for (shapes) |shape| {
         shape.draw();
     }
+
+    const shake = Interface(struct {
+        pub fn draw(_: *const anyopaque) void {
+            unreachable;
+        }
+
+        pub fn set_size(_: *anyopaque, _: u32) void {
+            unreachable;
+        }
+
+        pub fn get_size(_: *const anyopaque) u32 {
+            unreachable;
+        }
+
+        // pub usingnamespace InterfaceType;
+    });
+    // const shake = Interface(ShakeInterface);
+    const s1: shake = .{};
+    s1._vtable.draw(&triangles[0]);
+    // const TriangleT = s1.derive(struct {
+    //     size: u32,
+    //     const Self = @This();
+
+    //     pub fn draw(self: *const Self) void {
+    //         std.debug.print("Drawing a triangle, size: {d}\n", .{self.size});
+    //     }
+
+    //     pub fn set_size(self: *Self, size: u32) void {
+    //         self.size = size;
+    //     }
+
+    //     pub fn get_size(self: *const Self) u32 {
+    //         return self.size;
+    //     }
+    // });
+    // var t1: TriangleT = .{
+    //     .size = 40,
+    // };
+    // t1.draw();
+    // t1.set_size(50);
+    // t1.draw();
+    // std.debug.print("Triangle size: {d}\n", .{t1.get_size()});
+    // s1.draw(&triangles[0]);
 }
