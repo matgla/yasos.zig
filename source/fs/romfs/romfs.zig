@@ -27,6 +27,8 @@ const RomFsFile = @import("romfs_file.zig").RomFsFile;
 const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
 const FileHeader = @import("file_header.zig").FileHeader;
 
+const c = @import("../../libc_imports.zig").c;
+
 const std = @import("std");
 
 const log = &@import("../../log/kernel_log.zig").kernel_log;
@@ -34,6 +36,7 @@ const log = &@import("../../log/kernel_log.zig").kernel_log;
 pub const RomFs = struct {
     root: FileSystemHeader,
     allocator: std.mem.Allocator,
+    device_file: IFile,
 
     const VTable = IFileSystem.VTable{
         .mount = mount,
@@ -47,16 +50,13 @@ pub const RomFs = struct {
         .has_path = has_path,
     };
 
-    pub fn init(allocator: std.mem.Allocator, memory: []const u8) ?RomFs {
-        const maybe_fs_size = FileSystemHeader.get_romfs_size(memory);
-        if (maybe_fs_size == null) {
-            return null;
-        }
-        const fs = FileSystemHeader.init(@as([]const u8, memory.ptr[0..@intCast(maybe_fs_size.?)]));
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: u32) ?RomFs {
+        const fs = FileSystemHeader.init(allocator, device_file, start_offset);
         if (fs) |root| {
             return .{
                 .root = root,
                 .allocator = allocator,
+                .device_file = device_file,
             };
         }
         return null;
@@ -103,7 +103,7 @@ pub const RomFs = struct {
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
             if (node.filetype() == FileType.Directory) {
-                var it: ?FileHeader = FileHeader.init(node.memory, node.specinfo());
+                var it: ?FileHeader = self.create_file_header(node.specinfo());
                 while (it) |child| : (it = child.next()) {
                     var file: RomFsFile = RomFsFile.create(child, self.allocator);
                     var ifile = file.ifile();
@@ -122,24 +122,26 @@ pub const RomFs = struct {
         var it = try std.fs.path.componentIterator(path);
         var component = it.first();
         var maybe_node = self.root.first_file_header();
-        if (maybe_node == null) {
-            return null;
-        }
         while (component) |part| : (component = it.next()) {
-            while (!std.mem.eql(u8, maybe_node.?.name(), part.name)) {
+            const filename = maybe_node.?.name();
+            defer filename.deinit();
+            while (!std.mem.eql(u8, filename.name, part.name)) {
                 maybe_node = maybe_node.?.next();
                 if (maybe_node == null) {
                     return null;
                 }
             }
-
             // if symbolic link then fetch target node
             if (maybe_node) |node| {
                 if (node.filetype() == FileType.SymbolicLink) {
                     // iterate through link
-                    const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", node.data() }) catch return null;
-                    defer self.allocator.free(relative);
-                    maybe_node = self.get_file_header(relative);
+                    const maybe_name = node.read_string(self.allocator, 0);
+                    if (maybe_name) |link_name| {
+                        defer self.allocator.free(link_name);
+                        const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", link_name }) catch return null;
+                        defer self.allocator.free(relative);
+                        maybe_node = self.get_file_header(relative);
+                    }
                 }
             }
 
@@ -148,7 +150,7 @@ pub const RomFs = struct {
                 if (path_without_trailing_separator.len == part.path.len) {
                     if (node.filetype() == FileType.HardLink) {
                         // if hard link then get it
-                        return FileHeader.init(node.memory, node.specinfo());
+                        return self.create_file_header(node.specinfo());
                     }
                     return maybe_node;
                 }
@@ -156,7 +158,7 @@ pub const RomFs = struct {
 
             if (maybe_node) |node| {
                 if (node.filetype() == FileType.Directory) {
-                    maybe_node = FileHeader.init(node.memory, node.specinfo());
+                    maybe_node = self.create_file_header(node.specinfo());
                 }
             }
         }
@@ -164,10 +166,14 @@ pub const RomFs = struct {
         if (maybe_node) |node| {
             if (node.filetype() == FileType.HardLink) {
                 // if hard link then get it
-                return FileHeader.init(node.memory, node.specinfo());
+                return self.create_file_header(node.specinfo());
             }
         }
         return maybe_node;
+    }
+
+    fn create_file_header(self: RomFs, offset: u32) FileHeader {
+        return self.root.create_file_header_with_offset(offset);
     }
 
     fn get(ctx: *anyopaque, path: []const u8) ?IFile {

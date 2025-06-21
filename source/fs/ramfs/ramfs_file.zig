@@ -23,6 +23,7 @@ const std = @import("std");
 const c = @import("../../libc_imports.zig").c;
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+const FileName = @import("../../kernel/fs/ifile.zig").FileName;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
 const RamFsData = @import("ramfs_data.zig").RamFsData;
@@ -158,9 +159,9 @@ pub const RamFsFile = struct {
         return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
-    pub fn name(ctx: *const anyopaque) []const u8 {
+    pub fn name(ctx: *const anyopaque) FileName {
         const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
-        return self._data.name();
+        return FileName.init(self._data.name(), null);
     }
 
     pub fn ioctl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {

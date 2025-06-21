@@ -21,42 +21,73 @@
 const std = @import("std");
 
 const FileHeader = @import("file_header.zig").FileHeader;
+const FileReader = @import("file_reader.zig").FileReader;
+
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
+const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+
+const c = @import("../../libc_imports.zig").c;
+
+const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
+const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
+
 pub const FileSystemHeader = struct {
-    memory: []const u8,
+    _allocator: std.mem.Allocator,
+    _reader: FileReader,
+    _device_file: IFile,
+    _mapped_memory: ?*const anyopaque,
 
-    pub fn get_romfs_size(memory: []const u8) ?usize {
-        if (memory.len < 12) {
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: u32) ?FileSystemHeader {
+        var marker: [8]u8 = undefined;
+        _ = device_file.seek(offset, c.SEEK_SET);
+        _ = device_file.read(marker[0..]);
+        if (!std.mem.eql(u8, marker[0..], "-rom1fs-")) {
             return null;
         }
-        const marker = memory[0..8];
-        if (!std.mem.eql(u8, marker, "-rom1fs-")) {
-            return null;
-        }
-        return std.mem.bigToNative(u32, std.mem.bytesToValue(u32, memory[8..12]));
-    }
 
-    pub fn init(memory: []const u8) ?FileSystemHeader {
-        const marker = memory[0..8];
-        if (!std.mem.eql(u8, marker, "-rom1fs-")) {
-            return null;
+        var attr: FileMemoryMapAttributes = .{
+            .is_memory_mapped = false,
+            .mapped_address_r = null,
+            .mapped_address_w = null,
+        };
+        _ = device_file.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        var mapped_memory_address: ?*const anyopaque = null;
+        if (attr.mapped_address_r) |address| {
+            mapped_memory_address = address;
         }
+
         return .{
-            .memory = memory,
+            ._allocator = allocator,
+            ._reader = FileReader.init(device_file, offset),
+            ._device_file = device_file,
+            ._mapped_memory = mapped_memory_address,
         };
     }
 
-    inline fn read(comptime T: type, buffer: []const u8) T {
-        return std.mem.bigToNative(T, std.mem.bytesToValue(T, buffer));
+    pub fn deinit(self: FileSystemHeader) void {
+        _ = self;
+    }
+
+    fn get_name(allocator: std.mem.Allocator, file: IFile, offset: u32) ![]u8 {
+        _ = file.seek(offset, c.SEEK_SET);
+        var name_buffer: []u8 = try allocator.alloc(u8, 16);
+
+        _ = file.read(name_buffer[0..]);
+        while (std.mem.lastIndexOfScalar(u8, name_buffer, 0) == null) {
+            name_buffer = try allocator.realloc(name_buffer, name_buffer.len + 16);
+            _ = file.read(name_buffer[name_buffer.len - 16 ..]);
+        }
+
+        return name_buffer;
     }
 
     pub fn size(self: FileSystemHeader) u32 {
-        return FileSystemHeader.read(u32, self.memory[8..12]);
+        return self._reader.read(u32, 8);
     }
 
     pub fn checksum(self: FileSystemHeader) u32 {
-        return FileSystemHeader.read(u32, self.memory[12..16]);
+        return self._reader.read(u32, 12);
     }
 
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result
@@ -72,15 +103,26 @@ pub const FileSystemHeader = struct {
         return checksum_value == 0;
     }
 
-    pub fn name(self: FileSystemHeader) []const u8 {
-        return std.mem.sliceTo(self.memory[16..], 0);
+    pub fn name(self: FileSystemHeader) ?[]const u8 {
+        _ = self;
+        return null;
+        // return self._nameunknown";
+    }
+
+    pub fn get_mapped_address(self: FileSystemHeader) ?*const anyopaque {
+        return self._mapped_memory;
+    }
+
+    pub fn create_file_header_with_offset(self: FileSystemHeader, offset: u32) FileHeader {
+        var maybe_mapped_address: ?*const anyopaque = self._mapped_memory;
+        if (maybe_mapped_address) |address| {
+            maybe_mapped_address = @ptrFromInt(@as(usize, @intFromPtr(address)) + offset);
+        }
+        return FileHeader.init(self._device_file, self._reader.get_offset() + offset, maybe_mapped_address, self._allocator);
     }
 
     pub fn first_file_header(self: FileSystemHeader) ?FileHeader {
-        const file_header_index = 16 + self.name().len;
-        const remainder = file_header_index % 16;
-        const padded_index = if (remainder == 0) file_header_index else (file_header_index + (16 - remainder));
-        return FileHeader.init(self.memory, padded_index);
+        return self.create_file_header_with_offset(self._reader.get_data_offset());
     }
 };
 

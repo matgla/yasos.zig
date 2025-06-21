@@ -23,11 +23,3 @@ const std = @import("std");
 const config = @import("config");
 pub const process = @import("arm-m/process.zig");
 const irq_handlers = @import("arm-m/irq_handlers.zig");
-
-// mov to arch file
-pub inline fn get_lr() u32 {
-    return asm volatile (
-        \\ mov %[ret], lr
-        : [ret] "=r" (-> u32),
-    );
-}

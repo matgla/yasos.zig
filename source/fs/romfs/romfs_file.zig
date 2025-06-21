@@ -24,6 +24,7 @@ const c = @import("../../libc_imports.zig").c;
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const FileName = @import("../../kernel/fs/ifile.zig").FileName;
 const FileHeader = @import("file_header.zig").FileHeader;
 const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
@@ -48,15 +49,15 @@ pub const RomFsFile = struct {
     };
 
     /// Pointer to data instance, data is kept by filesystem
-    data: FileHeader,
+    header: FileHeader,
     allocator: std.mem.Allocator,
 
     /// Current position in file
-    position: usize = 0,
+    position: u32 = 0,
 
-    pub fn create(data: FileHeader, allocator: std.mem.Allocator) RomFsFile {
+    pub fn create(header: FileHeader, allocator: std.mem.Allocator) RomFsFile {
         return .{
-            .data = data,
+            .header = header,
             .allocator = allocator,
         };
     }
@@ -70,11 +71,12 @@ pub const RomFsFile = struct {
 
     pub fn read(ctx: *anyopaque, buffer: []u8) isize {
         const self: *RomFsFile = @ptrCast(@alignCast(ctx));
-        if (self.position >= self.data.size()) {
+        const data_size = self.header.size();
+        if (self.position >= data_size) {
             return 0;
         }
-        const length = @min(self.data.size() - self.position, buffer.len);
-        @memcpy(buffer[0..length], self.data.data()[self.position .. self.position + length]);
+        const length = @min(data_size - self.position, buffer.len);
+        self.header.read_bytes(buffer, self.position);
         self.position += length;
         return @intCast(length);
     }
@@ -93,8 +95,9 @@ pub const RomFsFile = struct {
                 self.position = @intCast(offset);
             },
             c.SEEK_END => {
-                if (self.data.size() >= offset) {
-                    self.position = self.data.size() - @as(usize, @intCast(offset));
+                const file_size = self.header.size();
+                if (file_size >= offset) {
+                    self.position = file_size - @as(u32, @intCast(offset));
                 } else {
                     // set errno
                     return -1;
@@ -130,12 +133,12 @@ pub const RomFsFile = struct {
 
     pub fn size(ctx: *const anyopaque) isize {
         const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
-        return @intCast(self.data.size());
+        return @intCast(self.header.size());
     }
 
-    pub fn name(ctx: *const anyopaque) []const u8 {
+    pub fn name(ctx: *const anyopaque) FileName {
         const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
-        return self.data.name();
+        return self.header.name();
     }
 
     pub fn ioctl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
@@ -143,8 +146,12 @@ pub const RomFsFile = struct {
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
                 var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
-                attr.is_memory_mapped = true;
-                attr.mapped_address_r = self.data.data().ptr;
+                if (self.header.get_mapped_address()) |address| {
+                    attr.is_memory_mapped = true;
+                    attr.mapped_address_r = address;
+                } else {
+                    attr.is_memory_mapped = false;
+                }
             },
             else => {
                 return -1;
@@ -169,14 +176,14 @@ pub const RomFsFile = struct {
         buf.st_uid = 0;
         buf.st_gid = 0;
         buf.st_rdev = 0;
-        buf.st_size = @intCast(self.data.size());
+        buf.st_size = @intCast(self.header.size());
         buf.st_blksize = 1;
         buf.st_blocks = 1;
     }
 
     pub fn filetype(ctx: *const anyopaque) FileType {
         const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
-        return self.data.filetype();
+        return self.header.filetype();
     }
 
     pub fn dupe(ctx: *anyopaque) ?IFile {

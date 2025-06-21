@@ -20,6 +20,8 @@
 
 const c = @import("../../libc_imports.zig").c;
 
+const std = @import("std");
+
 pub const FileType = enum(u8) {
     HardLink = 0,
     Directory = 1,
@@ -41,6 +43,24 @@ pub const FileMemoryMapAttributes = extern struct {
     mapped_address_w: ?*anyopaque,
 };
 
+pub const FileName = struct {
+    name: []const u8,
+    allocator: ?std.mem.Allocator,
+
+    pub fn init(name: []const u8, allocator: ?std.mem.Allocator) FileName {
+        return .{
+            .name = name,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: FileName) void {
+        if (self.allocator) |alloc| {
+            alloc.free(self.name);
+        }
+    }
+};
+
 pub const IFile = struct {
     const Self = @This();
 
@@ -55,7 +75,8 @@ pub const IFile = struct {
         sync: *const fn (ctx: *anyopaque) i32,
         tell: *const fn (ctx: *anyopaque) c.off_t,
         size: *const fn (ctx: *anyopaque) isize,
-        name: *const fn (ctx: *anyopaque) []const u8,
+        // filename may be heap allocated or stack, call always .deinit() after use
+        name: *const fn (ctx: *const anyopaque) FileName,
         ioctl: *const fn (ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32,
         fcntl: *const fn (ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32,
         stat: *const fn (ctx: *const anyopaque, data: *c.struct_stat) void,
@@ -63,6 +84,101 @@ pub const IFile = struct {
         dupe: *const fn (ctx: *anyopaque) ?IFile,
         destroy: *const fn (ctx: *anyopaque) void, // destroy object, but do not close
     };
+
+    pub fn init(ptr: anytype) IFile {
+        const gen_vtable = struct {
+            const vtable = VTable{
+                .read = gen_read,
+                .write = gen_write,
+                .seek = gen_seek,
+                .close = gen_close,
+                .sync = gen_sync,
+                .tell = gen_tell,
+                .size = gen_size,
+                .name = gen_name,
+                .ioctl = gen_ioctl,
+                .fcntl = gen_fcntl,
+                .stat = gen_stat,
+                .filetype = gen_filetype,
+                .dupe = gen_dupe,
+                .destroy = gen_destroy,
+            };
+
+            pub fn gen_read(ctx: *anyopaque, buf: []u8) isize {
+                const self: @TypeOf(ptr) = @ptrCast(@alignCast(ctx));
+                return self.read(buf);
+            }
+
+            pub fn gen_write(ctx: *anyopaque, buf: []const u8) isize {
+                const self: @TypeOf(ptr) = @ptrCast(@alignCast(ctx));
+                return self.write(buf);
+            }
+
+            pub fn gen_seek(ctx: *anyopaque, offset: c.off_t, base: i32) c.off_t {
+                const self: @TypeOf(ptr) = @ptrCast(@alignCast(ctx));
+                return self.seek(offset, base);
+            }
+
+            pub fn gen_close(ctx: *anyopaque) i32 {
+                const self: @TypeOf(ptr) = @ptrCast(@alignCast(ctx));
+                return self.close();
+            }
+
+            pub fn gen_sync(ctx: *anyopaque) i32 {
+                const self: *Self = @ptrCast(@alignCast(ctx));
+                return self.sync();
+            }
+
+            pub fn gen_tell(ctx: *anyopaque) c.off_t {
+                const self: *Self = @ptrCast(@alignCast(ctx));
+                return self.tell();
+            }
+
+            pub fn gen_size(ctx: *anyopaque) isize {
+                const self: *Self = @ptrCast(@alignCast(ctx));
+                return self.size();
+            }
+
+            pub fn gen_name(ctx: *const anyopaque) FileName {
+                const self: *const Self = @ptrCast(@alignCast(ctx));
+                return self.name();
+            }
+
+            pub fn gen_ioctl(ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32 {
+                const self: *Self = @ptrCast(@alignCast(ctx));
+                return self.ioctl(cmd, arg);
+            }
+
+            pub fn gen_fcntl(ctx: *anyopaque, cmd: i32, arg: ?*anyopaque) i32 {
+                const self: *Self = @ptrCast(@alignCast(ctx));
+                return self.fcntl(cmd, arg);
+            }
+
+            pub fn gen_stat(ctx: *const anyopaque, data: *c.struct_stat) void {
+                const self: *const Self = @ptrCast(@alignCast(ctx));
+                self.stat(data);
+            }
+
+            pub fn gen_filetype(ctx: *const anyopaque) FileType {
+                const self: *const Self = @ptrCast(@alignCast(ctx));
+                return self.filetype();
+            }
+
+            pub fn gen_dupe(ctx: *anyopaque) ?IFile {
+                const self: *Self = @ptrCast(@alignCast(ctx));
+                return self.dupe();
+            }
+
+            pub fn gen_destroy(ctx: *anyopaque) void {
+                const self: *Self = @ptrCast(@alignCast(ctx));
+                self.destroy();
+            }
+        };
+        return .{
+            .ptr = ptr,
+            .vtable = &gen_vtable.vtable,
+        };
+    }
 
     pub fn read(self: IFile, buf: []u8) isize {
         return self.vtable.read(self.ptr, buf);
@@ -92,7 +208,7 @@ pub const IFile = struct {
         return self.vtable.size(self.ptr);
     }
 
-    pub fn name(self: IFile) []const u8 {
+    pub fn name(self: IFile) FileName {
         return self.vtable.name(self.ptr);
     }
 

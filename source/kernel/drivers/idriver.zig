@@ -19,11 +19,13 @@
 //
 
 const std = @import("std");
-const IFile = @import("../fs/ifile.zig").IFile;
+const IIFile = @import("../fs/ifile.zig").IFile;
 
 pub const IDriver = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+
+    pub const IFile = IIFile;
 
     pub const VTable = struct {
         load: *const fn (ctx: *anyopaque) anyerror!void,

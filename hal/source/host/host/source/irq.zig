@@ -36,7 +36,7 @@ pub const Irq = struct {
     }
     pub fn trigger_supervisor_call(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
         if (system_call_handler) |handler| {
-            handler(number, arg, out, @returnAddress());
+            handler(number, arg, out);
         } else {
             std.debug.print("System Call IRQ was not configured\n", .{});
         }

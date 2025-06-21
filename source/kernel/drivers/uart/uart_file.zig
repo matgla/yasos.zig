@@ -22,6 +22,7 @@ const std = @import("std");
 const c = @import("../../../libc_imports.zig").c;
 
 const IFile = @import("../../fs/ifile.zig").IFile;
+const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
 
 pub fn UartFile(comptime UartType: anytype) type {
@@ -138,8 +139,8 @@ pub fn UartFile(comptime UartType: anytype) type {
             return 0;
         }
 
-        pub fn name(_: *const anyopaque) []const u8 {
-            return "";
+        pub fn name(_: *const anyopaque) FileName {
+            return FileName.init("uart", null);
         }
 
         pub fn ioctl(ctx: *anyopaque, op: i32, arg: ?*anyopaque) i32 {

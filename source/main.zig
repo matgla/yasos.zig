@@ -54,6 +54,7 @@ const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 const DriverFs = @import("kernel/drivers/driverfs.zig").DriverFs;
 
 const UartDriver = @import("kernel/drivers/uart/uart_driver.zig").UartDriver;
+const FlashDriver = @import("kernel/drivers/flash/flash_driver.zig").FlashDriver;
 const MmcDriver = @import("kernel/drivers/mmc/mmc_driver.zig").MmcDriver;
 
 const process_memory_pool = @import("kernel/process_memory_pool.zig");
@@ -103,25 +104,9 @@ export fn kernel_process() void {
     dynamic_loader.init(malloc_allocator);
     log.write(" - creating virtual file system\n");
     fs.vfs_init(malloc_allocator);
-    const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..16]);
 
-    if (maybe_romfs == null) {
-        log.print("RomFS not found at: 0x{x}\n", .{0x10080000});
-        return;
-    }
-
-    var romfs = maybe_romfs.?;
-    fs.vfs().mount_filesystem("/", romfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.ifilesystem().name(), @errorName(err) });
-        return;
-    };
-    var ramfs = RamFs.init(malloc_allocator) catch |err| {
-        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
-        return;
-    };
-
-    fs.vfs().mount_filesystem("/tmp", ramfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+    var uart_driver = UartDriver(board.uart.uart0).new(malloc_allocator) catch |err| {
+        log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
 
@@ -129,19 +114,16 @@ export fn kernel_process() void {
         log.print("Can't create driverfs: {s}\n", .{@errorName(err)});
         return;
     };
-
-    fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
-        return;
-    };
-
-    log.write(" - register drivers\n");
-    var uart_driver = UartDriver(board.uart.uart0).new(malloc_allocator) catch |err| {
-        log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
-        return;
-    };
     driverfs.append(uart_driver.idriver()) catch |err| {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
+        return;
+    };
+    const flash_driver = FlashDriver().new(malloc_allocator, board.flash.flash0) catch |err| {
+        log.print("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
+        return;
+    };
+    driverfs.append(flash_driver.idriver()) catch |err| {
+        log.print("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
     // var mmc_driver = MmcDriver(&board.mmc.mmc0).new(malloc_allocator) catch |err| {
@@ -157,6 +139,39 @@ export fn kernel_process() void {
         log.print("Can't load driver with error: {s}\n", .{@errorName(err)});
         return;
     };
+
+    const maybe_flash_file = flash_driver.ifile();
+    if (maybe_flash_file) |flash| {
+        const maybe_romfs = RomFs.init(malloc_allocator, flash, 0x800000);
+        if (maybe_romfs == null) {
+            log.print("RomFS not found at: 0x{x}\n", .{0x10080000});
+            return;
+        }
+        var romfs = maybe_romfs.?;
+        fs.vfs().mount_filesystem("/", romfs.ifilesystem()) catch |err| {
+            log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.ifilesystem().name(), @errorName(err) });
+            return;
+        };
+    } else {
+        log.print("Can't get Flash Driver\n", .{});
+        return;
+    }
+    var ramfs = RamFs.init(malloc_allocator) catch |err| {
+        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    fs.vfs().mount_filesystem("/tmp", ramfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+        return;
+    };
+
+    fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
+        log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
+        return;
+    };
+
+    log.write(" - register drivers\n");
 
     const maybe_process = process_manager.instance.get_current_process();
     var pid: u32 = 0;

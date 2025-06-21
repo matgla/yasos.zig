@@ -46,7 +46,9 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    if (std.mem.eql(u8, module_context.path, file.name())) {
+    const filename = file.name();
+    defer filename.deinit();
+    if (std.mem.eql(u8, module_context.path, filename.name)) {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,

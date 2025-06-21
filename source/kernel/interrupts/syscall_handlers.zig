@@ -46,39 +46,43 @@ pub fn errno(rc: u16) anyerror {
 
 // most stupid way to keep track of the last file
 pub fn traverse_directory(file: *IFile, context: *anyopaque) bool {
-    const tracker: *DirentTraverseTracker = @ptrCast(@alignCast(context));
-    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + file.name().len, @alignOf(c.dirent));
-    // skip files that were already traversed
+    // const tracker: *DirentTraverseTracker = @ptrCast(@alignCast(context));
 
-    if (tracker.skipuntil) |lastfile| {
-        if (std.mem.eql(u8, lastfile.name(), file.name())) {
-            _ = lastfile.close();
-            tracker.skipuntil = null;
-        }
+    // const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + file.name().len, @alignOf(c.dirent));
+    // // skip files that were already traversed
 
-        return true;
-    }
-    if (tracker.offset + required_space > tracker.count) {
-        if (tracker.lastfile) |lastfile| {
-            _ = lastfile.close();
-        }
-        tracker.lastfile = file.dupe();
-        return false;
-    }
-    const address = @intFromPtr(tracker.dirp) + tracker.offset;
-    const dirp: *c.dirent = @ptrCast(@alignCast(@as(*c.dirent, @ptrFromInt(address))));
-    dirp.d_ino = 0xdead;
-    dirp.d_off = 0xbeef;
-    dirp.d_reclen = @intCast(required_space);
-    std.mem.copyForwards(u8, dirp.d_name[0..], file.name());
-    dirp.d_name[file.name().len] = 0;
-    tracker.offset += required_space;
-    if (tracker.lastfile) |lastfile| {
-        _ = lastfile.close();
-    }
-    tracker.lastfile = file.dupe();
+    // if (tracker.skipuntil) |lastfile| {
+    //     if (std.mem.eql(u8, lastfile.name(), file.name())) {
+    //         _ = lastfile.close();
+    //         tracker.skipuntil = null;
+    //     }
 
-    return true;
+    //     return true;
+    // }
+    // if (tracker.offset + required_space > tracker.count) {
+    //     if (tracker.lastfile) |lastfile| {
+    //         _ = lastfile.close();
+    //     }
+    //     tracker.lastfile = file.dupe();
+    //     return false;
+    // }
+    // const address = @intFromPtr(tracker.dirp) + tracker.offset;
+    // const dirp: *c.dirent = @ptrCast(@alignCast(@as(*c.dirent, @ptrFromInt(address))));
+    // dirp.d_ino = 0xdead;
+    // dirp.d_off = 0xbeef;
+    // dirp.d_reclen = @intCast(required_space);
+    // std.mem.copyForwards(u8, dirp.d_name[0..], file.name());
+    // dirp.d_name[file.name().len] = 0;
+    // tracker.offset += required_space;
+    // if (tracker.lastfile) |lastfile| {
+    //     _ = lastfile.close();
+    // }
+    // tracker.lastfile = file.dupe();
+
+    // return true;
+    _ = file;
+    _ = context;
+    return false;
 }
 
 const DirentTraverseTracker = struct {
