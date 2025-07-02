@@ -8,7 +8,7 @@ pub const uart = struct {
 };
 
 pub const flash = struct {
-    pub const flash0 = hal.flash.Flash(hal.internal.Flash).create();
+    pub const flash0 = hal.flash.Flash(hal.internal.Flash).create(0);
 };
 
 // pub const mmc = struct {

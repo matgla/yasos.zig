@@ -18,37 +18,23 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
+
 const IFileSystem = @import("../fs/fs.zig").IFileSystem;
 const IFile = @import("../fs/fs.zig").IFile;
 const IDriver = @import("idriver.zig").IDriver;
 
-const std = @import("std");
+const interface = @import("interface");
 
 pub const DriverFs = struct {
-    const VTable = IFileSystem.VTable{
-        .mount = mount,
-        .umount = umount,
-        .create = _create,
-        .mkdir = mkdir,
-        .remove = remove,
-        .name = name,
-        .traverse = traverse,
-        .get = get,
-        .has_path = has_path,
-    };
+    pub usingnamespace interface.DeriveFromBase(IFileSystem, DriverFs);
 
     _allocator: std.mem.Allocator,
     _container: std.ArrayList(IDriver),
 
-    pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*DriverFs {
-        const object = try allocator.create(DriverFs);
-        object.* = DriverFs.create(allocator);
-        return object;
-    }
-
-    pub fn destroy(self: *DriverFs) void {
+    pub fn delete(self: *DriverFs) void {
         for (self._container.items) |driver| {
-            driver.destroy();
+            driver.delete();
         }
         self._container.deinit();
         self._allocator.destroy(self);
@@ -61,12 +47,12 @@ pub const DriverFs = struct {
         };
     }
 
-    pub fn ifilesystem(self: *DriverFs) IFileSystem {
-        return .{
-            .ptr = self,
-            .vtable = &VTable,
-        };
-    }
+    // pub fn ifilesystem(self: *DriverFs) IFileSystem {
+    //     return .{
+    //         .ptr = self,
+    //         .vtable = &VTable,
+    //     };
+    // }
 
     fn mount(_: *anyopaque) i32 {
         // nothing to do
@@ -114,7 +100,7 @@ pub const DriverFs = struct {
     }
 
     pub fn load_all(self: *DriverFs) !void {
-        for (self._container.items) |driver| {
+        for (self._container.items) |*driver| {
             driver.load() catch |err| {
                 return err;
             };

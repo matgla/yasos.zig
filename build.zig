@@ -138,6 +138,10 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("config/tests/config.zig"),
     });
     tests.root_module.addImport("config", test_config_module);
+
+    const oop = b.dependency("modules/oop", .{});
+    tests.root_module.addImport("interface", oop.module("interface"));
+
     const run_tests = b.addRunArtifact(tests);
     run_tests_step.dependOn(&run_tests.step);
     tests.root_module.addIncludePath(b.path("."));
@@ -190,6 +194,8 @@ pub fn build(b: *std.Build) !void {
             }
             arch_module.addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
             boardDep.artifact("yasos_kernel").root_module.addImport("arch", arch_module);
+
+            boardDep.artifact("yasos_kernel").root_module.addImport("interface", oop.module("interface"));
 
             _ = boardDep.module("board");
         } else {

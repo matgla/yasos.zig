@@ -20,9 +20,9 @@ pub fn Flash(comptime FlashImpl: anytype) type {
 
         const Self = @This();
 
-        pub fn create() Self {
+        pub fn create(id: u32) Self {
             return .{
-                .impl = .{},
+                .impl = FlashImpl.create(id),
             };
         }
 

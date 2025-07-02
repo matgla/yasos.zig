@@ -19,34 +19,30 @@
 //
 
 const std = @import("std");
-const IIFile = @import("../fs/ifile.zig").IFile;
+pub const IFile = @import("../fs/ifile.zig").IFile;
 
-pub const IDriver = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+const interface = @import("interface");
 
-    pub const IFile = IIFile;
+fn DriverInterface(comptime SelfType: type) type {
+    return struct {
+        pub const Self = SelfType;
 
-    pub const VTable = struct {
-        load: *const fn (ctx: *anyopaque) anyerror!void,
-        unload: *const fn (ctx: *anyopaque) bool,
-        ifile: *const fn (ctx: *anyopaque) ?IFile,
-        destroy: *const fn (ctx: *anyopaque) void,
+        pub fn load(self: *Self) anyerror!void {
+            return interface.VirtualCall(self, "load", .{}, anyerror!void);
+        }
+
+        pub fn unload(self: *Self) bool {
+            return interface.VirtualCall(self, "unload", .{}, bool);
+        }
+
+        pub fn ifile(self: *Self) ?IFile {
+            return interface.VirtualCall(self, "ifile", .{}, ?IFile);
+        }
+
+        pub fn delete(self: *Self) void {
+            interface.VirtualCall(self, "delete", .{}, void);
+        }
     };
+}
 
-    pub fn load(self: IDriver) !void {
-        try self.vtable.load(self.ptr);
-    }
-
-    pub fn unload(self: IDriver) bool {
-        return self.vtable.unload(self.ptr);
-    }
-
-    pub fn ifile(self: IDriver) ?IFile {
-        return self.vtable.ifile(self.ptr);
-    }
-
-    pub fn destroy(self: IDriver) void {
-        self.vtable.destroy(self.ptr);
-    }
-};
+pub const IDriver = interface.ConstructInterface(DriverInterface);

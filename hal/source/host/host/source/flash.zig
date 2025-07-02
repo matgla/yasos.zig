@@ -17,10 +17,13 @@ const std = @import("std");
 
 pub const Flash = struct {
     pub const BlockSize = 1;
+    id: u32,
     pub fn init() void {}
 
-    pub fn create() Flash {
-        return .{};
+    pub fn create(id: u32) Flash {
+        return .{
+            .id = id,
+        };
     }
 
     pub fn read(self: Flash, address: u32, buffer: []u8) void {

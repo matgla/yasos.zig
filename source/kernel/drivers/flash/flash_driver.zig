@@ -23,70 +23,41 @@ const std = @import("std");
 const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const FlashFile = @import("flash_file.zig").FlashFile;
+const interface = @import("interface");
 
 const hal = @import("hal");
 
-pub fn FlashDriver() type {
-    return struct {
-        const Self = @This();
-        const FlashType = hal.Flash;
+pub const FlashDriver = struct {
+    pub usingnamespace interface.DeriveFromBase(IDriver, FlashDriver);
+    const FlashType = hal.Flash;
 
-        const VTable = IDriver.VTable{
-            .load = load,
-            .unload = unload,
-            .ifile = _ifile,
-            .destroy = _destroy,
+    _flash: FlashType,
+    _allocator: std.mem.Allocator,
+
+    pub fn create(flash: FlashType, allocator: std.mem.Allocator) FlashDriver {
+        return .{
+            ._flash = flash,
+            ._allocator = allocator,
         };
+    }
 
-        _flash: FlashType,
-        _allocator: std.mem.Allocator,
-        // object is owner of the file handle
+    pub fn ifile(self: *FlashDriver) ?IFile {
+        const file = FlashFile(FlashType).create(self._allocator, &self._flash).new(self._allocator) catch {
+            return null;
+        };
+        return file;
+    }
 
-        pub fn new(allocator: std.mem.Allocator, flash: FlashType) std.mem.Allocator.Error!*Self {
-            const object = try allocator.create(Self);
-            object.* = Self.create(allocator, flash);
-            return object;
-        }
+    pub fn load(self: *FlashDriver) anyerror!void {
+        _ = self;
+    }
 
-        pub fn destroy(self: *Self) void {
-            self._allocator.destroy(self);
-        }
+    pub fn unload(self: *FlashDriver) bool {
+        _ = self;
+        return true;
+    }
 
-        pub fn create(allocator: std.mem.Allocator, flash: FlashType) Self {
-            return .{
-                ._flash = flash,
-                ._allocator = allocator,
-            };
-        }
-
-        pub fn idriver(self: *Self) IDriver {
-            return .{
-                .ptr = self,
-                .vtable = &VTable,
-            };
-        }
-
-        pub fn ifile(self: *Self) ?IFile {
-            var file = FlashFile(FlashType).new(self._allocator, &self._flash) catch {
-                return null;
-            };
-            return file.ifile();
-        }
-
-        fn load(_: *anyopaque) !void {}
-
-        fn unload(_: *anyopaque) bool {
-            return true;
-        }
-
-        fn _ifile(ctx: *anyopaque) ?IFile {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            return self.ifile();
-        }
-
-        fn _destroy(ctx: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            self.destroy();
-        }
-    };
-}
+    pub fn delete(self: *FlashDriver) void {
+        _ = self;
+    }
+};

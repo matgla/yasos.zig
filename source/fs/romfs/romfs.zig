@@ -18,7 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const IFileSystem = @import("../../kernel/fs/fs.zig").IFileSystem;
+const ReadOnlyFileSystem = @import("../../kernel/fs/ifilesystem.zig").ReadOnlyFileSystem;
 const IFile = @import("../../kernel/fs/fs.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
@@ -27,6 +27,8 @@ const RomFsFile = @import("romfs_file.zig").RomFsFile;
 const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
 const FileHeader = @import("file_header.zig").FileHeader;
 
+const interface = @import("interface");
+
 const c = @import("../../libc_imports.zig").c;
 
 const std = @import("std");
@@ -34,79 +36,25 @@ const std = @import("std");
 const log = &@import("../../log/kernel_log.zig").kernel_log;
 
 pub const RomFs = struct {
+    pub usingnamespace interface.DeriveFromBase(ReadOnlyFileSystem, RomFs);
+    base: ReadOnlyFileSystem,
     root: FileSystemHeader,
     allocator: std.mem.Allocator,
     device_file: IFile,
 
-    const VTable = IFileSystem.VTable{
-        .mount = mount,
-        .umount = umount,
-        .create = create,
-        .mkdir = mkdir,
-        .remove = remove,
-        .name = name,
-        .traverse = traverse,
-        .get = get,
-        .has_path = has_path,
-    };
-
-    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: u32) ?RomFs {
-        const fs = FileSystemHeader.init(allocator, device_file, start_offset);
-        if (fs) |root| {
-            return .{
-                .root = root,
-                .allocator = allocator,
-                .device_file = device_file,
-            };
-        }
-        return null;
-    }
-
-    pub fn ifilesystem(self: *RomFs) IFileSystem {
-        return .{
-            .ptr = self,
-            .vtable = &VTable,
-        };
-    }
-
-    fn mount(_: *anyopaque) i32 {
-        // nothing to do
-        return 0;
-    }
-
-    fn umount(_: *anyopaque) i32 {
-        // nothing to do
-        return 0;
-    }
-
-    fn create(_: *anyopaque, _: []const u8, _: i32) ?IFile {
-        // read-only filesystem
-        return null;
-    }
-
-    fn mkdir(_: *anyopaque, _: []const u8, _: i32) i32 {
-        // read-only filesystem
-        return -1;
-    }
-
-    fn remove(_: *anyopaque, _: []const u8) i32 {
-        // read-only filesystem
-        return -1;
-    }
-
-    fn name(_: *const anyopaque) []const u8 {
+    pub fn name(self: *const RomFs) []const u8 {
+        _ = self;
         return "romfs";
     }
 
-    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, context: *anyopaque) i32 {
-        const self: *RomFs = @ptrCast(@alignCast(ctx));
-        const maybe_node = self.get_file_header(path);
-        if (maybe_node) |node| {
+    pub fn traverse(self: *RomFs, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, context: *anyopaque) i32 {
+        var maybe_node = self.get_file_header(path);
+        if (maybe_node) |*node| {
             if (node.filetype() == FileType.Directory) {
                 var it: ?FileHeader = self.create_file_header(node.specinfo());
-                while (it) |child| : (it = child.next()) {
-                    var file: RomFsFile = RomFsFile.create(child, self.allocator);
-                    var ifile = file.ifile();
+                while (it) |*child| : (it = child.next()) {
+                    var file: RomFsFile = RomFsFile.create(child.*, self.allocator);
+                    var ifile = file.interface();
                     if (!callback(&ifile, context)) {
                         return 0;
                     }
@@ -115,6 +63,37 @@ pub const RomFs = struct {
             }
         }
         return -1;
+    }
+
+    pub fn delete(self: *RomFs) void {
+        _ = self;
+    }
+
+    // RomFs interface
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: u32) error{NotRomFsFileSystem}!RomFs {
+        const fs = FileSystemHeader.init(allocator, device_file, start_offset);
+        if (fs) |root| {
+            return .{
+                .base = .{},
+                .root = root,
+                .allocator = allocator,
+                .device_file = device_file,
+            };
+        }
+        return error.NotRomFsFileSystem;
+    }
+
+    pub fn get(self: *RomFs, path: []const u8) ?IFile {
+        const maybe_node = self.get_file_header(path);
+        if (maybe_node) |node| {
+            return RomFsFile.create(node, self.allocator).new(self.allocator) catch return null;
+        }
+        return null;
+    }
+
+    pub fn has_path(self: *const RomFs, path: []const u8) bool {
+        const file = self.get_file_header(path);
+        return file != null;
     }
 
     fn get_file_header(self: RomFs, path: []const u8) ?FileHeader {
@@ -132,7 +111,7 @@ pub const RomFs = struct {
                 }
             }
             // if symbolic link then fetch target node
-            if (maybe_node) |node| {
+            if (maybe_node) |*node| {
                 if (node.filetype() == FileType.SymbolicLink) {
                     // iterate through link
                     const maybe_name = node.read_string(self.allocator, 0);
@@ -145,7 +124,7 @@ pub const RomFs = struct {
                 }
             }
 
-            if (maybe_node) |node| {
+            if (maybe_node) |*node| {
                 // if last component then return
                 if (path_without_trailing_separator.len == part.path.len) {
                     if (node.filetype() == FileType.HardLink) {
@@ -156,14 +135,14 @@ pub const RomFs = struct {
                 }
             }
 
-            if (maybe_node) |node| {
+            if (maybe_node) |*node| {
                 if (node.filetype() == FileType.Directory) {
                     maybe_node = self.create_file_header(node.specinfo());
                 }
             }
         }
 
-        if (maybe_node) |node| {
+        if (maybe_node) |*node| {
             if (node.filetype() == FileType.HardLink) {
                 // if hard link then get it
                 return self.create_file_header(node.specinfo());
@@ -174,23 +153,6 @@ pub const RomFs = struct {
 
     fn create_file_header(self: RomFs, offset: u32) FileHeader {
         return self.root.create_file_header_with_offset(offset);
-    }
-
-    fn get(ctx: *anyopaque, path: []const u8) ?IFile {
-        const self: *RomFs = @ptrCast(@alignCast(ctx));
-        const maybe_node = self.get_file_header(path);
-        if (maybe_node) |node| {
-            const file = self.allocator.create(RomFsFile) catch return null;
-            file.* = RomFsFile.create(node, self.allocator);
-            return file.ifile();
-        }
-        return null;
-    }
-
-    fn has_path(ctx: *anyopaque, path: []const u8) bool {
-        const self: *RomFs = @ptrCast(@alignCast(ctx));
-        const file = self.get_file_header(path);
-        return file != null;
     }
 };
 

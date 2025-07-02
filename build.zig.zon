@@ -1,9 +1,14 @@
 .{
     .name = .yasos,
     .version = "0.0.1",
+    .minimum_zig_version = "0.15.0-dev.869+640a13065",
     .dependencies = .{
         .yasos_hal = .{ .path = "hal" },
         .yasld = .{ .path = "dynamic_loader" },
+        .@"modules/oop" = .{
+            .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#1d6ef3a247d5b943e17289d40eaccbdd1e719f73",
+            .hash = "oop_zig-0.0.1-SbIaG-o-AADDn4l_QABg3cGzrlWfu25u2E18pA-QRBBk",
+        },
     },
     .paths = .{
         "build.zig",

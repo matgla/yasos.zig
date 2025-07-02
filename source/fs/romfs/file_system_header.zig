@@ -40,8 +40,10 @@ pub const FileSystemHeader = struct {
 
     pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: u32) ?FileSystemHeader {
         var marker: [8]u8 = undefined;
-        _ = device_file.seek(offset, c.SEEK_SET);
-        _ = device_file.read(marker[0..]);
+        var df = device_file;
+
+        _ = df.seek(offset, c.SEEK_SET);
+        _ = df.read(marker[0..]);
         if (!std.mem.eql(u8, marker[0..], "-rom1fs-")) {
             return null;
         }
@@ -51,7 +53,7 @@ pub const FileSystemHeader = struct {
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
-        _ = device_file.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        _ = df.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
         var mapped_memory_address: ?*const anyopaque = null;
         if (attr.mapped_address_r) |address| {
             mapped_memory_address = address;
@@ -59,8 +61,8 @@ pub const FileSystemHeader = struct {
 
         return .{
             ._allocator = allocator,
-            ._reader = FileReader.init(device_file, offset),
-            ._device_file = device_file,
+            ._reader = FileReader.init(df, offset),
+            ._device_file = df,
             ._mapped_memory = mapped_memory_address,
         };
     }

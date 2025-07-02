@@ -75,20 +75,20 @@ pub const FileHeader = struct {
         }
     }
 
-    pub fn filetype(self: FileHeader) FileType {
+    pub fn filetype(self: *FileHeader) FileType {
         const fileheader = self._reader.read(u32, 0);
         return FileHeader.convert_filetype(@enumFromInt(fileheader & 0xf));
     }
 
-    pub fn specinfo(self: FileHeader) u32 {
+    pub fn specinfo(self: *FileHeader) u32 {
         return self._reader.read(u32, 4);
     }
 
-    pub fn size(self: FileHeader) u32 {
+    pub fn size(self: *FileHeader) u32 {
         return self._reader.read(u32, 8);
     }
 
-    pub fn name(self: FileHeader) FileName {
+    pub fn name(self: *FileHeader) FileName {
         const name_buffer = self._reader.read_string(self._allocator, 16) catch {
             return .{
                 .name = "",
@@ -98,14 +98,14 @@ pub const FileHeader = struct {
         return FileName.init(name_buffer, self._allocator);
     }
 
-    pub fn read(self: FileHeader, comptime T: anytype, offset: u32) T {
+    pub fn read(self: *FileHeader, comptime T: anytype, offset: u32) T {
         return self._reader.read(T, offset);
     }
-    pub fn read_bytes(self: FileHeader, buffer: []u8, offset: u32) void {
+    pub fn read_bytes(self: *FileHeader, buffer: []u8, offset: u32) void {
         self._reader.read_bytes(buffer, offset);
     }
 
-    pub fn read_string(self: FileHeader, allocator: std.mem.Allocator, offset: u32) ?[]u8 {
+    pub fn read_string(self: *FileHeader, allocator: std.mem.Allocator, offset: u32) ?[]u8 {
         return self._reader.read_string(allocator, offset) catch {
             return null;
         };
@@ -132,7 +132,7 @@ pub const FileHeader = struct {
         return checksum_value == 0;
     }
 
-    pub fn next(self: FileHeader) ?FileHeader {
+    pub fn next(self: *FileHeader) ?FileHeader {
         const next_file_header = self._reader.read(u32, 0) & 0xfffffff0;
         if (next_file_header == 0) {
             return null;

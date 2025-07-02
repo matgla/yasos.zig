@@ -16,64 +16,27 @@
 const std = @import("std");
 
 const IDriver = @import("../../../kernel/drivers/idriver.zig").IDriver;
+const IFile = @import("../../../kernel/drivers/idriver.zig").IFile;
+
+const interface = @import("interface");
 
 pub const RomfsDeviceFile = struct {
-    const VTable = IDriver.VTable{
-        .read = read,
-        .write = write,
-        .seek = seek,
-        .close = close,
-        .sync = sync,
-        .tell = tell,
-        .size = size,
-        .name = name,
-        .ioctl = ioctl,
-        .fcntl = fcntl,
-        .stat = stat,
-        .filetype = filetype,
-        .dupe = dupe,
-        .destroy = _destroy,
-    };
-
     pub fn create() RomfsDeviceFile {
         return .{};
-    }
-
-    pub fn ifile(self: *RomfsDeviceFile) IDriver.IFile {
-        return IDriver.IFile{
-            .ptr = @ptrCast(self),
-            .vtable = &RomfsDeviceFile.VTable,
-        };
-    }
-
-    fn read(ctx: *anyopaque, buf: []u8) !usize {
-        _ = ctx;
-        _ = buf;
-        return 0; // Stub implementation
-    }
-
-    fn write(ctx: *anyopaque, buf: []const u8) !usize {
-        _ = ctx;
-        _ = buf;
-        return 0; // Stub implementation
     }
 };
 
 pub const RomfsDeviceStub = struct {
-    const VTable = IDriver.VTable{
-        .load = load,
-        .unload = unload,
-        .ifile = ifile,
-        .destroy = _destroy,
-    };
-
-    path: []const u8,
+    pub usingnamespace interface.DeriveFromBase(IDriver, RomfsDeviceStub);
     file: ?std.fs.File,
+    allocator: *const std.mem.Allocator,
+    path: []const u8,
 
-    pub fn create(filepath: []const u8) RomfsDeviceStub {
+    pub fn create(allocator: *const std.mem.Allocator, path: [:0]const u8) RomfsDeviceStub {
         return .{
-            .path = filepath,
             .file = null,
+            .allocator = allocator,
+            .path = path,
         };
     }
 
@@ -83,32 +46,22 @@ pub const RomfsDeviceStub = struct {
         }
     }
 
-    pub fn idriver(self: *RomfsDeviceStub) IDriver {
-        return IDriver{
-            .ptr = @ptrCast(self),
-            .vtable = &VTable,
-        };
-    }
-
-    fn load(ctx: *anyopaque) !void {
-        const self: *RomfsDeviceStub = @ptrCast(@alignCast(ctx));
+    pub fn load(self: *RomfsDeviceStub) anyerror!void {
         const cwd = std.fs.cwd();
-
         self.file = try cwd.openFile(self.path, .{ .mode = .read_only });
     }
 
-    fn unload(ctx: *anyopaque) bool {
-        _ = ctx;
+    pub fn unload(self: *RomfsDeviceStub) bool {
+        _ = self;
         return true;
     }
 
-    fn ifile(ctx: *anyopaque) ?IDriver.IFile {
-        const self: *RomfsDeviceStub = @ptrCast(@alignCast(ctx));
-
+    pub fn ifile(self: *RomfsDeviceStub) ?IFile {
+        _ = self;
         return null;
     }
 
-    fn _destroy(ctx: *anyopaque) void {
-        _ = ctx;
+    pub fn delete(self: *RomfsDeviceStub) void {
+        _ = self;
     }
 };

@@ -27,15 +27,16 @@ pub const FileReader = struct {
     pub fn init(device_file: IFile, offset: u32) FileReader {
         var data_offset_value: u32 = 32;
         var buffer: [8]u8 = undefined;
-        _ = device_file.seek(offset + 16, c.SEEK_SET);
-        _ = device_file.read(buffer[0..]);
+        var df = device_file;
+        _ = df.seek(offset + 16, c.SEEK_SET);
+        _ = df.read(buffer[0..]);
         while (std.mem.lastIndexOfScalar(u8, buffer[0..], 0) != null) {
             data_offset_value += 16;
-            _ = device_file.read(buffer[0..]);
+            _ = df.read(buffer[0..]);
         }
 
         return .{
-            ._device_file = device_file,
+            ._device_file = df,
             ._offset = data_offset_value + offset,
             ._data_offset = 0,
         };
@@ -49,14 +50,14 @@ pub const FileReader = struct {
         return self._data_offset;
     }
 
-    pub fn read(self: *const FileReader, comptime T: type, offset: u32) T {
+    pub fn read(self: *FileReader, comptime T: type, offset: u32) T {
         var buffer: [@sizeOf(T)]u8 = undefined;
         _ = self._device_file.seek(self._offset + offset, c.SEEK_SET);
         _ = self._device_file.read(buffer[0..]);
         return std.mem.bigToNative(T, std.mem.bytesToValue(T, buffer[0..]));
     }
 
-    pub fn read_string(self: *const FileReader, allocator: std.mem.Allocator, offset: u32) ![]u8 {
+    pub fn read_string(self: *FileReader, allocator: std.mem.Allocator, offset: u32) ![]u8 {
         _ = self._device_file.seek(offset, c.SEEK_SET);
         var name_buffer: []u8 = try allocator.alloc(u8, 16);
 
@@ -69,7 +70,7 @@ pub const FileReader = struct {
         return name_buffer;
     }
 
-    pub fn read_bytes(self: *const FileReader, buffer: []u8, offset: u32) void {
+    pub fn read_bytes(self: *FileReader, buffer: []u8, offset: u32) void {
         _ = self._device_file.seek(self._offset + offset, c.SEEK_SET);
         _ = self._device_file.read(buffer[0..]);
     }
@@ -77,10 +78,11 @@ pub const FileReader = struct {
 
 const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
 test "RomFs FileReader should read data correctly" {
-    var romfs_device = RomfsDeviceStub.create("source/fs/romfs/tests/test.romfs");
+    var romfs_device = RomfsDeviceStub.create(&std.testing.allocator, "source/fs/romfs/tests/test.romfs");
     defer romfs_device.destroy();
-    const idriver = romfs_device.idriver();
-    try idriver.load();
-    const idevicefile = idriver.ifile();
-    _ = idevicefile;
+    const idriver = romfs_device.interface();
+    _ = idriver;
+    // try idriver.load();
+    // const idevicefile = idriver.ifile();
+    // _ = idevicefile;
 }

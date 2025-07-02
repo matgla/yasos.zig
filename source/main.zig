@@ -60,6 +60,7 @@ const MmcDriver = @import("kernel/drivers/mmc/mmc_driver.zig").MmcDriver;
 const process_memory_pool = @import("kernel/process_memory_pool.zig");
 const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
 const system_call = @import("kernel/interrupts/system_call.zig");
+const syscall_handlers = @import("kernel/interrupts/syscall_handlers.zig");
 
 const panic_helper = @import("arch").panic;
 
@@ -105,36 +106,27 @@ export fn kernel_process() void {
     log.write(" - creating virtual file system\n");
     fs.vfs_init(malloc_allocator);
 
-    var uart_driver = UartDriver(board.uart.uart0).new(malloc_allocator) catch |err| {
+    var driverfs = DriverFs.create(malloc_allocator);
+    const uart_driver = (UartDriver(board.uart.uart0){}).new(malloc_allocator) catch |err| {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
 
-    const driverfs = DriverFs.new(malloc_allocator) catch |err| {
-        log.print("Can't create driverfs: {s}\n", .{@errorName(err)});
-        return;
-    };
-    driverfs.append(uart_driver.idriver()) catch |err| {
+    driverfs.append(uart_driver) catch |err| {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-    const flash_driver = FlashDriver().new(malloc_allocator, board.flash.flash0) catch |err| {
+    var flash_driver = (FlashDriver.create(
+        board.flash.flash0,
+        malloc_allocator,
+    )).new(malloc_allocator) catch |err| {
         log.print("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-    driverfs.append(flash_driver.idriver()) catch |err| {
+    driverfs.append(flash_driver) catch |err| {
         log.print("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-    // var mmc_driver = MmcDriver(&board.mmc.mmc0).new(malloc_allocator) catch |err| {
-    //     log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
-    //     return;
-    // };
-
-    // driverfs.append(mmc_driver.idriver()) catch |err| {
-    //     log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
-    //     return;
-    // };
     driverfs.load_all() catch |err| {
         log.print("Can't load driver with error: {s}\n", .{@errorName(err)});
         return;
@@ -142,97 +134,98 @@ export fn kernel_process() void {
 
     const maybe_flash_file = flash_driver.ifile();
     if (maybe_flash_file) |flash| {
-        const maybe_romfs = RomFs.init(malloc_allocator, flash, 0x800000);
-        if (maybe_romfs == null) {
-            log.print("RomFS not found at: 0x{x}\n", .{0x10080000});
+        var romfs = (RomFs.init(malloc_allocator, flash, 0x800000) catch |err| {
+            log.print("Can't initialize RomFS: {s}\n", .{@errorName(err)});
             return;
-        }
-        var romfs = maybe_romfs.?;
-        fs.vfs().mount_filesystem("/", romfs.ifilesystem()) catch |err| {
-            log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.ifilesystem().name(), @errorName(err) });
+        }).new(malloc_allocator) catch |err| {
+            log.print("Can't create IRomFs object: {s}\n", .{@errorName(err)});
+            return;
+        };
+        fs.vfs().mount_filesystem("/", romfs) catch |err| {
+            log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.name(), @errorName(err) });
             return;
         };
     } else {
         log.print("Can't get Flash Driver\n", .{});
         return;
     }
-    var ramfs = RamFs.init(malloc_allocator) catch |err| {
-        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
-        return;
-    };
+    // var ramfs = RamFs.init(malloc_allocator) catch |err| {
+    //     log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
+    //     return;
+    // };
 
-    fs.vfs().mount_filesystem("/tmp", ramfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
-        return;
-    };
+    // fs.vfs().mount_filesystem("/tmp", ramfs.ifilesystem()) catch |err| {
+    //     log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
+    //     return;
+    // };
 
-    fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
-        return;
-    };
+    // fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
+    //     log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
+    //     return;
+    // };
 
-    log.write(" - register drivers\n");
+    // log.write(" - register drivers\n");
 
-    const maybe_process = process_manager.instance.get_current_process();
-    var pid: u32 = 0;
-    if (maybe_process) |p| {
-        log.write(" - setting default streams\n");
-        const maybe_uart_file = uart_driver.idriver().ifile();
-        if (maybe_uart_file) |uart_file| {
-            p.fds.put(0, .{
-                .file = uart_file,
-                .path = blk: {
-                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                    const value = "/dev/stdin";
-                    std.mem.copyForwards(u8, path[0..value.len], value);
-                    break :blk path;
-                },
-                .diriter = null,
-            }) catch {
-                log.write("Can't register: stdin\n");
-            };
-            p.fds.put(1, .{
-                .file = uart_file,
-                .path = blk: {
-                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                    const value = "/dev/stdout";
-                    std.mem.copyForwards(u8, path[0..value.len], value);
-                    break :blk path;
-                },
-                .diriter = null,
-            }) catch {
-                log.write("Can't register: stdout\n");
-            };
-            p.fds.put(2, .{
-                .file = uart_file,
-                .path = blk: {
-                    var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                    const value = "/dev/stderr";
-                    std.mem.copyForwards(u8, path[0..value.len], value);
-                    break :blk path;
-                },
-                .diriter = null,
-            }) catch {
-                log.write("Can't register: stderr\n");
-            };
-        }
-        pid = p.pid;
-    } else {
-        @panic("Process unavailable but called from it");
-    }
+    // const maybe_process = process_manager.instance.get_current_process();
+    // var pid: u32 = 0;
+    // if (maybe_process) |p| {
+    //     log.write(" - setting default streams\n");
+    //     const maybe_uart_file = uart_driver.idriver().ifile();
+    //     if (maybe_uart_file) |uart_file| {
+    //         p.fds.put(0, .{
+    //             .file = uart_file,
+    //             .path = blk: {
+    //                 var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+    //                 const value = "/dev/stdin";
+    //                 std.mem.copyForwards(u8, path[0..value.len], value);
+    //                 break :blk path;
+    //             },
+    //             .diriter = null,
+    //         }) catch {
+    //             log.write("Can't register: stdin\n");
+    //         };
+    //         p.fds.put(1, .{
+    //             .file = uart_file,
+    //             .path = blk: {
+    //                 var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+    //                 const value = "/dev/stdout";
+    //                 std.mem.copyForwards(u8, path[0..value.len], value);
+    //                 break :blk path;
+    //             },
+    //             .diriter = null,
+    //         }) catch {
+    //             log.write("Can't register: stdout\n");
+    //         };
+    //         p.fds.put(2, .{
+    //             .file = uart_file,
+    //             .path = blk: {
+    //                 var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+    //                 const value = "/dev/stderr";
+    //                 std.mem.copyForwards(u8, path[0..value.len], value);
+    //                 break :blk path;
+    //             },
+    //             .diriter = null,
+    //         }) catch {
+    //             log.write("Can't register: stderr\n");
+    //         };
+    //     }
+    //     pid = p.pid;
+    // } else {
+    //     @panic("Process unavailable but called from it");
+    // }
 
-    log.write(" - loading yasld\n");
+    // log.write(" - loading yasld\n");
 
-    var process_memory_allocator = ProcessPageAllocator.create(maybe_process.?.pid);
-    const sh = dynamic_loader.load_executable("/bin/sh", process_memory_allocator.std_allocator(), pid) catch |err| {
-        log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
-        return;
-    };
+    // var process_memory_allocator = ProcessPageAllocator.create(maybe_process.?.pid);
+    // const sh = dynamic_loader.load_executable("/bin/sh", process_memory_allocator.std_allocator(), pid) catch |err| {
+    //     log.print("Executable loading failed with error: {s}\n", .{@errorName(err)});
+    //     return;
+    // };
 
-    const args: [][]u8 = &.{};
-    _ = sh.main(@ptrCast(args.ptr), args.len) catch |err| {
-        log.print("Cannot execute main: {s}\n", .{@errorName(err)});
-    };
+    // const args: [][]u8 = &.{};
+    // _ = sh.main(@ptrCast(args.ptr), args.len) catch |err| {
+    //     log.print("Cannot execute main: {s}\n", .{@errorName(err)});
+    // };
     while (true) {
         time.sleep_ms(20);
     }
@@ -240,8 +233,8 @@ export fn kernel_process() void {
 
 pub export fn main() void {
     initialize_board();
-    log.print("\n-----------------------------------------\n", .{});
-    log.print("|               YASOS                   |\n", .{});
+    log.print("\n---------------------------------------------\n", .{});
+    log.print("|                 YASOS                     |\n", .{});
     DumpHardware.print_hardware();
 
     log.write(" - initializing process memory pool\n");

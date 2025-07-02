@@ -19,6 +19,9 @@
 //
 
 const std = @import("std");
+
+const interface = @import("interface");
+
 const c = @import("../../../libc_imports.zig").c;
 
 const IFile = @import("../../fs/ifile.zig").IFile;
@@ -28,43 +31,11 @@ const FileType = @import("../../fs/ifile.zig").FileType;
 pub fn FlashFile(comptime FlashType: anytype) type {
     return struct {
         const Self = @This();
-
+        pub usingnamespace interface.DeriveFromBase(IFile, Self);
         /// VTable for IFile interface
-        const VTable = IFile.VTable{
-            .read = read,
-            .write = write,
-            .seek = seek,
-            .close = close,
-            .sync = sync,
-            .tell = tell,
-            .size = size,
-            .name = name,
-            .ioctl = ioctl,
-            .fcntl = fcntl,
-            .stat = stat,
-            .filetype = filetype,
-            .dupe = dupe,
-            .destroy = _destroy,
-        };
-
         _flash: *FlashType,
         _allocator: std.mem.Allocator,
         _current_address: u32,
-
-        pub fn new(allocator: std.mem.Allocator, flash: *FlashType) std.mem.Allocator.Error!*Self {
-            const object = try allocator.create(Self);
-            object.* = Self.create(allocator, flash);
-            object.* = .{
-                ._flash = flash,
-                ._allocator = allocator,
-                ._current_address = 0,
-            };
-            return object;
-        }
-
-        pub fn destroy(self: *Self) void {
-            self._allocator.destroy(self);
-        }
 
         pub fn create(allocator: std.mem.Allocator, flash: *FlashType) Self {
             return .{
@@ -74,27 +45,18 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             };
         }
 
-        pub fn ifile(self: *Self) IFile {
-            return .{
-                .ptr = self,
-                .vtable = &VTable,
-            };
-        }
-
-        pub fn read(ctx: *anyopaque, buffer: []u8) isize {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        // IFile interface
+        pub fn read(self: *Self, buffer: []u8) isize {
             self._flash.read(self._current_address, buffer);
             return @intCast(buffer.len);
         }
 
-        pub fn write(ctx: *anyopaque, data: []const u8) isize {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        pub fn write(self: *Self, data: []const u8) isize {
             self._flash.write(self._current_address, data);
             return @intCast(data.len);
         }
 
-        pub fn seek(ctx: *anyopaque, offset: c.off_t, whence: i32) c.off_t {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
             switch (whence) {
                 c.SEEK_SET => {
                     if (offset < 0) {
@@ -107,42 +69,46 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             return 0;
         }
 
-        pub fn close(_: *anyopaque) i32 {
+        pub fn close(self: *Self) i32 {
+            _ = self;
             return 0;
         }
 
-        pub fn sync(_: *anyopaque) i32 {
+        pub fn sync(self: *Self) i32 {
+            _ = self;
             return 0;
         }
 
-        pub fn tell(_: *const anyopaque) c.off_t {
+        pub fn tell(self: *Self) c.off_t {
+            _ = self;
             return 0;
         }
 
-        pub fn size(_: *const anyopaque) isize {
+        pub fn size(self: *Self) isize {
+            _ = self;
             return 0;
         }
 
-        pub fn name(_: *const anyopaque) FileName {
+        pub fn name(self: *Self) FileName {
+            _ = self;
             return FileName.init("flash", null);
         }
 
-        pub fn ioctl(ctx: *anyopaque, op: i32, arg: ?*anyopaque) i32 {
-            _ = ctx;
+        pub fn ioctl(self: *Self, op: i32, arg: ?*anyopaque) i32 {
+            _ = self;
             _ = op;
             _ = arg;
             return -1;
         }
 
-        pub fn fcntl(ctx: *anyopaque, op: i32, maybe_arg: ?*anyopaque) i32 {
-            _ = ctx;
+        pub fn fcntl(self: *Self, op: i32, maybe_arg: ?*anyopaque) i32 {
+            _ = self;
             _ = op;
             _ = maybe_arg;
             return -1;
         }
 
-        pub fn stat(ctx: *const anyopaque, buf: *c.struct_stat) void {
-            const self: *const Self = @ptrCast(@alignCast(ctx));
+        pub fn stat(self: *Self, buf: *c.struct_stat) void {
             buf.st_dev = 0;
             buf.st_ino = 0;
             buf.st_mode = 0;
@@ -155,18 +121,13 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             buf.st_blocks = self._flash.get_number_of_blocks();
         }
 
-        pub fn filetype(_: *const anyopaque) FileType {
+        pub fn filetype(self: *Self) FileType {
+            _ = self;
             return FileType.BlockDevice;
         }
 
-        pub fn dupe(ctx: *anyopaque) ?IFile {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            return self.ifile();
-        }
-
-        pub fn _destroy(ctx: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            self.destroy();
+        pub fn delete(self: *Self) void {
+            _ = self;
         }
     };
 }

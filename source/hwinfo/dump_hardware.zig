@@ -29,24 +29,24 @@ const log = &kernel_log.kernel_log;
 pub const DumpHardware = struct {
     pub fn print_hardware() void {
         var buffer: [8]u8 = undefined;
-        log.print("-----------------------------------------\n", .{});
-        log.print("|   CPU: {s: <10}  FREQ: {s: <12} |\n", .{
+        log.print("---------------------------------------------\n", .{});
+        log.print("|   CPU: {s: <10}  FREQ: {s: <12}     |\n", .{
             cpu.name(),
             format_frequency(cpu.frequency(), &buffer),
         });
-        log.print("| Cores: {d: <2}                             |\n", .{
+        log.print("| Cores: {d: <2}                                 |\n", .{
             cpu.number_of_cores(),
         });
         DumpHardware.print_memory();
-        log.print("-----------------------------------------\n", .{});
+        log.print("---------------------------------------------\n", .{});
     }
 
     pub fn print_memory() void {
         var buffer: [8]u8 = undefined;
-        log.print("| Memory layout:                        |\n", .{});
+        log.print("| Memory layout:                            |\n", .{});
         const layout = memory.get_memory_layout();
         for (layout) |entry| {
-            log.print("|  0x{x: <10} {s: <8} {s: <8} {s: <5} |\n", .{
+            log.print("|  0x{x: <12}  {s: <8} {s: <8} {s: <5}  |\n", .{
                 entry.start_address,
                 format_size(entry.size, &buffer),
                 @tagName(entry.memory_type),
