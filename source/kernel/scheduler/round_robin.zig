@@ -19,7 +19,7 @@
 //
 
 const std = @import("std");
-const Process = @import("process.zig").Process;
+const Process = @import("../process.zig").Process;
 
 const cpu = @import("hal").cpu;
 

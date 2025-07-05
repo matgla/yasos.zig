@@ -26,8 +26,12 @@ pub fn Flash(comptime FlashImpl: anytype) type {
             };
         }
 
-        pub fn init() void {
-            return FlashImpl.init();
+        pub fn init(self: *Self) !void {
+            return self.impl.init();
+        }
+
+        pub fn deinit(self: *Self) void {
+            return self.impl.deinit();
         }
 
         pub fn read(self: *Self, address: u32, buffer: []u8) void {
@@ -44,6 +48,10 @@ pub fn Flash(comptime FlashImpl: anytype) type {
 
         pub fn get_number_of_blocks(self: *Self) u32 {
             return self.impl.get_number_of_blocks();
+        }
+
+        pub fn get_physical_address(self: *const Self) []const u8 {
+            return self.impl.get_physical_address();
         }
     };
 }

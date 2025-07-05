@@ -21,7 +21,6 @@ const std = @import("std");
 
 const hal = @import("hal");
 
-const RoundRobinScheduler = @import("round_robin.zig").RoundRobin;
 const process = @import("process.zig");
 const Process = process.Process;
 const config = @import("config");
@@ -31,170 +30,174 @@ var log = &@import("../log/kernel_log.zig").kernel_log;
 const dynamic_loader = @import("modules.zig");
 const SymbolEntry = @import("yasld").SymbolEntry;
 
+const Scheduler = if (config.scheduler.round_robin)
+    @import("scheduler/round_robin.zig").RoundRobin
+else if (config.scheduler.osthread)
+    @import("scheduler/osthread.zig").OSThread
+else
+    @compileError("Unsupported scheduler type");
+
 extern fn switch_to_next_task() void;
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
 
 extern fn reload_current_task() void;
 
-pub const ProcessManager = struct {
-    pub const ContainerType = std.DoublyLinkedList;
-    pub const ProcessType = Process;
-    const Self = @This();
+fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
+    return struct {
+        pub const ContainerType = std.DoublyLinkedList;
+        pub const ProcessType = Process;
+        const Self = @This();
+        const SchedulerType = SchedulerGeneratorType(Self);
 
-    processes: ContainerType,
-    scheduler: RoundRobinScheduler(Self),
-    allocator: std.mem.Allocator,
+        processes: ContainerType,
+        allocator: std.mem.Allocator,
+        scheduler: SchedulerType,
 
-    pub fn create(allocator: std.mem.Allocator) Self {
-        return Self{
-            .processes = .{},
-            .scheduler = .{},
-            .allocator = allocator,
-        };
-    }
+        pub fn create(allocator: std.mem.Allocator) Self {
+            log.print(" - process manager initialization with scheduler: {s}\n", .{@typeName(SchedulerType)});
+            return Self{
+                .processes = .{},
+                .allocator = allocator,
+                .scheduler = SchedulerType{},
+            };
+        }
 
-    pub fn set_scheduler(self: *Self, scheduler: RoundRobinScheduler(Self)) void {
-        self.scheduler = scheduler;
-    }
+        pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
+            var new_process = try Process.create(self.allocator, stack_size, process_entry, args, cwd);
+            log.print(" - creating process with PID: {d}\n", .{new_process.pid});
+            return self.processes.append(&new_process.node);
+        }
 
-    pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
-        var new_process = try Process.create(self.allocator, stack_size, process_entry, args, cwd);
-        return self.processes.append(&new_process.node);
-    }
-
-    pub fn delete_process(self: *Self, pid: u32) void {
-        var next = self.processes.first;
-        while (next) |node| {
-            const p: *Process = @fieldParentPtr("node", node);
-            next = node.next;
-            if (p.pid == pid) {
-                p.unblock_parent();
-                const allocator = p._allocator;
-                self.processes.remove(&p.node);
-                dynamic_loader.release_executable(pid);
-                p.deinit();
-                allocator.destroy(p);
-                if (self.scheduler.current == &p.node) {
-                    self.scheduler.current = null;
-                    if (self.scheduler.schedule_next()) {
-                        switch_to_next_task();
-                    } else {
-                        @panic("ProcessManager: No process to schedule\n");
+        pub fn delete_process(self: *Self, pid: u32) void {
+            var next = self.processes.first;
+            while (next) |node| {
+                const p: *Process = @fieldParentPtr("node", node);
+                next = node.next;
+                if (p.pid == pid) {
+                    p.unblock_parent();
+                    const allocator = p._allocator;
+                    self.processes.remove(&p.node);
+                    dynamic_loader.release_executable(pid);
+                    p.deinit();
+                    allocator.destroy(p);
+                    if (self.scheduler.current == &p.node) {
+                        self.scheduler.current = null;
+                        if (self.scheduler.schedule_next()) {
+                            switch_to_next_task();
+                        } else {
+                            @panic("ProcessManager: No process to schedule\n");
+                        }
                     }
+                    break;
                 }
-                // if (self.scheduler.schedule_next()) {
-                //     switch_to_next_task();
-                // } else {
-                //     @panic("ProcessManager: No process to schedule\n");
-                // }
-                break;
             }
         }
-    }
 
-    pub fn dump_processes(self: Self, out_stream: anytype) void {
-        var it = self.processes.first;
-        out_stream.print("  PID     STATE      PRIO     STACK    CPU  \n", .{});
-        while (it) |node| : (it = node.next) {
-            const active = if (node == self.scheduler.current) "*" else " ";
-            out_stream.print("{d: >5}{s}   {s: <8}   {d: <4}  {d}/{d} B   {d}\n", .{
-                node.data.pid,
-                active,
-                std.enums.tagName(Process.State, node.data.state) orelse "?",
-                node.data.priority,
-                node.data.stack_usage(),
-                node.data.stack.len,
-                node.data.current_core,
-            });
+        pub fn dump_processes(self: Self, out_stream: anytype) void {
+            var it = self.processes.first;
+            out_stream.print("  PID     STATE      PRIO     STACK    CPU  \n", .{});
+            while (it) |node| : (it = node.next) {
+                const active = if (node == self.scheduler.current) "*" else " ";
+                out_stream.print("{d: >5}{s}   {s: <8}   {d: <4}  {d}/{d} B   {d}\n", .{
+                    node.data.pid,
+                    active,
+                    std.enums.tagName(Process.State, node.data.state) orelse "?",
+                    node.data.priority,
+                    node.data.stack_usage(),
+                    node.data.stack.len,
+                    node.data.current_core,
+                });
+            }
         }
-    }
 
-    pub fn reevaluate_state(_: *Self, p: *Process) void {
-        if (p.waiting_for != null) {
-            p.state = Process.State.Blocked;
-            return;
+        pub fn reevaluate_state(_: *Self, p: *Process) void {
+            if (p.waiting_for != null) {
+                p.state = Process.State.Blocked;
+                return;
+            }
+            if (p.blocked_by_process != null) {
+                p.state = Process.State.Blocked;
+                return;
+            }
+            p.state = Process.State.Ready;
         }
-        if (p.blocked_by_process != null) {
-            p.state = Process.State.Blocked;
-            return;
+
+        pub fn vfork(self: *Self) !i32 {
+            const maybe_current_process = self.scheduler.get_current();
+            if (maybe_current_process) |current_process| {
+                const new_process = current_process.vfork() catch {
+                    return -1;
+                };
+
+                current_process.wait_for_process(new_process) catch {
+                    return -1;
+                };
+                self.processes.append(&new_process.node);
+                // switch without context switch
+                // self.scheduler.current = &new_process.node;
+
+                return @intCast(new_process.pid);
+            }
+            return -1;
         }
-        p.state = Process.State.Ready;
-    }
 
-    pub fn vfork(self: *Self) !i32 {
-        const maybe_current_process = self.scheduler.get_current();
-        if (maybe_current_process) |current_process| {
-            const new_process = current_process.vfork() catch {
-                return -1;
-            };
+        // load executable into process
 
-            current_process.wait_for_process(new_process) catch {
-                return -1;
-            };
-            self.processes.append(&new_process.node);
-            // switch without context switch
-            // self.scheduler.current = &new_process.node;
+        pub const ExecuteContext = struct {
+            symbol: usize,
+            argc: i32,
+            argv: [*c][*c]u8,
+            envp: [*c][*c]u8,
+            envpc: i32,
+        };
 
-            return @intCast(new_process.pid);
+        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
+            const maybe_current_process = self.scheduler.get_current();
+            if (maybe_current_process) |p| {
+                // TODO: move loader to struct, pass allocator to loading functions
+                const executable = try dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid);
+                var argc: usize = 0;
+                while (argv[argc] != null) : (argc += 1) {}
+
+                var envpc: usize = 0;
+                while (envp[envpc] != null) : (envpc += 1) {}
+
+                var symbol: SymbolEntry = undefined;
+                if (executable.module.entry) |entry| {
+                    symbol = entry;
+                } else if (executable.module.find_symbol("_start")) |entry| {
+                    symbol = entry;
+                } else {
+                    return -1;
+                }
+
+                p.restore_stack(); // process is still blocked so it won't be scheduled, unblocking when child finishes
+                // TODO: add & support
+                p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
+
+                // switch to me
+                reload_current_task();
+
+                return 0;
+            }
+            return -1;
         }
-        return -1;
-    }
 
-    // load executable into process
+        pub fn waitpid(_: Self, _: i32, _: *i32) !i32 {
+            return -1;
+        }
 
-    pub const ExecuteContext = struct {
-        symbol: usize,
-        argc: i32,
-        argv: [*c][*c]u8,
-        envp: [*c][*c]u8,
-        envpc: i32,
+        // This must take asking core into consideration since, more than one processes are going in the parallel
+        pub fn get_current_process(self: *const Self) ?*Process {
+            return self.scheduler.get_current();
+        }
+
+        pub fn initialize_context_switching(_: Self) void {
+            process.initialize_context_switching();
+        }
     };
-
-    pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
-        const maybe_current_process = self.scheduler.get_current();
-        if (maybe_current_process) |p| {
-            // TODO: move loader to struct, pass allocator to loading functions
-            const executable = try dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid);
-            var argc: usize = 0;
-            while (argv[argc] != null) : (argc += 1) {}
-
-            var envpc: usize = 0;
-            while (envp[envpc] != null) : (envpc += 1) {}
-
-            var symbol: SymbolEntry = undefined;
-            if (executable.module.entry) |entry| {
-                symbol = entry;
-            } else if (executable.module.find_symbol("_start")) |entry| {
-                symbol = entry;
-            } else {
-                return -1;
-            }
-
-            p.restore_stack(); // process is still blocked so it won't be scheduled, unblocking when child finishes
-            // TODO: add & support
-            p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
-
-            // switch to me
-            reload_current_task();
-
-            return 0;
-        }
-        return -1;
-    }
-
-    pub fn waitpid(_: Self, _: i32, _: *i32) !i32 {
-        return -1;
-    }
-
-    // This must take asking core into consideration since, more than one processes are going in the parallel
-    pub fn get_current_process(self: Self) ?*Process {
-        return self.scheduler.get_current();
-    }
-
-    pub fn initialize_context_switching(_: Self) void {
-        process.initialize_context_switching();
-    }
-};
+}
+pub const ProcessManager = ProcessManagerGenerator(Scheduler);
 
 extern fn context_switch_get_psp() usize;
 extern fn context_switch_push_registers_to_stack(stack_pointer: *u8) *u8;
@@ -203,6 +206,7 @@ pub var instance: ProcessManager = undefined;
 
 pub fn initialize_process_manager(allocator: std.mem.Allocator) void {
     instance = ProcessManager.create(allocator);
+    instance.scheduler.manager = &instance;
 }
 
 export fn get_next_task() *const u8 {

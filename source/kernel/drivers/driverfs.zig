@@ -20,90 +20,67 @@
 
 const std = @import("std");
 
-const IFileSystem = @import("../fs/fs.zig").IFileSystem;
-const IFile = @import("../fs/fs.zig").IFile;
+const ReadOnlyFileSystem = @import("../fs/ifilesystem.zig").ReadOnlyFileSystem;
+const IFile = @import("../fs/ifile.zig").IFile;
+
 const IDriver = @import("idriver.zig").IDriver;
 
 const interface = @import("interface");
 
 pub const DriverFs = struct {
-    pub usingnamespace interface.DeriveFromBase(IFileSystem, DriverFs);
-
+    pub usingnamespace interface.DeriveFromBase(ReadOnlyFileSystem, DriverFs);
+    base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
     _container: std.ArrayList(IDriver),
 
+    pub fn init(allocator: std.mem.Allocator) DriverFs {
+        return .{
+            .base = ReadOnlyFileSystem{},
+            ._allocator = allocator,
+            ._container = std.ArrayList(IDriver).init(allocator),
+        };
+    }
+
     pub fn delete(self: *DriverFs) void {
-        for (self._container.items) |driver| {
+        for (self._container.items) |*driver| {
             driver.delete();
         }
         self._container.deinit();
         self._allocator.destroy(self);
     }
 
-    pub fn create(allocator: std.mem.Allocator) DriverFs {
-        return .{
-            ._allocator = allocator,
-            ._container = std.ArrayList(IDriver).init(allocator),
-        };
+    pub fn name(self: *const DriverFs) []const u8 {
+        _ = self;
+        return "drivers";
     }
 
-    // pub fn ifilesystem(self: *DriverFs) IFileSystem {
-    //     return .{
-    //         .ptr = self,
-    //         .vtable = &VTable,
-    //     };
-    // }
-
-    fn mount(_: *anyopaque) i32 {
-        // nothing to do
-        return 0;
-    }
-
-    fn umount(_: *anyopaque) i32 {
-        return 0;
-    }
-
-    fn _create(_: *anyopaque, _: []const u8, _: i32) ?IFile {
-        // read-only filesystem
-        return null;
-    }
-
-    fn mkdir(_: *anyopaque, _: []const u8, _: i32) i32 {
-        // read-only filesystem
-        return -1;
-    }
-
-    fn remove(_: *anyopaque, _: []const u8) i32 {
-        // read-only filesystem
-        return -1;
-    }
-
-    fn name(_: *const anyopaque) []const u8 {
-        return "devicefs";
-    }
-
-    fn traverse(_: *anyopaque, _: []const u8, _: *const fn (file: *IFile, context: *anyopaque) bool, _: *anyopaque) i32 {
-        return -1;
-    }
-
-    fn get(_: *anyopaque, _: []const u8) ?IFile {
-        return null;
-    }
-
-    fn has_path(_: *anyopaque, _: []const u8) bool {
-        return false;
-    }
-
-    // driverfs interface, not IFileSystem
     pub fn append(self: *DriverFs, driver: IDriver) !void {
         try self._container.append(driver);
     }
 
     pub fn load_all(self: *DriverFs) !void {
         for (self._container.items) |*driver| {
-            driver.load() catch |err| {
-                return err;
-            };
+            try driver.load();
         }
+    }
+
+    pub fn traverse(self: *DriverFs, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
+        _ = self;
+        _ = path;
+        _ = callback;
+        _ = user_context;
+        return -1;
+    }
+
+    pub fn get(self: *DriverFs, path: []const u8) ?IFile {
+        _ = self;
+        _ = path;
+        return null;
+    }
+
+    pub fn has_path(self: *const DriverFs, path: []const u8) bool {
+        _ = self;
+        _ = path;
+        return false;
     }
 };

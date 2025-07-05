@@ -46,13 +46,15 @@ pub const FileHeader = struct {
     _device_file: IFile,
     _mapped_memory: ?*const anyopaque,
     _allocator: std.mem.Allocator,
+    _filesystem_offset: u32,
 
-    pub fn init(device_file: IFile, start_offset: u32, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) FileHeader {
+    pub fn init(device_file: IFile, start_offset: u32, filesystem_offset: u32, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) FileHeader {
         return .{
             ._reader = FileReader.init(device_file, start_offset),
             ._device_file = device_file,
             ._mapped_memory = mapped_address,
             ._allocator = allocator,
+            ._filesystem_offset = filesystem_offset,
         };
     }
 
@@ -77,7 +79,7 @@ pub const FileHeader = struct {
 
     pub fn filetype(self: *FileHeader) FileType {
         const fileheader = self._reader.read(u32, 0);
-        return FileHeader.convert_filetype(@enumFromInt(fileheader & 0xf));
+        return FileHeader.convert_filetype(@enumFromInt(fileheader & 0x7));
     }
 
     pub fn specinfo(self: *FileHeader) u32 {
@@ -91,24 +93,31 @@ pub const FileHeader = struct {
     pub fn name(self: *FileHeader) FileName {
         const name_buffer = self._reader.read_string(self._allocator, 16) catch {
             return .{
-                .name = "",
-                .allocator = null,
+                ._name = "",
+                ._allocator = null,
             };
         };
         return FileName.init(name_buffer, self._allocator);
     }
 
     pub fn read(self: *FileHeader, comptime T: anytype, offset: u32) T {
-        return self._reader.read(T, offset);
+        return self._reader.read(T, self._reader.get_data_offset() + offset);
     }
     pub fn read_bytes(self: *FileHeader, buffer: []u8, offset: u32) void {
-        self._reader.read_bytes(buffer, offset);
+        self._reader.read_bytes(buffer, self._reader.get_data_offset() + offset);
     }
 
     pub fn read_string(self: *FileHeader, allocator: std.mem.Allocator, offset: u32) ?[]u8 {
-        return self._reader.read_string(allocator, offset) catch {
+        return self._reader.read_string(allocator, self._reader.get_data_offset() + offset) catch {
             return null;
         };
+    }
+
+    pub fn read_name_at_offset(self: *FileHeader, allocator: std.mem.Allocator, offset: u32) ?FileName {
+        const name_buffer = self._reader.read_string(allocator, self._reader.get_data_offset() + offset) catch {
+            return null;
+        };
+        return FileName.init(name_buffer, allocator);
     }
 
     pub fn get_mapped_address(self: FileHeader) ?*const anyopaque {
@@ -141,6 +150,6 @@ pub const FileHeader = struct {
         if (maybe_mapped_address) |address| {
             maybe_mapped_address = @ptrFromInt(@as(usize, @intFromPtr(address)) + next_file_header);
         }
-        return FileHeader.init(self._device_file, next_file_header + self._reader.get_offset(), maybe_mapped_address, self._allocator);
+        return FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, maybe_mapped_address, self._allocator);
     }
 };

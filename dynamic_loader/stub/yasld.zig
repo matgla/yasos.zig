@@ -22,10 +22,10 @@ const std = @import("std");
 
 pub const Executable = @import("executable.zig").Executable;
 pub const Module = @import("module.zig").Module;
-pub const get_loader = @import("loader.zig").get_loader;
+const loader = @import("loader.zig");
+pub const get_loader = loader.get_loader;
 pub const SymbolEntry = @import("module.zig").SymbolEntry;
 
 pub fn loader_init(file_resolver: anytype, allocator: std.mem.Allocator) void {
-    _ = file_resolver;
-    _ = allocator;
+    loader.init(file_resolver, allocator);
 }

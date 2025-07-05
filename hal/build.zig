@@ -123,11 +123,12 @@ pub const Builder = struct {
             if (config.cpu) |cpu| {
                 if (std.mem.eql(u8, cpu, "host")) {
                     exe.linkLibC();
+                    exe.use_llvm = true;
                 } else {
                     _ = try toolchain.decorateModuleWithArmToolchain(b, exe.root_module, target);
                 }
             }
-            exe.root_module.sanitize_c = .trap;
+            // exe.root_module.sanitize_c = .trap;
             exe.root_module.addImport("board", boardModule);
             exe.root_module.addImport("hal", mcu.module("hal"));
 

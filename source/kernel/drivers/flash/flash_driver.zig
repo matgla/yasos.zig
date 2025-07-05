@@ -49,7 +49,7 @@ pub const FlashDriver = struct {
     }
 
     pub fn load(self: *FlashDriver) anyerror!void {
-        _ = self;
+        try self._flash.init();
     }
 
     pub fn unload(self: *FlashDriver) bool {

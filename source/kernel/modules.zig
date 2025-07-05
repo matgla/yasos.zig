@@ -48,7 +48,7 @@ fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
     const filename = file.name();
     defer filename.deinit();
-    if (std.mem.eql(u8, module_context.path, filename.name)) {
+    if (std.mem.eql(u8, module_context.path, filename.get_name())) {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,

@@ -37,13 +37,16 @@ pub const Irq = struct {
     pub fn trigger_supervisor_call(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
         if (system_call_handler) |handler| {
             handler(number, arg, out);
-        } else {
-            std.debug.print("System Call IRQ was not configured\n", .{});
         }
     }
 
     pub fn trigger(irq: Type) void {
         switch (irq) {
+            .pendsv => {
+                std.Thread.yield() catch |err| {
+                    std.debug.print("Error during context switch: {}\n", .{err});
+                };
+            },
             else => std.debug.print("TODO: implement triggering IRQ {s}\n", .{@tagName(irq)}),
         }
     }

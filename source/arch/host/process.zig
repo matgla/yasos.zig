@@ -15,7 +15,8 @@
 
 const std = @import("std");
 
-pub const Process = struct {};
+// pub const Process = struct {};
+
 pub fn prepare_process_stack(
     stack: []u8,
     comptime exit_handler: *const fn () void,
@@ -33,29 +34,36 @@ pub fn init() void {}
 
 var thread_counter: i32 = 0;
 
+threadlocal var thread_id: i32 = 0;
+
+pub fn get_thread_id() i32 {
+    return thread_id;
+}
+
 fn run_process_entry(process_entry: *const fn () void) void {
+    thread_id = thread_counter;
     process_entry();
 }
 
 pub const HostProcess = struct {
     thread: std.Thread,
+
+    pub fn get_process_id() i32 {
+        return thread_id;
+    }
     pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype) !HostProcess {
         _ = exit_handler_impl;
+        thread_counter += 1;
+        thread_id = thread_counter;
         const thread = try std.Thread.spawn(
             .{
-                .stack_size = stack_size,
+                .stack_size = stack_size << 16,
                 .allocator = allocator,
             },
             run_process_entry,
             .{@as(*const fn () void, @ptrCast(process_entry))},
         );
-        thread_counter += 1;
-        if (thread_counter == 1) {
-            // this is the first process, main tread should be blocked after creation
-            while (true) {
-                std.Thread.sleep(std.time.ns_per_s * 1);
-            }
-        }
+
         return HostProcess{
             .thread = thread,
         };

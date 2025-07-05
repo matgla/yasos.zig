@@ -18,33 +18,60 @@ const std = @import("std");
 pub const Flash = struct {
     pub const BlockSize = 1;
     id: u32,
-    pub fn init() void {}
+    memory: []const u8,
+
+    fn get_filename_mapping(self: *const Flash) error{UnknownFile}![]const u8 {
+        // make this configurable in board file
+        switch (self.id) {
+            0 => return "flash0.img",
+            else => return error.UnknownFile,
+        }
+        return error.UnknownFile;
+    }
+
+    pub fn init(self: *Flash) !void {
+        std.debug.print("Initializing flash with ID: {d}\n", .{self.id});
+        const filename = try self.get_filename_mapping();
+        const file = try std.fs.cwd().openFile(filename, .{});
+        defer file.close();
+        const file_size = try file.getEndPos();
+        self.memory = try file.readToEndAlloc(std.heap.page_allocator, file_size);
+        std.debug.print("Flash initialized\n", .{});
+    }
+
+    pub fn deinit(self: *Flash) void {
+        std.heap.page_allocator.free(self.memory);
+        std.debug.print("Flash deinitialized\n", .{});
+    }
 
     pub fn create(id: u32) Flash {
         return .{
             .id = id,
+            .memory = &.{},
         };
     }
 
     pub fn read(self: Flash, address: u32, buffer: []u8) void {
-        _ = buffer;
-        _ = self;
-        std.debug.print("Reading from flash at address {x}\n", .{address});
+        @memcpy(buffer, self.memory[address .. address + buffer.len]);
     }
 
     pub fn write(self: Flash, address: u32, data: []const u8) void {
+        _ = address;
         _ = data;
-        _ = self;
-        std.debug.print("Writing to flash at address {x}\n", .{address});
+        std.debug.print("Writing to flash {x} is not implemented\n", .{self.id});
     }
 
     pub fn erase(self: Flash, address: u32) void {
-        _ = self;
-        std.debug.print("Erasing flash at address {x}\n", .{address});
+        _ = address;
+        std.debug.print("Erasing flash {x} is not implemented\n", .{self.id});
     }
 
     pub fn get_number_of_blocks(self: Flash) u32 {
         _ = self;
         return 1024;
+    }
+
+    pub fn get_physical_address(self: *const Flash) []const u8 {
+        return self.memory;
     }
 };

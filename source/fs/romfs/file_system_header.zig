@@ -37,6 +37,7 @@ pub const FileSystemHeader = struct {
     _reader: FileReader,
     _device_file: IFile,
     _mapped_memory: ?*const anyopaque,
+    _offset: u32,
 
     pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: u32) ?FileSystemHeader {
         var marker: [8]u8 = undefined;
@@ -64,6 +65,7 @@ pub const FileSystemHeader = struct {
             ._reader = FileReader.init(df, offset),
             ._device_file = df,
             ._mapped_memory = mapped_memory_address,
+            ._offset = offset,
         };
     }
 
@@ -120,7 +122,7 @@ pub const FileSystemHeader = struct {
         if (maybe_mapped_address) |address| {
             maybe_mapped_address = @ptrFromInt(@as(usize, @intFromPtr(address)) + offset);
         }
-        return FileHeader.init(self._device_file, self._reader.get_offset() + offset, maybe_mapped_address, self._allocator);
+        return FileHeader.init(self._device_file, self._reader.get_offset() + offset, self._offset, maybe_mapped_address, self._allocator);
     }
 
     pub fn first_file_header(self: FileSystemHeader) ?FileHeader {

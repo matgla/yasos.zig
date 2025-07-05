@@ -26,19 +26,19 @@ pub const FileReader = struct {
 
     pub fn init(device_file: IFile, offset: u32) FileReader {
         var data_offset_value: u32 = 32;
-        var buffer: [8]u8 = undefined;
+        var buffer: [16]u8 = undefined;
         var df = device_file;
         _ = df.seek(offset + 16, c.SEEK_SET);
         _ = df.read(buffer[0..]);
-        while (std.mem.lastIndexOfScalar(u8, buffer[0..], 0) != null) {
+        while (std.mem.lastIndexOfScalar(u8, buffer[0..], 0) == null) {
             data_offset_value += 16;
             _ = df.read(buffer[0..]);
         }
 
         return .{
             ._device_file = df,
-            ._offset = data_offset_value + offset,
-            ._data_offset = 0,
+            ._offset = offset,
+            ._data_offset = data_offset_value,
         };
     }
 
@@ -58,7 +58,7 @@ pub const FileReader = struct {
     }
 
     pub fn read_string(self: *FileReader, allocator: std.mem.Allocator, offset: u32) ![]u8 {
-        _ = self._device_file.seek(offset, c.SEEK_SET);
+        _ = self._device_file.seek(self._offset + offset, c.SEEK_SET);
         var name_buffer: []u8 = try allocator.alloc(u8, 16);
 
         _ = self._device_file.read(name_buffer[0..]);

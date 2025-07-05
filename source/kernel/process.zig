@@ -58,6 +58,7 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
             path: [config.fs.max_path_length]u8,
             diriter: ?IFile,
         };
+        pub const ImplType = ProcessImpl;
 
         state: State,
         priority: u8,

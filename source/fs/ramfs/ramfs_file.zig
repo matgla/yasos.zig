@@ -32,27 +32,10 @@ const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonComm
 const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
 
 const log = &@import("../../log/kernel_log.zig").kernel_log;
+const interface = @import("interface");
 
 pub const RamFsFile = struct {
-    /// VTable for IFile interface
-    const VTable = IFile.VTable{
-        .read = read,
-        .write = write,
-        .seek = seek,
-        .close = close,
-        .sync = sync,
-        .tell = tell,
-        .size = size,
-        .name = name,
-        .ioctl = ioctl,
-        .fcntl = fcntl,
-        .stat = stat,
-        .filetype = filetype,
-        .dupe = dupe,
-        .destroy = destroy,
-    };
-
-    /// Pointer to data instance, data is kept by filesystem
+    pub usingnamespace interface.DeriveFromBase(IFile, RamFsFile);
     _data: *RamFsData,
     _allocator: std.mem.Allocator,
 
@@ -66,15 +49,7 @@ pub const RamFsFile = struct {
         };
     }
 
-    pub fn ifile(self: *RamFsFile) IFile {
-        return .{
-            .ptr = self,
-            .vtable = &VTable,
-        };
-    }
-
-    pub fn read(ctx: *anyopaque, buffer: []u8) isize {
-        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn read(self: *RamFsFile, buffer: []u8) isize {
         if (self._position >= self._data.data.items.len) {
             return 0;
         }
@@ -85,8 +60,7 @@ pub const RamFsFile = struct {
         return @intCast(length);
     }
 
-    pub fn write(ctx: *anyopaque, data: []const u8) isize {
-        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn write(self: *RamFsFile, data: []const u8) isize {
         if (self._data.data.items.len < data.len + self._position) {
             self._data.data.resize(self._position + data.len) catch {
                 return 0;
@@ -99,8 +73,7 @@ pub const RamFsFile = struct {
         return @intCast(data.len);
     }
 
-    pub fn seek(ctx: *anyopaque, offset: c.off_t, whence: i32) c.off_t {
-        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn seek(self: *RamFsFile, offset: c.off_t, whence: i32) c.off_t {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0) {
@@ -131,41 +104,36 @@ pub const RamFsFile = struct {
         return 0;
     }
 
-    pub fn close(ctx: *anyopaque) i32 {
-        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn close(self: *RamFsFile) i32 {
         self._allocator.destroy(self);
         return 0;
     }
 
-    pub fn dupe(ctx: *anyopaque) ?IFile {
-        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn dupe(self: *RamFsFile) ?IFile {
         const new_file = self._allocator.create(RamFsFile) catch return null;
         new_file.* = self.*;
         return new_file.ifile();
     }
 
-    pub fn sync(_: *anyopaque) i32 {
+    pub fn sync(self: *RamFsFile) i32 {
+        _ = self;
         // always in sync
         return 0;
     }
 
-    pub fn tell(ctx: *const anyopaque) c.off_t {
-        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn tell(self: *RamFsFile) c.off_t {
         return @intCast(self._position);
     }
 
-    pub fn size(ctx: *const anyopaque) isize {
-        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn size(self: *RamFsFile) isize {
         return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
-    pub fn name(ctx: *const anyopaque) FileName {
-        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn name(self: *RamFsFile) FileName {
         return FileName.init(self._data.name(), null);
     }
 
-    pub fn ioctl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
-        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn ioctl(self: *RamFsFile, cmd: i32, data: ?*anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
                 var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
@@ -179,11 +147,11 @@ pub const RamFsFile = struct {
         return 0;
     }
 
-    pub fn fcntl(_: *anyopaque, _: i32, _: ?*const anyopaque) i32 {
+    pub fn fcntl(self: *RamFsFile, _: i32, _: ?*anyopaque) i32 {
+        _ = self;
         return 0;
     }
-    pub fn stat(ctx: *const anyopaque, buf: *c.struct_stat) void {
-        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn stat(self: *RamFsFile, buf: *c.struct_stat) void {
         buf.st_dev = 0;
         buf.st_ino = 0;
         buf.st_mode = 0;
@@ -196,13 +164,11 @@ pub const RamFsFile = struct {
         buf.st_blocks = 1;
     }
 
-    pub fn filetype(ctx: *const anyopaque) FileType {
-        const self: *const RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn filetype(self: *RamFsFile) FileType {
         return self._data.type;
     }
 
-    pub fn destroy(ctx: *anyopaque) void {
-        const self: *RamFsFile = @ptrCast(@alignCast(ctx));
+    pub fn delete(self: *RamFsFile) void {
         self._allocator.destroy(self);
     }
 };

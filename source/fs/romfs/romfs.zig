@@ -101,23 +101,29 @@ pub const RomFs = struct {
         var it = try std.fs.path.componentIterator(path);
         var component = it.first();
         var maybe_node = self.root.first_file_header();
+        if (maybe_node == null) {
+            return null;
+        }
         while (component) |part| : (component = it.next()) {
-            const filename = maybe_node.?.name();
-            defer filename.deinit();
-            while (!std.mem.eql(u8, filename.name, part.name)) {
+            var filename = maybe_node.?.name();
+            while (!std.mem.eql(u8, filename.get_name(), part.name)) {
                 maybe_node = maybe_node.?.next();
                 if (maybe_node == null) {
+                    filename.deinit();
                     return null;
                 }
+
+                filename.deinit();
+                filename = maybe_node.?.name();
             }
             // if symbolic link then fetch target node
             if (maybe_node) |*node| {
                 if (node.filetype() == FileType.SymbolicLink) {
                     // iterate through link
-                    const maybe_name = node.read_string(self.allocator, 0);
-                    if (maybe_name) |link_name| {
-                        defer self.allocator.free(link_name);
-                        const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", link_name }) catch return null;
+                    const maybe_name = node.read_name_at_offset(self.allocator, 0);
+                    if (maybe_name) |*link_name| {
+                        defer link_name.deinit();
+                        const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", link_name.get_name() }) catch return null;
                         defer self.allocator.free(relative);
                         maybe_node = self.get_file_header(relative);
                     }

@@ -46,20 +46,25 @@ pub const FileMemoryMapAttributes = extern struct {
 };
 
 pub const FileName = struct {
-    name: []const u8,
-    allocator: ?std.mem.Allocator,
+    _name: []const u8,
+    _allocator: ?std.mem.Allocator,
 
     pub fn init(name: []const u8, allocator: ?std.mem.Allocator) FileName {
         return .{
-            .name = name,
-            .allocator = allocator,
+            ._name = name,
+            ._allocator = allocator,
         };
     }
 
     pub fn deinit(self: FileName) void {
-        if (self.allocator) |alloc| {
-            alloc.free(self.name);
+        if (self._allocator) |alloc| {
+            alloc.free(self._name);
         }
+    }
+
+    pub fn get_name(self: *const FileName) []const u8 {
+        const zero_index = std.mem.indexOfScalar(u8, self._name, 0) orelse self._name.len;
+        return self._name[0..zero_index];
     }
 };
 

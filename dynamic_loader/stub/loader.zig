@@ -22,10 +22,22 @@ const Module = @import("module.zig").Module;
 const Executable = @import("executable.zig").Executable;
 
 pub const Loader = struct {
+    pub const FileResolver = *const fn (name: []const u8) ?*const anyopaque;
+    file_resolver: FileResolver,
+    allocator: std.mem.Allocator,
+
+    pub fn create(file_resolver: FileResolver, allocator: std.mem.Allocator) Loader {
+        return Loader{
+            .file_resolver = file_resolver,
+            .allocator = allocator,
+        };
+    }
+
     pub fn load_executable(self: *Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Executable {
         _ = self;
         _ = module;
-        _ = stdout;
+        stdout.print("Loading executable...\n", .{});
+
         return .{
             .module = try Module.create(std.heap.page_allocator, process_allocator, false),
         };

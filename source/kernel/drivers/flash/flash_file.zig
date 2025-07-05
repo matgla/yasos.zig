@@ -27,6 +27,8 @@ const c = @import("../../../libc_imports.zig").c;
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
+const IoctlCommonCommands = @import("../../fs/ifile.zig").IoctlCommonCommands;
+const FileMemoryMapAttributes = @import("../../fs/ifile.zig").FileMemoryMapAttributes;
 
 pub fn FlashFile(comptime FlashType: anytype) type {
     return struct {
@@ -48,6 +50,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
         // IFile interface
         pub fn read(self: *Self, buffer: []u8) isize {
             self._flash.read(self._current_address, buffer);
+            self._current_address += @intCast(buffer.len);
             return @intCast(buffer.len);
         }
 
@@ -94,11 +97,18 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             return FileName.init("flash", null);
         }
 
-        pub fn ioctl(self: *Self, op: i32, arg: ?*anyopaque) i32 {
-            _ = self;
-            _ = op;
-            _ = arg;
-            return -1;
+        pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
+            switch (cmd) {
+                @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
+                    var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(arg));
+                    attr.is_memory_mapped = true;
+                    attr.mapped_address_r = self._flash.get_physical_address().ptr;
+                },
+                else => {
+                    return -1;
+                },
+            }
+            return 0;
         }
 
         pub fn fcntl(self: *Self, op: i32, maybe_arg: ?*anyopaque) i32 {

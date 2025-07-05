@@ -49,6 +49,4 @@ pub fn root_process(entry: anytype, arg: ?*const anyopaque, stack_size: u32) !vo
         hal.time.systick.enable();
         system_call.trigger(c.sys_start_root_process, arg, null);
     }
-
-    @panic("Can't initialize root process");
 }

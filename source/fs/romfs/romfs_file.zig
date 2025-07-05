@@ -53,8 +53,7 @@ pub const RomFsFile = struct {
         };
     }
 
-    pub fn read(ctx: *Self, buffer: []u8) isize {
-        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
+    pub fn read(self: *RomFsFile, buffer: []u8) isize {
         const data_size = self.header.size();
         if (self.position >= data_size) {
             return 0;
