@@ -35,4 +35,5 @@ if CPU_HOST
   choice CHOICE_CPU_FAMILY 
     default CPU_FAMILY_HOST
   endchoice
+
 endif 

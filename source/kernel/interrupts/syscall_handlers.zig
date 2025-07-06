@@ -45,40 +45,16 @@ pub fn errno(rc: u16) anyerror {
 }
 
 // most stupid way to keep track of the last file
-pub fn traverse_directory(file: *IFile, context: *anyopaque) bool {
-    const tracker: *DirentTraverseTracker = @ptrCast(@alignCast(context));
-    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + file.name().len, @alignOf(c.dirent));
+fn fill_dirent(file: *IFile, dirent_address: *anyopaque) isize {
+    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + file.name().get_name().len, @alignOf(c.dirent));
     // skip files that were already traversed
-
-    if (tracker.skipuntil) |lastfile| {
-        if (std.mem.eql(u8, lastfile.name(), file.name())) {
-            _ = lastfile.close();
-            tracker.skipuntil = null;
-        }
-
-        return true;
-    }
-    if (tracker.offset + required_space > tracker.count) {
-        if (tracker.lastfile) |lastfile| {
-            _ = lastfile.close();
-        }
-        tracker.lastfile = file.dupe();
-        return false;
-    }
-    const address = @intFromPtr(tracker.dirp) + tracker.offset;
-    const dirp: *c.dirent = @ptrCast(@alignCast(@as(*c.dirent, @ptrFromInt(address))));
+    const dirp: *c.dirent = @as(*c.dirent, @ptrCast(@alignCast(dirent_address)));
     dirp.d_ino = 0xdead;
     dirp.d_off = 0xbeef;
     dirp.d_reclen = @intCast(required_space);
-    std.mem.copyForwards(u8, dirp.d_name[0..], file.name());
-    dirp.d_name[file.name().len] = 0;
-    tracker.offset += required_space;
-    if (tracker.lastfile) |lastfile| {
-        _ = lastfile.close();
-    }
-    tracker.lastfile = file.dupe();
-
-    return true;
+    std.mem.copyForwards(u8, dirp.d_name[0..], file.name().get_name());
+    dirp.d_name[file.name().get_name().len] = 0;
+    return @intCast(required_space);
 }
 
 const DirentTraverseTracker = struct {
@@ -154,8 +130,8 @@ pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const maybe_file = process.fds.get(@intCast(fd.*));
-        if (maybe_file) |file| {
+        var maybe_file = process.fds.get(@intCast(fd.*));
+        if (maybe_file) |*file| {
             if (file.file.filetype() == FileType.CharDevice) return 1;
         }
     }
@@ -170,23 +146,23 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
     if (maybe_process) |process| {
         const maybe_file = fs.ivfs().get(path_slice);
         if (maybe_file) |file| {
-            defer file.destroy();
+            // defer file.destroy();
             const fd = process.get_free_fd();
-            const maybe_ifile = file.dupe();
-            if (maybe_ifile) |ifile| {
-                process.fds.put(fd, .{
-                    .file = ifile,
-                    .path = blk: {
-                        var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                        std.mem.copyForwards(u8, path_buffer[0..path_slice.len], path_slice);
-                        break :blk path_buffer;
-                    },
-                    .diriter = null,
-                }) catch {
-                    return -1;
-                };
-                return fd;
-            }
+            // const maybe_ifile = file.dupe();
+            // if (maybe_ifile) |ifile| {
+            process.fds.put(fd, .{
+                .file = file,
+                .path = blk: {
+                    var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
+                    std.mem.copyForwards(u8, path_buffer[0..path_slice.len], path_slice);
+                    break :blk path_buffer;
+                },
+                .diriter = null,
+            }) catch {
+                return -1;
+            };
+            return fd;
+            // }
         } else if ((context.flags & c.O_CREAT) != 0) {
             const fd = process.get_free_fd();
             const maybe_ifile = fs.ivfs().create(path_slice, context.mode);
@@ -214,8 +190,8 @@ pub fn sys_close(arg: *const volatile anyopaque) !i32 {
 
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const maybe_file = process.fds.get(@intCast(fd.*));
-        if (maybe_file) |file| {
+        var maybe_file = process.fds.get(@intCast(fd.*));
+        if (maybe_file) |*file| {
             _ = file.file.close();
             _ = process.fds.remove(@intCast(fd.*));
             return 0;
@@ -243,8 +219,8 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         return errno(c.EFAULT);
     }
     if (maybe_process) |process| {
-        const maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |file| {
+        var maybe_file = process.fds.get(@intCast(context.fd));
+        if (maybe_file) |*file| {
             context.result.* = file.file.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
             return 0;
         }
@@ -272,8 +248,8 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     }
 
     if (maybe_process) |process| {
-        const maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |file| {
+        var maybe_file = process.fds.get(@intCast(context.fd));
+        if (maybe_file) |*file| {
             context.result.* = file.file.write(@as([*]const u8, @ptrCast(context.buf.?))[0..context.count]);
             return 0;
         }
@@ -282,8 +258,8 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
-    const ctx: *const volatile VForkContext = @ptrCast(@alignCast(arg));
-    const result = try process_manager.instance.vfork(ctx.lr, @intFromPtr(ctx.result));
+    _ = arg;
+    const result = try process_manager.instance.vfork();
     hal.irq.trigger(.pendsv);
     return result;
 }
@@ -309,8 +285,8 @@ pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
     const maybe_process = process_manager.instance.get_current_process();
 
     if (maybe_process) |process| {
-        const maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |file| {
+        var maybe_file = process.fds.get(@intCast(context.fd));
+        if (maybe_file) |*file| {
             context.result.* = file.file.seek(context.offset, context.whence);
             return 0;
         }
@@ -329,26 +305,28 @@ pub fn sys_times(arg: *const volatile anyopaque) !i32 {
 pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
 
-    if (context.dirp == null) {
-        context.result.* = -1;
-    } else {
+    context.result.* = -1;
+    if (context.dirp == null) {} else {
         const maybe_process = process_manager.instance.get_current_process();
         if (maybe_process) |process| {
             const maybe_entity = process.fds.getPtr(@intCast(context.fd));
             if (maybe_entity) |entity| {
-                var tracker = DirentTraverseTracker{
-                    .dirp = @ptrCast(@alignCast(context.dirp)),
-                    .offset = 0,
-                    .count = context.count,
-                    .skipuntil = if (entity.diriter != null) entity.diriter.?.dupe() else null,
-                    .lastfile = null,
-                };
-                _ = fs.ivfs().traverse(std.mem.span(@as([*:0]const u8, @ptrCast(&entity.path))), traverse_directory, &tracker);
-                if (entity.diriter) |*diriter| {
-                    _ = diriter.close();
+                // if iterator not exists create one
+                if (entity.diriter == null) {
+                    entity.diriter = fs.ivfs().iterator(std.mem.span(@as([*:0]const u8, @ptrCast(&entity.path))));
                 }
-                entity.diriter = tracker.lastfile;
-                context.result.* = @intCast(tracker.offset);
+
+                // still can be null if path not exists or is not a directory
+                if (entity.diriter) |*diriter| {
+                    var maybe_file = diriter.next();
+                    if (maybe_file) |*file| {
+                        defer file.delete();
+                        context.result.* = fill_dirent(file, context.dirp);
+                    } else {
+                        diriter.delete();
+                        entity.diriter = null;
+                    }
+                }
                 return 0;
             }
         }
@@ -361,8 +339,8 @@ pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |file| {
+        var maybe_file = process.fds.get(@intCast(context.fd));
+        if (maybe_file) |*file| {
             return file.file.ioctl(context.op, context.arg);
         }
     }
@@ -438,9 +416,9 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
         if (path_slice.len == 0) {
             return -1;
         }
-        const maybe_file = fs.ivfs().get(path_slice);
-        if (maybe_file) |file| {
-            defer file.destroy();
+        var maybe_file = fs.ivfs().get(path_slice);
+        if (maybe_file) |*file| {
+            defer file.delete();
             if (file.filetype() == FileType.Directory) {
                 process.change_directory(path_slice) catch |err| {
                     log.print("chdir: failed to change directory: {s}\n", .{@errorName(err)});
@@ -463,8 +441,8 @@ pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |file| {
+        var maybe_file = process.fds.get(@intCast(context.fd));
+        if (maybe_file) |*file| {
             return file.file.fcntl(context.op, context.arg);
         }
     }

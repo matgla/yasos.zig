@@ -11,10 +11,10 @@ pub const psram = struct {
     pub const cs = 47;
 };
 
-pub const mmc = struct {
-    pub var mmc0 = hal.mmc.Mmc(0, 0, 1, 2, .{
-        .clk = 2,
-        .cmd = 18,
-        .d0 = 19,
-    }, hal.internal.Mmc).create();
+pub const flash = struct {
+    pub const flash0 = hal.flash.Flash(hal.internal.Flash(0x10000000, 16 * 1024 * 1024)).create(0);
 };
+
+// pub const mmc = struct {
+//     pub var mmc0 = hal.mmc.Mmc(.{.clk = 0}, hal.internal.Mmc).create();
+// };

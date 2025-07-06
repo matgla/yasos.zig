@@ -18,3 +18,10 @@ jobs:
       - name: Run Smoke Tests
         run: |
           make run_smoke_tests
+      
+      - name: Upload Test Logs  
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke_test_logs
+          path: ${{ github.workspace }}/tests/smoke/logs/*

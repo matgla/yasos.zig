@@ -32,7 +32,6 @@ const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
 const spawn = @import("kernel/spawn.zig");
 const process = @import("kernel/process.zig");
 const process_manager = @import("kernel/process_manager.zig");
-const RoundRobinScheduler = @import("kernel/round_robin.zig").RoundRobin;
 
 const malloc_allocator = @import("kernel/malloc.zig").malloc_allocator;
 
@@ -44,6 +43,8 @@ const yasld = @import("yasld");
 const dynamic_loader = @import("kernel/modules.zig");
 
 const IFile = @import("kernel/fs/fs.zig").IFile;
+const IFileSystem = @import("kernel/fs/fs.zig").IFileSystem;
+
 const IoctlCommonCommands = @import("kernel/fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("kernel/fs/ifile.zig").FileMemoryMapAttributes;
 
@@ -54,14 +55,19 @@ const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 const DriverFs = @import("kernel/drivers/driverfs.zig").DriverFs;
 
 const UartDriver = @import("kernel/drivers/uart/uart_driver.zig").UartDriver;
+const FlashDriver = @import("kernel/drivers/flash/flash_driver.zig").FlashDriver;
 const MmcDriver = @import("kernel/drivers/mmc/mmc_driver.zig").MmcDriver;
 
 const process_memory_pool = @import("kernel/process_memory_pool.zig");
 const ProcessPageAllocator = @import("kernel/malloc.zig").ProcessPageAllocator;
+const system_call = @import("kernel/interrupts/system_call.zig");
+const syscall_handlers = @import("kernel/interrupts/syscall_handlers.zig");
+
+const panic_helper = @import("arch").panic;
 
 comptime {
     _ = @import("kernel/interrupts/systick.zig");
-    _ = @import("kernel/system_stubs.zig");
+    _ = @import("arch");
 }
 
 fn initialize_board() void {
@@ -89,12 +95,8 @@ fn initialize_board() void {
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     log.write("****************** PANIC **********************\n");
     log.print("KERNEL PANIC: {s}.\n", .{msg});
+    panic_helper.dump_stack_trace(log, @returnAddress());
 
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(@returnAddress(), null);
-    while (stack.next()) |address| : (index += 1) {
-        log.print("  {d: >3}: 0x{X:0>8}\n", .{ index, address - 1 });
-    }
     log.write("***********************************************\n");
     while (true) {}
 }
@@ -104,54 +106,25 @@ export fn kernel_process() void {
     dynamic_loader.init(malloc_allocator);
     log.write(" - creating virtual file system\n");
     fs.vfs_init(malloc_allocator);
-    const maybe_romfs = RomFs.init(malloc_allocator, @as([*]const u8, @ptrFromInt(0x10080000))[0..16]);
 
-    if (maybe_romfs == null) {
-        log.print("RomFS not found at: 0x{x}\n", .{0x10080000});
-        return;
-    }
-
-    var romfs = maybe_romfs.?;
-    fs.vfs().mount_filesystem("/", romfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.ifilesystem().name(), @errorName(err) });
-        return;
-    };
-    var ramfs = RamFs.init(malloc_allocator) catch |err| {
-        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
-        return;
-    };
-
-    fs.vfs().mount_filesystem("/tmp", ramfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.ifilesystem().name(), @errorName(err) });
-        return;
-    };
-
-    const driverfs = DriverFs.new(malloc_allocator) catch |err| {
-        log.print("Can't create driverfs: {s}\n", .{@errorName(err)});
-        return;
-    };
-
-    fs.vfs().mount_filesystem("/dev", driverfs.ifilesystem()) catch |err| {
-        log.print("Can't mount '/dev' with type '{s}': {s}\n", .{ driverfs.ifilesystem().name(), @errorName(err) });
-        return;
-    };
-
-    log.write(" - register drivers\n");
-    var uart_driver = UartDriver(board.uart.uart0).new(malloc_allocator) catch |err| {
+    var driverfs: DriverFs = DriverFs.init(malloc_allocator);
+    var uart_driver = (UartDriver(board.uart.uart0).create(malloc_allocator)).new(malloc_allocator) catch |err| {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-    driverfs.append(uart_driver.idriver()) catch |err| {
+    driverfs.append(uart_driver) catch |err| {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-    var mmc_driver = MmcDriver(&board.mmc.mmc0).new(malloc_allocator) catch |err| {
-        log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
+    var flash_driver = (FlashDriver.create(
+        board.flash.flash0,
+        malloc_allocator,
+    )).new(malloc_allocator) catch |err| {
+        log.print("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
-
-    driverfs.append(mmc_driver.idriver()) catch |err| {
-        log.print("Can't create mmc driver instance: '{s}'\n", .{@errorName(err)});
+    driverfs.append(flash_driver) catch |err| {
+        log.print("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
     driverfs.load_all() catch |err| {
@@ -159,11 +132,47 @@ export fn kernel_process() void {
         return;
     };
 
+    const maybe_flash_file = flash_driver.ifile();
+    if (maybe_flash_file) |flash| {
+        var romfs = (RomFs.init(malloc_allocator, flash, 0x80000) catch |err| {
+            log.print("Can't initialize RomFS: {s}\n", .{@errorName(err)});
+            return;
+        }).new(malloc_allocator) catch |err| {
+            log.print("Can't allocate RomFs with an error: {s}\n", .{@errorName(err)});
+            return;
+        };
+        fs.vfs().mount_filesystem("/", romfs) catch |err| {
+            log.print("Can't mount '/' with type '{s}': {s}\n", .{ romfs.name(), @errorName(err) });
+            return;
+        };
+    } else {
+        log.print("Can't get Flash Driver\n", .{});
+        return;
+    }
+    var ramfs = (RamFs.init(malloc_allocator) catch |err| {
+        log.print("Can't initialize ramfs: {s}\n", .{@errorName(err)});
+        return;
+    }).new(malloc_allocator) catch |err| {
+        log.print("Can't create allocate RamFS with an error: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    fs.vfs().mount_filesystem("/tmp", ramfs) catch |err| {
+        log.print("Can't mount '/tmp' with type '{s}': {s}\n", .{ ramfs.name(), @errorName(err) });
+        return;
+    };
+
+    const idriverfs: IFileSystem = driverfs.interface();
+    fs.vfs().mount_filesystem("/dev", idriverfs) catch |err| {
+        log.print("Can't mount '/dev' with an error: {s}\n", .{@errorName(err)});
+        return;
+    };
+
     const maybe_process = process_manager.instance.get_current_process();
     var pid: u32 = 0;
     if (maybe_process) |p| {
         log.write(" - setting default streams\n");
-        const maybe_uart_file = uart_driver.idriver().ifile();
+        const maybe_uart_file = uart_driver.ifile();
         if (maybe_uart_file) |uart_file| {
             p.fds.put(0, .{
                 .file = uart_file,
@@ -226,8 +235,8 @@ export fn kernel_process() void {
 
 pub export fn main() void {
     initialize_board();
-    log.print("\n-----------------------------------------\n", .{});
-    log.print("|               YASOS                   |\n", .{});
+    log.print("\n---------------------------------------------\n", .{});
+    log.print("|                 YASOS                     |\n", .{});
     DumpHardware.print_hardware();
 
     log.write(" - initializing process memory pool\n");
@@ -239,11 +248,11 @@ pub export fn main() void {
     log.write(" - initializing process manager\n");
     process_manager.initialize_process_manager(malloc_allocator);
 
-    log.write(" - scheduler: round robin\n");
-    process_manager.instance.set_scheduler(RoundRobinScheduler(process_manager.ProcessManager){
-        .manager = &process_manager.instance,
-    });
+    log.write(" - enabling system call haandlers\n");
+    system_call.init();
     spawn.root_process(&kernel_process, null, 1024 * 16) catch @panic("Can't spawn root process: ");
     process.init();
-    while (true) {}
+    while (true) {
+        // std.Thread.sleep(1000 * std.time.ns_per_ms);
+    }
 }

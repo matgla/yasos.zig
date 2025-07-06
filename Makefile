@@ -25,4 +25,3 @@ run_smoke_tests: prepare_smoke
 
 run_tests: 
 	${RUN_CONTAINER} -c "zig build test --summary all"
-

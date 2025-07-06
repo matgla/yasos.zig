@@ -28,7 +28,6 @@ const Semaphore = @import("../semaphore.zig").Semaphore;
 
 // this is kernel semaphore intended to be used by kernel events handlers
 // which means it shouldn't be interrupted since interrupt handlers are blocking
-extern fn store_and_switch_to_next_task() void;
 
 pub const KernelSemaphore = struct {
     // blocking

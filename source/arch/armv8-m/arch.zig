@@ -21,4 +21,7 @@
 const std = @import("std");
 
 const config = @import("config");
-pub const process = @import("arm-m/process.zig");
+pub const process = @import("arm-m").process;
+pub const irq_handlers = @import("arm-m").irq_handlers;
+pub const panic = @import("arm-m").panic;
+pub const HardwareProcess = @import("arm-m").HardwareProcess;

@@ -15,9 +15,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+if [[ "$(uname)" == "Darwin" ]]; then
+    GETOPT_CMD="/opt/homebrew/opt/gnu-getopt/bin/getopt"
+else
+    GETOPT_CMD="getopt"
+fi
 
 # Use getopt to parse long options
-PARSED_ARGS=$(getopt -o c:v:i --long command:,container_version:,interactive -- "$@")
+PARSED_ARGS=$(${GETOPT_CMD} -o c:v:i --long command:,container_version:,interactive -- "$@")
 
 # Exit if getopt fails
 if [ $? -ne 0 ]; then
@@ -43,13 +48,16 @@ while true; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
-
 # Define your probe's VID and PID
 PROBE_ALLOWED_LIST=(
     "2e8a:000c"
 )
 
-USB_DEVICES=$(lsusb)
+if [[ "$(uname)" == "Darwin" ]]; then
+    USB_DEVICES=""
+else 
+    USB_DEVICES=$(lsusb)
+fi
 for PAIR in "${PROBE_ALLOWED_LIST[@]}"; do
     if echo "$USB_DEVICES" | grep -q "$PAIR"; then
         MATCHED_DEVICE="$PAIR"
@@ -59,7 +67,7 @@ done
 
 PROBE_UART_DEVICE=""
 
-if [ -n "$MATCHED_DEVICE" ]; then
+if [[ -n "$MATCHED_DEVICE" && "$(uname)" != "Darwin" ]]; then
     # Find the corresponding UART device (assuming /dev/ttyUSB or /dev/ttyACM)
     UART_DEVICES=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null)
     for UART_DEVICE in $UART_DEVICES; do
@@ -75,7 +83,7 @@ fi
 CONTAINER_MOUNT_UART=""
 if [ ! -z "$PROBE_UART_DEVICE" ]; then
     echo "Found probe UART device: $PROBE_UART_DEVICE"
-    CONTAINER_MOUNT_UART="--device=$PROBE_UART_DEVICE:/dev/ttyACM0"
+    CONTAINER_MOUNT_UART="--device=$PROBE_UART_DEVICE:/dev/ttyACM0 --device=/dev/bus/usb"
 fi
 
 if [[ -z "$CONTAINER_INTERACTIVE" && -z "$COMMAND" ]]; then
@@ -83,5 +91,5 @@ if [[ -z "$CONTAINER_INTERACTIVE" && -z "$COMMAND" ]]; then
     exit 1
 fi
 
-podman run $CONTAINER_MOUNT_UART --device=/dev/bus/usb --userns=keep-id -v $(pwd):/workspace ${CONTAINER_INTERACTIVE} -w /workspace matgla/yasos.zig:${CONTAINER_VERSION} ${COMMAND}
+podman run $CONTAINER_MOUNT_UART --userns=keep-id -v $(pwd):/workspace ${CONTAINER_INTERACTIVE} -w /workspace matgla/yasos.zig:${CONTAINER_VERSION} ${COMMAND}
 

@@ -1,5 +1,5 @@
 //
-// make_rootfs.zig
+// irq_handlers.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,4 +18,9 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const std = @import("std");
+pub inline fn get_lr() u32 {
+    return asm volatile (
+        \\ mov %[ret], lr
+        : [ret] "=r" (-> u32),
+    );
+}
