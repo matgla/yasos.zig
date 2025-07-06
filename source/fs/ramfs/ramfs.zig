@@ -19,17 +19,20 @@
 //
 
 const IFileSystem = @import("../../kernel/fs/fs.zig").IFileSystem;
+const IDirectoryIterator = @import("../../kernel/fs/ifilesystem.zig").IDirectoryIterator;
 const IFile = @import("../../kernel/fs/fs.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
 const std = @import("std");
 
 const log = &@import("../../log/kernel_log.zig").kernel_log;
+const interface = @import("interface");
 
 const RamFsFile = @import("ramfs_file.zig").RamFsFile;
 const RamFsData = @import("ramfs_data.zig").RamFsData;
 
 pub const RamFs = struct {
+    pub usingnamespace interface.DeriveFromBase(IFileSystem, RamFs);
     allocator: std.mem.Allocator,
     root: FilesNode,
 
@@ -63,18 +66,6 @@ pub const RamFs = struct {
         }
     };
 
-    const VTable = IFileSystem.VTable{
-        .mount = mount,
-        .umount = umount,
-        .create = create,
-        .mkdir = mkdir,
-        .remove = remove,
-        .name = name,
-        .traverse = traverse,
-        .get = get,
-        .has_path = has_path,
-    };
-
     pub fn init(allocator: std.mem.Allocator) !RamFs {
         return .{
             .allocator = allocator,
@@ -86,61 +77,37 @@ pub const RamFs = struct {
         };
     }
 
-    pub fn ifilesystem(self: *RamFs) IFileSystem {
-        return .{
-            .ptr = self,
-            .vtable = &VTable,
-        };
+    pub fn iterator(self: *RamFs, path: []const u8) ?IDirectoryIterator {
+        _ = self;
+        _ = path;
+        return null;
     }
 
-    fn mount(_: *anyopaque) i32 {
+    pub fn mount(self: *RamFs) i32 {
+        _ = self;
         return 0;
     }
 
-    fn umount(ctx: *anyopaque) i32 {
-        const self: *RamFs = @ptrCast(@alignCast(ctx));
+    pub fn delete(self: *RamFs) void {
+        _ = self.umount();
+    }
+
+    pub fn umount(self: *RamFs) i32 {
         self.root.deinit(self.allocator);
         return 0;
     }
 
-    fn create_node(self: *RamFs, path: []const u8, filetype: FileType) ?*FilesNode {
-        var dirname = std.fs.path.dirname(path);
-        const basename = std.fs.path.basenamePosix(path);
-        if (dirname == null) {
-            dirname = "/";
-        }
-        if (dirname) |parent_path| {
-            const maybe_parent_node = self.get_node(parent_path) catch return null;
-            if (maybe_parent_node) |parent_node| {
-                if (parent_node.get(basename) != null) {
-                    return null;
-                }
-                var new: *FilesNode = self.allocator.create(FilesNode) catch return null;
-                new.* = FilesNode{
-                    .node = RamFsData.create(self.allocator, basename, filetype) catch return null,
-                    .children = .{},
-                    .list_node = .{},
-                };
-                parent_node.children.append(&new.list_node);
-                return new;
-            }
-        }
-        return null;
-    }
-
-    fn create(ctx: *anyopaque, path: []const u8, _: i32) ?IFile {
-        const self: *RamFs = @ptrCast(@alignCast(ctx));
-
+    pub fn create(self: *RamFs, path: []const u8, _: i32) ?IFile {
         if (self.create_node(path, FileType.File)) |node| {
-            const file = self.allocator.create(RamFsFile) catch return null;
-            file.* = RamFsFile.create(&node.node, self.allocator);
-            return file.ifile();
+            return RamFsFile.create(&node.node, self.allocator).new(self.allocator) catch |err| {
+                log.print("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
+                return null;
+            };
         }
         return null;
     }
 
-    fn mkdir(ctx: *anyopaque, path: []const u8, _: i32) i32 {
-        const self: *RamFs = @ptrCast(@alignCast(ctx));
+    pub fn mkdir(self: *RamFs, path: []const u8, _: i32) i32 {
         const maybe_node = self.create_node(path, FileType.Directory);
         if (maybe_node != null) {
             return 0;
@@ -148,14 +115,13 @@ pub const RamFs = struct {
         return -1;
     }
 
-    fn remove(ctx: *anyopaque, path: []const u8) i32 {
-        const self: *RamFs = @ptrCast(@alignCast(ctx));
+    pub fn remove(self: *RamFs, path: []const u8) i32 {
         var dirname = std.fs.path.dirname(path);
         const basename = std.fs.path.basenamePosix(path);
         if (dirname == null) {
             dirname = "/";
         }
-        const maybe_parent = self.get_node(dirname.?) catch return -1;
+        const maybe_parent = RamFs.get_node(*RamFs, self, dirname.?) catch return -1;
         if (maybe_parent) |parent| {
             var next = parent.children.first;
             while (next) |node| {
@@ -176,13 +142,13 @@ pub const RamFs = struct {
         return -1;
     }
 
-    fn name(_: *const anyopaque) []const u8 {
+    pub fn name(self: *const RamFs) []const u8 {
+        _ = self;
         return "ramfs";
     }
 
-    fn traverse(ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
-        const self: *RamFs = @ptrCast(@alignCast(ctx));
-        const maybe_node = self.get_node(path) catch return -1;
+    pub fn traverse(self: *RamFs, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
+        const maybe_node = RamFs.get_node(*RamFs, self, path) catch return -1;
         if (maybe_node) |file_node| {
             if (file_node.node.type == FileType.Directory) {
                 var next = file_node.children.first;
@@ -190,7 +156,7 @@ pub const RamFs = struct {
                     const child: *FilesNode = @fieldParentPtr("list_node", node);
                     next = node.next;
                     var file: RamFsFile = RamFsFile.create(&child.node, self.allocator);
-                    var ifile = file.ifile();
+                    var ifile = file.interface();
                     if (!callback(&ifile, user_context)) {
                         return 0;
                     }
@@ -201,27 +167,33 @@ pub const RamFs = struct {
         return -1;
     }
 
-    fn get(ctx: *anyopaque, path: []const u8) ?IFile {
-        const self: *RamFs = @ptrCast(@alignCast(ctx));
-        const maybe_node = self.get_node(path) catch return null;
+    pub fn get(self: *RamFs, path: []const u8) ?IFile {
+        const maybe_node = RamFs.get_node(*RamFs, self, path) catch return null;
         if (maybe_node) |node| {
-            const file = self.allocator.create(RamFsFile) catch return null;
-            file.* = RamFsFile.create(&node.node, self.allocator);
-            return file.ifile();
+            return RamFsFile.create(&node.node, self.allocator).new(self.allocator) catch |err| {
+                log.print("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
+                return null;
+            };
         }
         return null;
     }
 
-    fn has_path(ctx: *anyopaque, path: []const u8) bool {
-        const self: *RamFs = @ptrCast(@alignCast(ctx));
-        const node = self.get_node(path) catch return false;
+    pub fn has_path(self: *const RamFs, path: []const u8) bool {
+        const node = RamFs.get_node(*const RamFs, self, path) catch return false;
         return node != null;
     }
 
-    fn get_node(self: *RamFs, path: []const u8) !?*FilesNode {
+    fn determine_filesnode_type(comptime T: type) type {
+        if (@typeInfo(T).pointer.is_const) {
+            return *const FilesNode;
+        }
+        return *FilesNode;
+    }
+
+    fn get_node(comptime T: type, self: T, path: []const u8) !?determine_filesnode_type(T) {
         var it = try std.fs.path.componentIterator(path);
         var component = it.first();
-        var node: *FilesNode = &self.root;
+        var node: determine_filesnode_type(T) = &self.root;
         while (component) |part| : (component = it.next()) {
             const maybe_node = node.get(part.name);
             if (maybe_node) |child| {
@@ -231,6 +203,31 @@ pub const RamFs = struct {
             }
         }
         return node;
+    }
+
+    fn create_node(self: *RamFs, path: []const u8, filetype: FileType) ?*FilesNode {
+        var dirname = std.fs.path.dirname(path);
+        const basename = std.fs.path.basenamePosix(path);
+        if (dirname == null) {
+            dirname = "/";
+        }
+        if (dirname) |parent_path| {
+            const maybe_parent_node = RamFs.get_node(*RamFs, self, parent_path) catch return null;
+            if (maybe_parent_node) |parent_node| {
+                if (parent_node.get(basename) != null) {
+                    return null;
+                }
+                var new: *FilesNode = self.allocator.create(FilesNode) catch return null;
+                new.* = FilesNode{
+                    .node = RamFsData.create(self.allocator, basename, filetype) catch return null,
+                    .children = .{},
+                    .list_node = .{},
+                };
+                parent_node.children.append(&new.list_node);
+                return new;
+            }
+        }
+        return null;
     }
 };
 

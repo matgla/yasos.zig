@@ -27,6 +27,7 @@ pub const Executable = struct {
         _ = self;
         _ = argv;
         _ = argc;
+        return 0;
     }
 
     pub fn deinit(self: *Executable) void {

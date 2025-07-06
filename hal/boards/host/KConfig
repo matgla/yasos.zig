@@ -30,4 +30,11 @@ if BOARD_HOST
 
   config CONFIG_BUILD_BUNDLE_COMPILER_RT
     default y
+
+  config CONFIG_BUILD_USE_NEWLIB 
+    default n
+
+  choice CONFIG_PROCESS_SCHEDULER
+    default CONFIG_SCHEDULER_OSTHREAD
+  endchoice 
 endif

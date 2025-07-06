@@ -1,5 +1,5 @@
 //
-// process.zig
+// time.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,27 +18,23 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const config = @import("config");
+const std = @import("std");
 
-pub const HardwareStoredRegisters = packed struct {
-    r0: usize,
-    r1: usize,
-    r2: usize,
-    r3: usize,
-    r12: usize,
-    lr: usize,
-    pc: usize,
-    psr: usize,
-};
+pub const Time = struct {
+    const Self = @This();
+    pub const SysTick = struct {
+        pub fn init(_: SysTick, ticks: u32) !void {
+            _ = ticks;
+        }
+        pub fn enable(_: SysTick) void {}
+        pub fn disable(_: SysTick) void {}
+    };
 
-pub const SoftwareStoredRegisters = packed struct {
-    r4: usize,
-    r5: usize,
-    r6: usize,
-    r7: usize,
-    r8: usize,
-    r9: usize,
-    r10: usize,
-    r11: usize,
-    lr: usize,
+    pub fn sleep_ms(ms: u64) void {
+        Time.sleep_us(ms * 1000);
+    }
+
+    pub fn sleep_us(us: u64) void {
+        std.Thread.sleep(u64(us) * 1000);
+    }
 };

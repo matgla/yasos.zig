@@ -1,5 +1,5 @@
 //
-// reader.zig
+// arch.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,6 +18,11 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const Reader = struct {
-    
-};
+const std = @import("std");
+
+const config = @import("config");
+
+pub const process = @import("process.zig");
+pub const irq_handlers = @import("irq_handlers.zig");
+pub const panic = @import("panic.zig");
+pub const HardwareProcess = @import("process.zig").HostProcess;

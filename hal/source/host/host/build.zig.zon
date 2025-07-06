@@ -19,6 +19,7 @@
 //
 
 .{
+    .fingerprint = 0x9b5d34f26f060bef,
     .name = .mcu_host,
     .version = "0.0.0",
     .dependencies = .{

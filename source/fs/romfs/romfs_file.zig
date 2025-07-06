@@ -20,71 +20,51 @@
 
 ///! This module provides file handler implementation for ramfs filesystem
 const std = @import("std");
+
+const interface = @import("interface");
+
 const c = @import("../../libc_imports.zig").c;
 
 const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+const ReadOnlyFile = @import("../../kernel/fs/ifile.zig").ReadOnlyFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const FileName = @import("../../kernel/fs/ifile.zig").FileName;
 const FileHeader = @import("file_header.zig").FileHeader;
 const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
 
 pub const RomFsFile = struct {
-    /// VTable for IFile interface
-    const VTable = IFile.VTable{
-        .read = read,
-        .write = write,
-        .seek = seek,
-        .close = close,
-        .sync = sync,
-        .tell = tell,
-        .size = size,
-        .name = name,
-        .ioctl = ioctl,
-        .fcntl = fcntl,
-        .stat = stat,
-        .filetype = filetype,
-        .dupe = dupe,
-        .destroy = destroy,
-    };
-
+    const Self = @This();
+    pub usingnamespace interface.DeriveFromBase(ReadOnlyFile, Self);
+    base: ReadOnlyFile,
     /// Pointer to data instance, data is kept by filesystem
-    data: FileHeader,
+    header: FileHeader,
     allocator: std.mem.Allocator,
 
     /// Current position in file
-    position: usize = 0,
+    position: c.off_t = 0,
 
-    pub fn create(data: FileHeader, allocator: std.mem.Allocator) RomFsFile {
+    // RomFsFile interface
+    pub fn create(header: FileHeader, allocator: std.mem.Allocator) RomFsFile {
         return .{
-            .data = data,
+            .base = .{},
+            .header = header,
             .allocator = allocator,
         };
     }
 
-    pub fn ifile(self: *RomFsFile) IFile {
-        return .{
-            .ptr = self,
-            .vtable = &VTable,
-        };
-    }
-
-    pub fn read(ctx: *anyopaque, buffer: []u8) isize {
-        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
-        if (self.position >= self.data.size()) {
+    pub fn read(self: *RomFsFile, buffer: []u8) isize {
+        const data_size: c.off_t = @intCast(self.header.size());
+        if (self.position >= data_size) {
             return 0;
         }
-        const length = @min(self.data.size() - self.position, buffer.len);
-        @memcpy(buffer[0..length], self.data.data()[self.position .. self.position + length]);
+        const length = @min(data_size - self.position, buffer.len);
+        self.header.read_bytes(buffer, self.position);
         self.position += length;
         return @intCast(length);
     }
 
-    pub fn write(_: *anyopaque, _: []const u8) isize {
-        return -1;
-    }
-
-    pub fn seek(ctx: *anyopaque, offset: c.off_t, whence: i32) c.off_t {
-        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
+    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0) {
@@ -93,8 +73,9 @@ pub const RomFsFile = struct {
                 self.position = @intCast(offset);
             },
             c.SEEK_END => {
-                if (self.data.size() >= offset) {
-                    self.position = self.data.size() - @as(usize, @intCast(offset));
+                const file_size: c.off_t = @intCast(self.header.size());
+                if (file_size >= offset) {
+                    self.position = file_size - @as(c.off_t, @intCast(offset));
                 } else {
                     // set errno
                     return -1;
@@ -112,39 +93,33 @@ pub const RomFsFile = struct {
         return 0;
     }
 
-    pub fn close(ctx: *anyopaque) i32 {
-        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
-        self.allocator.destroy(self);
+    pub fn close(self: *Self) i32 {
+        _ = self;
         return 0;
     }
 
-    pub fn sync(_: *anyopaque) i32 {
-        // always in sync
-        return 0;
-    }
-
-    pub fn tell(ctx: *const anyopaque) c.off_t {
-        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
+    pub fn tell(self: *Self) c.off_t {
         return @intCast(self.position);
     }
 
-    pub fn size(ctx: *const anyopaque) isize {
-        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
-        return @intCast(self.data.size());
+    pub fn size(self: *Self) isize {
+        return @intCast(self.header.size());
     }
 
-    pub fn name(ctx: *const anyopaque) []const u8 {
-        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
-        return self.data.name();
+    pub fn name(self: *Self) FileName {
+        return self.header.name();
     }
 
-    pub fn ioctl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
-        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
+    pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
                 var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
-                attr.is_memory_mapped = true;
-                attr.mapped_address_r = self.data.data().ptr;
+                if (self.header.get_mapped_address()) |address| {
+                    attr.is_memory_mapped = true;
+                    attr.mapped_address_r = address;
+                } else {
+                    attr.is_memory_mapped = false;
+                }
             },
             else => {
                 return -1;
@@ -153,15 +128,14 @@ pub const RomFsFile = struct {
         return 0;
     }
 
-    pub fn fcntl(ctx: *anyopaque, cmd: i32, data: ?*anyopaque) i32 {
-        _ = ctx;
+    pub fn fcntl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
+        _ = self;
         _ = cmd;
         _ = data;
         return 0;
     }
 
-    pub fn stat(ctx: *const anyopaque, buf: *c.struct_stat) void {
-        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
+    pub fn stat(self: *Self, buf: *c.struct_stat) void {
         buf.st_dev = 0;
         buf.st_ino = 0;
         buf.st_mode = 0;
@@ -169,25 +143,20 @@ pub const RomFsFile = struct {
         buf.st_uid = 0;
         buf.st_gid = 0;
         buf.st_rdev = 0;
-        buf.st_size = @intCast(self.data.size());
+        buf.st_size = @intCast(self.header.size());
         buf.st_blksize = 1;
         buf.st_blocks = 1;
     }
 
-    pub fn filetype(ctx: *const anyopaque) FileType {
-        const self: *const RomFsFile = @ptrCast(@alignCast(ctx));
-        return self.data.filetype();
+    pub fn filetype(self: *Self) FileType {
+        return self.header.filetype();
     }
 
-    pub fn dupe(ctx: *anyopaque) ?IFile {
-        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
-        const new_file = self.allocator.create(RomFsFile) catch return null;
-        new_file.* = self.*;
-        return new_file.ifile();
+    pub fn dupe(self: *Self) ?IFile {
+        return self.new(self.allocator) catch return null;
     }
 
-    pub fn destroy(ctx: *anyopaque) void {
-        const self: *RomFsFile = @ptrCast(@alignCast(ctx));
-        self.allocator.destroy(self);
+    pub fn delete(self: *Self) void {
+        _ = self;
     }
 };
