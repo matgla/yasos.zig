@@ -18,7 +18,7 @@ jobs:
       - name: Run Smoke Tests
         run: |
           make run_smoke_tests
-        continue-on-error: true
+      
       - name: Upload Test Logs  
         if: failure()
         uses: actions/upload-artifact@v4
