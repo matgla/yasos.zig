@@ -46,7 +46,9 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    if (std.mem.eql(u8, module_context.path, file.name())) {
+    const filename = file.name();
+    defer filename.deinit();
+    if (std.mem.eql(u8, module_context.path, filename.get_name())) {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
@@ -73,15 +75,15 @@ pub fn init(allocator: std.mem.Allocator) void {
 }
 
 pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
-    const maybe_file = fs.ivfs().get(path);
-    if (maybe_file) |f| {
+    var maybe_file = fs.ivfs().get(path);
+    if (maybe_file) |*f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
         _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        f.destroy();
+        // f.destroy();
         var header_address: *const anyopaque = undefined;
 
         if (attr.mapped_address_r) |address| {
@@ -113,15 +115,15 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
 }
 
 pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
-    const maybe_file = fs.ivfs().get(path);
-    if (maybe_file) |f| {
+    var maybe_file = fs.ivfs().get(path);
+    if (maybe_file) |*f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
         _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        f.destroy();
+        // f.destroy();
         var header_address: *const anyopaque = undefined;
 
         if (attr.mapped_address_r) |address| {

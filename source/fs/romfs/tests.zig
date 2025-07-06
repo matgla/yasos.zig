@@ -19,7 +19,8 @@
 //
 
 comptime {
-    _ = @import("file_system_header.zig");
-    _ = @import("file_header.zig");
-    _ = @import("romfs.zig");
+    _ = @import("file_reader.zig");
+    // _ = @import("file_system_header.zig");
+    // _ = @import("file_header.zig");
+    // _ = @import("romfs.zig");
 }

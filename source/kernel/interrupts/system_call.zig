@@ -24,37 +24,31 @@ const hal = @import("hal");
 
 const c = @import("../../libc_imports.zig").c;
 
-const syscall = @import("../system_stubs.zig");
+const syscall = @import("arch").syscall;
 
 const log = &@import("../../log/kernel_log.zig").kernel_log;
 
 const process_manager = @import("../process_manager.zig");
 
 const handlers = @import("syscall_handlers.zig");
-
-extern fn store_and_switch_to_next_task(lr: u32) void;
-
-// mov to arch file
-inline fn get_lr() usize {
-    return asm volatile (
-        \\ mov %[ret], lr
-        : [ret] "=r" (-> usize),
-    );
+const arch = @import("arch");
+comptime {
+    _ = @import("arch");
+    const config = @import("config");
+    if (config.build.use_newlib) {
+        _ = @import("system_stubs.zig");
+    }
 }
 
-pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) void {
-    const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
-    const result: i32 = result_or_error catch |err| {
-        c_result.*.err = @intFromError(err);
-        c_result.*.result = -1;
-        return;
-    };
-
-    c_result.*.result = result;
-    c_result.*.err = -1;
-}
+extern fn store_and_switch_to_next_task(lr: usize) void;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
+
+fn context_switch_handler(lr: usize) void {
+    if (process_manager.instance.scheduler.schedule_next()) {
+        store_and_switch_to_next_task(lr);
+    }
+}
 
 fn sys_unhandled_factory(comptime i: usize) type {
     return struct {
@@ -124,33 +118,20 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
-pub export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
-    var arg_to_call = arg;
-    if (number == c.sys_vfork) {
-        const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(out));
-        const ctx: handlers.VForkContext = .{
-            .lr = get_lr(),
-            .result = &c_result.*.result,
-        };
-        arg_to_call = @ptrCast(&ctx);
-    }
-    write_result(out, syscall_lookup_table[number](arg_to_call));
+pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) void {
+    const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
+    const result: i32 = result_or_error catch |err| {
+        c_result.*.err = @intFromError(err);
+        c_result.*.result = -1;
+        return;
+    };
+
+    c_result.*.result = result;
+    c_result.*.err = -1;
 }
 
-export fn irq_pendsv() void {
-    const lr: usize = get_lr();
-    if (process_manager.instance.scheduler.schedule_next()) {
-        store_and_switch_to_next_task(lr);
-    }
-}
-
-export fn irq_hard_fault() void {
-    log.print("PANIC: Hard Fault occured!\n", .{});
-    while (true) {
-        asm volatile (
-            \\ wfi
-        );
-    }
+pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+    write_result(out, syscall_lookup_table[number](arg));
 }
 
 // can be called only from the user process, not from the kernel
@@ -160,10 +141,24 @@ pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) v
 
     if (arg) |a| {
         svc_arg = a;
+    } else {
+        const a: i32 = 0;
+        svc_arg = @ptrCast(&a);
     }
     if (out) |o| {
         svc_out = o;
+    } else {
+        var o: c.syscall_result = .{
+            .result = 0,
+            .err = 0,
+        };
+        svc_out = @ptrCast(&o);
     }
 
     hal.irq.trigger_supervisor_call(number, svc_arg, svc_out);
+}
+
+pub fn init() void {
+    arch.irq_handlers.set_system_call_handler(system_call_handler);
+    arch.irq_handlers.set_context_switch_handler(context_switch_handler);
 }

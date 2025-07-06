@@ -58,6 +58,18 @@ config CONFIG_PROCESS_CONTEXT_SWITCH_HW_SPINLOCK_NUMBER
   int "HW spinlock number for context switch"
   default 6 
 
+choice CONFIG_PROCESS_SCHEDULER
+  prompt "Process Scheduler"
+  help 
+    Select process scheduler to use. 
+    Round Robin scheduler is a simple scheduler that allows processes to run for a fixed time slice.
+    OSThread scheduler is a stub scheduler that uses OS thread to simulate processes
+config CONFIG_SCHEDULER_OSTHREAD 
+  bool "OSThread"
+config CONFIG_SCHEDULER_ROUND_ROBIN
+  bool "RoundRobinScheduler"
+endchoice
+
 endmenu
 
 menu "Filesystem Options"

@@ -21,6 +21,12 @@
 const std = @import("std");
 
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+const FileName = @import("../../kernel/fs/ifile.zig").FileName;
+
+const c = @import("../../libc_imports.zig").c;
+
+const FileReader = @import("file_reader.zig").FileReader;
 
 const alignment: u32 = 16;
 
@@ -36,21 +42,26 @@ pub const Type = enum(u4) {
 };
 
 pub const FileHeader = struct {
-    memory: []const u8,
-    start_index: usize,
+    _reader: FileReader,
+    _device_file: IFile,
+    _mapped_memory: ?*const anyopaque,
+    _allocator: std.mem.Allocator,
+    _filesystem_offset: c.off_t,
 
-    pub fn init(memory: []const u8, start_index: usize) ?FileHeader {
-        if (start_index >= memory.len) {
-            return null;
-        }
+    pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) FileHeader {
         return .{
-            .memory = memory,
-            .start_index = start_index,
+            ._reader = FileReader.init(device_file, start_offset),
+            ._device_file = device_file,
+            ._mapped_memory = mapped_address,
+            ._allocator = allocator,
+            ._filesystem_offset = filesystem_offset,
         };
     }
 
-    inline fn read(comptime T: type, buffer: []const u8) T {
-        return std.mem.bigToNative(T, std.mem.bytesToValue(T, buffer));
+    pub fn deinit(self: FileHeader) void {
+        if (self._name) |n| {
+            self._allocator.free(n);
+        }
     }
 
     fn convert_filetype(ft: Type) FileType {
@@ -66,27 +77,56 @@ pub const FileHeader = struct {
         }
     }
 
-    pub fn filetype(self: FileHeader) FileType {
-        const file = FileHeader.read(u32, self.memory[self.start_index .. self.start_index + 4]) & 0x00000007;
-        return FileHeader.convert_filetype(@enumFromInt(file));
+    pub fn filetype(self: *FileHeader) FileType {
+        const fileheader = self._reader.read(u32, 0);
+        return FileHeader.convert_filetype(@enumFromInt(fileheader & 0x7));
     }
 
-    pub fn specinfo(self: FileHeader) u32 {
-        return FileHeader.read(u32, self.memory[self.start_index + 4 .. self.start_index + 8]);
+    pub fn specinfo(self: *FileHeader) u32 {
+        return self._reader.read(u32, 4);
     }
 
-    pub fn size(self: FileHeader) u32 {
-        return FileHeader.read(u32, self.memory[self.start_index + 8 .. self.start_index + 12]);
+    pub fn size(self: *FileHeader) u32 {
+        return self._reader.read(u32, 8);
     }
 
-    pub fn name(self: FileHeader) []const u8 {
-        return std.mem.sliceTo(self.memory[self.start_index + 16 ..], 0);
+    pub fn name(self: *FileHeader) FileName {
+        const name_buffer = self._reader.read_string(self._allocator, 16) catch {
+            return .{
+                ._name = "",
+                ._allocator = null,
+            };
+        };
+        return FileName.init(name_buffer, self._allocator);
     }
 
-    pub fn data(self: FileHeader) []const u8 {
-        const data_index = (self.start_index + self.name().len + 1 + 16 + (alignment - 1)) & ~(alignment - 1);
-        return self.memory[data_index .. data_index + self.size()];
+    pub fn read(self: *FileHeader, comptime T: anytype, offset: c.off_t) T {
+        return self._reader.read(T, self._reader.get_data_offset() + offset);
     }
+    pub fn read_bytes(self: *FileHeader, buffer: []u8, offset: c.off_t) void {
+        self._reader.read_bytes(buffer, self._reader.get_data_offset() + offset);
+    }
+
+    pub fn read_string(self: *FileHeader, allocator: std.mem.Allocator, offset: u32) ?[]u8 {
+        return self._reader.read_string(allocator, self._reader.get_data_offset() + offset) catch {
+            return null;
+        };
+    }
+
+    pub fn read_name_at_offset(self: *FileHeader, allocator: std.mem.Allocator, offset: c.off_t) ?FileName {
+        const name_buffer = self._reader.read_string(allocator, self._reader.get_data_offset() + offset) catch {
+            return null;
+        };
+        return FileName.init(name_buffer, allocator);
+    }
+
+    pub fn get_mapped_address(self: FileHeader) ?*const anyopaque {
+        return @ptrFromInt(@intFromPtr(self._mapped_memory) + @as(usize, @intCast((self._reader.get_offset() - self._filesystem_offset + self._reader.get_data_offset()))));
+    }
+    // pub fn data(self: FileHeader) []const u8 {
+    // const data_index = (self.start_index + self.name().len + 1 + 16 + (alignment - 1)) & ~(alignment - 1);
+    // return self.memory[data_index .. data_index + self.size()];
+    // }
 
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result
     // if result is equal to 0, then checksum is correct
@@ -101,11 +141,11 @@ pub const FileHeader = struct {
         return checksum_value == 0;
     }
 
-    pub fn next(self: FileHeader) ?FileHeader {
-        const next_file_header = FileHeader.read(u32, self.memory[self.start_index .. self.start_index + 4]) & 0xfffffff0;
+    pub fn next(self: *FileHeader) ?FileHeader {
+        const next_file_header: c.off_t = @intCast(self._reader.read(u32, 0) & 0xfffffff0);
         if (next_file_header == 0) {
             return null;
         }
-        return FileHeader.init(self.memory, next_file_header);
+        return FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, self._mapped_memory, self._allocator);
     }
 };

@@ -20,56 +20,108 @@
 
 const IFile = @import("ifile.zig").IFile;
 
-pub const IFileSystem = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
+const interface = @import("interface");
 
-    pub const VTable = struct {
-        mount: *const fn (ctx: *anyopaque) i32,
-        umount: *const fn (ctx: *anyopaque) i32,
-        create: *const fn (ctx: *anyopaque, path: []const u8, flags: i32) ?IFile,
-        mkdir: *const fn (ctx: *anyopaque, path: []const u8, mode: i32) i32,
-        remove: *const fn (ctx: *anyopaque, path: []const u8) i32,
-        name: *const fn (ctx: *const anyopaque) []const u8,
-        // callback must returns true if traverse should continue or false if should break
-        traverse: *const fn (ctx: *anyopaque, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32,
-        get: *const fn (ctx: *anyopaque, path: []const u8) ?IFile,
-        has_path: *const fn (ctx: *anyopaque, path: []const u8) bool,
+fn DirectoryIteratorInterface(comptime SelfType: type) type {
+    return struct {
+        pub const Self = SelfType;
+
+        pub fn next(self: *Self) ?IFile {
+            return interface.VirtualCall(self, "next", .{}, ?IFile);
+        }
+
+        pub fn delete(self: *Self) void {
+            interface.DestructorCall(self);
+            interface.VirtualCall(self, "delete", .{}, void);
+        }
     };
+}
 
-    pub fn mount(self: IFileSystem) void {
-        self.vtable.mount(self.ptr);
+fn FileSystemInterface(comptime SelfType: type) type {
+    return struct {
+        pub const Self = SelfType;
+
+        pub fn mount(self: *Self) i32 {
+            return interface.VirtualCall(self, "mount", .{}, i32);
+        }
+
+        pub fn umount(self: *Self) i32 {
+            return interface.VirtualCall(self, "umount", .{}, i32);
+        }
+
+        pub fn create(self: *Self, path: []const u8, flags: i32) ?IFile {
+            return interface.VirtualCall(self, "create", .{ path, flags }, ?IFile);
+        }
+
+        pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
+            return interface.VirtualCall(self, "mkdir", .{ path, mode }, i32);
+        }
+
+        pub fn remove(self: *Self, path: []const u8) i32 {
+            return interface.VirtualCall(self, "remove", .{path}, i32);
+        }
+
+        pub fn name(self: *const Self) []const u8 {
+            return interface.VirtualCall(self, "name", .{}, []const u8);
+        }
+
+        pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
+            return interface.VirtualCall(self, "traverse", .{ path, callback, user_context }, i32);
+        }
+
+        pub fn get(self: *Self, path: []const u8) ?IFile {
+            return interface.VirtualCall(self, "get", .{path}, ?IFile);
+        }
+
+        pub fn has_path(self: *const Self, path: []const u8) bool {
+            return interface.VirtualCall(self, "has_path", .{path}, bool);
+        }
+
+        pub fn delete(self: *Self) void {
+            interface.VirtualCall(self, "delete", .{}, void);
+            interface.DestructorCall(self);
+        }
+
+        pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
+            return interface.VirtualCall(self, "iterator", .{path}, ?IDirectoryIterator);
+        }
+    };
+}
+
+pub const ReadOnlyFileSystem = struct {
+    pub const Self = @This();
+    pub usingnamespace interface.DeriveFromBase(IFileSystem, Self);
+
+    pub fn mount(self: *Self) i32 {
+        _ = self;
+        return 0; // Read-only filesystem does not need to do anything on mount
     }
 
-    pub fn umount(self: IFileSystem) i32 {
-        return self.vtable.umount(self.ptr);
+    pub fn umount(self: *Self) i32 {
+        _ = self;
+        return 0; // Read-only filesystem does not need to do anything on unmount
     }
 
-    pub fn create(self: IFileSystem, path: []const u8, flags: i32) ?IFile {
-        return self.vtable.create(self.ptr, path, flags);
+    pub fn create(self: *Self, path: []const u8, flags: i32) ?IFile {
+        _ = self;
+        _ = path;
+        _ = flags;
+        return null; // Read-only filesystem does not allow file creation
     }
 
-    pub fn mkdir(self: IFileSystem, path: []const u8, mode: i32) i32 {
-        return self.vtable.mkdir(self.ptr, path, mode);
+    pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
+        _ = self;
+        _ = path;
+        _ = mode;
+        return -1; // Read-only filesystem does not allow directory creation
     }
 
-    pub fn remove(self: IFileSystem, path: []const u8) i32 {
-        return self.vtable.remove(self.ptr, path);
-    }
-
-    pub fn name(self: IFileSystem) []const u8 {
-        return self.vtable.name(self.ptr);
-    }
-
-    pub fn traverse(self: IFileSystem, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
-        return self.vtable.traverse(self.ptr, path, callback, user_context);
-    }
-
-    pub fn get(self: IFileSystem, path: []const u8) ?IFile {
-        return self.vtable.get(self.ptr, path);
-    }
-
-    pub fn has_path(self: IFileSystem, path: []const u8) bool {
-        return self.vtable.has_path(self.ptr, path);
+    pub fn remove(self: *Self, path: []const u8) i32 {
+        _ = self;
+        _ = path;
+        return -1; // Read-only filesystem does not allow file removal
     }
 };
+
+pub const IFileSystem = interface.ConstructInterface(FileSystemInterface);
+pub const IDirectoryIterator = interface.ConstructInterface(DirectoryIteratorInterface);

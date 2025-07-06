@@ -27,3 +27,4 @@ pub const atomic = @import("atomic.zig");
 pub const external_memory = @import("external_memory.zig");
 pub const memory = @import("memory.zig");
 pub const mmc = @import("mmc.zig");
+pub const flash = @import("flash.zig");

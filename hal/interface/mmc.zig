@@ -20,35 +20,35 @@
 
 const std = @import("std");
 
-pub fn Mmc(comptime pioid: usize, comptime clk_sm_id: usize, comptime data_sm_id: usize, comptime cmd_sm_id: usize, comptime pins: Pins, comptime mmc: anytype) type {
-    const MMCImplementation = mmc(pioid, clk_sm_id, data_sm_id, cmd_sm_id, pins);
-    return struct {
-        const Self = @This();
-        impl: MMCImplementation,
+// pub fn Mmc(comptime pins: Pins, comptime mmc: anytype) type {
+//     const MMCImplementation = mmc(pioid, clk_sm_id, data_sm_id, cmd_sm_id, pins);
+//     return struct {
+//         const Self = @This();
+//         impl: MMCImplementation,
 
-        pub fn create() Self {
-            return Self{
-                .impl = MMCImplementation{},
-            };
-        }
+//         pub fn create() Self {
+//             return Self{
+//                 .impl = MMCImplementation{},
+//             };
+//         }
 
-        pub fn init(self: *Self, comptime config: Config) InitializeError!void {
-            try self.impl.init(config);
-        }
-    };
-}
+//         pub fn init(self: *Self, comptime config: Config) InitializeError!void {
+//             try self.impl.init(config);
+//         }
+//     };
+// }
 
-pub const InitializeError = error{};
+// pub const InitializeError = error{};
 
-pub const Pins = struct {
-    clk: u32,
-    cmd: u32,
-    d0: u32,
-};
+// pub const Pins = struct {
+//     clk: u32,
+//     cmd: u32,
+//     d0: u32,
+// };
 
-pub const Config = struct {
-    bus_width: u8 = 4,
-    clock_speed: u32 = 50 * 1000 * 1000,
-    timeout_ms: u32 = 1000,
-    use_dma: bool = true,
-};
+// pub const Config = struct {
+//     bus_width: u8 = 4,
+//     clock_speed: u32 = 50 * 1000 * 1000,
+//     timeout_ms: u32 = 1000,
+//     use_dma: bool = true,
+// };
