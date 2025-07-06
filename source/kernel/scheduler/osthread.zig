@@ -27,6 +27,7 @@ pub fn OSThread(comptime ManagerType: anytype) type {
     return struct {
         const Self = @This();
         manager: *const ManagerType = undefined,
+        current: ?*std.DoublyLinkedList.Node = null,
 
         pub fn schedule_next(self: *Self) bool {
             _ = self;
