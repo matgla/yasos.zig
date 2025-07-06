@@ -19,6 +19,9 @@
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  """
 
+import os
+import datetime
+
 import serial
 import pytest
 from pyocd.core.helpers import ConnectHelper
@@ -27,6 +30,7 @@ from .detect_serial_port import detect_probe_serial_port
 
 class Session:
     serial_port = None 
+    file = None
     def __init__(self): 
         if Session.serial_port is None:
             Session.serial_port = detect_probe_serial_port()
@@ -35,23 +39,35 @@ class Session:
         self.serial = serial.Serial(Session.serial_port, 921600, timeout=10)
         self.serial.read_all()
         self.serial.flushOutput()
+        os.makedirs("logs", exist_ok=True)
+        log_file = os.environ.get('PYTEST_CURRENT_TEST').split(':')[-1].split(' ')[0]
+        date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        log_file = f"logs/{log_file}_{date}.txt"
+        self.file = open(log_file, 'w') 
         self.reset_target()
         self.wait_for_prompt()
         while self.serial.inWaiting() > 0:
             self.wait_for_prompt()
 
     def wait_for_prompt(self):
-        line = self.serial.read_until("$ ".encode('utf-8')).decode('utf-8').strip()
+        line = self.serial.read_until("$ ".encode('utf-8')).decode('utf-8')
+        self.file.write(line)
+        line = line.strip()
         if not line.endswith("$"):
             raise RuntimeError("Prompt not found after reset")
 
     def write_command(self, command):
         self.serial.write((command + '\n').encode('utf-8'))
-        line = self.serial.readline().decode('utf-8').strip()
+        line = self.serial.readline().decode('utf-8')
+        self.file.write(line)
+        line = line.strip()
         assert command in line, f"expected command '{command}' not found in: {line}"
 
     def read_line(self):
-        line = self.serial.readline().decode('utf-8').strip()
+        line = self.serial.readline().decode('utf-8')
+        self.file.write(line) 
+        line = line.strip()
+        
         return line
     
     def reset_target(self):
@@ -68,4 +84,5 @@ class Session:
 
     def close(self):
         self.serial.close()
+        self.file.close()
 

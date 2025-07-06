@@ -24,30 +24,14 @@ const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const UartFile = @import("uart_file.zig").UartFile;
 
+const interface = @import("interface");
+
 pub fn UartDriver(comptime UartType: anytype) type {
     return struct {
-        const Self = @This();
+        pub const Self = @This();
+        pub usingnamespace interface.DeriveFromBase(IDriver, Self);
         const uart = UartType;
-
-        const VTable = IDriver.VTable{
-            .load = load,
-            .unload = unload,
-            .ifile = ifile,
-            .destroy = _destroy,
-        };
-
         _allocator: std.mem.Allocator,
-        // object is owner of the file handle
-
-        pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
-            const object = try allocator.create(Self);
-            object.* = Self.create(allocator);
-            return object;
-        }
-
-        pub fn destroy(self: *Self) void {
-            self._allocator.destroy(self);
-        }
 
         pub fn create(allocator: std.mem.Allocator) Self {
             return .{
@@ -55,14 +39,8 @@ pub fn UartDriver(comptime UartType: anytype) type {
             };
         }
 
-        pub fn idriver(self: *Self) IDriver {
-            return .{
-                .ptr = self,
-                .vtable = &VTable,
-            };
-        }
-
-        fn load(_: *anyopaque) !void {
+        pub fn load(self: *Self) anyerror!void {
+            _ = self;
             uart.flush();
             uart.init(.{
                 .baudrate = 921600,
@@ -71,21 +49,20 @@ pub fn UartDriver(comptime UartType: anytype) type {
             };
         }
 
-        fn unload(_: *anyopaque) bool {
+        pub fn unload(self: *Self) bool {
+            _ = self;
             return true;
         }
 
-        fn ifile(ctx: *anyopaque) ?IFile {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            var file = UartFile(uart).new(self._allocator) catch {
+        pub fn ifile(self: *Self) ?IFile {
+            return (UartFile(uart).create(self._allocator)).new(self._allocator) catch {
                 return null;
             };
-            return file.ifile();
         }
 
-        fn _destroy(ctx: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            self.destroy();
+        pub fn delete(self: *Self) void {
+            // No specific cleanup needed for UART driver
+            _ = self;
         }
     };
 }

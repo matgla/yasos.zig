@@ -20,6 +20,9 @@
 
 const std = @import("std");
 
+const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
+var system_call_handler: ?SystemCallHandler = null;
+
 pub const Irq = struct {
     pub const Type = enum {
         systick,
@@ -31,13 +34,24 @@ pub const Irq = struct {
     pub fn set_priority(irq: Type, priority: u32) void {
         std.debug.print("TODO: implement setting priority for IRQ {s} to {d}\n", .{ @tagName(irq), priority });
     }
-    pub fn trigger_supervisor_call(_: u32, _: *const volatile anyopaque, _: *volatile anyopaque) void {
-        std.debug.print("TODO: implement triggering supervisor call\n", .{});
+    pub fn trigger_supervisor_call(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+        if (system_call_handler) |handler| {
+            handler(number, arg, out);
+        }
     }
 
     pub fn trigger(irq: Type) void {
         switch (irq) {
+            .pendsv => {
+                std.Thread.yield() catch |err| {
+                    std.debug.print("Error during context switch: {}\n", .{err});
+                };
+            },
             else => std.debug.print("TODO: implement triggering IRQ {s}\n", .{@tagName(irq)}),
         }
+    }
+
+    pub fn set_system_call_handler(handler: SystemCallHandler) void {
+        system_call_handler = handler;
     }
 };

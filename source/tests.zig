@@ -20,4 +20,5 @@
 
 comptime {
     _ = @import("fs/tests.zig");
+    _ = @import("kernel/tests.zig");
 }

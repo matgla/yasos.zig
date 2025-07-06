@@ -25,6 +25,9 @@ pub const internal = struct {
     pub const ExternalMemory = @import("source/external_memory.zig").ExternalMemory;
     pub const Irq = @import("source/irq.zig").Irq;
     pub const HardwareAtomic = @import("source/atomic.zig").HardwareAtomic;
+    pub const Time = @import("source/time.zig").Time;
+    pub const Mmc = @import("source/mmc.zig").Mmc;
+    pub const Flash = @import("source/flash.zig").Flash;
 };
 
 pub const uart = @import("hal_interface").uart;
@@ -33,3 +36,7 @@ pub const memory = @import("hal_interface").memory.Memory(internal.Memory).creat
 pub const irq = @import("hal_interface").irq.Irq(internal.Irq).create();
 pub var external_memory = @import("hal_interface").external_memory.ExternalMemory(internal.ExternalMemory).create();
 pub const atomic = @import("hal_interface").atomic.AtomicInterface(internal.HardwareAtomic);
+pub const time = @import("hal_interface").time.Time(internal.Time).create();
+pub const mmc = @import("hal_interface").mmc;
+pub const Flash = @import("hal_interface").flash.Flash(internal.Flash);
+pub const flash = @import("hal_interface").flash;

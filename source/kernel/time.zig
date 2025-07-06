@@ -23,27 +23,16 @@ const process_manager = @import("process_manager.zig");
 
 const log = &@import("../log/kernel_log.zig").kernel_log;
 
-pub fn sleep(seconds: u32) void {
-    sleep_ms(seconds * 1000);
-}
-
 pub fn sleep_ms(ms: u32) void {
-    const start = systick.get_system_ticks();
-    // 1000 - ticks = 1 ms
-    var elapsed: u64 = 0;
-    const ptr: *volatile u64 = &elapsed;
-    while (ptr.* < ms) {
-        ptr.* = systick.get_system_ticks() - start;
-        asm volatile (
-            \\ wfi
-        );
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        process.sleep_for_ms(ms);
     }
 }
 
 pub fn sleep_us(us: u32) void {
-    _ = us;
-    // const maybe_process = process_manager.instance.current_process;
-    // if (maybe_process) |process| {
-    //     process.sleep_for_us(us);
-    // }
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        process.sleep_for_us(us);
+    }
 }

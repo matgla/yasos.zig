@@ -31,7 +31,16 @@ config CONFIG_BUILD_BUNDLE_COMPILER_RT
     bool "Bundle compiler RT" 
     help 
         Bundle compiler RT. Compiler RT may not be compatible with GCC based environment, i.e. for newlib nano
+
+config CONFIG_BUILD_USE_NEWLIB
+    bool "Use newlib libc library" 
+    help 
+        Newlib may be incompatible with host environment 
+
+
 endmenu
+
+
 
 menu "Memory"
 
