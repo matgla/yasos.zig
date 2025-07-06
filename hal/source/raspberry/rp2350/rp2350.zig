@@ -40,7 +40,7 @@ pub var external_memory = @import("hal_interface").external_memory.ExternalMemor
 pub const memory = @import("hal_interface").memory.Memory(internal.Memory).create();
 pub const mmc = @import("hal_interface").mmc;
 pub const flash = @import("hal_interface").flash;
-pub const Flash = flash.Flash(internal.Flash);
+// pub const Flash = flash.Flash(internal.Flash);
 
 pub const hw_atomic = internal.HardwareAtomic;
 

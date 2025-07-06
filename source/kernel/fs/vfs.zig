@@ -21,6 +21,7 @@
 const std = @import("std");
 
 const IFileSystem = @import("ifilesystem.zig").IFileSystem;
+const IDirectoryIterator = @import("ifilesystem.zig").IDirectoryIterator;
 const IFile = @import("ifile.zig").IFile;
 const MountPoints = @import("mount_points.zig").MountPoints;
 const MountPoint = @import("mount_points.zig").MountPoint;
@@ -77,6 +78,14 @@ pub const VirtualFileSystem = struct {
             return node.point.filesystem.traverse(node.left, callback, user_context);
         }
         return -1;
+    }
+
+    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.iterator(node.left);
+        }
+        return null;
     }
 
     pub fn get(self: *Self, path: []const u8) ?IFile {

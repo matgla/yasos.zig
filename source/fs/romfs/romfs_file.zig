@@ -42,7 +42,7 @@ pub const RomFsFile = struct {
     allocator: std.mem.Allocator,
 
     /// Current position in file
-    position: u32 = 0,
+    position: c.off_t = 0,
 
     // RomFsFile interface
     pub fn create(header: FileHeader, allocator: std.mem.Allocator) RomFsFile {
@@ -54,7 +54,7 @@ pub const RomFsFile = struct {
     }
 
     pub fn read(self: *RomFsFile, buffer: []u8) isize {
-        const data_size = self.header.size();
+        const data_size: c.off_t = @intCast(self.header.size());
         if (self.position >= data_size) {
             return 0;
         }
@@ -73,9 +73,9 @@ pub const RomFsFile = struct {
                 self.position = @intCast(offset);
             },
             c.SEEK_END => {
-                const file_size = self.header.size();
+                const file_size: c.off_t = @intCast(self.header.size());
                 if (file_size >= offset) {
-                    self.position = file_size - @as(u32, @intCast(offset));
+                    self.position = file_size - @as(c.off_t, @intCast(offset));
                 } else {
                     // set errno
                     return -1;

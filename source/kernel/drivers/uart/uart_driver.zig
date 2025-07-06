@@ -31,6 +31,13 @@ pub fn UartDriver(comptime UartType: anytype) type {
         pub const Self = @This();
         pub usingnamespace interface.DeriveFromBase(IDriver, Self);
         const uart = UartType;
+        _allocator: std.mem.Allocator,
+
+        pub fn create(allocator: std.mem.Allocator) Self {
+            return .{
+                ._allocator = allocator,
+            };
+        }
 
         pub fn load(self: *Self) anyerror!void {
             _ = self;
@@ -48,13 +55,9 @@ pub fn UartDriver(comptime UartType: anytype) type {
         }
 
         pub fn ifile(self: *Self) ?IFile {
-            // const self: *Self = @ptrCast(@alignCast(ctx));
-            // var file = UartFile(uart).new(self._allocator) catch {
-            // return null;
-            // };
-            // return file.ifile();
-            _ = self;
-            return null;
+            return (UartFile(uart).create(self._allocator)).new(self._allocator) catch {
+                return null;
+            };
         }
 
         pub fn delete(self: *Self) void {

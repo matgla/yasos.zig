@@ -15,33 +15,49 @@
 
 const std = @import("std");
 
-pub const Flash = struct {
-    pub const BlockSize = 1;
-    pub fn init() void {}
+pub fn Flash(comptime mapping_address: usize, comptime size: usize) type {
+    return struct {
+        pub const Self = @This();
+        pub const BlockSize = 1;
+        memory: []const u8,
 
-    pub fn create() Flash {
-        return .{};
-    }
+        pub fn init(self: Self) void {
+            _ = self;
+        }
 
-    pub fn read(self: Flash, address: u32, buffer: []u8) void {
-        _ = buffer;
-        _ = self;
-        _ = address;
-    }
+        fn slicify(ptr: [*]u8, memory_size: usize) []const u8 {
+            return ptr[0..memory_size];
+        }
 
-    pub fn write(self: Flash, address: u32, data: []const u8) void {
-        _ = data;
-        _ = self;
-        _ = address;
-    }
+        pub fn create(comptime id: u32) Self {
+            _ = id;
+            return .{
+                .memory = slicify(@ptrFromInt(mapping_address), size),
+            };
+        }
 
-    pub fn erase(self: Flash, address: u32) void {
-        _ = self;
-        _ = address;
-    }
+        pub fn read(self: Self, address: u32, buffer: []u8) void {
+            @memcpy(buffer, self.memory[address .. address + buffer.len]);
+        }
 
-    pub fn get_number_of_blocks(self: Flash) u32 {
-        _ = self;
-        return 1024;
-    }
-};
+        pub fn write(self: Self, address: u32, data: []const u8) void {
+            _ = data;
+            _ = self;
+            _ = address;
+        }
+
+        pub fn erase(self: Self, address: u32) void {
+            _ = self;
+            _ = address;
+        }
+
+        pub fn get_number_of_blocks(self: Self) u32 {
+            _ = self;
+            return 1024;
+        }
+
+        pub fn get_physical_address(self: Self) []const u8 {
+            return self.memory;
+        }
+    };
+}

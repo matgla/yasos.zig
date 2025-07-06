@@ -21,6 +21,7 @@
 const std = @import("std");
 
 const ReadOnlyFileSystem = @import("../fs/ifilesystem.zig").ReadOnlyFileSystem;
+const IDirectoryIterator = @import("../fs/ifilesystem.zig").IDirectoryIterator;
 const IFile = @import("../fs/ifile.zig").IFile;
 
 const IDriver = @import("idriver.zig").IDriver;
@@ -82,5 +83,11 @@ pub const DriverFs = struct {
         _ = self;
         _ = path;
         return false;
+    }
+
+    pub fn iterator(self: *DriverFs, path: []const u8) ?IDirectoryIterator {
+        _ = self;
+        _ = path;
+        return null;
     }
 };

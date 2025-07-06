@@ -19,6 +19,7 @@
 //
 
 const IFileSystem = @import("../../kernel/fs/fs.zig").IFileSystem;
+const IDirectoryIterator = @import("../../kernel/fs/ifilesystem.zig").IDirectoryIterator;
 const IFile = @import("../../kernel/fs/fs.zig").IFile;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
@@ -74,6 +75,12 @@ pub const RamFs = struct {
                 .list_node = .{},
             },
         };
+    }
+
+    pub fn iterator(self: *RamFs, path: []const u8) ?IDirectoryIterator {
+        _ = self;
+        _ = path;
+        return null;
     }
 
     pub fn mount(self: *RamFs) i32 {

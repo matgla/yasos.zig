@@ -12,7 +12,7 @@ pub const psram = struct {
 };
 
 pub const flash = struct {
-    pub const flash0 = hal.flash.Flash(hal.internal.Flash).create();
+    pub const flash0 = hal.flash.Flash(hal.internal.Flash(0x10000000, 16 * 1024 * 1024)).create(0);
 };
 
 // pub const mmc = struct {

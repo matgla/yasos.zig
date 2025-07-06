@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const IFileSystem = @import("ifilesystem.zig").IFileSystem;
+const IDirectoryIterator = @import("ifilesystem.zig").IDirectoryIterator;
 const IFile = @import("ifile.zig").IFile;
 
 const config = @import("config");
@@ -257,6 +258,12 @@ const FileSystemStub = struct {
 
     pub fn delete(self: *FileSystemStub) void {
         _ = self;
+    }
+
+    pub fn iterator(self: *FileSystemStub, path: []const u8) ?IDirectoryIterator {
+        _ = self;
+        _ = path;
+        return null; // No directory iterator for stub
     }
 };
 test "error when root not mounted" {

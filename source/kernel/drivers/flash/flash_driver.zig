@@ -26,10 +26,11 @@ const FlashFile = @import("flash_file.zig").FlashFile;
 const interface = @import("interface");
 
 const hal = @import("hal");
+const board = @import("board");
 
 pub const FlashDriver = struct {
     pub usingnamespace interface.DeriveFromBase(IDriver, FlashDriver);
-    const FlashType = hal.Flash;
+    const FlashType = @TypeOf(board.flash.flash0);
 
     _flash: FlashType,
     _allocator: std.mem.Allocator,

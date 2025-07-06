@@ -25,41 +25,19 @@ const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
 
+const interface = @import("interface");
+
 pub fn UartFile(comptime UartType: anytype) type {
     return struct {
         const Self = @This();
+        pub usingnamespace interface.DeriveFromBase(IFile, Self);
         const uart = UartType;
-
-        /// VTable for IFile interface
-        const VTable = IFile.VTable{
-            .read = read,
-            .write = write,
-            .seek = seek,
-            .close = close,
-            .sync = sync,
-            .tell = tell,
-            .size = size,
-            .name = name,
-            .ioctl = ioctl,
-            .fcntl = fcntl,
-            .stat = stat,
-            .filetype = filetype,
-            .dupe = dupe,
-            .destroy = _destroy,
-        };
-
         _icanonical: bool,
         _echo: bool,
         _nonblock: bool,
         _allocator: std.mem.Allocator,
 
-        pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
-            const object = try allocator.create(Self);
-            object.* = Self.create(allocator);
-            return object;
-        }
-
-        pub fn destroy(self: *Self) void {
+        pub fn delete(self: *Self) void {
             self._allocator.destroy(self);
         }
 
@@ -72,15 +50,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             };
         }
 
-        pub fn ifile(self: *Self) IFile {
-            return .{
-                .ptr = self,
-                .vtable = &VTable,
-            };
-        }
-
-        pub fn read(ctx: *anyopaque, buffer: []u8) isize {
-            const self: *const Self = @ptrCast(@alignCast(ctx));
+        pub fn read(self: *Self, buffer: []u8) isize {
             var index: usize = 0;
             var ch: [1]u8 = .{0};
             while (index < buffer.len) {
@@ -114,37 +84,43 @@ pub fn UartFile(comptime UartType: anytype) type {
             return 0;
         }
 
-        pub fn write(_: *anyopaque, data: []const u8) isize {
+        pub fn write(self: *Self, data: []const u8) isize {
+            _ = self;
             const result = uart.write_some(data) catch return 0;
             return @intCast(result);
         }
 
-        pub fn seek(_: *anyopaque, _: c.off_t, _: i32) c.off_t {
+        pub fn seek(self: *Self, _: c.off_t, _: i32) c.off_t {
+            _ = self;
             return 0;
         }
 
-        pub fn close(_: *anyopaque) i32 {
+        pub fn close(self: *Self) i32 {
+            _ = self;
             return 0;
         }
 
-        pub fn sync(_: *anyopaque) i32 {
+        pub fn sync(self: *Self) i32 {
+            _ = self;
             return 0;
         }
 
-        pub fn tell(_: *const anyopaque) c.off_t {
+        pub fn tell(self: *Self) c.off_t {
+            _ = self;
             return 0;
         }
 
-        pub fn size(_: *const anyopaque) isize {
+        pub fn size(self: *Self) isize {
+            _ = self;
             return 0;
         }
 
-        pub fn name(_: *const anyopaque) FileName {
+        pub fn name(self: *Self) FileName {
+            _ = self;
             return FileName.init("uart", null);
         }
 
-        pub fn ioctl(ctx: *anyopaque, op: i32, arg: ?*anyopaque) i32 {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        pub fn ioctl(self: *Self, op: i32, arg: ?*anyopaque) i32 {
             if (arg) |termios_arg| {
                 const termios: *c.termios = @ptrCast(@alignCast(termios_arg));
                 switch (op) {
@@ -179,9 +155,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             return -1;
         }
 
-        pub fn fcntl(ctx: *anyopaque, op: i32, maybe_arg: ?*anyopaque) i32 {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-
+        pub fn fcntl(self: *Self, op: i32, maybe_arg: ?*anyopaque) i32 {
             var result: i32 = 0;
             if (maybe_arg) |arg| {
                 const flags: *c_int = @ptrCast(@alignCast(arg));
@@ -204,7 +178,8 @@ pub fn UartFile(comptime UartType: anytype) type {
             return -1;
         }
 
-        pub fn stat(_: *const anyopaque, buf: *c.struct_stat) void {
+        pub fn stat(self: *Self, buf: *c.struct_stat) void {
+            _ = self;
             buf.st_dev = 0;
             buf.st_ino = 0;
             buf.st_mode = 0;
@@ -217,18 +192,9 @@ pub fn UartFile(comptime UartType: anytype) type {
             buf.st_blocks = 1;
         }
 
-        pub fn filetype(_: *const anyopaque) FileType {
+        pub fn filetype(self: *Self) FileType {
+            _ = self;
             return FileType.CharDevice;
-        }
-
-        pub fn dupe(ctx: *anyopaque) ?IFile {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            return self.ifile();
-        }
-
-        pub fn _destroy(ctx: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            self.destroy();
         }
     };
 }

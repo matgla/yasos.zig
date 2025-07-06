@@ -108,7 +108,7 @@ export fn kernel_process() void {
     fs.vfs_init(malloc_allocator);
 
     var driverfs: DriverFs = DriverFs.init(malloc_allocator);
-    var uart_driver = (UartDriver(board.uart.uart0){}).new(malloc_allocator) catch |err| {
+    var uart_driver = (UartDriver(board.uart.uart0).create(malloc_allocator)).new(malloc_allocator) catch |err| {
         log.print("Can't create uart driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
@@ -247,9 +247,12 @@ pub export fn main() void {
 
     log.write(" - initializing process manager\n");
     process_manager.initialize_process_manager(malloc_allocator);
+
+    log.write(" - enabling system call haandlers\n");
+    system_call.init();
     spawn.root_process(&kernel_process, null, 1024 * 16) catch @panic("Can't spawn root process: ");
     process.init();
     while (true) {
-        std.Thread.sleep(1000 * std.time.ns_per_ms);
+        // std.Thread.sleep(1000 * std.time.ns_per_ms);
     }
 }

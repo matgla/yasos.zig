@@ -22,6 +22,21 @@ const IFile = @import("ifile.zig").IFile;
 
 const interface = @import("interface");
 
+fn DirectoryIteratorInterface(comptime SelfType: type) type {
+    return struct {
+        pub const Self = SelfType;
+
+        pub fn next(self: *Self) ?IFile {
+            return interface.VirtualCall(self, "next", .{}, ?IFile);
+        }
+
+        pub fn delete(self: *Self) void {
+            interface.DestructorCall(self);
+            interface.VirtualCall(self, "delete", .{}, void);
+        }
+    };
+}
+
 fn FileSystemInterface(comptime SelfType: type) type {
     return struct {
         pub const Self = SelfType;
@@ -66,6 +81,10 @@ fn FileSystemInterface(comptime SelfType: type) type {
             interface.VirtualCall(self, "delete", .{}, void);
             interface.DestructorCall(self);
         }
+
+        pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
+            return interface.VirtualCall(self, "iterator", .{path}, ?IDirectoryIterator);
+        }
     };
 }
 
@@ -105,3 +124,4 @@ pub const ReadOnlyFileSystem = struct {
 };
 
 pub const IFileSystem = interface.ConstructInterface(FileSystemInterface);
+pub const IDirectoryIterator = interface.ConstructInterface(DirectoryIteratorInterface);

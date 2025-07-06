@@ -20,12 +20,14 @@
 
 const ReadOnlyFileSystem = @import("../../kernel/fs/ifilesystem.zig").ReadOnlyFileSystem;
 const IFile = @import("../../kernel/fs/fs.zig").IFile;
+const IDirectoryIterator = @import("../../kernel/fs/ifilesystem.zig").IDirectoryIterator;
 const FileType = @import("../../kernel/fs/ifile.zig").FileType;
 
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
 
 const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
 const FileHeader = @import("file_header.zig").FileHeader;
+const RomFsDirectoryIterator = @import("romfs_directory_iterator.zig").RomFsDirectoryIterator;
 
 const interface = @import("interface");
 
@@ -70,7 +72,7 @@ pub const RomFs = struct {
     }
 
     // RomFs interface
-    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: u32) error{NotRomFsFileSystem}!RomFs {
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: c.off_t) error{NotRomFsFileSystem}!RomFs {
         const fs = FileSystemHeader.init(allocator, device_file, start_offset);
         if (fs) |root| {
             return .{
@@ -94,6 +96,21 @@ pub const RomFs = struct {
     pub fn has_path(self: *const RomFs, path: []const u8) bool {
         const file = self.get_file_header(path);
         return file != null;
+    }
+
+    pub fn iterator(self: *RomFs, path: []const u8) ?IDirectoryIterator {
+        var maybe_node = self.get_file_header(path);
+        if (maybe_node) |*node| {
+            if (node.filetype() == FileType.Directory) {
+                const maybe_child: ?FileHeader = self.create_file_header(node.specinfo());
+                if (maybe_child) |child| {
+                    return RomFsDirectoryIterator.create(child, self.allocator).new(self.allocator) catch {
+                        return null;
+                    };
+                }
+            }
+        }
+        return null;
     }
 
     fn get_file_header(self: RomFs, path: []const u8) ?FileHeader {
@@ -158,7 +175,7 @@ pub const RomFs = struct {
     }
 
     fn create_file_header(self: RomFs, offset: u32) FileHeader {
-        return self.root.create_file_header_with_offset(offset);
+        return self.root.create_file_header_with_offset(@intCast(offset));
     }
 };
 

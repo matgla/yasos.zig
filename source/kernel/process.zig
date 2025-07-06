@@ -28,6 +28,8 @@ const arch_process = @import("arch").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
 const IFile = @import("fs/ifile.zig").IFile;
+const IDirectoryIterator = @import("fs/ifilesystem.zig").IDirectoryIterator;
+
 const process_memory_pool = @import("process_memory_pool.zig");
 const ProcessPageAllocator = @import("malloc.zig").ProcessPageAllocator;
 const system_call = @import("interrupts/system_call.zig");
@@ -56,7 +58,7 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
         const FileHandle = struct {
             file: IFile,
             path: [config.fs.max_path_length]u8,
-            diriter: ?IFile,
+            diriter: ?IDirectoryIterator,
         };
         pub const ImplType = ProcessImpl;
 
