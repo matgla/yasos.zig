@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) !void {
     const tests = b.addTest(.{
         .name = "yasos_tests",
         .target = b.standardTargetOptions(.{}),
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         .optimize = optimize,
         .root_source_file = b.path("tests.zig"),
     });

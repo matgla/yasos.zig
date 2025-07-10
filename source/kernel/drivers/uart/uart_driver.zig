@@ -31,12 +31,9 @@ pub fn UartDriver(comptime UartType: anytype) type {
         pub const Self = @This();
         pub usingnamespace interface.DeriveFromBase(IDriver, Self);
         const uart = UartType;
-        _allocator: std.mem.Allocator,
 
-        pub fn create(allocator: std.mem.Allocator) Self {
-            return .{
-                ._allocator = allocator,
-            };
+        pub fn create() Self {
+            return .{};
         }
 
         pub fn load(self: *Self) anyerror!void {
@@ -54,8 +51,9 @@ pub fn UartDriver(comptime UartType: anytype) type {
             return true;
         }
 
-        pub fn ifile(self: *Self) ?IFile {
-            return (UartFile(uart).create(self._allocator)).new(self._allocator) catch {
+        pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
+            _ = self;
+            return (UartFile(uart).create(allocator)).new(allocator) catch {
                 return null;
             };
         }

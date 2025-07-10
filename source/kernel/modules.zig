@@ -77,15 +77,15 @@ pub fn init(allocator: std.mem.Allocator) void {
 }
 
 pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
-    var maybe_file = fs.get_ivfs().get(path);
+    var maybe_file = fs.get_ivfs().get(path, allocator);
     if (maybe_file) |*f| {
+        defer f.delete();
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
         _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        // f.destroy();
         var header_address: *const anyopaque = undefined;
 
         if (attr.mapped_address_r) |address| {
@@ -117,8 +117,9 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
 }
 
 pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
-    var maybe_file = fs.get_ivfs().get(path);
+    var maybe_file = fs.get_ivfs().get(path, allocator);
     if (maybe_file) |*f| {
+        defer f.delete();
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,

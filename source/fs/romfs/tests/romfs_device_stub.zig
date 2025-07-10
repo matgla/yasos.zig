@@ -15,8 +15,9 @@
 
 const std = @import("std");
 
-const IDriver = @import("../../../kernel/drivers/idriver.zig").IDriver;
-const IFile = @import("../../../kernel/drivers/idriver.zig").IFile;
+const kernel = @import("kernel");
+const IDriver = kernel.driver.IDriver;
+const IFile = kernel.fs.IFile;
 
 const interface = @import("interface");
 
@@ -56,8 +57,9 @@ pub const RomfsDeviceStub = struct {
         return true;
     }
 
-    pub fn ifile(self: *RomfsDeviceStub) ?IFile {
+    pub fn ifile(self: *RomfsDeviceStub, allocator: std.mem.Allocator) ?IFile {
         _ = self;
+        _ = allocator;
         return null;
     }
 

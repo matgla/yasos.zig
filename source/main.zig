@@ -103,25 +103,23 @@ fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !voi
 fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     kernel.fs.vfs_init(allocator);
     var driverfs = kernel.driver.fs.DriverFs.init(allocator);
-    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).create(allocator)).new(allocator) catch |err| {
+    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).create()).new(allocator) catch |err| {
         kernel.log.err("Can't create uart driver instance: '{s}'", .{@errorName(err)});
         return;
     };
     driverfs.append(uart_driver, "uart0") catch return;
 
-    var flash_driver = (kernel.driver.FlashDriver.create(
-        board.flash.flash0,
-        allocator,
-    )).new(allocator) catch |err| {
+    var flash_driver = (kernel.driver.FlashDriver.create(board.flash.flash0)).new(allocator) catch |err| {
         kernel.log.err("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return;
     };
     driverfs.append(flash_driver, "flash9") catch return;
     driverfs.load_all() catch return;
 
-    const maybe_flash_file = flash_driver.ifile();
-    if (maybe_flash_file) |flash| {
-        try mount_filesystem(try allocate_filesystem(allocator, RomFs.init(allocator, flash, 0x80000)), "/");
+    var maybe_flash_file = flash_driver.ifile(allocator);
+    if (maybe_flash_file) |*flash| {
+        defer flash.delete();
+        try mount_filesystem(try allocate_filesystem(allocator, RomFs.init(allocator, flash.*, 0x80000)), "/");
         try mount_filesystem(try allocate_filesystem(allocator, RamFs.init(allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
     } else {
@@ -179,7 +177,7 @@ export fn kernel_process(argument: *std.mem.Allocator) void {
 
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const maybe_uartfile = kernel.fs.get_ivfs().get("/dev/uart0");
+        const maybe_uartfile = kernel.fs.get_ivfs().get("/dev/uart0", process.get_memory_allocator());
         if (maybe_uartfile) |uartfile| {
             attach_default_filedescriptors_to_root_process(uartfile, process);
         } else {

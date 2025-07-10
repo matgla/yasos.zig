@@ -104,10 +104,11 @@ pub const ReadOnlyFileSystem = struct {
         return 0; // Read-only filesystem does not need to do anything on unmount
     }
 
-    pub fn create(self: *Self, path: []const u8, flags: i32) ?IFile {
+    pub fn create(self: *Self, path: []const u8, flags: i32, allocator: std.mem.Allocator) ?IFile {
         _ = self;
         _ = path;
         _ = flags;
+        _ = allocator;
         return null; // Read-only filesystem does not allow file creation
     }
 

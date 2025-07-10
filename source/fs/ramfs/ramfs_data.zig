@@ -72,24 +72,24 @@ pub const RamFsData = struct {
     }
 };
 
-test "create nodes" {
+test "RamFsData.ShouldCreateFile" {
     var file1 = try RamFsData.create_file(std.testing.allocator, "file1");
+    defer file1.deinit();
     try std.testing.expectEqualStrings("file1", file1.name());
     try std.testing.expectEqual(FileType.File, file1.type);
-    defer file1.deinit();
 
     var file2 = try RamFsData.create_file(std.testing.allocator, "file3");
+    defer file2.deinit();
     try std.testing.expectEqualStrings("file3", file2.name());
     try std.testing.expectEqual(FileType.File, file2.type);
-    defer file2.deinit();
 
     var dir = try RamFsData.create_directory(std.testing.allocator, "dira");
+    defer dir.deinit();
     try std.testing.expectEqualStrings("dira", dir.name());
     try std.testing.expectEqual(FileType.Directory, dir.type);
-    defer dir.deinit();
 }
 
-test "write content to file" {
+test "RamFsData.ShouldAppendToFile" {
     var file1 = try RamFsData.create_file(std.testing.allocator, "file1");
     try file1.data.appendSlice("This is test content");
     try std.testing.expectEqualStrings("file1", file1.name());

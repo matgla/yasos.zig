@@ -87,10 +87,10 @@ pub const RomFs = struct {
         return error.NotRomFsFileSystem;
     }
 
-    pub fn get(self: *RomFs, path: []const u8) ?IFile {
+    pub fn get(self: *RomFs, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
-            return RomFsFile.create(node, self.allocator).new(self.allocator) catch return null;
+            return RomFsFile.create(node, allocator).new(allocator) catch return null;
         }
         return null;
     }
@@ -202,8 +202,8 @@ fn traverse_dir(file: *IFile, _: *anyopaque) bool {
     return true;
 }
 
-test "Parsing filesystem" {
-    const test_data = @embedFile("test.romfs");
+test "Romfs.ShouldParseFilesystem" {
+    const test_data = @embedFile("tests/test.romfs");
     expected_directories = std.ArrayList([]const u8).init(std.testing.allocator);
     defer expected_directories.deinit();
     var maybe_fs = RomFs.init(std.testing.allocator, test_data);

@@ -37,8 +37,8 @@ fn DriverInterface(comptime SelfType: type) type {
             return interface.VirtualCall(self, "unload", .{}, bool);
         }
 
-        pub fn ifile(self: *Self) ?IFile {
-            return interface.VirtualCall(self, "ifile", .{}, ?IFile);
+        pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
+            return interface.VirtualCall(self, "ifile", .{allocator}, ?IFile);
         }
 
         pub fn name(self: *const Self) []const u8 {

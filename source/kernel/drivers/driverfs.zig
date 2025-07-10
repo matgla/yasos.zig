@@ -87,9 +87,9 @@ pub const DriverFs = struct {
         return -1;
     }
 
-    pub fn get(self: *DriverFs, path: []const u8) ?IFile {
+    pub fn get(self: *DriverFs, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         if (self._container.getPtr(path)) |driver| {
-            return driver.ifile();
+            return driver.ifile(allocator);
         }
         return null;
     }

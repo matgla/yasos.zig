@@ -20,5 +20,5 @@
 
 comptime {
     _ = @import("ramfs/tests.zig");
-    // _ = @import("romfs/tests.zig");
+    _ = @import("romfs/tests.zig");
 }

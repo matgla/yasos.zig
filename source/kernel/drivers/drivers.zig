@@ -21,3 +21,4 @@ pub const fs = @import("driverfs.zig");
 pub const UartDriver = @import("uart/uart_driver.zig").UartDriver;
 pub const FlashDriver = @import("flash/flash_driver.zig").FlashDriver;
 pub const MmcDriver = @import("mmc/mmc_driver.zig").MmcDriver;
+pub const IDriver = @import("idriver.zig").IDriver;

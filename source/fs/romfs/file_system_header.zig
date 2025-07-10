@@ -120,8 +120,8 @@ pub const FileSystemHeader = struct {
     }
 };
 
-test "Parse filesystem header" {
-    const test_data = @embedFile("test.romfs");
+test "RomFs.ShouldParseFilesystemHeader" {
+    const test_data = @embedFile("tests/test.romfs");
     const maybe_fs = FileSystemHeader.init(test_data);
     try std.testing.expect(maybe_fs != null);
     if (maybe_fs) |fs| {

@@ -234,31 +234,9 @@ pub const RamFs = struct {
     }
 };
 
-const ExpectationList = std.ArrayList([]const u8);
-var expected_directories: ExpectationList = undefined;
-var did_error: anyerror!void = {};
-
-fn traverse_dir(file: *IFile, _: *anyopaque) bool {
-    const name = file.name().get_name();
-    did_error catch return false;
-
-    const maybe_expectation = expected_directories.pop();
-    if (maybe_expectation) |expectation| {
-        did_error = std.testing.expectEqualStrings(expectation, name);
-        did_error catch {
-            std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation, name });
-            return false;
-        };
-    } else {
-        std.debug.print("Expectation not found for: '{s}'\n", .{name});
-        return false;
-    }
-    return true;
-}
-
-test "Create files in ramfs" {
-    expected_directories = ExpectationList.init(std.testing.allocator);
-    defer expected_directories.deinit();
+test "RomFsFile.ShouldCreateAndRemoveFiles" {
+    const TestDirectoryTraverser = @import("../tests/directory_traverser.zig").TestDirectoryTraverser;
+    try TestDirectoryTraverser.init(std.testing.allocator);
     var fs = try RamFs.init(std.testing.allocator);
     var sut = fs.interface();
     defer _ = sut.umount();
@@ -300,20 +278,20 @@ test "Create files in ramfs" {
     try std.testing.expectEqual(true, sut.has_path("/test/file.txt"));
     try std.testing.expectEqual(true, sut.has_path("/test/dir/nested/file"));
 
-    try expected_directories.insert(0, "test");
-    try expected_directories.insert(0, "other");
+    try TestDirectoryTraverser.append("test");
+    try TestDirectoryTraverser.append("other");
 
-    try std.testing.expectEqual(-1, sut.traverse("/test/file.txt", traverse_dir, undefined));
-    try std.testing.expectEqual(0, sut.traverse("/", traverse_dir, undefined));
-    try did_error;
-    try std.testing.expectEqual(0, expected_directories.items.len);
+    try std.testing.expectEqual(-1, sut.traverse("/test/file.txt", TestDirectoryTraverser.traverse_dir, undefined));
+    try std.testing.expectEqual(0, sut.traverse("/", TestDirectoryTraverser.traverse_dir, undefined));
+    try TestDirectoryTraverser.did_error;
+    try std.testing.expectEqual(0, TestDirectoryTraverser.size());
 
-    try expected_directories.insert(0, "dir");
-    try expected_directories.insert(0, "file.txt");
+    try TestDirectoryTraverser.append("dir");
+    try TestDirectoryTraverser.append("file.txt");
 
-    try std.testing.expectEqual(0, sut.traverse("/test", traverse_dir, undefined));
-    try did_error;
-    try std.testing.expectEqual(0, expected_directories.items.len);
+    try std.testing.expectEqual(0, sut.traverse("/test", TestDirectoryTraverser.traverse_dir, undefined));
+    try TestDirectoryTraverser.did_error;
+    try std.testing.expectEqual(0, TestDirectoryTraverser.size());
 
     // reject non empty directory removal
     try std.testing.expectEqual(-1, sut.remove("/test"));
@@ -330,4 +308,6 @@ test "Create files in ramfs" {
     try std.testing.expectEqual(0, sut.remove("/test/dir/nested"));
     try std.testing.expectEqual(0, sut.remove("/test/dir"));
     try std.testing.expectEqual(0, sut.remove("/test"));
+
+    try TestDirectoryTraverser.deinit();
 }

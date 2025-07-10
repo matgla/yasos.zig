@@ -159,6 +159,6 @@ pub const RomFsFile = struct {
     }
 
     pub fn delete(self: *Self) void {
-        self.close();
+        _ = self.close();
     }
 };

@@ -146,7 +146,7 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
     const maybe_process = process_manager.instance.get_current_process();
     const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
     if (maybe_process) |process| {
-        const maybe_file = fs.get_ivfs().get(path_slice);
+        const maybe_file = fs.get_ivfs().get(path_slice, process.get_memory_allocator());
         if (maybe_file) |file| {
             // defer file.destroy();
             const fd = process.get_free_fd();
@@ -167,7 +167,7 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
             // }
         } else if ((context.flags & c.O_CREAT) != 0) {
             const fd = process.get_free_fd();
-            const maybe_ifile = fs.get_ivfs().create(path_slice, context.mode);
+            const maybe_ifile = fs.get_ivfs().create(path_slice, context.mode, process.get_memory_allocator());
             if (maybe_ifile) |ifile| {
                 process.fds.put(fd, .{
                     .file = ifile,
@@ -420,7 +420,7 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
         if (path_slice.len == 0) {
             return -1;
         }
-        var maybe_file = fs.get_ivfs().get(path_slice);
+        var maybe_file = fs.get_ivfs().get(path_slice, process.get_memory_allocator());
         if (maybe_file) |*file| {
             defer file.delete();
             if (file.filetype() == FileType.Directory) {

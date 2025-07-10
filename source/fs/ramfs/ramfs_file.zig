@@ -179,7 +179,7 @@ pub const RamFsFile = struct {
     }
 };
 
-test "Read and write file" {
+test "RamFsFile.ShouldReadAndWriteFile" {
     var data = try RamFsData.create_file(std.testing.allocator, "test_file");
     defer data.deinit();
 
@@ -207,7 +207,7 @@ test "Read and write file" {
     try std.testing.expectEqualStrings("e\ntest", buf[0..6]);
 }
 
-test "Seek file" {
+test "RamFsFile.ShouldSeekFile" {
     var data = try RamFsData.create_file(std.testing.allocator, "test_file");
     defer data.deinit();
 

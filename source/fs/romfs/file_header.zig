@@ -125,10 +125,6 @@ pub const FileHeader = struct {
     pub fn get_mapped_address(self: FileHeader) ?*const anyopaque {
         return @ptrFromInt(@intFromPtr(self._mapped_memory) + @as(usize, @intCast((self._reader.get_offset() - self._filesystem_offset + self._reader.get_data_offset()))));
     }
-    // pub fn data(self: FileHeader) []const u8 {
-    // const data_index = (self.start_index + self.name().len + 1 + 16 + (alignment - 1)) & ~(alignment - 1);
-    // return self.memory[data_index .. data_index + self.size()];
-    // }
 
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result
     // if result is equal to 0, then checksum is correct
