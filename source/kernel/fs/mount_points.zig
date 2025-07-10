@@ -19,9 +19,11 @@
 //
 
 const std = @import("std");
-const IFileSystem = @import("ifilesystem.zig").IFileSystem;
-const IDirectoryIterator = @import("ifilesystem.zig").IDirectoryIterator;
-const IFile = @import("ifile.zig").IFile;
+
+const kernel = @import("../kernel.zig");
+const IFileSystem = kernel.fs.IFileSystem;
+const IDirectoryIterator = kernel.fs.IDirectoryIterator;
+const IFile = kernel.fs.IFile;
 
 const config = @import("config");
 const interface = @import("interface");

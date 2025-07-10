@@ -23,9 +23,10 @@ const std = @import("std");
 
 const config = @import("config");
 
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const kernel = @import("kernel");
+const log = kernel.log;
 
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+const FileType = kernel.fs.FileType;
 
 pub const RamFsDataError = error{
     FileNameTooLong,
@@ -33,7 +34,7 @@ pub const RamFsDataError = error{
 
 pub const RamFsData = struct {
     /// File type, users may use that field
-    type: FileType,
+    type: kernel.fs.FileType,
     /// File contents
     data: std.ArrayListAligned(u8, .@"8"),
 

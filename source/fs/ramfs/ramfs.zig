@@ -18,14 +18,17 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const IFileSystem = @import("../../kernel/fs/fs.zig").IFileSystem;
-const IDirectoryIterator = @import("../../kernel/fs/ifilesystem.zig").IDirectoryIterator;
-const IFile = @import("../../kernel/fs/fs.zig").IFile;
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const kernel = @import("kernel");
+
+const IFileSystem = kernel.fs.IFileSystem;
+const IDirectoryIterator = kernel.fs.IDirectoryIterator;
+const IFile = kernel.fs.IFile;
+const FileType = kernel.fs.FileType;
 
 const std = @import("std");
 
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+const log = kernel.log;
+
 const interface = @import("interface");
 
 const RamFsFile = @import("ramfs_file.zig").RamFsFile;
@@ -97,10 +100,10 @@ pub const RamFs = struct {
         return 0;
     }
 
-    pub fn create(self: *RamFs, path: []const u8, _: i32) ?IFile {
+    pub fn create(self: *RamFs, path: []const u8, _: i32, allocator: std.mem.Allocator) ?IFile {
         if (self.create_node(path, FileType.File)) |node| {
-            return RamFsFile.create(&node.node, self.allocator).new(self.allocator) catch |err| {
-                log.print("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
+            return RamFsFile.create(&node.node, allocator).new(allocator) catch |err| {
+                kernel.log.err("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
                 return null;
             };
         }
@@ -167,11 +170,11 @@ pub const RamFs = struct {
         return -1;
     }
 
-    pub fn get(self: *RamFs, path: []const u8) ?IFile {
+    pub fn get(self: *RamFs, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = RamFs.get_node(*RamFs, self, path) catch return null;
         if (maybe_node) |node| {
-            return RamFsFile.create(&node.node, self.allocator).new(self.allocator) catch |err| {
-                log.print("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
+            return RamFsFile.create(&node.node, allocator).new(allocator) catch |err| {
+                kernel.log.err("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
                 return null;
             };
         }
@@ -231,29 +234,33 @@ pub const RamFs = struct {
     }
 };
 
-const ExpectationList = std.DoublyLinkedList([]const u8);
+const ExpectationList = std.ArrayList([]const u8);
 var expected_directories: ExpectationList = undefined;
 var did_error: anyerror!void = {};
 
 fn traverse_dir(file: *IFile, _: *anyopaque) bool {
+    const name = file.name().get_name();
     did_error catch return false;
-    did_error = std.testing.expect(expected_directories.first != null);
-    did_error catch {
-        std.debug.print("Expectation not found for: '{s}'\n", .{file.name()});
+
+    const maybe_expectation = expected_directories.pop();
+    if (maybe_expectation) |expectation| {
+        did_error = std.testing.expectEqualStrings(expectation, name);
+        did_error catch {
+            std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation, name });
+            return false;
+        };
+    } else {
+        std.debug.print("Expectation not found for: '{s}'\n", .{name});
         return false;
-    };
-    const expectation = expected_directories.popFirst().?;
-    did_error = std.testing.expectEqualStrings(expectation.data, file.name());
-    did_error catch {
-        std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation.data, file.name() });
-        return false;
-    };
+    }
     return true;
 }
 
 test "Create files in ramfs" {
+    expected_directories = ExpectationList.init(std.testing.allocator);
+    defer expected_directories.deinit();
     var fs = try RamFs.init(std.testing.allocator);
-    const sut = fs.ifilesystem();
+    var sut = fs.interface();
     defer _ = sut.umount();
 
     try std.testing.expectEqualStrings("ramfs", sut.name());
@@ -276,37 +283,44 @@ test "Create files in ramfs" {
     try std.testing.expectEqual(true, sut.has_path("test/dir/nested"));
     try std.testing.expectEqual(true, sut.has_path("other"));
 
-    try std.testing.expectEqual(0, sut.create("/test/file.txt", 0));
-    try std.testing.expectEqual(-1, sut.create("/test/file.txt", 0));
-    try std.testing.expectEqual(0, sut.create("test/dir/nested/file", 0));
+    var maybe_file = sut.create("/test/file.txt", 0, std.testing.allocator);
+    try std.testing.expect(maybe_file != null);
+    if (maybe_file) |*file| {
+        file.delete();
+    }
+
+    try std.testing.expectEqual(null, sut.create("/test/file.txt", 0, std.testing.allocator));
+
+    maybe_file = sut.create("test/dir/nested/file", 0, std.testing.allocator);
+    try std.testing.expect(maybe_file != null);
+    if (maybe_file) |*file| {
+        file.delete();
+    }
+
     try std.testing.expectEqual(true, sut.has_path("/test/file.txt"));
     try std.testing.expectEqual(true, sut.has_path("/test/dir/nested/file"));
 
-    var test_dir = ExpectationList.Node{ .data = "test" };
-    expected_directories.append(&test_dir);
-    var other_dir = ExpectationList.Node{ .data = "other" };
-    expected_directories.append(&other_dir);
+    try expected_directories.insert(0, "test");
+    try expected_directories.insert(0, "other");
 
     try std.testing.expectEqual(-1, sut.traverse("/test/file.txt", traverse_dir, undefined));
     try std.testing.expectEqual(0, sut.traverse("/", traverse_dir, undefined));
     try did_error;
-    try std.testing.expectEqual(0, expected_directories.len);
+    try std.testing.expectEqual(0, expected_directories.items.len);
 
-    var dir_dir = ExpectationList.Node{ .data = "dir" };
-    expected_directories.append(&dir_dir);
-    var file_file = ExpectationList.Node{ .data = "file.txt" };
-    expected_directories.append(&file_file);
+    try expected_directories.insert(0, "dir");
+    try expected_directories.insert(0, "file.txt");
 
     try std.testing.expectEqual(0, sut.traverse("/test", traverse_dir, undefined));
     try did_error;
-    try std.testing.expectEqual(0, expected_directories.len);
+    try std.testing.expectEqual(0, expected_directories.items.len);
 
     // reject non empty directory removal
     try std.testing.expectEqual(-1, sut.remove("/test"));
-    const maybe_file = sut.get("/test/file.txt");
+    maybe_file = sut.get("/test/file.txt", std.testing.allocator);
     try std.testing.expect(maybe_file != null);
-    if (maybe_file) |file| {
-        defer _ = file.close();
+    if (maybe_file) |*file| {
+        defer file.delete();
         try std.testing.expectEqual(18, file.write("Some data for file"));
     }
 

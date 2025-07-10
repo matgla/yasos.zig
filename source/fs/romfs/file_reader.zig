@@ -15,9 +15,10 @@
 
 const std = @import("std");
 
-const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+const kernel = @import("kernel");
+const IFile = kernel.fs.IFile;
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 pub const FileReader = struct {
     _device_file: IFile,
@@ -76,13 +77,13 @@ pub const FileReader = struct {
     }
 };
 
-const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
-test "RomFs FileReader should read data correctly" {
-    var romfs_device = RomfsDeviceStub.create(&std.testing.allocator, "source/fs/romfs/tests/test.romfs");
-    defer romfs_device.destroy();
-    const idriver = romfs_device.interface();
-    _ = idriver;
-    // try idriver.load();
-    // const idevicefile = idriver.ifile();
-    // _ = idevicefile;
-}
+// const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
+// test "RomFs FileReader should read data correctly" {
+//     var romfs_device = RomfsDeviceStub.create(&std.testing.allocator, "source/fs/romfs/tests/test.romfs");
+//     defer romfs_device.destroy();
+//     const idriver = romfs_device.interface();
+//     _ = idriver;
+//     // try idriver.load();
+//     // const idevicefile = idriver.ifile();
+//     // _ = idevicefile;
+// }

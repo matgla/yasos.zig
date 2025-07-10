@@ -15,13 +15,9 @@
 
 const std = @import("std");
 
-const malloc_allocator = @import("malloc.zig").malloc_allocator;
-const log = &@import("../log/kernel_log.zig").kernel_log;
-
 const memory = @import("hal").memory;
 
-const dynamic_loader = @import("modules.zig");
-
+const log = std.log.scoped(.@"kernel/memory_pool");
 // Only one process is owner of memory chunk
 // shared memory will be implemented as seperate structure
 pub const ProcessMemoryPool = struct {
@@ -49,7 +45,8 @@ pub const ProcessMemoryPool = struct {
     allocator: std.mem.Allocator,
     start_address: usize,
 
-    pub fn create(allocator: std.mem.Allocator) !ProcessMemoryPool {
+    pub fn init(allocator: std.mem.Allocator) !ProcessMemoryPool {
+        log.debug("Process memory pool initialized", .{});
         const memory_layout = memory.get_memory_layout();
         return ProcessMemoryPool{
             .memory_size = memory_layout[2].size,
@@ -59,6 +56,12 @@ pub const ProcessMemoryPool = struct {
             .allocator = allocator,
             .start_address = memory_layout[2].start_address,
         };
+    }
+
+    pub fn deinit(self: *ProcessMemoryPool) void {
+        log.debug("Process memory pool deinitialization started...", .{});
+        self.page_bitmap.deinit();
+        self.memory_map.deinit();
     }
 
     fn get_next_free_slot(self: *ProcessMemoryPool, start_index: usize, pages_number: i32) !struct { usize, usize } {
@@ -95,6 +98,7 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: u32) ?[]u8 {
+        log.debug("Allocating {d} pages for {d}", .{ number_of_pages, pid });
         if (number_of_pages <= 0) {
             return null;
         }
@@ -136,6 +140,7 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn release_pages_for(self: *ProcessMemoryPool, pid: u32) void {
+        log.debug("Releasing pages for: {d}", .{pid});
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
             for (mapping.value_ptr.items) |entity| {
@@ -153,6 +158,7 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn free_pages(self: *ProcessMemoryPool, address: *anyopaque, number_of_pages: i32, pid: u32) void {
+        log.debug("Releasing pages {d} at 0x{x} for pid: {d}", .{ number_of_pages, @intFromPtr(address), pid });
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
             var i: usize = 0;
@@ -171,9 +177,3 @@ pub const ProcessMemoryPool = struct {
         }
     }
 };
-
-pub var instance: ProcessMemoryPool = undefined;
-
-pub fn init() !void {
-    instance = try ProcessMemoryPool.create(malloc_allocator);
-}

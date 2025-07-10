@@ -22,7 +22,7 @@ const std = @import("std");
 
 const interface = @import("interface");
 
-const c = @import("../../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;

@@ -25,19 +25,20 @@ const fs = @import("fs/vfs.zig");
 const FileMemoryMapAttributes = @import("fs/ifile.zig").FileMemoryMapAttributes;
 const IoctlCommonCommands = @import("fs/ifile.zig").IoctlCommonCommands;
 
-const log = &@import("../log/kernel_log.zig").kernel_log;
-
 const ModuleContext = struct {
     path: []const u8,
     address: ?*const anyopaque,
 };
+
+const kernel = @import("kernel");
+const log = std.log.scoped(.loader);
 
 fn file_resolver(name: []const u8) ?*const anyopaque {
     var context: ModuleContext = .{
         .path = name,
         .address = null,
     };
-    _ = fs.ivfs().traverse("/lib", traverse_directory, &context);
+    _ = fs.get_ivfs().traverse("/lib", traverse_directory, &context);
     if (context.address) |address| {
         return address;
     }
@@ -68,6 +69,7 @@ var libraries_list: std.AutoHashMap(u32, std.DoublyLinkedList) = undefined;
 var kernel_allocator: std.mem.Allocator = undefined;
 
 pub fn init(allocator: std.mem.Allocator) void {
+    log.info("yasld initialization started", .{});
     yasld.loader_init(&file_resolver, allocator);
     modules_list = std.AutoHashMap(u32, yasld.Executable).init(allocator);
     libraries_list = std.AutoHashMap(u32, std.DoublyLinkedList).init(allocator);
@@ -75,7 +77,7 @@ pub fn init(allocator: std.mem.Allocator) void {
 }
 
 pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
-    var maybe_file = fs.ivfs().get(path);
+    var maybe_file = fs.get_ivfs().get(path);
     if (maybe_file) |*f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
@@ -93,11 +95,11 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
             @panic("Implement image copying to memory");
         }
         if (yasld.get_loader()) |loader| {
-            var loader_logger = log.*;
-            loader_logger.debug_enabled = false;
-            loader_logger.prefix = "[yasld]";
-            const executable = loader.*.load_executable(header_address, loader_logger, allocator) catch |err| {
-                log.print("loading '{s}' failed: {s}\n", .{ path, @errorName(err) });
+            // const loader_logger = log;
+            // loader_logger.debug_enabled = false;
+            // loader_logger.prefix = "[yasld]";
+            const executable = loader.*.load_executable(header_address, std.log.scoped(.yasld), allocator) catch |err| {
+                log.err("loading '{s}' failed: {s}", .{ path, @errorName(err) });
                 return err;
             };
             if (modules_list.getPtr(pid)) |prev| {
@@ -108,14 +110,14 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
             const exec_ptr: *yasld.Executable = modules_list.getPtr(pid).?;
             return exec_ptr;
         } else {
-            log.print("Error: Yasld is not initialized\n", .{});
+            log.err("yasld is not initialized", .{});
         }
     }
     return std.posix.AccessError.FileNotFound;
 }
 
 pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
-    var maybe_file = fs.ivfs().get(path);
+    var maybe_file = fs.get_ivfs().get(path);
     if (maybe_file) |*f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
@@ -133,7 +135,7 @@ pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: 
             @panic("Implement image copying to memory");
         }
         if (yasld.get_loader()) |loader| {
-            const library = loader.*.load_library(header_address, log, allocator) catch |err| {
+            const library = loader.*.load_library(header_address, std.log.scoped(.yasld), allocator) catch |err| {
                 return err;
             };
 
@@ -146,7 +148,7 @@ pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: 
             }
             return library;
         } else {
-            log.print("Error: Yasld is not initialized\n", .{});
+            log.err("yasld is not initialized", .{});
         }
     }
     return std.posix.AccessError.FileNotFound;

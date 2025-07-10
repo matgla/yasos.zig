@@ -64,4 +64,9 @@ pub const RomfsDeviceStub = struct {
     pub fn delete(self: *RomfsDeviceStub) void {
         _ = self;
     }
+
+    pub fn name(self: *const RomfsDeviceStub) []const u8 {
+        _ = self;
+        return "romfs";
+    }
 };

@@ -64,5 +64,10 @@ pub fn UartDriver(comptime UartType: anytype) type {
             // No specific cleanup needed for UART driver
             _ = self;
         }
+
+        pub fn name(self: *const Self) []const u8 {
+            _ = self;
+            return "uart";
+        }
     };
 }

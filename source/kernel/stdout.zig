@@ -1,5 +1,5 @@
 //
-// tests.zig
+// kernel_log.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -18,9 +18,29 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-comptime {
-    // _ = @import("file_reader.zig");
-    // _ = @import("file_system_header.zig");
-    // _ = @import("file_header.zig");
-    // _ = @import("romfs.zig");
+const std = @import("std");
+
+const board = @import("board");
+
+var stdout: std.io.AnyWriter = undefined;
+
+pub const WriteCallback = *const fn (self: *const anyopaque, data: []const u8) anyerror!usize;
+
+pub fn set_output(context: *const anyopaque, writer: WriteCallback) void {
+    stdout = std.io.AnyWriter{
+        .context = context,
+        .writeFn = writer,
+    };
+}
+
+pub fn get() *std.io.AnyWriter {
+    return &stdout;
+}
+
+pub fn print(comptime format: []const u8, args: anytype) void {
+    stdout.print(format, args) catch return;
+}
+
+pub fn write(comptime data: []const u8) void {
+    _ = stdout.write(data) catch return;
 }

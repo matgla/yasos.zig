@@ -21,7 +21,8 @@
 const systick = @import("interrupts/systick.zig");
 const process_manager = @import("process_manager.zig");
 
-const log = &@import("../log/kernel_log.zig").kernel_log;
+const kernel = @import("kernel");
+const log = kernel.log;
 
 pub fn sleep_ms(ms: u32) void {
     const maybe_process = process_manager.instance.get_current_process();

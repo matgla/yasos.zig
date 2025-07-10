@@ -120,7 +120,6 @@ pub fn build(b: *std.Build) !void {
     } else {
         generate.step.dependOn(&configure.step);
     }
-
     const optimize = b.standardOptimizeOption(.{});
     const tests = b.addTest(.{
         .name = "yasos_tests",
@@ -134,6 +133,11 @@ pub fn build(b: *std.Build) !void {
     tests.step.dependOn(&generate_defconfig_for_tests.step);
     b.installArtifact(tests);
     tests.linkLibC();
+    const kernel_module_for_tests = b.addModule("kernel_under_test", .{
+        .root_source_file = b.path("source/kernel/kernel.zig"),
+    });
+    tests.root_module.addImport("kernel", kernel_module_for_tests);
+
     const test_config_module = b.addModule("test_config", .{
         .root_source_file = b.path("config/tests/config.zig"),
     });
@@ -141,6 +145,14 @@ pub fn build(b: *std.Build) !void {
 
     const oop = b.dependency("modules/oop", .{});
     tests.root_module.addImport("interface", oop.module("interface"));
+    kernel_module_for_tests.addImport("interface", oop.module("interface"));
+
+    const libc_imports_for_tests = b.addModule("libc_imports_for_tests", .{
+        .root_source_file = b.path("source/libc_imports.zig"),
+    });
+    libc_imports_for_tests.addIncludePath(b.path("."));
+    kernel_module_for_tests.addImport("libc_imports", libc_imports_for_tests);
+    tests.root_module.addImport("libc_imports", libc_imports_for_tests);
 
     const run_tests = b.addRunArtifact(tests);
     run_tests_step.dependOn(&run_tests.step);
@@ -164,23 +176,55 @@ pub fn build(b: *std.Build) !void {
                 .config_file = @as([]const u8, config_path),
             });
             b.installArtifact(boardDep.artifact("yasos_kernel"));
-            boardDep.artifact("yasos_kernel").addIncludePath(b.path("source/sys/include"));
-            boardDep.artifact("yasos_kernel").addIncludePath(b.path("."));
+            const kernel_exec = boardDep.artifact("yasos_kernel");
+            kernel_exec.addIncludePath(b.path("source/sys/include"));
+            kernel_exec.addIncludePath(b.path("."));
 
             const yasld = b.dependency("yasld", .{
                 .optimize = optimize,
-                .target = boardDep.artifact("yasos_kernel").root_module.resolved_target.?,
+                .target = kernel_exec.root_module.resolved_target.?,
                 .cpu_arch = @as([]const u8, config.cpu_arch),
             });
 
-            boardDep.artifact("yasos_kernel").root_module.addImport("yasld", yasld.module("yasld"));
-            boardDep.artifact("yasos_kernel").root_module.addIncludePath(b.path("."));
+            const kernel_module = b.addModule("kernel", .{
+                .root_source_file = b.path("source/kernel/kernel.zig"),
+                .target = kernel_exec.root_module.resolved_target,
+                .optimize = optimize,
+            });
+
+            const libc_imports_module = b.addModule("libc_imports", .{
+                .root_source_file = b.path("source/libc_imports.zig"),
+                .target = kernel_exec.root_module.resolved_target,
+                .optimize = optimize,
+            });
+
+            const cimports_module = b.addModule("libc_imports", .{
+                .root_source_file = b.path("source/cimports.zig"),
+                .target = kernel_exec.root_module.resolved_target,
+                .optimize = optimize,
+            });
+
+            libc_imports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
+            cimports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
+
+            kernel_module.addImport("libc_imports", libc_imports_module);
+            kernel_module.addImport("c", cimports_module);
+
+            kernel_exec.root_module.addImport("kernel", kernel_module);
+            kernel_exec.root_module.addImport("yasld", yasld.module("yasld"));
+            kernel_exec.root_module.addImport("libc_imports", libc_imports_module);
+            kernel_exec.root_module.addIncludePath(b.path("."));
             const arch_module = b.addModule("arch", .{
                 .root_source_file = b.path(b.fmt("source/arch/{s}/arch.zig", .{config.cpu_arch})),
             });
 
             const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
+            const board_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("board").?;
+
             arch_module.addImport("hal", hal_module);
+            kernel_module.addImport("hal", hal_module);
+            kernel_module.addImport("board", board_module);
+
             if (std.mem.eql(u8, config.cpu_arch, "armv6-m") or std.mem.eql(u8, config.cpu_arch, "armv8-m")) {
                 const arch_arm_m = b.addModule("arm-m", .{
                     .root_source_file = b.path("source/arch/arm-m/arch.zig"),
@@ -190,12 +234,15 @@ pub fn build(b: *std.Build) !void {
 
                 arch_module.addImport("config", config_module);
                 arch_arm_m.addImport("config", config_module);
+                kernel_module.addImport("config", config_module);
+                kernel_module.addImport("yasld", yasld.module("yasld"));
+                kernel_module.addImport("arch", arch_module);
                 arch_arm_m.addImport("hal", hal_module);
             }
             arch_module.addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
             boardDep.artifact("yasos_kernel").root_module.addImport("arch", arch_module);
-
             boardDep.artifact("yasos_kernel").root_module.addImport("interface", oop.module("interface"));
+            kernel_module.addImport("interface", oop.module("interface"));
 
             _ = boardDep.module("board");
         } else {

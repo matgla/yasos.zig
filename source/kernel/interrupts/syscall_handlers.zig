@@ -23,13 +23,15 @@ const FileType = @import("../fs/ifile.zig").FileType;
 const IFile = @import("../fs/ifile.zig").IFile;
 
 const fs = @import("../fs/vfs.zig");
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+
+const kernel = @import("kernel");
+const log = kernel.log;
 
 const systick = @import("systick.zig");
 
 const config = @import("config");
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const dynamic_loader = @import("../modules.zig");
 const yasld = @import("yasld");
@@ -144,7 +146,7 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
     const maybe_process = process_manager.instance.get_current_process();
     const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
     if (maybe_process) |process| {
-        const maybe_file = fs.ivfs().get(path_slice);
+        const maybe_file = fs.get_ivfs().get(path_slice);
         if (maybe_file) |file| {
             // defer file.destroy();
             const fd = process.get_free_fd();
@@ -165,7 +167,7 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
             // }
         } else if ((context.flags & c.O_CREAT) != 0) {
             const fd = process.get_free_fd();
-            const maybe_ifile = fs.ivfs().create(path_slice, context.mode);
+            const maybe_ifile = fs.get_ivfs().create(path_slice, context.mode);
             if (maybe_ifile) |ifile| {
                 process.fds.put(fd, .{
                     .file = ifile,
@@ -201,14 +203,15 @@ pub fn sys_close(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c_int = @ptrCast(@alignCast(arg));
+    _ = arg;
+    // const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
         process_manager.instance.delete_process(process.pid);
     } else {
         @panic("No process found");
     }
-    log.print("Process exited with code {d}\n", .{context.*});
+    // log.print("Process exited with code {d}\n", .{context.*});
     return 0;
 }
 
@@ -228,14 +231,15 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c_int = @ptrCast(@alignCast(arg));
+    _ = arg;
+    // const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
         process_manager.instance.delete_process(process.pid);
     } else {
         @panic("No process found");
     }
-    log.print("Process killed with code {d}\n", .{context.*});
+    // log.print("Process killed with code {d}\n", .{context.*});
     return 0;
 }
 
@@ -313,7 +317,7 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
             if (maybe_entity) |entity| {
                 // if iterator not exists create one
                 if (entity.diriter == null) {
-                    entity.diriter = fs.ivfs().iterator(std.mem.span(@as([*:0]const u8, @ptrCast(&entity.path))));
+                    entity.diriter = fs.get_ivfs().iterator(std.mem.span(@as([*:0]const u8, @ptrCast(&entity.path))));
                 }
 
                 // still can be null if path not exists or is not a directory
@@ -416,12 +420,12 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
         if (path_slice.len == 0) {
             return -1;
         }
-        var maybe_file = fs.ivfs().get(path_slice);
+        var maybe_file = fs.get_ivfs().get(path_slice);
         if (maybe_file) |*file| {
             defer file.delete();
             if (file.filetype() == FileType.Directory) {
-                process.change_directory(path_slice) catch |err| {
-                    log.print("chdir: failed to change directory: {s}\n", .{@errorName(err)});
+                process.change_directory(path_slice) catch {
+                    // log.print("chdir: failed to change directory: {s}\n", .{@errorName(err)});
                     return -1;
                 };
                 return 0;
@@ -465,8 +469,8 @@ pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.dlopen_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const library = dynamic_loader.load_shared_library(std.mem.span(@as([*:0]const u8, @ptrCast(context.path))), process.memory_pool_allocator.std_allocator(), process.pid) catch |err| {
-            log.print("dlopen: failed to load library: {s}\n", .{@errorName(err)});
+        const library = dynamic_loader.load_shared_library(std.mem.span(@as([*:0]const u8, @ptrCast(context.path))), process.get_memory_allocator(), process.pid) catch {
+            // log.print("dlopen: failed to load library: {s}\n", .{@errorName(err)});
             return -1;
         };
         context.*.result.* = library;

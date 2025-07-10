@@ -25,7 +25,7 @@ const system_call = @import("interrupts/system_call.zig");
 
 const process_manager = @import("process_manager.zig");
 
-const c = @import("../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 pub fn spawn(allocator: std.mem.Allocator, entry: anytype, arg: ?*const anyopaque, stack_size: u32) error{ProcessCreationFailed}!void {
     const context = system_call.CreateProcessCall{

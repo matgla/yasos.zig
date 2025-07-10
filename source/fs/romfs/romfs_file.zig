@@ -23,15 +23,17 @@ const std = @import("std");
 
 const interface = @import("interface");
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
-const IFile = @import("../../kernel/fs/ifile.zig").IFile;
-const ReadOnlyFile = @import("../../kernel/fs/ifile.zig").ReadOnlyFile;
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
-const FileName = @import("../../kernel/fs/ifile.zig").FileName;
+const kernel = @import("kernel");
+
+const IFile = kernel.IFile;
+const ReadOnlyFile = kernel.fs.ReadOnlyFile;
+const FileType = kernel.fs.FileType;
+const FileName = kernel.fs.FileName;
 const FileHeader = @import("file_header.zig").FileHeader;
-const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
-const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
+const IoctlCommonCommands = kernel.fs.IoctlCommonCommands;
+const FileMemoryMapAttributes = kernel.fs.FileMemoryMapAttributes;
 
 pub const RomFsFile = struct {
     const Self = @This();
@@ -157,6 +159,6 @@ pub const RomFsFile = struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        self.close();
     }
 };

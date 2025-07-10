@@ -20,11 +20,13 @@
 
 const std = @import("std");
 
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
-const IFile = @import("../../kernel/fs/ifile.zig").IFile;
-const FileName = @import("../../kernel/fs/ifile.zig").FileName;
+const kernel = @import("kernel");
 
-const c = @import("../../libc_imports.zig").c;
+const FileType = kernel.fs.FileType;
+const IFile = kernel.fs.IFile;
+const FileName = kernel.fs.FileName;
+
+const c = @import("libc_imports").c;
 
 const FileReader = @import("file_reader.zig").FileReader;
 

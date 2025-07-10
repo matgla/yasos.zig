@@ -61,4 +61,9 @@ pub const FlashDriver = struct {
     pub fn delete(self: *FlashDriver) void {
         _ = self;
     }
+
+    pub fn name(self: *const FlashDriver) []const u8 {
+        _ = self;
+        return "flash";
+    }
 };

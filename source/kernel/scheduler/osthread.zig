@@ -19,7 +19,8 @@
 //
 
 const std = @import("std");
-const Process = @import("../process.zig").Process;
+const kernel = @import("kernel");
+const Process = kernel.process.Process;
 
 const cpu = @import("hal").cpu;
 
@@ -31,13 +32,13 @@ pub fn OSThread(comptime ManagerType: anytype) type {
 
         pub fn schedule_next(self: *Self) bool {
             _ = self;
-            std.Thread.yield() catch {
-                return false;
-            };
+            // std.Thread.yield() catch {
+            // return false;
+            // };
             return true;
         }
 
-        pub fn get_current(self: Self) ?*Process {
+        pub fn get_current(self: Self) ?*kernel.process.Process {
             var next = self.manager.processes.first;
             while (next) |node| {
                 const process: *Process = @fieldParentPtr("node", node);

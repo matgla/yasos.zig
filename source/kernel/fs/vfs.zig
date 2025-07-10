@@ -28,6 +28,8 @@ const MountPoint = @import("mount_points.zig").MountPoint;
 
 const interface = @import("interface");
 
+const log = std.log.scoped(.vfs);
+
 pub const VirtualFileSystem = struct {
     pub usingnamespace interface.DeriveFromBase(IFileSystem, VirtualFileSystem);
     const Self = @This();
@@ -43,10 +45,10 @@ pub const VirtualFileSystem = struct {
         return 0;
     }
 
-    pub fn create(self: *Self, path: []const u8, mode: i32) ?IFile {
+    pub fn create(self: *Self, path: []const u8, mode: i32, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.create(node.left, mode);
+            return node.point.filesystem.create(node.left, mode, allocator);
         }
         return null;
     }
@@ -88,10 +90,10 @@ pub const VirtualFileSystem = struct {
         return null;
     }
 
-    pub fn get(self: *Self, path: []const u8) ?IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.get(node.left);
+            return node.point.filesystem.get(node.left, allocator);
         }
         return null;
     }
@@ -125,14 +127,15 @@ var vfs_instance: VirtualFileSystem = undefined;
 var vfs_object: IFileSystem = undefined;
 
 pub fn vfs_init(allocator: std.mem.Allocator) void {
+    log.info("initialization...", .{});
     vfs_instance = VirtualFileSystem.init(allocator);
     vfs_object = vfs_instance.interface();
 }
 
-pub fn ivfs() *IFileSystem {
+pub fn get_ivfs() *IFileSystem {
     return &vfs_object;
 }
 
-pub fn vfs() *VirtualFileSystem {
+pub fn get_vfs() *VirtualFileSystem {
     return &vfs_instance;
 }

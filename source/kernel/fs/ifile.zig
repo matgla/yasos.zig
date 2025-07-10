@@ -18,7 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const interface = @import("interface");
 

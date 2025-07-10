@@ -15,7 +15,7 @@
 
 const std = @import("std");
 
-const c = @import("../../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileType = @import("../../fs/ifile.zig").FileType;

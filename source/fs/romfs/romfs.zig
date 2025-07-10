@@ -18,10 +18,12 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const ReadOnlyFileSystem = @import("../../kernel/fs/ifilesystem.zig").ReadOnlyFileSystem;
-const IFile = @import("../../kernel/fs/fs.zig").IFile;
-const IDirectoryIterator = @import("../../kernel/fs/ifilesystem.zig").IDirectoryIterator;
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const kernel = @import("kernel");
+
+const ReadOnlyFileSystem = kernel.fs.ReadOnlyFileSystem;
+const IFile = kernel.fs.IFile;
+const IDirectoryIterator = kernel.fs.IDirectoryIterator;
+const FileType = kernel.fs.FileType;
 
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
 
@@ -31,11 +33,11 @@ const RomFsDirectoryIterator = @import("romfs_directory_iterator.zig").RomFsDire
 
 const interface = @import("interface");
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const std = @import("std");
 
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+const log = kernel.log;
 
 pub const RomFs = struct {
     pub usingnamespace interface.DeriveFromBase(ReadOnlyFileSystem, RomFs);

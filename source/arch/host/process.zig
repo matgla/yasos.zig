@@ -46,26 +46,24 @@ fn run_process_entry(process_entry: *const fn () void) void {
 }
 
 pub const HostProcess = struct {
-    thread: std.Thread,
+    child_pid: std.posix.pid_t,
 
-    pub fn get_process_id() i32 {
-        return thread_id;
+    pub fn get_process_id(self: HostProcess) i32 {
+        return @intCast(self.child_pid);
     }
+
     pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype) !HostProcess {
-        _ = exit_handler_impl;
-        thread_counter += 1;
-        thread_id = thread_counter;
-        const thread = try std.Thread.spawn(
-            .{
-                .stack_size = stack_size << 16,
-                .allocator = allocator,
-            },
-            run_process_entry,
-            .{@as(*const fn () void, @ptrCast(process_entry))},
-        );
+        _ = allocator;
+        _ = stack_size;
+
+        const child_pid = try std.posix.fork();
+        if (child_pid == 0) {
+            process_entry();
+            exit_handler_impl();
+        }
 
         return HostProcess{
-            .thread = thread,
+            .pid = child_pid,
         };
     }
 
