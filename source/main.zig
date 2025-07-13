@@ -41,6 +41,7 @@ pub const std_options: std.Options = .{
     .page_size_max = 4 * 1024,
     .page_size_min = 1 * 1024,
     .logFn = kernel.kernel_stdout_log,
+    .log_level = .info,
     .log_scope_levels = &[_]std.log.ScopeLevel{ .{
         .scope = .yasld,
         .level = .info,
@@ -52,16 +53,16 @@ pub const std_options: std.Options = .{
         .level = .info,
     }, .{
         .scope = .@"kernel/memory_pool",
-        .level = .debug,
+        .level = .info,
     }, .{
         .scope = .@"kernel/process",
         .level = .info,
     }, .{
         .scope = .@"vfs/driverfs",
-        .level = .debug,
+        .level = .info,
     }, .{
         .scope = .@"kernel/fs/mount_points",
-        .level = .debug,
+        .level = .info,
     } },
 };
 
@@ -183,9 +184,9 @@ fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, 
     };
 }
 const KernelAllocator = kernel.memory.heap.MallocAllocator(.{
-    .leak_detection = true,
+    .leak_detection = false,
     .verbose = false,
-    .dump_stats = true,
+    .dump_stats = false,
 });
 
 export fn kernel_process(argument: *KernelAllocator) void {

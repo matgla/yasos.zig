@@ -102,3 +102,16 @@ context_switch_return_pop_single:
   str r2, [r0]
   msr psp, r1
   bx r3 
+
+.global irq_svcall
+.thumb_func
+irq_svcall:
+  cmp r0, #1
+  bne call_svcall
+  ldr r0, =sp_call
+  str sp, [r1] 
+  mov r0, 1
+call_svcall: 
+  push {r0, lr}
+  bl _irq_svcall 
+  pop {r0, pc}  
