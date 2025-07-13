@@ -37,33 +37,52 @@ comptime {
     _ = @import("arch");
 }
 
+fn get_log_level() std.log.Level {
+    if (config.instrumentation.log_debug) {
+        return .debug;
+    }
+    if (config.instrumentation.log_info) {
+        return .info;
+    }
+    if (config.instrumentation.log_warning) {
+        return .warning;
+    }
+    if (config.instrumentation.log_error) {
+        return .err;
+    }
+
+    return .err;
+}
+
 pub const std_options: std.Options = .{
     .page_size_max = 4 * 1024,
     .page_size_min = 1 * 1024,
     .logFn = kernel.kernel_stdout_log,
-    .log_level = .info,
-    .log_scope_levels = &[_]std.log.ScopeLevel{ .{
-        .scope = .yasld,
-        .level = .info,
-    }, .{
-        .scope = .@"yasld/module",
-        .level = .info,
-    }, .{
-        .scope = .malloc,
-        .level = .info,
-    }, .{
-        .scope = .@"kernel/memory_pool",
-        .level = .info,
-    }, .{
-        .scope = .@"kernel/process",
-        .level = .info,
-    }, .{
-        .scope = .@"vfs/driverfs",
-        .level = .info,
-    }, .{
-        .scope = .@"kernel/fs/mount_points",
-        .level = .info,
-    } },
+    .log_level = get_log_level(),
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{
+            .scope = .yasld,
+            .level = .err,
+        }, // .{
+        //     .scope = .@"yasld/module",
+        //     .level = .info,
+        // }, .{
+        //     .scope = .malloc,
+        //     .level = .info,
+        // }, .{
+        //     .scope = .@"kernel/memory_pool",
+        //     .level = .info,
+        // }, .{
+        //     .scope = .@"kernel/process",
+        //     .level = .info,
+        // }, .{
+        //     .scope = .@"vfs/driverfs",
+        //     .level = .info,
+        // }, .{
+        //     .scope = .@"kernel/fs/mount_points",
+        //     .level = .info,
+        // } },
+    },
 };
 
 fn initialize_board() void {
@@ -184,9 +203,9 @@ fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, 
     };
 }
 const KernelAllocator = kernel.memory.heap.MallocAllocator(.{
-    .leak_detection = false,
-    .verbose = false,
-    .dump_stats = false,
+    .leak_detection = config.instrumentation.enable_memory_leak_detection,
+    .verbose = config.instrumentation.verbose_allocators,
+    .dump_stats = config.instrumentation.print_memory_usage,
 });
 
 export fn kernel_process(argument: *KernelAllocator) void {
