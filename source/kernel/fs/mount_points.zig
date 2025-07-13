@@ -28,6 +28,8 @@ const IFile = kernel.fs.IFile;
 const config = @import("config");
 const interface = @import("interface");
 
+const log = std.log.scoped(.@"kernel/fs/mount_points");
+
 pub const MountPoint = struct {
     pub const List = std.DoublyLinkedList;
     path_buffer: [config.fs.max_mount_point_size]u8,
@@ -64,6 +66,7 @@ pub const MountPoint = struct {
     }
 
     pub fn deinit(self: *MountPoint, allocator: std.mem.Allocator) void {
+        log.debug("destroying '{s}'", .{self.path});
         var it = self.children.pop();
         while (it) |node| {
             const child: *MountPoint = @fieldParentPtr("list_node", node);
@@ -71,6 +74,9 @@ pub const MountPoint = struct {
             it = self.children.pop();
             allocator.destroy(child);
         }
+
+        self.filesystem.delete();
+        // allocator.destroy(self);
     }
 };
 

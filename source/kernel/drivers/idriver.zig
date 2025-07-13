@@ -47,6 +47,7 @@ fn DriverInterface(comptime SelfType: type) type {
 
         pub fn delete(self: *Self) void {
             interface.VirtualCall(self, "delete", .{}, void);
+            interface.DestructorCall(self);
         }
     };
 }

@@ -37,6 +37,7 @@ const dynamic_loader = @import("../modules.zig");
 const yasld = @import("yasld");
 
 const hal = @import("hal");
+const arch = @import("arch");
 
 const E = enum(u16) {
     EINVAL = c.EINVAL,
@@ -46,16 +47,24 @@ pub fn errno(rc: u16) anyerror {
     return @errorFromInt(rc);
 }
 
+var kernel_allocator: std.mem.Allocator = undefined;
+
+pub fn init(allocator: std.mem.Allocator) void {
+    kernel_allocator = allocator;
+}
+
 // most stupid way to keep track of the last file
 fn fill_dirent(file: *IFile, dirent_address: *anyopaque) isize {
-    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + file.name().get_name().len, @alignOf(c.dirent));
+    var filename = file.name(kernel_allocator);
+    defer filename.deinit();
+    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + filename.get_name().len, @alignOf(c.dirent));
     // skip files that were already traversed
     const dirp: *c.dirent = @as(*c.dirent, @ptrCast(@alignCast(dirent_address)));
     dirp.d_ino = 0xdead;
     dirp.d_off = 0xbeef;
     dirp.d_reclen = @intCast(required_space);
-    std.mem.copyForwards(u8, dirp.d_name[0..], file.name().get_name());
-    dirp.d_name[file.name().get_name().len] = 0;
+    std.mem.copyForwards(u8, dirp.d_name[0..], filename.get_name());
+    dirp.d_name[filename.get_name().len] = 0;
     return @intCast(required_space);
 }
 
@@ -84,10 +93,21 @@ pub const VForkContext = extern struct {
 };
 
 extern fn switch_to_next_task() void;
+extern fn start_first_task(lr: *usize) void;
+extern fn push_return_address() void;
+extern fn switch_to_main_task(lr: usize) void;
+var sp: usize = 0;
 
 pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
+    sp = @as(*const volatile usize, @ptrCast(@alignCast(arg))).*;
     switch_to_next_task();
+    return 0;
+}
+
+pub fn sys_stop_root_process(arg: *const volatile anyopaque) !i32 {
+    _ = arg;
+    hal.time.systick.disable();
+    switch_to_main_task(sp);
     return 0;
 }
 
@@ -195,6 +215,7 @@ pub fn sys_close(arg: *const volatile anyopaque) !i32 {
         var maybe_file = process.fds.get(@intCast(fd.*));
         if (maybe_file) |*file| {
             _ = file.file.close();
+            file.file.delete();
             _ = process.fds.remove(@intCast(fd.*));
             return 0;
         }
@@ -469,7 +490,7 @@ pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.dlopen_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const library = dynamic_loader.load_shared_library(std.mem.span(@as([*:0]const u8, @ptrCast(context.path))), process.get_memory_allocator(), process.pid) catch {
+        const library = dynamic_loader.load_shared_library(std.mem.span(@as([*:0]const u8, @ptrCast(context.path))), process.get_memory_allocator(), process.get_process_memory_allocator(), process.pid) catch {
             // log.print("dlopen: failed to load library: {s}\n", .{@errorName(err)});
             return -1;
         };

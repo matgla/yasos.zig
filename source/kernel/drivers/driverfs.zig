@@ -49,10 +49,10 @@ pub const DriverFs = struct {
         log.debug("deinitialization", .{});
         var it = self._container.iterator();
         while (it.next()) |driver| {
+            log.debug("removing driver: {s}", .{driver.value_ptr.name()});
             driver.value_ptr.delete();
         }
         self._container.deinit();
-        self._allocator.destroy(self);
     }
 
     pub fn name(self: *const DriverFs) []const u8 {

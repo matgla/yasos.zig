@@ -33,8 +33,9 @@ pub const ProcessMemoryPool = struct {
         address: []u8,
         pid: u32,
         access: AccessType,
+        node: std.DoublyLinkedList.Node,
     };
-    const ProcessMemoryList = std.ArrayList(ProcessMemoryEntity);
+    const ProcessMemoryList = std.DoublyLinkedList;
     const ProcessMemoryMap = std.AutoHashMap(u32, ProcessMemoryList);
 
     memory_size: usize,
@@ -61,6 +62,15 @@ pub const ProcessMemoryPool = struct {
     pub fn deinit(self: *ProcessMemoryPool) void {
         log.debug("Process memory pool deinitialization started...", .{});
         self.page_bitmap.deinit();
+        var it = self.memory_map.iterator();
+        while (it.next()) |process| {
+            var next = process.value_ptr.pop();
+            while (next) |node| {
+                const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
+                self.allocator.destroy(entity);
+                next = node.next;
+            }
+        }
         self.memory_map.deinit();
     }
 
@@ -98,7 +108,6 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: u32) ?[]u8 {
-        log.debug("Allocating {d} pages for {d}", .{ number_of_pages, pid });
         if (number_of_pages <= 0) {
             return null;
         }
@@ -117,21 +126,21 @@ pub const ProcessMemoryPool = struct {
                     return null;
                 };
                 if (!list.found_existing) {
-                    list.value_ptr.* = ProcessMemoryList.init(self.allocator);
+                    list.value_ptr.* = .{};
                 }
-                list.value_ptr.append(ProcessMemoryEntity{
+                const entity = self.allocator.create(ProcessMemoryEntity) catch return null;
+                entity.* = .{
                     .address = slicify(
                         @as([*]u8, @ptrFromInt(self.start_address + start_index * page_size)),
                         @as(usize, @intCast(number_of_pages)) * page_size,
                     ),
                     .pid = pid,
                     .access = .{ .read = 1, .write = 1, .execute = 1 },
-                }) catch {
-                    return null;
+                    .node = .{},
                 };
-                @memset(list.value_ptr.getLast().address, 0);
-
-                return list.value_ptr.getLast().address;
+                list.value_ptr.append(&entity.node);
+                log.debug("Allocating {d} pages for {d} at 0x{x}", .{ number_of_pages, pid, @intFromPtr(entity.address.ptr) });
+                return entity.address;
             } else {
                 start_index = slot_end + 1;
             }
@@ -143,15 +152,23 @@ pub const ProcessMemoryPool = struct {
         log.debug("Releasing pages for: {d}", .{pid});
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
-            for (mapping.value_ptr.items) |entity| {
+            var next = mapping.value_ptr.first;
+            while (next) |entity_node| {
+                const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
                 const start_index = (@intFromPtr(entity.address.ptr) - self.start_address) / page_size;
                 const end_index = start_index + @as(usize, @intCast(entity.address.len)) / page_size;
                 for (start_index..end_index) |index| {
                     self.page_bitmap.unset(index);
                 }
+                next = entity_node.next;
             }
-            if (self.memory_map.getPtr(pid)) |*arr| {
-                arr.*.deinit();
+            if (self.memory_map.getPtr(pid)) |*list| {
+                var next_element = list.*.pop();
+                while (next_element) |node| {
+                    const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", node);
+                    self.allocator.destroy(entity);
+                    next_element = list.*.pop();
+                }
             }
             _ = self.memory_map.remove(pid);
         }
@@ -161,13 +178,15 @@ pub const ProcessMemoryPool = struct {
         log.debug("Releasing pages {d} at 0x{x} for pid: {d}", .{ number_of_pages, @intFromPtr(address), pid });
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
-            var i: usize = 0;
-            for (mapping.value_ptr.items) |entity| {
+            var next = mapping.value_ptr.first;
+            while (next) |entity_node| {
+                const entity: *ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
                 if (@as(*anyopaque, entity.address.ptr) == address) {
-                    _ = mapping.value_ptr.swapRemove(i);
+                    self.allocator.destroy(entity);
+                    _ = mapping.value_ptr.remove(entity_node);
                     break;
                 }
-                i += 1;
+                next = entity_node.next;
             }
             const start_index = (@intFromPtr(address) - self.start_address) / page_size;
             const end_index = start_index + @as(usize, @intCast(number_of_pages));

@@ -46,9 +46,28 @@ const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque
 var context_switch_handler: ?ContextSwitchHandler = null;
 var system_call_handler: ?SystemCallHandler = null;
 
-export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+export var sp_call: usize = 0;
+export fn irq_svcall() callconv(.Naked) void {
+    asm volatile (
+        \\ push {r0, r1}
+        \\ ldr r0, =sp_call
+        \\ mov r1, sp
+        \\ adds r1, 8
+        \\ str r1, [r0] 
+        \\ pop {r0, r1}
+        \\ push {r0, lr}
+        \\ bl _irq_svcall 
+        \\ pop {r0, pc} 
+    );
+}
+
+export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
     if (system_call_handler) |handler| {
-        handler(number, arg, out);
+        if (number == 1) {
+            handler(number, &sp_call, out);
+        } else {
+            handler(number, arg, out);
+        }
     }
 }
 

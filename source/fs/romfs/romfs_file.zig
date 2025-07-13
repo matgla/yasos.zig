@@ -108,8 +108,8 @@ pub const RomFsFile = struct {
         return @intCast(self.header.size());
     }
 
-    pub fn name(self: *Self) FileName {
-        return self.header.name();
+    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
+        return self.header.name(allocator);
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {

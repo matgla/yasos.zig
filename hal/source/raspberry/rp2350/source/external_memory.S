@@ -301,7 +301,7 @@ qmi_program_sreg:
 1:
     ldr r0, [r3, #QMI_DIRECT_CSR_OFFSET]
     tst r0, #QMI_DIRECT_CSR_BUSY_BITS
-    beq 1b
+    bne 1b
 
     movs r0, #CMD_READ_STATUS2
     bl read_flash_sreg

@@ -30,6 +30,8 @@ const FileType = @import("../../fs/ifile.zig").FileType;
 const IoctlCommonCommands = @import("../../fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("../../fs/ifile.zig").FileMemoryMapAttributes;
 
+const log = std.log.scoped(.@"kernel/fs/driver/flash_file");
+
 pub fn FlashFile(comptime FlashType: anytype) type {
     return struct {
         const Self = @This();
@@ -92,8 +94,9 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             return 0;
         }
 
-        pub fn name(self: *Self) FileName {
+        pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
             _ = self;
+            _ = allocator;
             return FileName.init("flash", null);
         }
 
@@ -137,7 +140,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
         }
 
         pub fn delete(self: *Self) void {
-            _ = self;
+            log.debug("Flash file 0x{x} destruction", .{@intFromPtr(self)});
         }
     };
 }

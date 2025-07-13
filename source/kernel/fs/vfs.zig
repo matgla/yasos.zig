@@ -118,6 +118,11 @@ pub const VirtualFileSystem = struct {
         };
     }
 
+    pub fn deinit(self: *Self) void {
+        log.info("Virtual file system deinitialization", .{});
+        self.mount_points.deinit();
+    }
+
     pub fn mount_filesystem(self: *Self, path: []const u8, fs: IFileSystem) !void {
         try self.mount_points.mount_filesystem(path, fs);
     }

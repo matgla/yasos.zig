@@ -60,12 +60,6 @@ pub const FileHeader = struct {
         };
     }
 
-    pub fn deinit(self: FileHeader) void {
-        if (self._name) |n| {
-            self._allocator.free(n);
-        }
-    }
-
     fn convert_filetype(ft: Type) FileType {
         switch (ft) {
             Type.HardLink => return FileType.HardLink,
@@ -92,14 +86,14 @@ pub const FileHeader = struct {
         return self._reader.read(u32, 8);
     }
 
-    pub fn name(self: *FileHeader) FileName {
-        const name_buffer = self._reader.read_string(self._allocator, 16) catch {
+    pub fn name(self: *FileHeader, allocator: std.mem.Allocator) FileName {
+        const name_buffer = self._reader.read_string(allocator, 16) catch {
             return .{
                 ._name = "",
                 ._allocator = null,
             };
         };
-        return FileName.init(name_buffer, self._allocator);
+        return FileName.init(name_buffer, allocator);
     }
 
     pub fn read(self: *FileHeader, comptime T: anytype, offset: c.off_t) T {

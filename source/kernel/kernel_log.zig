@@ -45,8 +45,8 @@ pub fn kernel_stdout_log(
             @tagName(scope)
         else
             @tagName(scope),
-    } ++ ": ";
-    const prefix = comptime log_level_as_text(level) ++ "/" ++ scope_prefix;
+    };
+    const prefix = "[" ++ comptime log_level_as_text(level) ++ "][" ++ scope_prefix ++ "] ";
     stdout.get().print(prefix ++ format ++ "\n", args) catch return;
 }
 

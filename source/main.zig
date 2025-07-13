@@ -41,12 +41,28 @@ pub const std_options: std.Options = .{
     .page_size_max = 4 * 1024,
     .page_size_min = 1 * 1024,
     .logFn = kernel.kernel_stdout_log,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{
-            .scope = .yasld,
-            .level = .info,
-        },
-    },
+    .log_scope_levels = &[_]std.log.ScopeLevel{ .{
+        .scope = .yasld,
+        .level = .info,
+    }, .{
+        .scope = .@"yasld/module",
+        .level = .info,
+    }, .{
+        .scope = .malloc,
+        .level = .info,
+    }, .{
+        .scope = .@"kernel/memory_pool",
+        .level = .debug,
+    }, .{
+        .scope = .@"kernel/process",
+        .level = .info,
+    }, .{
+        .scope = .@"vfs/driverfs",
+        .level = .debug,
+    }, .{
+        .scope = .@"kernel/fs/mount_points",
+        .level = .debug,
+    } },
 };
 
 fn initialize_board() void {
@@ -105,33 +121,32 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     var driverfs = kernel.driver.fs.DriverFs.init(allocator);
     const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).create()).new(allocator) catch |err| {
         kernel.log.err("Can't create uart driver instance: '{s}'", .{@errorName(err)});
-        return;
+        return err;
     };
-    driverfs.append(uart_driver, "uart0") catch return;
+    try driverfs.append(uart_driver, "uart0");
 
     var flash_driver = (kernel.driver.FlashDriver.create(board.flash.flash0)).new(allocator) catch |err| {
         kernel.log.err("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
-        return;
+        return err;
     };
-    driverfs.append(flash_driver, "flash9") catch return;
-    driverfs.load_all() catch return;
+    try driverfs.append(flash_driver, "flash0");
+    try driverfs.load_all();
 
     var maybe_flash_file = flash_driver.ifile(allocator);
     if (maybe_flash_file) |*flash| {
-        defer flash.delete();
         try mount_filesystem(try allocate_filesystem(allocator, RomFs.init(allocator, flash.*, 0x80000)), "/");
         try mount_filesystem(try allocate_filesystem(allocator, RamFs.init(allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
     } else {
         kernel.log.err("Can't get Flash Driver", .{});
-        return;
     }
+    return;
 }
 
-fn attach_default_filedescriptors_to_root_process(streamfile: kernel.fs.IFile, process: *kernel.process.Process) void {
+fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, process: *kernel.process.Process) void {
     kernel.log.info("setting default streams", .{});
     process.fds.put(0, .{
-        .file = streamfile,
+        .file = streamfile.share(),
         .path = blk: {
             var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
             const value = "/dev/stdin";
@@ -143,7 +158,7 @@ fn attach_default_filedescriptors_to_root_process(streamfile: kernel.fs.IFile, p
         kernel.log.err("Can't register: stdin", .{});
     };
     process.fds.put(1, .{
-        .file = streamfile,
+        .file = streamfile.share(),
         .path = blk: {
             var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
             const value = "/dev/stdout";
@@ -155,7 +170,7 @@ fn attach_default_filedescriptors_to_root_process(streamfile: kernel.fs.IFile, p
         kernel.log.err("Can't register: stdout", .{});
     };
     process.fds.put(2, .{
-        .file = streamfile,
+        .file = streamfile.share(),
         .path = blk: {
             var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
             const value = "/dev/stderr";
@@ -167,25 +182,28 @@ fn attach_default_filedescriptors_to_root_process(streamfile: kernel.fs.IFile, p
         kernel.log.err("Can't register: stderr", .{});
     };
 }
+const KernelAllocator = kernel.memory.heap.MallocAllocator(.{
+    .leak_detection = true,
+    .verbose = false,
+    .dump_stats = true,
+});
 
-export fn kernel_process(argument: *std.mem.Allocator) void {
-    const allocator = argument.*;
-    kernel.dynamic_loader.init(allocator);
-    initialize_filesystem(allocator) catch |err| {
-        kernel.log.err("Filesystem initialization failed: {s}", .{@errorName(err)});
-    };
+export fn kernel_process(argument: *KernelAllocator) void {
+    var malloc_allocator = argument.*;
+    const allocator = malloc_allocator.allocator();
 
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const maybe_uartfile = kernel.fs.get_ivfs().get("/dev/uart0", process.get_memory_allocator());
-        if (maybe_uartfile) |uartfile| {
+        var maybe_uartfile = kernel.fs.get_ivfs().get("/dev/uart0", process.get_memory_allocator());
+        if (maybe_uartfile) |*uartfile| {
+            defer uartfile.delete();
             attach_default_filedescriptors_to_root_process(uartfile, process);
         } else {
             kernel.log.err("default streams were not assigned: /dev/uart0 do not exists", .{});
         }
         const pid = process.pid;
         // this loads executable replacing current image
-        const sh = kernel.dynamic_loader.load_executable("/bin/sh", process.get_memory_allocator(), pid) catch |err| {
+        const sh = kernel.dynamic_loader.load_executable("/bin/sh", allocator, process.get_process_memory_allocator(), pid) catch |err| {
             kernel.log.err("Executable loading failed with error: {s}", .{@errorName(err)});
             return;
         };
@@ -204,22 +222,31 @@ pub fn splashscreen() void {
 }
 
 pub export fn main() void {
-    var kernel_allocator = kernel.memory.heap.MallocAllocator(.{
-        .leak_detection = true,
-    }){};
-    defer kernel_allocator.deinit();
-    const allocator = kernel_allocator.allocator();
-    initialize_board();
-    splashscreen();
+    var kernel_allocator = KernelAllocator{};
+    {
+        const allocator = kernel_allocator.allocator();
+        initialize_board();
+        splashscreen();
 
-    kernel.process.process_manager.initialize_process_manager(allocator);
-    kernel.irq.system_call.init();
-    kernel.spawn.root_process(&kernel_process, &allocator, 1024 * 16) catch @panic("Can't spawn root process: ");
-    kernel.process.init();
-    while (!kernel.process.process_manager.instance.is_empty()) {
-        //     // hal.time.sleep_ms(1000);
+        kernel.process.process_manager.initialize_process_manager(allocator);
+        defer kernel.process.process_manager.deinitialize_process_manager();
+
+        kernel.irq.system_call.init(kernel_allocator.allocator());
+        kernel.dynamic_loader.init(allocator);
+        defer kernel.dynamic_loader.deinit();
+        initialize_filesystem(allocator) catch |err| {
+            kernel.log.err("Filesystem initialization failed: {s}", .{@errorName(err)});
+            return;
+        };
+        defer kernel.fs.get_vfs().deinit();
+
+        kernel.spawn.root_process(&kernel_process, &allocator, 1024 * 16) catch @panic("Can't spawn root process: ");
+        kernel.process.init();
+        while (!kernel.process.process_manager.instance.is_empty()) {
+            //     // hal.time.sleep_ms(1000);
+        }
+        kernel.log.warn("Root process died", .{});
     }
-
-    kernel.log.debug("Root process died, shutdown...", .{});
-    kernel.process.process_manager.deinitialize_process_manager();
+    KernelAllocator.detect_leaks();
+    kernel.stdout.print("Now you can turn off PC!", .{});
 }

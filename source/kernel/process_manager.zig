@@ -28,6 +28,9 @@ const Process = process.Process;
 const log = std.log.scoped(.process_manager);
 const dynamic_loader = @import("modules.zig");
 const SymbolEntry = @import("yasld").SymbolEntry;
+const system_call = @import("interrupts/system_call.zig");
+const c = @import("libc_imports").c;
+const handlers = @import("interrupts/syscall_handlers.zig");
 
 const Scheduler = if (config.scheduler.round_robin)
     @import("scheduler/round_robin.zig").RoundRobin
@@ -70,6 +73,12 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
 
         pub fn deinit(self: *Self) void {
             self._process_memory_pool.deinit();
+            var next = self.processes.first;
+            while (next) |node| {
+                const p: *Process = @fieldParentPtr("node", node);
+                p.deinit();
+                next = node.next;
+            }
         }
 
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
@@ -90,6 +99,13 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                     self.allocator.destroy(p);
                     if (self.scheduler.current == &p.node) {
                         self.scheduler.current = null;
+                        if (self.processes.len() == 0) {
+                            var data: u32 = 0;
+                            _ = handlers.sys_stop_root_process(&data) catch {
+                                @panic("ProcessManager: can't get back to main");
+                            };
+                        }
+
                         if (self.scheduler.schedule_next()) {
                             switch_to_next_task();
                         } else {
@@ -163,7 +179,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             const maybe_current_process = self.scheduler.get_current();
             if (maybe_current_process) |p| {
                 // TODO: move loader to struct, pass allocator to loading functions
-                const executable = try dynamic_loader.load_executable(path, p.get_memory_allocator(), p.pid);
+                const executable = try dynamic_loader.load_executable(path, p.get_memory_allocator(), p.get_process_memory_allocator(), p.pid);
                 var argc: usize = 0;
                 while (argv[argc] != null) : (argc += 1) {}
 

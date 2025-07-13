@@ -135,7 +135,8 @@ pub const RamFsFile = struct {
         return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
-    pub fn name(self: *RamFsFile) FileName {
+    pub fn name(self: *RamFsFile, allocator: std.mem.Allocator) FileName {
+        _ = allocator;
         return FileName.init(self._data.name(), null);
     }
 
@@ -175,7 +176,7 @@ pub const RamFsFile = struct {
     }
 
     pub fn delete(self: *RamFsFile) void {
-        self._allocator.destroy(self);
+        _ = self;
     }
 };
 
@@ -186,7 +187,7 @@ test "RamFsFile.ShouldReadAndWriteFile" {
     var sut = RamFsFile.create(&data, std.testing.allocator);
     var file = sut.interface();
 
-    try std.testing.expectEqualStrings("test_file", file.name().get_name());
+    try std.testing.expectEqualStrings("test_file", file.name(std.testing.allocator).get_name());
     try std.testing.expectEqual(22, file.write("Some data inside file\n"));
     try std.testing.expectEqual(4, file.write("test"));
     var buf: [8]u8 = undefined;

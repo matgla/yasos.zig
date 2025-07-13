@@ -49,6 +49,13 @@ load_context:
   cpsie i
   bx r1
 
+.global switch_to_main_task
+.thumb_func:
+switch_to_main_task:
+  msr msp, r0 
+  ldr r0, =0xfffffff9
+  bx r0
+
 
 .global store_and_switch_to_next_task
 .thumb_func

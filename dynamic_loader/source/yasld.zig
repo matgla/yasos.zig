@@ -25,3 +25,4 @@ pub const SymbolEntry = @import("module.zig").SymbolEntry;
 pub const Module = @import("module.zig").Module;
 pub const get_loader = @import("loader.zig").get_loader;
 pub const loader_init = @import("loader.zig").init;
+pub const loader_deinit = @import("loader.zig").deinit;

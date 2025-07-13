@@ -25,6 +25,8 @@ const fs = @import("fs/vfs.zig");
 const FileMemoryMapAttributes = @import("fs/ifile.zig").FileMemoryMapAttributes;
 const IoctlCommonCommands = @import("fs/ifile.zig").IoctlCommonCommands;
 
+var kernel_allocator: std.mem.Allocator = undefined;
+
 const ModuleContext = struct {
     path: []const u8,
     address: ?*const anyopaque,
@@ -47,7 +49,7 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    const filename = file.name();
+    const filename = file.name(kernel_allocator);
     defer filename.deinit();
     if (std.mem.eql(u8, module_context.path, filename.get_name())) {
         var attr: FileMemoryMapAttributes = .{
@@ -66,7 +68,6 @@ fn traverse_directory(file: *IFile, context: *anyopaque) bool {
 
 var modules_list: std.AutoHashMap(u32, yasld.Executable) = undefined;
 var libraries_list: std.AutoHashMap(u32, std.DoublyLinkedList) = undefined;
-var kernel_allocator: std.mem.Allocator = undefined;
 
 pub fn init(allocator: std.mem.Allocator) void {
     log.info("yasld initialization started", .{});
@@ -76,16 +77,22 @@ pub fn init(allocator: std.mem.Allocator) void {
     kernel_allocator = allocator;
 }
 
-pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
+pub fn deinit() void {
+    modules_list.deinit();
+    libraries_list.deinit();
+    yasld.loader_deinit();
+}
+
+pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
     var maybe_file = fs.get_ivfs().get(path, allocator);
     if (maybe_file) |*f| {
-        defer f.delete();
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
         _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        f.delete();
         var header_address: *const anyopaque = undefined;
 
         if (attr.mapped_address_r) |address| {
@@ -98,7 +105,7 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
             // const loader_logger = log;
             // loader_logger.debug_enabled = false;
             // loader_logger.prefix = "[yasld]";
-            const executable = loader.*.load_executable(header_address, std.log.scoped(.yasld), allocator) catch |err| {
+            const executable = loader.*.load_executable(header_address, process_allocator) catch |err| {
                 log.err("loading '{s}' failed: {s}", .{ path, @errorName(err) });
                 return err;
             };
@@ -116,7 +123,7 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, pid: u32)
     return std.posix.AccessError.FileNotFound;
 }
 
-pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
+pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
     var maybe_file = fs.get_ivfs().get(path, allocator);
     if (maybe_file) |*f| {
         defer f.delete();
@@ -136,7 +143,7 @@ pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, pid: 
             @panic("Implement image copying to memory");
         }
         if (yasld.get_loader()) |loader| {
-            const library = loader.*.load_library(header_address, std.log.scoped(.yasld), allocator) catch |err| {
+            const library = loader.*.load_library(header_address, process_allocator) catch |err| {
                 return err;
             };
 
@@ -160,6 +167,15 @@ pub fn release_executable(pid: u32) void {
     if (maybe_executable) |executable| {
         executable.deinit();
         _ = modules_list.remove(pid);
+        const maybe_list = libraries_list.getPtr(pid);
+        if (maybe_list) |list| {
+            var next = list.pop();
+            while (next) |node| {
+                const library: *yasld.Module = @fieldParentPtr("list_node", node);
+                library.destroy();
+                next = list.pop();
+            }
+        }
         _ = libraries_list.remove(pid);
     }
 }

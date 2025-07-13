@@ -111,18 +111,47 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             };
             return process;
         }
+        pub fn clear_fds(self: *Self) void {
+            var it = self.fds.iterator();
+            while (it.next()) |*n| {
+                if (n.value_ptr.diriter) |*d| {
+                    d.delete();
+                }
+                n.value_ptr.file.delete();
+            }
+            self.fds.deinit();
+        }
+
+        fn dupe_filehandle(handle: *FileHandle) FileHandle {
+            return .{
+                .diriter = handle.diriter,
+                .file = handle.file.share(),
+                .path = handle.path,
+            };
+        }
+        fn dupe_fds(self: *Self) !std.AutoHashMap(u16, FileHandle) {
+            var fds = std.AutoHashMap(u16, FileHandle).init(self._kernel_allocator);
+            var it = self.fds.iterator();
+            while (it.next()) |*n| {
+                try fds.put(n.key_ptr.*, dupe_filehandle(n.value_ptr));
+            }
+            return fds;
+        }
 
         pub fn deinit(self: *Self) void {
             self.impl.deinit(self._process_memory_allocator.allocator());
-            self.fds.deinit();
+            self.clear_fds();
             self._kernel_allocator.free(self.cwd);
             self._process_memory_allocator.deinit();
         }
 
         pub fn get_memory_allocator(self: *Self) std.mem.Allocator {
-            return self._process_memory_allocator.allocator();
+            return self._kernel_allocator;
         }
 
+        pub fn get_process_memory_allocator(self: *Self) std.mem.Allocator {
+            return self._process_memory_allocator.allocator();
+        }
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
         pub fn vfork(self: *Self, process_memory_pool: *ProcessMemoryPoolType) !*Self {
@@ -133,6 +162,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             log.debug("vfork process memory allocator created for pid {d}", .{pid_counter});
             const cwd_handle = try self._kernel_allocator.alloc(u8, self.cwd.len);
             @memcpy(cwd_handle, self.cwd);
+
             process.* = .{
                 .state = State.Ready,
                 .priority = self.priority,
@@ -140,7 +170,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .pid = pid_counter,
                 ._kernel_allocator = self._kernel_allocator,
                 .current_core = 0,
-                .fds = try self.fds.clone(),
+                .fds = try self.dupe_fds(),
                 .blocked_by_process = self.blocked_by_process,
                 .blocks_process = self.blocks_process,
                 .cwd = cwd_handle,

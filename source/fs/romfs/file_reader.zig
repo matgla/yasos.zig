@@ -61,6 +61,7 @@ pub const FileReader = struct {
     pub fn read_string(self: *FileReader, allocator: std.mem.Allocator, offset: c.off_t) ![]u8 {
         _ = self._device_file.seek(self._offset + offset, c.SEEK_SET);
         var name_buffer: []u8 = try allocator.alloc(u8, 16);
+        @memset(name_buffer, 0);
 
         _ = self._device_file.read(name_buffer[0..]);
         while (std.mem.lastIndexOfScalar(u8, name_buffer, 0) == null) {

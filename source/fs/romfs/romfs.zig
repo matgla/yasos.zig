@@ -70,7 +70,7 @@ pub const RomFs = struct {
     }
 
     pub fn delete(self: *RomFs) void {
-        _ = self;
+        self.device_file.delete();
     }
 
     // RomFs interface
@@ -124,7 +124,7 @@ pub const RomFs = struct {
             return null;
         }
         while (component) |part| : (component = it.next()) {
-            var filename = maybe_node.?.name();
+            var filename = maybe_node.?.name(self.allocator);
             while (!std.mem.eql(u8, filename.get_name(), part.name)) {
                 maybe_node = maybe_node.?.next();
                 if (maybe_node == null) {
@@ -133,8 +133,9 @@ pub const RomFs = struct {
                 }
 
                 filename.deinit();
-                filename = maybe_node.?.name();
+                filename = maybe_node.?.name(self.allocator);
             }
+            filename.deinit();
             // if symbolic link then fetch target node
             if (maybe_node) |*node| {
                 if (node.filetype() == FileType.SymbolicLink) {

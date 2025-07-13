@@ -38,7 +38,7 @@ pub fn UartFile(comptime UartType: anytype) type {
         _allocator: std.mem.Allocator,
 
         pub fn delete(self: *Self) void {
-            self._allocator.destroy(self);
+            _ = self;
         }
 
         pub fn create(allocator: std.mem.Allocator) Self {
@@ -115,7 +115,8 @@ pub fn UartFile(comptime UartType: anytype) type {
             return 0;
         }
 
-        pub fn name(self: *Self) FileName {
+        pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
+            _ = allocator;
             _ = self;
             return FileName.init("uart", null);
         }
