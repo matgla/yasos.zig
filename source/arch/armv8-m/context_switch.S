@@ -109,7 +109,7 @@ irq_svcall:
   cmp r0, #1
   bne call_svcall
   ldr r0, =sp_call
-  str sp, [r1] 
+  str sp, [r0] 
   mov r0, 1
 call_svcall: 
   push {r0, lr}

@@ -268,5 +268,5 @@ pub export fn main() void {
         kernel.log.warn("Root process died", .{});
     }
     KernelAllocator.detect_leaks();
-    kernel.stdout.print("Now you can turn off PC!", .{});
+    kernel.stdout.print("Now you can turn off PC!\n", .{});
 }
