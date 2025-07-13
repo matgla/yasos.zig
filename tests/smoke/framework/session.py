@@ -20,6 +20,7 @@
  """
 
 import os
+import time 
 import datetime
 
 import serial
@@ -50,11 +51,15 @@ class Session:
             self.wait_for_prompt()
 
     def wait_for_prompt(self):
-        line = self.serial.read_until("$ ".encode('utf-8')).decode('utf-8')
+        self.wait_for_data("$ ") 
+        
+    def wait_for_data(self, data):
+        line = self.serial.read_until(data.encode('utf-8')).decode('utf-8')
         self.file.write(line)
         line = line.strip()
-        if not line.endswith("$"):
-            raise RuntimeError("Prompt not found after reset")
+        if not line.endswith(data.strip()):
+            raise RuntimeError("Prompt not found on serial port: '" + data + "'")       
+        return line
 
     def write_command(self, command):
         self.serial.write((command + '\n').encode('utf-8'))
@@ -67,7 +72,6 @@ class Session:
         line = self.serial.readline().decode('utf-8')
         self.file.write(line) 
         line = line.strip()
-        
         return line
     
     def reset_target(self):
@@ -83,6 +87,10 @@ class Session:
             session.close()
 
     def close(self):
+        self.write_command("exit")
+        self.wait_for_data("Root process died") 
+        if self.serial.inWaiting() > 0:
+            self.file.write(self.serial.read_all().decode("utf-8"))
         self.serial.close()
         self.file.close()
 

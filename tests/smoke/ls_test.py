@@ -32,9 +32,11 @@ class TestLs:
         self.session.write_command("ls")
         line = self.session.read_line()
         assert sorted([".", "..", "dev", "usr", "lib", "tmp", "bin" ]) == sorted(line.split())
+        self.session.close() 
 
     def test_list_bin(self):
         self.session.write_command("cd bin")
         self.session.write_command("ls")
         line = self.session.read_line()
         assert set(["ls", "cat", "sh"]).issubset(line.split())
+        self.session.close()

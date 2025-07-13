@@ -17,6 +17,8 @@ jobs:
           submodules: 'recursive'
       - name: Run Smoke Tests
         run: |
+          mkdir -p ${{ github.workspace }}/tests/smoke/logs
+          cp ${{ github.workspace }}/zig-out/yasos_kernel ${{ github.workspace }}/tests/smoke/logs
           make run_smoke_tests
       
       - name: Upload Test Logs  

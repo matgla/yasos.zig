@@ -43,6 +43,6 @@ def test_change_dir():
     session.write_command("pwd")
     line = session.read_line()
     assert line == "/"
-
+    
     session.close()
 
