@@ -19,13 +19,16 @@
 //
 
 const std = @import("std");
-const Process = @import("../process.zig").Process;
+
+const kernel = @import("../kernel.zig");
+const Process = kernel.process.Process;
 
 const cpu = @import("hal").cpu;
 
 pub fn RoundRobin(comptime ManagerType: anytype) type {
     return struct {
         const Self = @This();
+        pub const Name = "RoundRobin";
         manager: *const ManagerType = undefined,
         current: ?*std.DoublyLinkedList.Node = null,
         next: ?*std.DoublyLinkedList.Node = null,
@@ -37,7 +40,7 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
 
             if (self.current == null) {
                 if (self.manager.processes.first) |node| {
-                    const process: *Process = @fieldParentPtr("node", node);
+                    const process: *kernel.process.Process = @fieldParentPtr("node", node);
                     process.set_core(@intCast(cpu.coreid()));
                 }
                 self.next = self.manager.processes.first;

@@ -28,12 +28,12 @@ const c = @cImport({
 });
 
 export fn irq_hard_fault() void {
-    // log.print("PANIC: Hard Fault occured!\n", .{});
-    while (true) {
-        asm volatile (
-            \\ wfi
-        );
-    }
+    @panic("Hard fault occured");
+    // while (true) {
+    //     asm volatile (
+    //         \\ wfi
+    //     );
+    // }
 }
 pub const VForkContext = extern struct {
     lr: usize,
@@ -46,9 +46,13 @@ const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque
 var context_switch_handler: ?ContextSwitchHandler = null;
 var system_call_handler: ?SystemCallHandler = null;
 
-export fn irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
-    if (system_call_handler) |handler| {
-        handler(number, arg, out);
+export var sp_call: usize = 0;
+
+export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+    if (number == 1) {
+        system_call_handler.?(number, &sp_call, out);
+    } else {
+        system_call_handler.?(number, arg, out);
     }
 }
 

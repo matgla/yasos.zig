@@ -15,13 +15,9 @@
 
 const std = @import("std");
 
-const malloc_allocator = @import("malloc.zig").malloc_allocator;
-const log = &@import("../log/kernel_log.zig").kernel_log;
-
 const memory = @import("hal").memory;
 
-const dynamic_loader = @import("modules.zig");
-
+const log = std.log.scoped(.@"kernel/memory_pool");
 // Only one process is owner of memory chunk
 // shared memory will be implemented as seperate structure
 pub const ProcessMemoryPool = struct {
@@ -37,8 +33,9 @@ pub const ProcessMemoryPool = struct {
         address: []u8,
         pid: u32,
         access: AccessType,
+        node: std.DoublyLinkedList.Node,
     };
-    const ProcessMemoryList = std.ArrayList(ProcessMemoryEntity);
+    const ProcessMemoryList = std.DoublyLinkedList;
     const ProcessMemoryMap = std.AutoHashMap(u32, ProcessMemoryList);
 
     memory_size: usize,
@@ -49,7 +46,8 @@ pub const ProcessMemoryPool = struct {
     allocator: std.mem.Allocator,
     start_address: usize,
 
-    pub fn create(allocator: std.mem.Allocator) !ProcessMemoryPool {
+    pub fn init(allocator: std.mem.Allocator) !ProcessMemoryPool {
+        log.debug("Process memory pool initialized", .{});
         const memory_layout = memory.get_memory_layout();
         return ProcessMemoryPool{
             .memory_size = memory_layout[2].size,
@@ -59,6 +57,21 @@ pub const ProcessMemoryPool = struct {
             .allocator = allocator,
             .start_address = memory_layout[2].start_address,
         };
+    }
+
+    pub fn deinit(self: *ProcessMemoryPool) void {
+        log.debug("Process memory pool deinitialization started...", .{});
+        self.page_bitmap.deinit();
+        var it = self.memory_map.iterator();
+        while (it.next()) |process| {
+            var next = process.value_ptr.pop();
+            while (next) |node| {
+                const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
+                self.allocator.destroy(entity);
+                next = node.next;
+            }
+        }
+        self.memory_map.deinit();
     }
 
     fn get_next_free_slot(self: *ProcessMemoryPool, start_index: usize, pages_number: i32) !struct { usize, usize } {
@@ -113,21 +126,21 @@ pub const ProcessMemoryPool = struct {
                     return null;
                 };
                 if (!list.found_existing) {
-                    list.value_ptr.* = ProcessMemoryList.init(self.allocator);
+                    list.value_ptr.* = .{};
                 }
-                list.value_ptr.append(ProcessMemoryEntity{
+                const entity = self.allocator.create(ProcessMemoryEntity) catch return null;
+                entity.* = .{
                     .address = slicify(
                         @as([*]u8, @ptrFromInt(self.start_address + start_index * page_size)),
                         @as(usize, @intCast(number_of_pages)) * page_size,
                     ),
                     .pid = pid,
                     .access = .{ .read = 1, .write = 1, .execute = 1 },
-                }) catch {
-                    return null;
+                    .node = .{},
                 };
-                @memset(list.value_ptr.getLast().address, 0);
-
-                return list.value_ptr.getLast().address;
+                list.value_ptr.append(&entity.node);
+                log.debug("Allocating {d} pages for {d} at 0x{x}", .{ number_of_pages, pid, @intFromPtr(entity.address.ptr) });
+                return entity.address;
             } else {
                 start_index = slot_end + 1;
             }
@@ -136,32 +149,44 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn release_pages_for(self: *ProcessMemoryPool, pid: u32) void {
+        log.debug("Releasing pages for: {d}", .{pid});
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
-            for (mapping.value_ptr.items) |entity| {
+            var next = mapping.value_ptr.first;
+            while (next) |entity_node| {
+                const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
                 const start_index = (@intFromPtr(entity.address.ptr) - self.start_address) / page_size;
                 const end_index = start_index + @as(usize, @intCast(entity.address.len)) / page_size;
                 for (start_index..end_index) |index| {
                     self.page_bitmap.unset(index);
                 }
+                next = entity_node.next;
             }
-            if (self.memory_map.getPtr(pid)) |*arr| {
-                arr.*.deinit();
+            if (self.memory_map.getPtr(pid)) |*list| {
+                var next_element = list.*.pop();
+                while (next_element) |node| {
+                    const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", node);
+                    self.allocator.destroy(entity);
+                    next_element = list.*.pop();
+                }
             }
             _ = self.memory_map.remove(pid);
         }
     }
 
     pub fn free_pages(self: *ProcessMemoryPool, address: *anyopaque, number_of_pages: i32, pid: u32) void {
+        log.debug("Releasing pages {d} at 0x{x} for pid: {d}", .{ number_of_pages, @intFromPtr(address), pid });
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
-            var i: usize = 0;
-            for (mapping.value_ptr.items) |entity| {
+            var next = mapping.value_ptr.first;
+            while (next) |entity_node| {
+                const entity: *ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
                 if (@as(*anyopaque, entity.address.ptr) == address) {
-                    _ = mapping.value_ptr.swapRemove(i);
+                    self.allocator.destroy(entity);
+                    _ = mapping.value_ptr.remove(entity_node);
                     break;
                 }
-                i += 1;
+                next = entity_node.next;
             }
             const start_index = (@intFromPtr(address) - self.start_address) / page_size;
             const end_index = start_index + @as(usize, @intCast(number_of_pages));
@@ -170,10 +195,8 @@ pub const ProcessMemoryPool = struct {
             }
         }
     }
+
+    pub fn get_used_size(self: ProcessMemoryPool) usize {
+        return self.page_bitmap.count() * page_size;
+    }
 };
-
-pub var instance: ProcessMemoryPool = undefined;
-
-pub fn init() !void {
-    instance = try ProcessMemoryPool.create(malloc_allocator);
-}

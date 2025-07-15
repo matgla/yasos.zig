@@ -35,6 +35,6 @@ pub const Time = struct {
     }
 
     pub fn sleep_us(us: u64) void {
-        std.Thread.sleep(u64(us) * 1000);
+        std.Thread.sleep(us * 1000);
     }
 };

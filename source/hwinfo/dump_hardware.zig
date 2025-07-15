@@ -23,30 +23,29 @@ const std = @import("std");
 const cpu = @import("hal").cpu;
 const memory = @import("hal").memory;
 
-const kernel_log = @import("../log/kernel_log.zig");
-const log = &kernel_log.kernel_log;
+const kernel = @import("kernel");
 
 pub const DumpHardware = struct {
     pub fn print_hardware() void {
         var buffer: [8]u8 = undefined;
-        log.print("---------------------------------------------\n", .{});
-        log.print("|   CPU: {s: <10}  FREQ: {s: <12}     |\n", .{
+        kernel.stdout.print("---------------------------------------------\n", .{});
+        kernel.stdout.print("|   CPU: {s: <10}  FREQ: {s: <12}     |\n", .{
             cpu.name(),
             format_frequency(cpu.frequency(), &buffer),
         });
-        log.print("| Cores: {d: <2}                                 |\n", .{
+        kernel.stdout.print("| Cores: {d: <2}                                 |\n", .{
             cpu.number_of_cores(),
         });
         DumpHardware.print_memory();
-        log.print("---------------------------------------------\n", .{});
+        kernel.stdout.print("---------------------------------------------\n", .{});
     }
 
     pub fn print_memory() void {
         var buffer: [8]u8 = undefined;
-        log.print("| Memory layout:                            |\n", .{});
+        kernel.stdout.print("| Memory layout:                            |\n", .{});
         const layout = memory.get_memory_layout();
         for (layout) |entry| {
-            log.print("|  0x{x: <12}  {s: <8} {s: <8} {s: <5}  |\n", .{
+            kernel.stdout.print("|  0x{x: <12}  {s: <8} {s: <8} {s: <5}  |\n", .{
                 entry.start_address,
                 format_size(entry.size, &buffer),
                 @tagName(entry.memory_type),

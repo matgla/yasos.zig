@@ -49,6 +49,13 @@ load_context:
   cpsie i
   bx r1
 
+.global switch_to_main_task
+.thumb_func:
+switch_to_main_task:
+  msr msp, r0 
+  ldr r0, =0xfffffff9
+  bx r0
+
 
 .global store_and_switch_to_next_task
 .thumb_func
@@ -95,3 +102,16 @@ context_switch_return_pop_single:
   str r2, [r0]
   msr psp, r1
   bx r3 
+
+.global irq_svcall
+.thumb_func
+irq_svcall:
+  cmp r0, #1
+  bne call_svcall
+  ldr r0, =sp_call
+  str sp, [r0] 
+  mov r0, 1
+call_svcall: 
+  push {r0, lr}
+  bl _irq_svcall 
+  pop {r0, pc}  

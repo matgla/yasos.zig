@@ -46,7 +46,7 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
             return self.impl.write(buffer) catch return WriteError.WriteFailure;
         }
 
-        pub fn write_some_opaque(self: *const anyopaque, buffer: []const u8) usize {
+        pub fn write_some_opaque(self: *const anyopaque, buffer: []const u8) anyerror!usize {
             const realSelf: *const Self = @ptrCast(@alignCast(self));
             return realSelf.*.impl.write(buffer) catch {
                 return 0;

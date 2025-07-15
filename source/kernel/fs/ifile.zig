@@ -18,7 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const interface = @import("interface");
 
@@ -100,8 +100,8 @@ fn FileInterface(comptime SelfType: type) type {
             return interface.VirtualCall(self, "size", .{}, isize);
         }
 
-        pub fn name(self: *Self) FileName {
-            return interface.VirtualCall(self, "name", .{}, FileName);
+        pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
+            return interface.VirtualCall(self, "name", .{allocator}, FileName);
         }
 
         pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -121,12 +121,17 @@ fn FileInterface(comptime SelfType: type) type {
         }
 
         pub fn delete(self: *Self) void {
-            return interface.VirtualCall(self, "delete", .{}, void);
+            if (self.__refcount) |r| {
+                if (r.* == 1) {
+                    interface.VirtualCall(self, "delete", .{}, void);
+                }
+            }
+            interface.DestructorCall(self);
         }
     };
 }
 
-pub const IFile = interface.ConstructInterface(FileInterface);
+pub const IFile = interface.ConstructCountingInterface(FileInterface);
 pub const ReadOnlyFile = struct {
     pub const Self = @This();
     pub usingnamespace interface.DeriveFromBase(IFile, Self);

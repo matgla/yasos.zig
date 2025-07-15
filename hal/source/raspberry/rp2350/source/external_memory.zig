@@ -261,6 +261,7 @@ fn slicify(ptr: [*]volatile u8, len: usize) []volatile u8 {
 extern fn qmi_initialize_m1() usize;
 extern fn qmi_dummy_read() void;
 extern fn qmi_reinitialize_flash() void;
+const log = std.log.scoped(.hal_external_memory);
 
 pub const ExternalMemory = struct {
     _initialized: bool = false,
@@ -275,89 +276,89 @@ pub const ExternalMemory = struct {
 
     pub fn disable() void {}
 
-    fn print_qmi_directcsr(self: ExternalMemory, stdout: anytype) void {
-        stdout.write(" direct_csr\n");
+    fn print_qmi_directcsr(self: ExternalMemory) void {
+        log.debug(" direct_csr", .{});
         _ = self;
         const state = qmi.*.direct_csr.read();
-        stdout.print("  en: {d}\n", .{state.en});
-        stdout.print("  busy: {d}\n", .{state.busy});
-        stdout.print("  assert_cs0n: {d}\n", .{state.assert_cs0n});
-        stdout.print("  assert_cs1n: {d}\n", .{state.assert_cs1n});
-        stdout.print("  auto_cs0n: {d}\n", .{state.auto_cs0n});
-        stdout.print("  auto_cs1n: {d}\n", .{state.auto_cs1n});
-        stdout.print("  txfull: {d}\n", .{state.txfull});
-        stdout.print("  txempty: {d}\n", .{state.txempty});
-        stdout.print("  txlevel: {d}\n", .{state.txlevel});
-        stdout.print("  rxempty: {d}\n", .{state.rxempty});
-        stdout.print("  rxfull: {d}\n", .{state.rxfull});
-        stdout.print("  rxlevel: {d}\n", .{state.rxlevel});
-        stdout.print("  clkdiv: {d}\n", .{state.clkdiv});
-        stdout.print("  rxdelay: {d}\n", .{state.rxdelay});
+        log.debug("  en: {d}", .{state.en});
+        log.debug("  busy: {d}", .{state.busy});
+        log.debug("  assert_cs0n: {d}", .{state.assert_cs0n});
+        log.debug("  assert_cs1n: {d}", .{state.assert_cs1n});
+        log.debug("  auto_cs0n: {d}", .{state.auto_cs0n});
+        log.debug("  auto_cs1n: {d}", .{state.auto_cs1n});
+        log.debug("  txfull: {d}", .{state.txfull});
+        log.debug("  txempty: {d}", .{state.txempty});
+        log.debug("  txlevel: {d}", .{state.txlevel});
+        log.debug("  rxempty: {d}", .{state.rxempty});
+        log.debug("  rxfull: {d}", .{state.rxfull});
+        log.debug("  rxlevel: {d}", .{state.rxlevel});
+        log.debug("  clkdiv: {d}", .{state.clkdiv});
+        log.debug("  rxdelay: {d}", .{state.rxdelay});
     }
 
-    fn print_qmi_timings(self: ExternalMemory, stdout: anytype) void {
+    fn print_qmi_timings(self: ExternalMemory) void {
         _ = self;
         for (0..2) |i| {
-            stdout.print(" m[{d}] timing\n", .{i});
+            log.debug(" m[{d}] timing", .{i});
             const state = qmi.*.m[i].timing.read();
-            stdout.print("  clkdiv: {d}\n", .{state.clkdiv});
-            stdout.print("  rxdelay: {d}\n", .{state.rxdelay});
-            stdout.print("  min_deselect: {d}\n", .{state.min_deselect});
-            stdout.print("  max_select: {d}\n", .{state.max_select});
-            stdout.print("  select_hold: {d}\n", .{state.select_hold});
-            stdout.print("  select_setup: {d}\n", .{state.select_setup});
-            stdout.print("  pagebreak: {d}\n", .{state.pagebreak});
-            stdout.print("  cooldown: {d}\n", .{state.cooldown});
+            log.debug("  clkdiv: {d}", .{state.clkdiv});
+            log.debug("  rxdelay: {d}", .{state.rxdelay});
+            log.debug("  min_deselect: {d}", .{state.min_deselect});
+            log.debug("  max_select: {d}", .{state.max_select});
+            log.debug("  select_hold: {d}", .{state.select_hold});
+            log.debug("  select_setup: {d}", .{state.select_setup});
+            log.debug("  pagebreak: {d}", .{state.pagebreak});
+            log.debug("  cooldown: {d}", .{state.cooldown});
 
             const rfmt = qmi.*.m[i].rfmt.read();
-            stdout.print(" m[{d}] rfmt\n", .{i});
-            stdout.print("  prefix_width: {d}\n", .{rfmt.prefix_width});
-            stdout.print("  address_width: {d}\n", .{rfmt.address_width});
-            stdout.print("  suffix_width: {d}\n", .{rfmt.suffix_width});
-            stdout.print("  dummy_width: {d}\n", .{rfmt.dummy_width});
-            stdout.print("  data_width: {d}\n", .{rfmt.data_width});
-            stdout.print("  prefix_len: {d}\n", .{rfmt.prefix_len});
-            stdout.print("  suffix_len: {d}\n", .{rfmt.suffix_len});
-            stdout.print("  dummy_len: {d}\n", .{rfmt.dummy_len});
-            stdout.print("  dtr: {d}\n", .{rfmt.dtr});
+            log.debug(" m[{d}] rfmt", .{i});
+            log.debug("  prefix_width: {d}", .{rfmt.prefix_width});
+            log.debug("  address_width: {d}", .{rfmt.address_width});
+            log.debug("  suffix_width: {d}", .{rfmt.suffix_width});
+            log.debug("  dummy_width: {d}", .{rfmt.dummy_width});
+            log.debug("  data_width: {d}", .{rfmt.data_width});
+            log.debug("  prefix_len: {d}", .{rfmt.prefix_len});
+            log.debug("  suffix_len: {d}", .{rfmt.suffix_len});
+            log.debug("  dummy_len: {d}", .{rfmt.dummy_len});
+            log.debug("  dtr: {d}", .{rfmt.dtr});
 
             const rcmd = qmi.*.m[i].rcmd.read();
-            stdout.print(" m[{d}] rcmd\n", .{i});
-            stdout.print("  prefix: {x}\n", .{rcmd.prefix});
-            stdout.print("  suffix: {x}\n", .{rcmd.suffix});
+            log.debug(" m[{d}] rcmd", .{i});
+            log.debug("  prefix: {x}", .{rcmd.prefix});
+            log.debug("  suffix: {x}", .{rcmd.suffix});
 
             const wfmt = qmi.*.m[i].wfmt.read();
-            stdout.print(" m[{d}] wfmt\n", .{i});
-            stdout.print("  prefix_width: {d}\n", .{wfmt.prefix_width});
-            stdout.print("  address_width: {d}\n", .{wfmt.address_width});
-            stdout.print("  suffix_width: {d}\n", .{wfmt.suffix_width});
-            stdout.print("  dummy_width: {d}\n", .{wfmt.dummy_width});
-            stdout.print("  data_width: {d}\n", .{wfmt.data_width});
-            stdout.print("  prefix_len: {d}\n", .{wfmt.prefix_len});
-            stdout.print("  suffix_len: {d}\n", .{wfmt.suffix_len});
-            stdout.print("  dummy_len: {d}\n", .{wfmt.dummy_len});
-            stdout.print("  dtr: {d}\n", .{wfmt.dtr});
+            log.debug(" m[{d}] wfmt", .{i});
+            log.debug("  prefix_width: {d}", .{wfmt.prefix_width});
+            log.debug("  address_width: {d}", .{wfmt.address_width});
+            log.debug("  suffix_width: {d}", .{wfmt.suffix_width});
+            log.debug("  dummy_width: {d}", .{wfmt.dummy_width});
+            log.debug("  data_width: {d}", .{wfmt.data_width});
+            log.debug("  prefix_len: {d}", .{wfmt.prefix_len});
+            log.debug("  suffix_len: {d}", .{wfmt.suffix_len});
+            log.debug("  dummy_len: {d}", .{wfmt.dummy_len});
+            log.debug("  dtr: {d}", .{wfmt.dtr});
 
             const wcmd = qmi.*.m[i].wcmd.read();
-            stdout.print(" m[{d}] wcmd\n", .{i});
-            stdout.print("  prefix: {x}\n", .{wcmd.prefix});
-            stdout.print("  suffix: {x}\n", .{wcmd.suffix});
+            log.debug(" m[{d}] wcmd", .{i});
+            log.debug("  prefix: {x}", .{wcmd.prefix});
+            log.debug("  suffix: {x}", .{wcmd.suffix});
         }
     }
 
-    pub fn dump_configuration(self: ExternalMemory, stdout: anytype) void {
-        stdout.write("----- QMI Configuration ------\n");
-        stdout.print(" enabled: {any}\n", .{self._initialized});
-        self.print_qmi_directcsr(stdout);
-        self.print_qmi_timings(stdout);
-        stdout.write("------------------------------\n");
+    pub fn dump_configuration(self: ExternalMemory) void {
+        log.debug("----- QMI Configuration ------", .{});
+        log.debug(" enabled: {any}", .{self._initialized});
+        self.print_qmi_directcsr();
+        self.print_qmi_timings();
+        log.debug("------------------------------", .{});
     }
 
     pub fn get_memory_size(self: ExternalMemory) usize {
         return self._psram_size;
     }
 
-    pub fn perform_post(self: *ExternalMemory, stdout: anytype) bool {
+    pub fn perform_post(self: *ExternalMemory) bool {
         var prng = std.Random.DefaultPrng.init(1000);
 
         const data = slicify(
@@ -375,7 +376,7 @@ pub const ExternalMemory = struct {
         index = start;
         for (data) |*i| {
             if (i.* != @as(u8, @intCast(index % 256))) {
-                stdout.print("Memory failure: memory mismatch at: {d}, expected: {d}, got: {d}\n", .{ i, index % 256, i.* });
+                log.err("Memory failure: memory mismatch at: {d}, expected: {d}, got: {d}", .{ i, index % 256, i.* });
                 self._psram_size = 0;
                 self._initialized = false;
                 return false;

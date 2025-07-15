@@ -21,8 +21,9 @@ const std = @import("std");
 
 const interface = @import("interface");
 
-const IDirectoryIterator = @import("../../kernel/fs/ifilesystem.zig").IDirectoryIterator;
-const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+const kernel = @import("kernel");
+const IDirectoryIterator = kernel.fs.IDirectoryIterator;
+const IFile = kernel.fs.IFile;
 const FileHeader = @import("file_header.zig").FileHeader;
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
 

@@ -47,6 +47,12 @@ switch_to_next_task:
   pop {r0, r1}
   bx r1
 
+.global push_return_address
+.thumb_func 
+push_return_address
+push {r0, lr}
+bx lr
+
 .global store_and_switch_to_next_task
 .thumb_func
 store_and_switch_to_next_task:

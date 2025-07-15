@@ -17,7 +17,12 @@
 // Public License along with this program. If not, see
 // <https://www.gnu.org/licenses/>.
 //
+const std = @import("std");
 
 comptime {
     _ = @import("source/tests.zig");
+}
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
 }

@@ -187,6 +187,7 @@ typedef struct dlsym_context {
 
 typedef enum SystemCall {
   sys_start_root_process = 1,
+  sys_stop_root_process,
   sys_create_process,
   sys_semaphore_acquire,
   sys_semaphore_release,

@@ -1,4 +1,3 @@
-//
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
 // This program is free software: you can redistribute it and/or
@@ -61,6 +60,12 @@ var loader_object: ?Loader = null;
 
 pub fn init(file_resolver: anytype, allocator: std.mem.Allocator) void {
     loader_object = Loader.create(file_resolver, allocator);
+}
+
+pub fn deinit() void {
+    if (loader_object) |loader| {
+        loader.deinit();
+    }
 }
 
 pub fn get_loader() ?*Loader {

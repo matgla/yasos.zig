@@ -32,6 +32,8 @@ const SymbolEntry = @import("module.zig").SymbolEntry;
 const LoadedSharedData = @import("module.zig").LoadedSharedData;
 const LoadedUniqueData = @import("module.zig").LoadedUniqueData;
 
+const log = std.log.scoped(.yasld);
+
 const LoaderError = error{
     DataProcessingFailure,
     SymbolTableRelocationFailure,
@@ -46,23 +48,56 @@ const LoaderError = error{
 pub const Loader = struct {
     // OS should provide pointer to XIP region, it must be copied to RAM if needed
     pub const FileResolver = *const fn (name: []const u8) ?*const anyopaque;
+    const LoadedModule = struct {
+        shared_data: *LoadedSharedData,
+        users: i32,
+    };
 
     file_resolver: FileResolver,
 
     // mapping from name to loaded instances
     // pid to module mapping done inside kernel itself
-    modules_list: std.StringHashMap(std.DoublyLinkedList),
+    modules_list: std.StringHashMap(LoadedModule),
     kernel_allocator: std.mem.Allocator,
 
     pub fn create(file_resolver: FileResolver, kernel_allocator: std.mem.Allocator) Loader {
         return .{
             .file_resolver = file_resolver,
-            .modules_list = std.StringHashMap(std.DoublyLinkedList).init(kernel_allocator),
+            .modules_list = std.StringHashMap(LoadedModule).init(kernel_allocator),
             .kernel_allocator = kernel_allocator,
         };
     }
 
-    pub fn load_executable(self: *Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Executable {
+    pub fn deinit(self: *Loader) void {
+        // var it = self.modules_list.iterator();
+        // while (it.next()) |n| {
+        // var next = n.value_ptr.first;
+        // while (next) |node| {
+        // var module: *Module = @fieldParentPtr("list_node", node);
+        // module.destroy();
+        //         next = node.next;
+        //     }
+        // }
+        self.modules_list.deinit();
+    }
+
+    fn get_shared_data(self: *Loader, module_name: []const u8, process_allocator: std.mem.Allocator, parser: *const Parser, xip: bool) !*LoadedSharedData {
+        var maybe_existing_module = self.modules_list.getPtr(module_name);
+        if (maybe_existing_module) |*loaded| {
+            log.debug("Module is already loaded, propagating .text for: {s}", .{parser.name});
+            loaded.*.users += 1;
+            return loaded.*.shared_data;
+        }
+        log.debug("module doesn't exists, creating one for: {s}", .{parser.name});
+        const shared_data = try LoadedSharedData.create(self.kernel_allocator, process_allocator, xip, parser);
+        try self.modules_list.put(parser.name, .{
+            .users = 1,
+            .shared_data = shared_data,
+        });
+        return shared_data;
+    }
+
+    pub fn load_executable(self: *Loader, module: *const anyopaque, process_allocator: std.mem.Allocator) !Executable {
         const executable: Executable = .{
             .module = try Module.create(
                 self.kernel_allocator,
@@ -70,71 +105,67 @@ pub const Loader = struct {
                 true,
             ),
         };
-        try self.load_module(executable.module, module, stdout);
+        try self.load_module(executable.module, module, process_allocator);
         return executable;
     }
 
-    pub fn load_library(self: *Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !*Module {
+    pub fn load_library(self: *Loader, module: *const anyopaque, process_allocator: std.mem.Allocator) !*Module {
         const library: *Module = try Module.create(self.kernel_allocator, process_allocator, true);
-        try self.load_module(library, module, stdout);
+        try self.load_module(library, module, process_allocator);
         return library;
     }
 
     pub fn unload_module(self: *Loader, module: *Module) void {
         if (module.name) |name| {
-            var maybe_list = self.modules_list.getPtr(name);
-            if (maybe_list) |*list| {
-                list.*.remove(&module.list_node);
-                module.destroy();
+            log.debug("Unloading module: {s}", .{name});
+            const maybe_shared_data = self.modules_list.getPtr(name);
+            if (maybe_shared_data) |*shared_data| {
+                shared_data.*.users -= 1;
+                if (shared_data.*.users == 0) {
+                    log.debug("Removing shared data for: {s}", .{name});
+                    shared_data.*.shared_data.destroy();
+                    _ = self.modules_list.remove(name);
+                }
             }
+        } else {
+            log.err("unloading unknown module", .{});
         }
     }
 
-    fn load_module(self: *Loader, module: *Module, module_address: *const anyopaque, stdout: anytype) !void {
-        stdout.debug("parsing header\n", .{});
+    fn load_module(self: *Loader, module: *Module, module_address: *const anyopaque, process_allocator: std.mem.Allocator) !void {
+        log.debug("parsing header", .{});
         const header = self.process_header(module_address) catch |err| {
-            stdout.write("Wrong magic cookie, not a yaff file\n");
+            log.err("Wrong magic cookie, not a yaff file", .{});
             return err;
         };
-        print_header(header, stdout);
+        print_header(header);
 
-        const parser = Parser.create(header, stdout);
-        // parser.print(stdout);
+        const parser = Parser.create(header);
+        parser.print();
 
         try module.set_name(parser.name);
 
-        try self.import_child_modules(header, &parser, module, stdout);
+        try self.import_child_modules(header, &parser, module);
 
         // if module is already loaded just data must be loaded
-        const maybe_existing_module = self.modules_list.getPtr(parser.name);
-        if (maybe_existing_module) |*loaded| {
-            stdout.print("Module is already loaded, propagating .text for: {s}", .{parser.name});
-            const existing_module: *Module = @fieldParentPtr("list_node", loaded.*.first.?);
-            if (existing_module.shared_data) |data| {
-                module.add_shared_data(data);
-            } else {
-                stdout.print("Module '{s}' is already loaded, but shared data missing\n", .{parser.name});
-                return LoaderError.DataProcessingFailure;
-            }
-        }
-
-        // import modules
-        try self.process_data(header, &parser, module, stdout);
+        const shared_data = try self.get_shared_data(parser.name, process_allocator, &parser, module.xip);
+        module.add_shared_data(shared_data);
+        try self.process_data(header, &parser, module);
         // module.exported_symbols = parser.exported_symbols;
 
         const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
         try module.relocate_init(init_ptr[0..header.init_length], header);
-        module.process_initializers(stdout);
+        module.process_initializers();
 
-        try self.process_symbol_table_relocations(&parser, module, stdout, header);
-        try self.process_local_relocations(&parser, module, stdout);
-        try self.process_data_relocations(&parser, module, stdout);
+        try self.process_symbol_table_relocations(&parser, module, header);
+        try self.process_local_relocations(&parser, module);
+        try self.process_data_relocations(&parser, module);
 
-        stdout.debug(".text loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
-        stdout.debug(".plt  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
-        stdout.debug(".data loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
-        stdout.debug(".bss  loaded at 0x{x}, size: {x} for: {s}\n", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
-        stdout.debug(".got  loaded at 0x{x}, entr: {x} for: {s}\n", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
+        log.info(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
+        log.debug(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
+        log.debug(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
+        log.debug(".bss  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
+        log.debug(".got  loaded at 0x{x}, entr: {x} for: {s}", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
 
         if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
             var section: Section = .Unknown;
@@ -159,7 +190,8 @@ pub const Loader = struct {
             };
         }
     }
-    fn import_child_modules(self: *Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) LoaderError!void {
+
+    fn import_child_modules(self: *Loader, header: *const Header, parser: *const Parser, module: *Module) LoaderError!void {
         if (header.external_libraries_amount == 0) {
             return;
         }
@@ -170,11 +202,11 @@ pub const Loader = struct {
             it = library.next();
             index += 1;
         }) {
-            stdout.debug("loading child module '{s}'\n", .{library.data.name()});
+            log.debug("loading child module '{s}'", .{library.data.name()});
             const maybe_address = self.file_resolver(library.data.name());
             if (maybe_address) |address| {
                 const library_header = self.process_header(address) catch {
-                    stdout.print("Incorrect 'YAFF' marking for '{s}'\n", .{library.data.name()});
+                    log.err("Incorrect 'YAFF' marking for '{s}'", .{library.data.name()});
                     return error.ChildLoadingFailure;
                 };
                 if (@as(Type, @enumFromInt(library_header.module_type)) != Type.Library) {
@@ -182,31 +214,18 @@ pub const Loader = struct {
                 }
                 const child = try Module.create(module.allocator, module.process_allocator, true);
                 module.append_child(child);
-                self.load_module(child, address, stdout) catch |err| {
-                    stdout.print("Can't load child module '{s}': {s}\n", .{ library.data.name(), @errorName(err) });
+                self.load_module(child, address, module.process_allocator) catch |err| {
+                    log.err("Can't load child module '{s}': {s}", .{ library.data.name(), @errorName(err) });
                     return error.ChildLoadingFailure;
                 };
             } else {
-                stdout.print("Can't find child module '{s}'\n", .{library.data.name()});
+                log.err("Can't find child module '{s}'", .{library.data.name()});
                 return LoaderError.DependencyNotFound;
             }
         }
     }
 
-    fn process_data(_: Loader, header: *const Header, parser: *const Parser, module: *Module, stdout: anytype) !void {
-        _ = stdout;
-        if (module.shared_data == null) {
-            // we are first module that uses that data, initialization must be done
-            const shared_data = try LoadedSharedData.create(
-                module.allocator,
-                module.process_allocator,
-                &module.list_node,
-                module.xip,
-                parser,
-            );
-            module.shared_data = shared_data;
-        }
-
+    fn process_data(_: Loader, header: *const Header, parser: *const Parser, module: *Module) !void {
         // unique data must be always copied to RAM
         module.unique_data = try LoadedUniqueData.create(
             module.allocator,
@@ -220,7 +239,7 @@ pub const Loader = struct {
         }
     }
 
-    fn get_section_address_for_offset(module: *Module, header: *const Header, offset: usize, log: anytype) error{OffsetOutOfRange}!struct { section: usize, offset: usize } {
+    fn get_section_address_for_offset(module: *Module, header: *const Header, offset: usize) error{OffsetOutOfRange}!struct { section: usize, offset: usize } {
         const text_limit: usize = header.code_length;
         const init_offset: usize = text_limit + header.init_length;
         const plt_limit: usize = init_offset + header.plt_length;
@@ -246,12 +265,12 @@ pub const Loader = struct {
         }
     }
 
-    fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, stdout: anytype, header: *const Header) !void {
+    fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, header: *const Header) !void {
         var got = module.get_got();
-        stdout.debug("Processing symbol table relocations for GOT: {x}\n", .{@intFromPtr(got.ptr)});
+        log.debug("Processing symbol table relocations for GOT: {x}", .{@intFromPtr(got.ptr)});
         const maybe_init = self.find_symbol(module, "__start_data");
         if (maybe_init == null) {
-            stdout.debug("[yasld] Can't find symbol '__start_data'\n", .{});
+            log.debug("[yasld] Can't find symbol '__start_data'", .{});
         }
 
         for (0..got.len) |i| {
@@ -259,12 +278,12 @@ pub const Loader = struct {
                 continue;
             } // skip first three entries, they are reserved for the loader itself
 
-            const section_start = Loader.get_section_address_for_offset(module, header, got[i].symbol_offset, stdout) catch |err| {
-                stdout.print("[yasld] Can't find section for GOT[{d}]: {s}\n", .{ i, @errorName(err) });
+            const section_start = Loader.get_section_address_for_offset(module, header, got[i].symbol_offset) catch |err| {
+                log.err("[yasld] Can't find section for GOT[{d}]: {s}", .{ i, @errorName(err) });
                 return err;
             };
             const address = section_start.section + got[i].symbol_offset - section_start.offset;
-            stdout.debug("Setting GOT[{d}] to: 0x{x}\n", .{ i, address });
+            log.debug("Setting GOT[{d}] to: 0x{x}", .{ i, address });
             got[i].base_register = @intFromPtr(got.ptr);
             got[i].symbol_offset = address;
         }
@@ -279,16 +298,16 @@ pub const Loader = struct {
             if (maybe_symbol) |symbol| {
                 const maybe_symbol_entry = self.find_symbol(module, symbol.name());
                 if (maybe_symbol_entry) |symbol_entry| {
-                    stdout.debug("Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}\n", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });
+                    log.debug("Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });
                     got[rel.index].symbol_offset = symbol_entry.address;
                     got[rel.index].base_register = symbol_entry.target_got_address;
                 } else {
-                    stdout.print("[yasld] Can't find symbol: '{s}'\n", .{symbol.name()});
+                    log.err("[yasld] Can't find symbol: '{s}'\n", .{symbol.name()});
                     return LoaderError.SymbolNotFound;
                 }
             } else {
-                stdout.print("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}\n", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
-                // return LoaderError.SymbolNotFound;
+                log.err("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
+                return LoaderError.SymbolNotFound;
             }
         }
     }
@@ -301,32 +320,32 @@ pub const Loader = struct {
         return null;
     }
 
-    fn process_local_relocations(_: Loader, parser: *const Parser, module: *Module, logger: anytype) !void {
+    fn process_local_relocations(_: Loader, parser: *const Parser, module: *Module) !void {
         var got = module.get_got();
-        logger.debug("Processing local relocations for GOT: 0x{x}\n", .{@intFromPtr(got.ptr)});
+        log.debug("Processing local relocations for GOT: 0x{x}", .{@intFromPtr(got.ptr)});
         for (parser.local_relocations.relocations) |rel| {
             const relocated_start_address: usize = try module.get_base_address(@enumFromInt(rel.section));
             const relocated = relocated_start_address + rel.target_offset;
             got[rel.index].symbol_offset = relocated;
             got[rel.index].base_register = @intFromPtr(got.ptr);
 
-            logger.debug("Patching GOT[{d}] to: 0x{x}, section: {s}, target_offset: 0x{x}\n", .{ rel.index, got[rel.index].symbol_offset, @tagName(@as(Section, @enumFromInt(rel.section))), rel.target_offset });
+            log.debug("Patching GOT[{d}] to: 0x{x}, section: {s}, target_offset: 0x{x}", .{ rel.index, got[rel.index].symbol_offset, @tagName(@as(Section, @enumFromInt(rel.section))), rel.target_offset });
         }
     }
 
-    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module, stdout: anytype) !void {
+    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module) !void {
         for (parser.data_relocations.relocations) |rel| {
             var data_memory_address: usize = @intFromPtr(module.get_data().ptr);
             var rel_to = rel.to;
-            stdout.debug("Processing data relocation: relto: {x} -> data: {x}\n", .{ rel_to, module.get_data().len });
+            log.debug("Processing data relocation: relto: {x} -> data: {x}", .{ rel_to, module.get_data().len });
             if (rel_to > module.get_data().len) {
                 rel_to -= module.get_data().len;
                 data_memory_address = @intFromPtr(module.get_bss().ptr);
-                stdout.debug("Processing data relocation: relto: {x} -> bss: {x}\n", .{ rel_to, module.get_bss().len });
+                log.debug("Processing data relocation: relto: {x} -> bss: {x}", .{ rel_to, module.get_bss().len });
                 if (rel_to > module.get_bss().len) {
                     rel_to -= module.get_bss().len;
                     data_memory_address = @intFromPtr(module.get_got().ptr);
-                    stdout.debug("Processing data relocation: relto: {x} -> got: {x}\n", .{ rel_to, module.get_got().len * 8 });
+                    log.debug("Processing data relocation: relto: {x} -> got: {x}", .{ rel_to, module.get_got().len * 8 });
                     if (rel_to > module.get_got().len * 8) {
                         return LoaderError.DataProcessingFailure;
                     }
@@ -337,7 +356,7 @@ pub const Loader = struct {
             const target: *usize = @ptrFromInt(address_to_change);
             const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));
             const address_from: usize = base_address_from + rel.from;
-            stdout.debug("Patching from: 0x{x} to: 0x{x}, address_from: {x}, target: {x}\n", .{ rel.from, rel.to, address_from, @intFromPtr(target) });
+            log.debug("Patching from: 0x{x} to: 0x{x}, address_from: {x}, target: {x}", .{ rel.from, rel.to, address_from, @intFromPtr(target) });
 
             target.* = address_from;
         }
@@ -356,6 +375,12 @@ var loader_object: ?Loader = null;
 
 pub fn init(file_resolver: anytype, allocator: std.mem.Allocator) void {
     loader_object = Loader.create(file_resolver, allocator);
+}
+
+pub fn deinit() void {
+    if (loader_object) |*loader| {
+        loader.deinit();
+    }
 }
 
 pub fn get_loader() ?*Loader {

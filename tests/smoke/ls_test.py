@@ -19,22 +19,17 @@
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  """
 
-import pytest 
-import serial
+from .conftest import session_key
 
-from .framework.session import Session
+def test_list_rootfs(request):
+    session = request.node.stash[session_key] 
+    session.write_command("ls")
+    line = session.read_line_except_logs()
+    assert sorted([".", "..", "dev", "usr", "lib", "tmp", "bin", "proc" ]) == sorted(line.split())
 
-class TestLs:
-    def setup_class(self):
-        self.session = Session()
-
-    def test_list_rootfs(self):
-        self.session.write_command("ls")
-        line = self.session.read_line()
-        assert sorted([".", "..", "dev", "usr", "lib", "tmp", "bin" ]) == sorted(line.split())
-
-    def test_list_bin(self):
-        self.session.write_command("cd bin")
-        self.session.write_command("ls")
-        line = self.session.read_line()
-        assert set(["ls", "cat", "sh"]).issubset(line.split())
+def test_list_bin(request):
+    session = request.node.stash[session_key] 
+    session.write_command("cd bin")
+    session.write_command("ls")
+    line = session.read_line_except_logs()
+    assert set(["ls", "cat", "sh"]).issubset(line.split())

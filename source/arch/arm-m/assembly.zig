@@ -24,3 +24,10 @@ pub inline fn get_lr() u32 {
         : [ret] "=r" (-> u32),
     );
 }
+
+pub inline fn get_sp() u32 {
+    return asm volatile (
+        \\ mov %[ret], sp 
+        : [ret] "=r" (-> u32),
+    );
+}

@@ -15,9 +15,10 @@
 
 const std = @import("std");
 
-const IFile = @import("../../kernel/fs/ifile.zig").IFile;
+const kernel = @import("kernel");
+const IFile = kernel.fs.IFile;
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 pub const FileReader = struct {
     _device_file: IFile,
@@ -60,6 +61,7 @@ pub const FileReader = struct {
     pub fn read_string(self: *FileReader, allocator: std.mem.Allocator, offset: c.off_t) ![]u8 {
         _ = self._device_file.seek(self._offset + offset, c.SEEK_SET);
         var name_buffer: []u8 = try allocator.alloc(u8, 16);
+        @memset(name_buffer, 0);
 
         _ = self._device_file.read(name_buffer[0..]);
         while (std.mem.lastIndexOfScalar(u8, name_buffer, 0) == null) {
@@ -76,8 +78,8 @@ pub const FileReader = struct {
     }
 };
 
-const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
-test "RomFs FileReader should read data correctly" {
+test "RomFsFileReader.ShouldReadHeader" {
+    const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
     var romfs_device = RomfsDeviceStub.create(&std.testing.allocator, "source/fs/romfs/tests/test.romfs");
     defer romfs_device.destroy();
     const idriver = romfs_device.interface();

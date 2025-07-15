@@ -28,26 +28,31 @@ const IDriver = @import("idriver.zig").IDriver;
 
 const interface = @import("interface");
 
+const log = std.log.scoped(.@"vfs/driverfs");
+
 pub const DriverFs = struct {
     pub usingnamespace interface.DeriveFromBase(ReadOnlyFileSystem, DriverFs);
     base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
-    _container: std.ArrayList(IDriver),
+    _container: std.StringHashMap(IDriver),
 
     pub fn init(allocator: std.mem.Allocator) DriverFs {
+        log.info("created", .{});
         return .{
             .base = ReadOnlyFileSystem{},
             ._allocator = allocator,
-            ._container = std.ArrayList(IDriver).init(allocator),
+            ._container = std.StringHashMap(IDriver).init(allocator),
         };
     }
 
     pub fn delete(self: *DriverFs) void {
-        for (self._container.items) |*driver| {
-            driver.delete();
+        log.debug("deinitialization", .{});
+        var it = self._container.iterator();
+        while (it.next()) |driver| {
+            log.debug("removing driver: {s}", .{driver.value_ptr.name()});
+            driver.value_ptr.delete();
         }
         self._container.deinit();
-        self._allocator.destroy(self);
     }
 
     pub fn name(self: *const DriverFs) []const u8 {
@@ -55,13 +60,22 @@ pub const DriverFs = struct {
         return "drivers";
     }
 
-    pub fn append(self: *DriverFs, driver: IDriver) !void {
-        try self._container.append(driver);
+    pub fn append(self: *DriverFs, driver: IDriver, node_name: []const u8) !void {
+        log.debug("mapping driver '{s}' to '{s}' ", .{ driver.name(), node_name });
+        self._container.put(node_name, driver) catch |err| {
+            log.err("adding driver {s} failed with an error: {s}", .{ driver.name(), @errorName(err) });
+            return err;
+        };
     }
 
     pub fn load_all(self: *DriverFs) !void {
-        for (self._container.items) |*driver| {
-            try driver.load();
+        log.debug("loading all drivers", .{});
+        var it = self._container.iterator();
+        while (it.next()) |driver| {
+            driver.value_ptr.load() catch |err| {
+                log.err("Loading driver {s} failed with an error: {s}", .{ driver.value_ptr.name(), @errorName(err) });
+                return err;
+            };
         }
     }
 
@@ -73,9 +87,10 @@ pub const DriverFs = struct {
         return -1;
     }
 
-    pub fn get(self: *DriverFs, path: []const u8) ?IFile {
-        _ = self;
-        _ = path;
+    pub fn get(self: *DriverFs, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+        if (self._container.getPtr(path)) |driver| {
+            return driver.ifile(allocator);
+        }
         return null;
     }
 

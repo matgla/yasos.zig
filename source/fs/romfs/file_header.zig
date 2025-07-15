@@ -20,11 +20,13 @@
 
 const std = @import("std");
 
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
-const IFile = @import("../../kernel/fs/ifile.zig").IFile;
-const FileName = @import("../../kernel/fs/ifile.zig").FileName;
+const kernel = @import("kernel");
 
-const c = @import("../../libc_imports.zig").c;
+const FileType = kernel.fs.FileType;
+const IFile = kernel.fs.IFile;
+const FileName = kernel.fs.FileName;
+
+const c = @import("libc_imports").c;
 
 const FileReader = @import("file_reader.zig").FileReader;
 
@@ -58,12 +60,6 @@ pub const FileHeader = struct {
         };
     }
 
-    pub fn deinit(self: FileHeader) void {
-        if (self._name) |n| {
-            self._allocator.free(n);
-        }
-    }
-
     fn convert_filetype(ft: Type) FileType {
         switch (ft) {
             Type.HardLink => return FileType.HardLink,
@@ -90,14 +86,14 @@ pub const FileHeader = struct {
         return self._reader.read(u32, 8);
     }
 
-    pub fn name(self: *FileHeader) FileName {
-        const name_buffer = self._reader.read_string(self._allocator, 16) catch {
+    pub fn name(self: *FileHeader, allocator: std.mem.Allocator) FileName {
+        const name_buffer = self._reader.read_string(allocator, 16) catch {
             return .{
                 ._name = "",
                 ._allocator = null,
             };
         };
-        return FileName.init(name_buffer, self._allocator);
+        return FileName.init(name_buffer, allocator);
     }
 
     pub fn read(self: *FileHeader, comptime T: anytype, offset: c.off_t) T {
@@ -123,10 +119,6 @@ pub const FileHeader = struct {
     pub fn get_mapped_address(self: FileHeader) ?*const anyopaque {
         return @ptrFromInt(@intFromPtr(self._mapped_memory) + @as(usize, @intCast((self._reader.get_offset() - self._filesystem_offset + self._reader.get_data_offset()))));
     }
-    // pub fn data(self: FileHeader) []const u8 {
-    // const data_index = (self.start_index + self.name().len + 1 + 16 + (alignment - 1)) & ~(alignment - 1);
-    // return self.memory[data_index .. data_index + self.size()];
-    // }
 
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result
     // if result is equal to 0, then checksum is correct

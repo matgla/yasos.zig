@@ -18,6 +18,8 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
+
 const IFile = @import("ifile.zig").IFile;
 
 const interface = @import("interface");
@@ -49,8 +51,8 @@ fn FileSystemInterface(comptime SelfType: type) type {
             return interface.VirtualCall(self, "umount", .{}, i32);
         }
 
-        pub fn create(self: *Self, path: []const u8, flags: i32) ?IFile {
-            return interface.VirtualCall(self, "create", .{ path, flags }, ?IFile);
+        pub fn create(self: *Self, path: []const u8, flags: i32, allocator: std.mem.Allocator) ?IFile {
+            return interface.VirtualCall(self, "create", .{ path, flags, allocator }, ?IFile);
         }
 
         pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
@@ -69,8 +71,8 @@ fn FileSystemInterface(comptime SelfType: type) type {
             return interface.VirtualCall(self, "traverse", .{ path, callback, user_context }, i32);
         }
 
-        pub fn get(self: *Self, path: []const u8) ?IFile {
-            return interface.VirtualCall(self, "get", .{path}, ?IFile);
+        pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+            return interface.VirtualCall(self, "get", .{ path, allocator }, ?IFile);
         }
 
         pub fn has_path(self: *const Self, path: []const u8) bool {
@@ -102,10 +104,11 @@ pub const ReadOnlyFileSystem = struct {
         return 0; // Read-only filesystem does not need to do anything on unmount
     }
 
-    pub fn create(self: *Self, path: []const u8, flags: i32) ?IFile {
+    pub fn create(self: *Self, path: []const u8, flags: i32, allocator: std.mem.Allocator) ?IFile {
         _ = self;
         _ = path;
         _ = flags;
+        _ = allocator;
         return null; // Read-only filesystem does not allow file creation
     }
 

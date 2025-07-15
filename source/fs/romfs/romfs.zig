@@ -18,10 +18,12 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const ReadOnlyFileSystem = @import("../../kernel/fs/ifilesystem.zig").ReadOnlyFileSystem;
-const IFile = @import("../../kernel/fs/fs.zig").IFile;
-const IDirectoryIterator = @import("../../kernel/fs/ifilesystem.zig").IDirectoryIterator;
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const kernel = @import("kernel");
+
+const ReadOnlyFileSystem = kernel.fs.ReadOnlyFileSystem;
+const IFile = kernel.fs.IFile;
+const IDirectoryIterator = kernel.fs.IDirectoryIterator;
+const FileType = kernel.fs.FileType;
 
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
 
@@ -31,11 +33,11 @@ const RomFsDirectoryIterator = @import("romfs_directory_iterator.zig").RomFsDire
 
 const interface = @import("interface");
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const std = @import("std");
 
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+const log = kernel.log;
 
 pub const RomFs = struct {
     pub usingnamespace interface.DeriveFromBase(ReadOnlyFileSystem, RomFs);
@@ -68,7 +70,7 @@ pub const RomFs = struct {
     }
 
     pub fn delete(self: *RomFs) void {
-        _ = self;
+        self.device_file.delete();
     }
 
     // RomFs interface
@@ -85,10 +87,10 @@ pub const RomFs = struct {
         return error.NotRomFsFileSystem;
     }
 
-    pub fn get(self: *RomFs, path: []const u8) ?IFile {
+    pub fn get(self: *RomFs, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
-            return RomFsFile.create(node, self.allocator).new(self.allocator) catch return null;
+            return RomFsFile.create(node, allocator).new(allocator) catch return null;
         }
         return null;
     }
@@ -122,7 +124,7 @@ pub const RomFs = struct {
             return null;
         }
         while (component) |part| : (component = it.next()) {
-            var filename = maybe_node.?.name();
+            var filename = maybe_node.?.name(self.allocator);
             while (!std.mem.eql(u8, filename.get_name(), part.name)) {
                 maybe_node = maybe_node.?.next();
                 if (maybe_node == null) {
@@ -131,8 +133,9 @@ pub const RomFs = struct {
                 }
 
                 filename.deinit();
-                filename = maybe_node.?.name();
+                filename = maybe_node.?.name(self.allocator);
             }
+            filename.deinit();
             // if symbolic link then fetch target node
             if (maybe_node) |*node| {
                 if (node.filetype() == FileType.SymbolicLink) {
@@ -200,8 +203,8 @@ fn traverse_dir(file: *IFile, _: *anyopaque) bool {
     return true;
 }
 
-test "Parsing filesystem" {
-    const test_data = @embedFile("test.romfs");
+test "Romfs.ShouldParseFilesystem" {
+    const test_data = @embedFile("tests/test.romfs");
     expected_directories = std.ArrayList([]const u8).init(std.testing.allocator);
     defer expected_directories.deinit();
     var maybe_fs = RomFs.init(std.testing.allocator, test_data);

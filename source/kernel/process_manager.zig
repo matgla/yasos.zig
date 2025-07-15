@@ -21,14 +21,16 @@ const std = @import("std");
 
 const hal = @import("hal");
 
-const process = @import("process.zig");
-const Process = process.Process;
 const config = @import("config");
-
-var log = &@import("../log/kernel_log.zig").kernel_log;
-
+const kernel = @import("kernel.zig");
+const process = kernel.process;
+const Process = process.Process;
+const log = std.log.scoped(.process_manager);
 const dynamic_loader = @import("modules.zig");
 const SymbolEntry = @import("yasld").SymbolEntry;
+const system_call = @import("interrupts/system_call.zig");
+const c = @import("libc_imports").c;
+const handlers = @import("interrupts/syscall_handlers.zig");
 
 const Scheduler = if (config.scheduler.round_robin)
     @import("scheduler/round_robin.zig").RoundRobin
@@ -52,20 +54,40 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         processes: ContainerType,
         allocator: std.mem.Allocator,
         scheduler: SchedulerType,
+        _process_memory_pool: kernel.memory.heap.ProcessMemoryPool,
 
-        pub fn create(allocator: std.mem.Allocator) Self {
-            log.print(" - process manager initialization with scheduler: {s}\n", .{@typeName(SchedulerType)});
+        pub fn init(allocator: std.mem.Allocator) Self {
+            log.debug("Using scheduler '{s}'", .{SchedulerGeneratorType(Self).Name});
+            const processes_memory_pool = kernel.memory.heap.ProcessMemoryPool.init(allocator) catch |err| {
+                log.err("Processes memory pool initialization failed: '{s}'", .{@errorName(err)});
+                unreachable;
+            };
+
             return Self{
                 .processes = .{},
                 .allocator = allocator,
                 .scheduler = SchedulerType{},
+                ._process_memory_pool = processes_memory_pool,
             };
         }
 
+        pub fn deinit(self: *Self) void {
+            self._process_memory_pool.deinit();
+            var next = self.processes.first;
+            while (next) |node| {
+                const p: *Process = @fieldParentPtr("node", node);
+                p.deinit();
+                next = node.next;
+            }
+        }
+
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
-            var new_process = try Process.create(self.allocator, stack_size, process_entry, args, cwd);
-            log.print(" - creating process with PID: {d}\n", .{new_process.pid});
+            var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool);
             return self.processes.append(&new_process.node);
+        }
+
+        pub fn get_process_memory_pool(self: Self) kernel.memory.heap.ProcessMemoryPool {
+            return self._process_memory_pool;
         }
 
         pub fn delete_process(self: *Self, pid: u32) void {
@@ -75,17 +97,23 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                 next = node.next;
                 if (p.pid == pid) {
                     p.unblock_parent();
-                    const allocator = p._allocator;
                     self.processes.remove(&p.node);
                     dynamic_loader.release_executable(pid);
                     p.deinit();
-                    allocator.destroy(p);
+                    self.allocator.destroy(p);
                     if (self.scheduler.current == &p.node) {
                         self.scheduler.current = null;
+                        if (self.processes.len() == 0) {
+                            var data: u32 = 0;
+                            _ = handlers.sys_stop_root_process(&data) catch {
+                                @panic("ProcessManager: can't get back to main");
+                            };
+                        }
+
                         if (self.scheduler.schedule_next()) {
                             switch_to_next_task();
                         } else {
-                            @panic("ProcessManager: No process to schedule\n");
+                            @panic("ProcessManager: No process to schedule");
                         }
                     }
                     break;
@@ -125,7 +153,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         pub fn vfork(self: *Self) !i32 {
             const maybe_current_process = self.scheduler.get_current();
             if (maybe_current_process) |current_process| {
-                const new_process = current_process.vfork() catch {
+                const new_process = current_process.vfork(&self._process_memory_pool) catch {
                     return -1;
                 };
 
@@ -155,7 +183,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             const maybe_current_process = self.scheduler.get_current();
             if (maybe_current_process) |p| {
                 // TODO: move loader to struct, pass allocator to loading functions
-                const executable = try dynamic_loader.load_executable(path, p.memory_pool_allocator.std_allocator(), p.pid);
+                const executable = try dynamic_loader.load_executable(path, p.get_memory_allocator(), p.get_process_memory_allocator(), p.pid);
                 var argc: usize = 0;
                 while (argv[argc] != null) : (argc += 1) {}
 
@@ -195,6 +223,10 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         pub fn initialize_context_switching(_: Self) void {
             process.initialize_context_switching();
         }
+
+        pub fn is_empty(self: Self) bool {
+            return self.processes.len() == 0;
+        }
     };
 }
 pub const ProcessManager = ProcessManagerGenerator(Scheduler);
@@ -205,8 +237,13 @@ extern fn context_switch_push_registers_to_stack(stack_pointer: *u8) *u8;
 pub var instance: ProcessManager = undefined;
 
 pub fn initialize_process_manager(allocator: std.mem.Allocator) void {
-    instance = ProcessManager.create(allocator);
+    log.info("Process manager initialization...", .{});
+    instance = ProcessManager.init(allocator);
     instance.scheduler.manager = &instance;
+}
+
+pub fn deinitialize_process_manager() void {
+    instance.deinit();
 }
 
 export fn get_next_task() *const u8 {
