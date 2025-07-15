@@ -28,12 +28,12 @@ const c = @cImport({
 });
 
 export fn irq_hard_fault() void {
-    // log.print("PANIC: Hard Fault occured!\n", .{});
-    while (true) {
-        asm volatile (
-            \\ wfi
-        );
-    }
+    @panic("Hard fault occured");
+    // while (true) {
+    //     asm volatile (
+    //         \\ wfi
+    //     );
+    // }
 }
 pub const VForkContext = extern struct {
     lr: usize,

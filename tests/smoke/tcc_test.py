@@ -20,16 +20,28 @@
  """
 
 from .conftest import session_key
+import random
 
-def test_list_rootfs(request):
+def test_compile_hello_world_with_usage_tracking(request):
+    prevusage = None
     session = request.node.stash[session_key] 
-    session.write_command("ls")
-    line = session.read_line_except_logs()
-    assert sorted([".", "..", "dev", "usr", "lib", "tmp", "bin" ]) == sorted(line.split())
+    for i in range(10):
+        session.write_command("tcc /usr/hello_world.c -o /tmp/hello")
+        data = session.wait_for_prompt()
+        usage = data.split("\n")[-2].split()[-1]
+        if prevusage != None:
+            assert prevusage == usage, "Memory usage should be the same after first file created in tmp"
+        prevusage = usage   
+        print(usage)
+        session.write_command("/tmp/hello")
+        data = session.read_line_except_logs()
+        assert "Hello, World!" in data
+        data = session.read_line_except_logs()
+        assert "This is a simple C program." in data
+        number = str(random.randint(0, 200000))
+        session.write_command(number)
+        data = session.read_line_except_logs()
+        assert "You entered: " + number in data
+        data = session.wait_for_prompt()
+    
 
-def test_list_bin(request):
-    session = request.node.stash[session_key] 
-    session.write_command("cd bin")
-    session.write_command("ls")
-    line = session.read_line_except_logs()
-    assert set(["ls", "cat", "sh"]).issubset(line.split())

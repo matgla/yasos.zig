@@ -19,30 +19,25 @@
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  """
 
-import pytest 
-import serial
+from .conftest import session_key
 
-from .framework.session import Session
-
-def test_change_dir():
-    session = Session()
+def test_change_dir(request):
+    session = request.node.stash[session_key]
     session.write_command("pwd")
-    line = session.read_line()
+    line = session.read_line_except_logs()
     assert line == "/"
- 
+    
     session.write_command("cd bin")
     session.write_command("ls")
-    line = session.read_line()
+    line = session.read_line_except_logs()
     assert set(["ls", "cat", "sh"]).issubset(line.split())
 
     session.write_command("pwd")
-    line = session.read_line()
+    line = session.read_line_except_logs()
     assert line == "/bin"
 
     session.write_command("cd ..")
     session.write_command("pwd")
-    line = session.read_line()
+    line = session.read_line_except_logs()
     assert line == "/"
     
-    session.close()
-

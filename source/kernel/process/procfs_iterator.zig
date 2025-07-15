@@ -17,23 +17,37 @@
 // IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub const memory = @import("memory/memory.zig");
-pub const log = @import("kernel_log.zig").log;
-pub const kernel_stdout_log = @import("kernel_log.zig").kernel_stdout_log;
-pub const stdout = @import("stdout.zig");
+const std = @import("std");
 
-pub const process = struct {
-    pub const process_manager = @import("process_manager.zig");
-    pub const Process = @import("process.zig").Process;
-    pub const initialize_context_switching = @import("process.zig").initialize_context_switching;
-    pub const init = @import("process.zig").init;
-    pub const ProcFs = @import("process/procfs.zig").ProcFs;
+const interface = @import("interface");
+const kernel = @import("../kernel.zig");
+
+pub const ProcInfo = struct {
+    file: kernel.fs.IFile,
+    node: std.DoublyLinkedList.Node,
 };
 
-pub const spawn = @import("spawn.zig");
-pub const fs = @import("fs/fs.zig");
-pub const dynamic_loader = @import("modules.zig");
+pub const ProcFsIterator = struct {
+    pub usingnamespace interface.DeriveFromBase(kernel.fs.IDirectoryIterator, ProcFsIterator);
+    pub const Self = @This();
+    _node: ?*std.DoublyLinkedList.Node,
 
-pub const irq = @import("interrupts/interrupts.zig");
+    pub fn create(first_node: ?*std.DoublyLinkedList.Node) ProcFsIterator {
+        return .{
+            ._node = first_node,
+        };
+    }
 
-pub const driver = @import("drivers/drivers.zig");
+    pub fn next(self: *Self) ?kernel.fs.IFile {
+        if (self._node) |node| {
+            self._node = node.*.next;
+            const info: *ProcInfo = @fieldParentPtr("node", node);
+            return info.file.share();
+        }
+        return null;
+    }
+
+    pub fn delete(self: *Self) void {
+        _ = self;
+    }
+};

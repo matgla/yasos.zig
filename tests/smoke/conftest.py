@@ -19,17 +19,22 @@
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  """
 
-from .conftest import session_key
 
-def test_list_rootfs(request):
-    session = request.node.stash[session_key] 
-    session.write_command("ls")
-    line = session.read_line_except_logs()
-    assert sorted([".", "..", "dev", "usr", "lib", "tmp", "bin" ]) == sorted(line.split())
+import pytest
 
-def test_list_bin(request):
-    session = request.node.stash[session_key] 
-    session.write_command("cd bin")
-    session.write_command("ls")
-    line = session.read_line_except_logs()
-    assert set(["ls", "cat", "sh"]).issubset(line.split())
+from .framework.session import Session
+
+session_key = pytest.StashKey()
+
+@pytest.hookimpl
+def pytest_runtest_setup(item):
+    item.stash[session_key] = Session(item.name)
+    
+@pytest.hookimpl
+def pytest_runtest_teardown(item):
+    session = item.stash[session_key] 
+    session.write_command("exit")
+    data = session.wait_for_data("You can turn off your PC now!")
+    assert not "Memory leaks detected" in data
+    session.close() 
+    

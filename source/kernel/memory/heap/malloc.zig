@@ -29,6 +29,10 @@ const arch = @import("arch");
 var memory_in_use: isize = 0;
 var surpressed_memory: isize = 0;
 
+pub fn get_usage() usize {
+    return if (memory_in_use < 0) 0 else @intCast(memory_in_use);
+}
+
 const Tracker = extern struct {
     next: ?*Tracker,
     prev: ?*Tracker,
@@ -111,7 +115,6 @@ pub fn MallocAllocator(comptime options: anytype) type {
         };
 
         pub const Self = @This();
-
         pub fn init() Self {
             return .{};
         }

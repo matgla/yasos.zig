@@ -50,7 +50,6 @@ fn get_log_level() std.log.Level {
     if (config.instrumentation.log_error) {
         return .err;
     }
-
     return .err;
 }
 
@@ -63,7 +62,17 @@ pub const std_options: std.Options = .{
         .{
             .scope = .yasld,
             .level = .err,
-        }, // .{
+        },
+        .{
+            .scope = .@"vfs/procfs",
+            .level = .debug,
+        },
+        .{
+            .scope = .@"vfs/meminfo",
+            .level = .debug,
+        },
+
+        // .{
         //     .scope = .@"yasld/module",
         //     .level = .info,
         // }, .{
@@ -157,6 +166,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         try mount_filesystem(try allocate_filesystem(allocator, RomFs.init(allocator, flash.*, 0x80000)), "/");
         try mount_filesystem(try allocate_filesystem(allocator, RamFs.init(allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
+        try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.init(allocator)), "/proc");
     } else {
         kernel.log.err("Can't get Flash Driver", .{});
     }
@@ -202,7 +212,7 @@ fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, 
         kernel.log.err("Can't register: stderr", .{});
     };
 }
-const KernelAllocator = kernel.memory.heap.MallocAllocator(.{
+const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
     .leak_detection = config.instrumentation.enable_memory_leak_detection,
     .verbose = config.instrumentation.verbose_allocators,
     .dump_stats = config.instrumentation.print_memory_usage,
@@ -260,13 +270,10 @@ pub export fn main() void {
         };
         defer kernel.fs.get_vfs().deinit();
 
-        kernel.spawn.root_process(&kernel_process, &allocator, 1024 * 16) catch @panic("Can't spawn root process: ");
-        kernel.process.init();
-        while (!kernel.process.process_manager.instance.is_empty()) {
-            //     // hal.time.sleep_ms(1000);
-        }
+        // we need to get real return address to get back from user mode successfully
+        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, &allocator, 1024 * 16 }) catch @panic("Can't spawn root process: ");
         kernel.log.warn("Root process died", .{});
     }
-    KernelAllocator.detect_leaks();
-    kernel.stdout.print("Now you can turn off PC!\n", .{});
+    @call(.never_inline, KernelAllocator.detect_leaks, .{});
+    kernel.stdout.print("You can turn off your PC now!\n", .{});
 }

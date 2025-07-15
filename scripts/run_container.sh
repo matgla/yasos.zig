@@ -71,19 +71,14 @@ if [[ -n "$MATCHED_DEVICE" && "$(uname)" != "Darwin" ]]; then
     # Find the corresponding UART device (assuming /dev/ttyUSB or /dev/ttyACM)
     UART_DEVICES=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null)
     for UART_DEVICE in $UART_DEVICES; do
-        VENDOR_ID=$(udevadm info --query property --name="$UART_DEVICE" | grep 'ID_VENDOR_ID' | cut -d'=' -f2)
-        MODEL_ID=$(udevadm info --query property --name="$UART_DEVICE" | grep 'ID_MODEL_ID' | cut -d'=' -f2)
-        if [[ "$VENDOR_ID:$MODEL_ID" == "$MATCHED_DEVICE" ]]; then
-            PROBE_UART_DEVICE="$UART_DEVICE"
-            break
-        fi
+        PROBE_UART_DEVICE="$PROBE_UART_DEVICE--device=$UART_DEVICE:$UART_DEVICE "
     done
 fi
 
 CONTAINER_MOUNT_UART=""
 if [ ! -z "$PROBE_UART_DEVICE" ]; then
-    echo "Found probe UART device: $PROBE_UART_DEVICE"
-    CONTAINER_MOUNT_UART="--device=$PROBE_UART_DEVICE:/dev/ttyACM0 --device=/dev/bus/usb"
+    echo "Found probe UART devices: $PROBE_UART_DEVICE"
+    CONTAINER_MOUNT_UART="$PROBE_UART_DEVICE --device=/dev/bus/usb"
 fi
 
 if [[ -z "$CONTAINER_INTERACTIVE" && -z "$COMMAND" ]]; then
