@@ -19,6 +19,13 @@ pub fn dump_stack_trace(log: anytype, address: usize) void {
     var index: usize = 0;
     var stack = std.debug.StackIterator.init(address, null);
     while (stack.next()) |return_address| : (index += 1) {
-        log.print("  {d: >3}: 0x{X:0>8}\n", .{ index, return_address - 1 });
+        log.err("  {d: >3}: 0x{X:0>8}", .{ index, return_address - 1 });
     }
+}
+
+pub fn get_stack_trace_depth(address: usize) usize {
+    var index: usize = 0;
+    var stack = std.debug.StackIterator.init(address, null);
+    while (stack.next()) |_| : (index += 1) {}
+    return index;
 }

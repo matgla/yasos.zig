@@ -14,5 +14,5 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 comptime {
-    _ = @import("fs/mount_points.zig");
+    // _ = @import("fs/mount_points.zig");
 }

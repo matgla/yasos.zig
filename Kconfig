@@ -72,6 +72,30 @@ endchoice
 
 endmenu
 
+menu "Logging & Instrumentation"
+  config CONFIG_INSTRUMENTATION_ENABLE_MEMORY_LEAK_DETECTION
+    prompt "Enable leak detection"
+    def_bool "false"
+  config CONFIG_INSTRUMENTATION_VERBOSE_ALLOCATORS
+    prompt "Enable verbose kernel allocator"
+    def_bool "false"
+  config CONFIG_INSTRUMENTATION_PRINT_MEMORY_USAGE 
+    prompt "Enable kernel allocator memory usage"
+    def_bool "false"
+ 
+  choice "Log level"
+    prompt "Log level"
+    config CONFIG_INSTRUMENTATION_LOG_ERROR
+      bool "error" 
+    config CONFIG_INSTRUMENTATION_LOG_WARNING
+      bool "warning"
+    config CONFIG_INSTRUMENTATION_LOG_INFO
+      bool "info"
+    config CONFIG_INSTRUMENTATION_LOG_DEBUG
+      bool "debug"
+ endchoice 
+endmenu
+
 menu "Filesystem Options"
   rsource "source/fs/KConfig"
 

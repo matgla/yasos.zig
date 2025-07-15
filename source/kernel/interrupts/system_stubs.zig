@@ -19,9 +19,10 @@
 //
 
 const std = @import("std");
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+const kernel = @import("kernel");
+const log = kernel.log;
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 const fs = @import("../fs/vfs.zig");
 const IFile = @import("../fs/ifile.zig").IFile;
 const systick = @import("systick.zig");
@@ -34,13 +35,14 @@ const FileType = @import("../fs/ifile.zig").FileType;
 const handlers = @import("syscall_handlers.zig");
 
 pub export fn _exit(code: c_int) void {
+    _ = code;
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
         process_manager.instance.delete_process(process.pid);
     } else {
         @panic("No process found");
     }
-    log.print("Process exited with code {d}\n", .{code});
+    // log.print("Process exited with code {d}\n", .{code});
 }
 
 export fn _kill(_: c.pid_t, _: c_int) c.pid_t {

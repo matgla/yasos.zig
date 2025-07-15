@@ -20,27 +20,36 @@
  """
 
 import os
+import time 
 import datetime
+import subprocess
+import re
 
 import serial
-import pytest
 from pyocd.core.helpers import ConnectHelper
 from .detect_serial_port import detect_probe_serial_port
 
+current_dir = os.path.dirname(os.path.abspath(__file__)) + "/.."
 
 class Session:
     serial_port = None 
     file = None
-    def __init__(self): 
+    def __init__(self, name): 
         if Session.serial_port is None:
-            Session.serial_port = detect_probe_serial_port()
+            serial_device = os.environ.get("SERIAL_DEVICE")
+            
+            if serial_device != None and len(serial_device.strip()) > 0:
+                print("Setting serialport to:", serial_device)
+                Session.serial_port = serial_device
+            else:
+                Session.serial_port = detect_probe_serial_port()
         if Session.serial_port is None:
             raise RuntimeError("No serial port found for the debug probe.")
         self.serial = serial.Serial(Session.serial_port, 921600, timeout=10)
         self.serial.read_all()
         self.serial.flushOutput()
         os.makedirs("logs", exist_ok=True)
-        log_file = os.environ.get('PYTEST_CURRENT_TEST').split(':')[-1].split(' ')[0]
+        log_file = name.split(':')[-1].split(' ')[0]
         date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         log_file = f"logs/{log_file}_{date}.txt"
         self.file = open(log_file, 'w') 
@@ -50,39 +59,55 @@ class Session:
             self.wait_for_prompt()
 
     def wait_for_prompt(self):
-        line = self.serial.read_until("$ ".encode('utf-8')).decode('utf-8')
+        return self.wait_for_data("$ ") 
+        
+    def wait_for_data(self, data):
+        line = self.serial.read_until(data.encode('utf-8')).decode('utf-8')
         self.file.write(line)
         line = line.strip()
-        if not line.endswith("$"):
-            raise RuntimeError("Prompt not found after reset")
+        if not line.endswith(data.strip()):
+            raise RuntimeError("Prompt not found on serial port: '" + data + "'")       
+        return line
 
     def write_command(self, command):
         self.serial.write((command + '\n').encode('utf-8'))
-        line = self.serial.readline().decode('utf-8')
-        self.file.write(line)
-        line = line.strip()
+        data = self.wait_for_data(command + '\n');
+        line = data.strip()
         assert command in line, f"expected command '{command}' not found in: {line}"
 
     def read_line(self):
         line = self.serial.readline().decode('utf-8')
         self.file.write(line) 
         line = line.strip()
-        
         return line
+
+    def read_line_except(self, regex):
+        while True:
+            line = self.serial.readline().decode('utf-8')
+            self.file.write(line) 
+            line = line.strip()
+            if not re.search(regex, line):
+                return line
+        return ""
+
+    def read_line_except_logs(self):
+         while True:
+            line = self.serial.readline().decode('utf-8')
+            self.file.write(line) 
+            if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
+                continue
+            return line.strip()
     
     def reset_target(self):
-        session = ConnectHelper.session_with_chosen_probe(options={
-            "target_override": "rp2350",
-        })
-        if session is None:
-            raise RuntimeError("No debug probe found.")
-        session.open()
-        try:
-            session.target.reset()
-        finally:
-            session.close()
+        self.file.write("Resetting target with command: " + current_dir + "/reset_target.sh\n")
+        output = subprocess.run("./reset_target.sh", shell=True, cwd=current_dir, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        if (output.returncode != 0):
+            output = subprocess.run("./reset_target.sh", shell=True, cwd=current_dir, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        self.file.write(output.stdout.decode('utf-8'))
+        
 
     def close(self):
         self.serial.close()
         self.file.close()
+
 

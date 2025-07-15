@@ -78,6 +78,7 @@ fi
 mkdir -p rootfs
 mkdir -p rootfs/usr/include
 mkdir -p rootfs/usr/lib
+mkdir -p rootfs/proc
 cd rootfs
 ln -s usr/lib  
 ln -s usr/bin

@@ -3,7 +3,7 @@
 SCRIPT_DIR=$(dirname "$0")
 cd $SCRIPT_DIR
 
-pytest -W error -s
+SERIAL_DEVICE="$1" pytest -W error -s
 
 if [ $? -ne 0 ]; then
     echo "Tests failed"

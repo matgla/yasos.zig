@@ -33,16 +33,16 @@ pub fn ExternalMemory(comptime ExternalMemoryImpl: anytype) type {
             self.impl.disable();
         }
 
-        pub fn dump_configuration(self: Self, stdout: anytype) void {
-            self.impl.dump_configuration(stdout);
+        pub fn dump_configuration(self: Self) void {
+            self.impl.dump_configuration();
         }
 
         pub fn get_memory_size(self: Self) usize {
             return self.impl.get_memory_size();
         }
 
-        pub fn perform_post(self: *Self, stdout: anytype) bool {
-            return self.impl.perform_post(stdout);
+        pub fn perform_post(self: *Self) bool {
+            return self.impl.perform_post();
         }
     };
 }

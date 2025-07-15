@@ -33,17 +33,15 @@ pub const FlashDriver = struct {
     const FlashType = @TypeOf(board.flash.flash0);
 
     _flash: FlashType,
-    _allocator: std.mem.Allocator,
 
-    pub fn create(flash: FlashType, allocator: std.mem.Allocator) FlashDriver {
+    pub fn create(flash: FlashType) FlashDriver {
         return .{
             ._flash = flash,
-            ._allocator = allocator,
         };
     }
 
-    pub fn ifile(self: *FlashDriver) ?IFile {
-        const file = FlashFile(FlashType).create(self._allocator, &self._flash).new(self._allocator) catch {
+    pub fn ifile(self: *FlashDriver, allocator: std.mem.Allocator) ?IFile {
+        const file = FlashFile(FlashType).create(allocator, &self._flash).new(allocator) catch {
             return null;
         };
         return file;
@@ -60,5 +58,10 @@ pub const FlashDriver = struct {
 
     pub fn delete(self: *FlashDriver) void {
         _ = self;
+    }
+
+    pub fn name(self: *const FlashDriver) []const u8 {
+        _ = self;
+        return "flash";
     }
 };

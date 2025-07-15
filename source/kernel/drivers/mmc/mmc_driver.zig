@@ -31,8 +31,6 @@ pub fn MmcDriver(comptime MmcType: anytype) type {
             .destroy = _destroy,
         };
 
-        _allocator: std.mem.Allocator,
-
         pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
             const object = try allocator.create(Self);
             object.* = Self.create(allocator);
@@ -43,10 +41,8 @@ pub fn MmcDriver(comptime MmcType: anytype) type {
             self._allocator.destroy(self);
         }
 
-        pub fn create(allocator: std.mem.Allocator) Self {
-            return .{
-                ._allocator = allocator,
-            };
+        pub fn create() Self {
+            return .{};
         }
 
         pub fn idriver(self: *Self) IDriver {
@@ -69,8 +65,8 @@ pub fn MmcDriver(comptime MmcType: anytype) type {
             return true;
         }
 
-        fn ifile(ctx: *anyopaque) ?IFile {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        fn ifile(self: *anyopaque) ?IFile {
+            // const self: *Self = @ptrCast(@alignCast(ctx));
             const file = MmcFile(mmc).new(self._allocator) catch {
                 return null;
             };

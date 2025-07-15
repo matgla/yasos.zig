@@ -22,6 +22,8 @@ const std = @import("std");
 const config = @import("config");
 const exc_return = @import("exc_return.zig");
 
+const kernel = @import("kernel");
+
 const hal = @import("hal");
 
 // This must be reimplemented for armv6-m
@@ -213,31 +215,31 @@ pub fn dump_registers_on_stack(result_ptr: usize, ret: usize, lr: usize, restore
 }
 
 pub const ArmProcess = struct {
+    const Self = @This();
+
     const stack_marker: u32 = 0xdeadbeef;
     stack: []align(8) u8,
     stack_position: *u8,
     has_own_stack: bool = true,
-    memory_pool_allocator: std.mem.Allocator,
 
-    pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype) !ArmProcess {
-        const stack = try allocator.alignedAlloc(u8, .@"8", stack_size);
+    pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype) !Self {
+        const stack = try process_allocator.alignedAlloc(u8, .@"8", stack_size);
         if (comptime config.process.use_stack_overflow_detection) {
             @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
         }
-        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, null);
+        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg);
         return ArmProcess{
             .stack = stack,
             .stack_position = stack_position,
             .has_own_stack = true,
-            .memory_pool_allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *ArmProcess) void {
-        self.memory_pool_allocator.free(self.stack);
+    pub fn deinit(self: *Self, process_allocator: std.mem.Allocator) void {
+        process_allocator.free(self.stack);
     }
 
-    pub fn stack_pointer(self: *const ArmProcess) *const u8 {
+    pub fn stack_pointer(self: *const Self) *const u8 {
         if (config.process.use_stack_overflow_detection) {
             if (!self.validate_stack()) {
                 if (!config.process.use_mpu_stack_protection) {
@@ -250,7 +252,7 @@ pub const ArmProcess = struct {
         return self.stack_position;
     }
 
-    pub fn set_stack_pointer(self: *ArmProcess, ptr: *u8, blocked_by_process: ?*ArmProcess) void {
+    pub fn set_stack_pointer(self: *Self, ptr: *u8, blocked_by_process: ?*Self) void {
         // if the process is using its parent stack, then we have to copy stack to parent
         // and set stack position to the freshly pushed registers
         if (!self.has_own_stack) {
@@ -271,22 +273,21 @@ pub const ArmProcess = struct {
         }
     }
 
-    pub fn vfork(self: *ArmProcess, allocator: std.mem.Allocator) !ArmProcess {
-        const stack: []align(8) u8 = try allocator.alignedAlloc(u8, .@"8", self.stack.len);
+    pub fn vfork(self: *Self, process_allocator: std.mem.Allocator) !Self {
+        const stack: []align(8) u8 = try process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
         const stack_position = self.stack_position;
         @memcpy(stack, self.stack);
         const parent_stack = self.stack;
         self.stack = stack;
         self.has_own_stack = false;
-        return ArmProcess{
+        return .{
             .stack = parent_stack,
             .stack_position = stack_position,
             .has_own_stack = false,
-            .memory_pool_allocator = allocator,
         };
     }
 
-    pub fn reinitialize_stack(self: *ArmProcess, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) void {
+    pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) void {
         if (comptime config.process.use_stack_overflow_detection) {
             @memcpy(self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
         }
@@ -299,12 +300,12 @@ pub const ArmProcess = struct {
         self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4]);
     }
 
-    pub fn validate_stack(self: *const ArmProcess) bool {
+    pub fn validate_stack(self: *const Self) bool {
         if (!config.process.use_stack_overflow_detection) @compileError("Stack overflow detection is disabled in config!");
         return std.mem.eql(u8, self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
     }
 
-    pub fn restore_stack(self: *ArmProcess, blocks_process: ?*ArmProcess) void {
+    pub fn restore_stack(self: *Self, blocks_process: ?*Self) void {
         if (blocks_process) |p| {
             if (!p.has_own_stack) {
                 @memcpy(self.stack, p.stack);
@@ -319,7 +320,6 @@ pub const ArmProcess = struct {
 };
 
 fn test_entry() void {}
-
 fn test_exit_handler() void {}
 
 test "prepare process initial stack" {

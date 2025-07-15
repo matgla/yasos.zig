@@ -17,7 +17,12 @@ jobs:
           submodules: 'recursive'
       - name: Run Smoke Tests
         run: |
+          mkdir -p ${{ github.workspace }}/tests/smoke/logs
           make run_smoke_tests
+      - name: Copy Firmware If Failed
+        if: failure()
+        run: | 
+          cp ${{ github.workspace }}/zig-out/bin/yasos_kernel ${{ github.workspace }}/tests/smoke/logs
       
       - name: Upload Test Logs  
         if: failure()

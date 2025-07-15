@@ -22,11 +22,12 @@ const std = @import("std");
 
 const hal = @import("hal");
 
-const c = @import("../../libc_imports.zig").c;
+const c = @import("libc_imports").c;
 
 const syscall = @import("arch").syscall;
 
-const log = &@import("../../log/kernel_log.zig").kernel_log;
+const kernel = @import("kernel");
+const log = std.log.scoped(.syscall);
 
 const process_manager = @import("../process_manager.zig");
 
@@ -54,7 +55,7 @@ fn sys_unhandled_factory(comptime i: usize) type {
     return struct {
         fn handler(arg: *const volatile anyopaque) !i32 {
             _ = arg;
-            log.print("\nUnhandled system call id: {d}\n", .{i});
+            log.err("\nUnhandled system call id: {d}\n", .{i});
             return -1;
         }
     };
@@ -64,6 +65,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
     comptime {
         switch (index) {
             c.sys_start_root_process => return handlers.sys_start_root_process,
+            c.sys_stop_root_process => return handlers.sys_stop_root_process,
             c.sys_create_process => return handlers.sys_create_process,
             c.sys_semaphore_acquire => return handlers.sys_semaphore_acquire,
             c.sys_semaphore_release => return handlers.sys_semaphore_release,
@@ -158,7 +160,9 @@ pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) v
     hal.irq.trigger_supervisor_call(number, svc_arg, svc_out);
 }
 
-pub fn init() void {
+pub fn init(kernel_allocator: std.mem.Allocator) void {
+    log.info("initialization...", .{});
     arch.irq_handlers.set_system_call_handler(system_call_handler);
     arch.irq_handlers.set_context_switch_handler(context_switch_handler);
+    handlers.init(kernel_allocator);
 }

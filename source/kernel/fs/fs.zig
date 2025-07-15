@@ -18,9 +18,18 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
-pub const IFile = @import("ifile.zig").IFile;
 pub const VirtualFileSystem = @import("vfs.zig").VirtualFileSystem;
 pub const vfs_init = @import("vfs.zig").vfs_init;
-pub const vfs = @import("vfs.zig").vfs;
-pub const ivfs = @import("vfs.zig").ivfs;
+pub const get_vfs = @import("vfs.zig").get_vfs;
+pub const get_ivfs = @import("vfs.zig").get_ivfs;
+
+pub const ReadOnlyFileSystem = @import("ifilesystem.zig").ReadOnlyFileSystem;
+pub const IDirectoryIterator = @import("ifilesystem.zig").IDirectoryIterator;
+pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
+
+pub const FileMemoryMapAttributes = @import("ifile.zig").FileMemoryMapAttributes;
+pub const FileName = @import("ifile.zig").FileName;
+pub const FileType = @import("ifile.zig").FileType;
+pub const IFile = @import("ifile.zig").IFile;
+pub const IoctlCommonCommands = @import("ifile.zig").IoctlCommonCommands;
+pub const ReadOnlyFile = @import("ifile.zig").ReadOnlyFile;

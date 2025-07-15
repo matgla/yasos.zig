@@ -24,3 +24,4 @@ comptime {
 }
 pub const panic = @import("panic.zig");
 pub const HardwareProcess = @import("process.zig").ArmProcess;
+pub const get_lr = @import("assembly.zig").get_lr;

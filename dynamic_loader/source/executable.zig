@@ -41,8 +41,6 @@ pub const Executable = struct {
     }
 
     pub fn deinit(self: *Executable) void {
-        if (get_loader()) |loader| {
-            loader.*.unload_module(self.module);
-        }
+        self.module.destroy();
     }
 };

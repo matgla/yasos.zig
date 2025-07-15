@@ -25,6 +25,10 @@ const Section = @import("section.zig").Section;
 const Header = @import("header.zig").Header;
 const Parser = @import("parser.zig").Parser;
 
+const get_loader = @import("loader.zig").get_loader;
+
+const log = std.log.scoped(.@"yasld/module");
+
 pub const GotEntry = extern struct {
     symbol_offset: usize,
     base_register: usize,
@@ -41,19 +45,16 @@ pub const LoadedSharedData = struct {
     plt: ?[]const u8,
     xip: bool,
     exported_symbols: SymbolTable,
-    users: std.DoublyLinkedList, // pid -> reference count
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
 
     pub fn create(
         allocator: std.mem.Allocator,
         process_allocator: std.mem.Allocator,
-        module_node: *std.DoublyLinkedList.Node,
         xip: bool,
         parser: *const Parser,
     ) !*LoadedSharedData {
-        var self = try allocator.create(LoadedSharedData);
-
+        const self = try allocator.create(LoadedSharedData);
         if (xip) {
             self.* = .{
                 .text = parser.get_text(),
@@ -61,29 +62,15 @@ pub const LoadedSharedData = struct {
                 .plt = parser.get_plt(),
                 .xip = xip,
                 .exported_symbols = parser.exported_symbols,
-                .users = .{},
                 .allocator = allocator,
                 .process_allocator = process_allocator,
             };
         }
-        self.users.append(module_node);
         return self;
     }
 
     pub fn destroy(self: *LoadedSharedData) void {
         self.allocator.destroy(self);
-    }
-
-    pub fn remove(self: *LoadedSharedData, module_node: *std.DoublyLinkedList.Node) void {
-        self.users.remove(module_node);
-        if (self.users.len() == 0) {
-            // I am not needed anymore
-            self.destroy();
-        }
-    }
-
-    pub fn register(self: *LoadedSharedData, module: *std.DoublyLinkedList.Node) void {
-        self.users.append(module);
     }
 };
 
@@ -145,6 +132,7 @@ pub const Module = struct {
     // this needs to be corelated with thread info
     entry: ?SymbolEntry = null,
     list_node: std.DoublyLinkedList.Node,
+    child_list_node: std.DoublyLinkedList.Node,
     name: ?[]const u8,
     children: std.DoublyLinkedList,
 
@@ -157,6 +145,7 @@ pub const Module = struct {
             .shared_data = null,
             .unique_data = null,
             .list_node = .{},
+            .child_list_node = .{},
             .name = null,
             .children = .{},
         };
@@ -164,18 +153,31 @@ pub const Module = struct {
     }
 
     pub fn add_shared_data(self: *Module, data: *LoadedSharedData) void {
-        data.register(&self.list_node);
+        self.shared_data = data;
     }
 
     pub fn append_child(self: *Module, child: *Module) void {
-        self.children.append(&child.list_node);
+        self.children.append(&child.child_list_node);
     }
 
     pub fn destroy(self: *Module) void {
-        if (self.shared_data) |*shared| {
-            shared.*.remove(&self.list_node);
+        var next = self.children.pop();
+        while (next) |node| {
+            const child: *Module = @fieldParentPtr("child_list_node", node);
+            child.destroy();
+            next = self.children.pop();
         }
+
+        if (get_loader()) |loader| {
+            loader.*.unload_module(self);
+        }
+
+        if (self.unique_data) |data| {
+            data.destroy();
+        }
+
         if (self.name) |n| {
+            log.debug("removal of '{s}'", .{n});
             self.allocator.free(n);
         }
         self.allocator.destroy(self);
@@ -186,6 +188,7 @@ pub const Module = struct {
             self.allocator.free(n);
         }
         self.name = try self.allocator.dupe(u8, name);
+        log.debug("created module: {s}", .{name});
     }
 
     pub fn get_base_address(self: Module, section: Section) error{UnknownSection}!usize {
@@ -253,7 +256,7 @@ pub const Module = struct {
 
         var it = self.children.first;
         while (it) |child_node| : (it = child_node.next) {
-            const module: *const Module = @fieldParentPtr("list_node", child_node);
+            const module: *const Module = @fieldParentPtr("child_list_node", child_node);
             const maybe_child_symbol = module.find_local_symbol(name);
             if (module.unique_data) |*data| {
                 if (data.*.got) |*got| {
@@ -313,9 +316,8 @@ pub const Module = struct {
     // process initializers using C-symbols
     // used for example for current TCC implementation
     // that exports __section_start instead of .init_array
-    pub fn process_initializers(self: *Module, stdout: anytype) void {
+    pub fn process_initializers(self: *Module) void {
         _ = self;
-        _ = stdout;
     }
 
     pub fn get_got(self: *const Module) []GotEntry {

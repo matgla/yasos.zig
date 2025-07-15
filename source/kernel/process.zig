@@ -20,18 +20,18 @@
 
 const std = @import("std");
 
-const c = @import("../libc_imports.zig").c;
-const log = &@import("../log/kernel_log.zig").kernel_log;
+const c = @import("libc_imports").c;
 
 const config = @import("config");
+const kernel = @import("kernel.zig");
+
+const log = std.log.scoped(.@"kernel/process");
+
 const arch_process = @import("arch").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
-const IFile = @import("fs/ifile.zig").IFile;
+const IFile = kernel.fs.IFile;
 const IDirectoryIterator = @import("fs/ifilesystem.zig").IDirectoryIterator;
-
-const process_memory_pool = @import("process_memory_pool.zig");
-const ProcessPageAllocator = @import("malloc.zig").ProcessPageAllocator;
 const system_call = @import("interrupts/system_call.zig");
 const systick = @import("interrupts/systick.zig");
 const arch = @import("arch");
@@ -52,7 +52,7 @@ extern fn context_switch_return_pop_single() void;
 
 extern fn reload_current_task() void;
 
-pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
+pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolType: anytype) type {
     return struct {
         const Self = @This();
         const FileHandle = struct {
@@ -60,21 +60,22 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
             path: [config.fs.max_path_length]u8,
             diriter: ?IDirectoryIterator,
         };
-        pub const ImplType = ProcessImpl;
+        pub const ImplType = ProcessType;
+        const ProcessMemoryAllocator = kernel.memory.heap.ProcessPageAllocator(ProcessMemoryPoolType);
 
         state: State,
         priority: u8,
-        impl: ProcessImpl,
+        impl: ImplType,
         pid: u32,
-        _allocator: std.mem.Allocator,
+        _kernel_allocator: std.mem.Allocator,
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
         fds: std.AutoHashMap(u16, FileHandle),
         blocked_by_process: ?*Self = null,
         blocks_process: ?*Self = null,
-        memory_pool_allocator: ProcessPageAllocator,
         cwd: []u8,
         node: std.DoublyLinkedList.Node,
+        _process_memory_allocator: ProcessMemoryAllocator,
 
         pub const State = enum(u2) {
             Ready,
@@ -83,67 +84,105 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
             Terminated,
         };
 
-        pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, _: anytype, cwd: []const u8) !*Self {
+        pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: anytype, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType) !*Self {
             pid_counter += 1;
-            const process = try allocator.create(Self);
-            var memory_pool = ProcessPageAllocator.create(pid_counter);
-            const cwd_handle = try allocator.alloc(u8, cwd.len + 1);
+            const process = try kernel_allocator.create(Self);
+            kernel.log.debug("initializing memory allocator for pid: {d}", .{pid_counter});
+            var process_memory_allocator = ProcessMemoryAllocator.init(pid_counter, process_memory_pool);
+            const cwd_handle = try kernel_allocator.alloc(u8, cwd.len + 1);
             @memcpy(cwd_handle[0..cwd.len], cwd);
             cwd_handle[cwd.len] = 0;
-
+            const args = [_]usize{
+                @intFromPtr(arg),
+            };
             process.* = .{
                 .state = State.Ready,
                 .priority = 0,
-                .impl = try ProcessImpl.create(memory_pool.std_allocator(), stack_size, process_entry, exit_handler_impl),
+                .impl = try ImplType.init(process_memory_allocator.allocator(), stack_size, process_entry, exit_handler_impl, args[0..]),
                 .pid = pid_counter,
-                ._allocator = allocator,
+                ._kernel_allocator = kernel_allocator,
                 .current_core = 0,
-                .fds = std.AutoHashMap(u16, FileHandle).init(allocator),
+                .fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
                 .blocked_by_process = null,
                 .blocks_process = null,
-                .memory_pool_allocator = memory_pool,
                 .cwd = cwd_handle,
                 .node = .{},
+                ._process_memory_allocator = process_memory_allocator,
             };
             return process;
         }
+        pub fn clear_fds(self: *Self) void {
+            var it = self.fds.iterator();
+            while (it.next()) |*n| {
+                if (n.value_ptr.diriter) |*d| {
+                    d.delete();
+                }
+                n.value_ptr.file.delete();
+            }
+            self.fds.deinit();
+        }
 
-        // this is full copy of the process, so it shares the same stack
-        // stack relocation impossible without MMU
-        pub fn vfork(self: *Self) !*Self {
-            // allocate stack copy
-            const process = try self._allocator.create(Self);
-            pid_counter += 1;
-            var memory_pool = ProcessPageAllocator.create(pid_counter);
-            const cwd_handle = try self._allocator.alloc(u8, self.cwd.len);
-            @memcpy(cwd_handle, self.cwd);
-            process.* = .{
-                .state = State.Ready,
-                .priority = self.priority,
-                .impl = try self.impl.vfork(memory_pool.std_allocator()),
-                .pid = pid_counter,
-                ._allocator = self._allocator,
-                .current_core = 0,
-                .fds = try self.fds.clone(),
-                .blocked_by_process = self.blocked_by_process,
-                .blocks_process = self.blocks_process,
-                .memory_pool_allocator = memory_pool,
-                .cwd = cwd_handle,
-                .node = .{},
+        fn dupe_filehandle(handle: *FileHandle) FileHandle {
+            return .{
+                .diriter = handle.diriter,
+                .file = handle.file.share(),
+                .path = handle.path,
             };
-            return process;
+        }
+        fn dupe_fds(self: *Self) !std.AutoHashMap(u16, FileHandle) {
+            var fds = std.AutoHashMap(u16, FileHandle).init(self._kernel_allocator);
+            var it = self.fds.iterator();
+            while (it.next()) |*n| {
+                try fds.put(n.key_ptr.*, dupe_filehandle(n.value_ptr));
+            }
+            return fds;
         }
 
         pub fn deinit(self: *Self) void {
-            self.impl.deinit();
-            self.memory_pool_allocator.release_pages();
-            self.fds.deinit();
-            self._allocator.free(self.cwd);
+            self.impl.deinit(self._process_memory_allocator.allocator());
+            self.clear_fds();
+            self._kernel_allocator.free(self.cwd);
+            self._process_memory_allocator.deinit();
+        }
+
+        pub fn get_memory_allocator(self: *Self) std.mem.Allocator {
+            return self._kernel_allocator;
+        }
+
+        pub fn get_process_memory_allocator(self: *Self) std.mem.Allocator {
+            return self._process_memory_allocator.allocator();
+        }
+        // this is full copy of the process, so it shares the same stack
+        // stack relocation impossible without MMU
+        pub fn vfork(self: *Self, process_memory_pool: *ProcessMemoryPoolType) !*Self {
+            // allocate stack copy
+            const process = try self._kernel_allocator.create(Self);
+            pid_counter += 1;
+            var memory_pool = ProcessMemoryAllocator.init(pid_counter, process_memory_pool);
+            log.debug("vfork process memory allocator created for pid {d}", .{pid_counter});
+            const cwd_handle = try self._kernel_allocator.alloc(u8, self.cwd.len);
+            @memcpy(cwd_handle, self.cwd);
+
+            process.* = .{
+                .state = State.Ready,
+                .priority = self.priority,
+                .impl = try self.impl.vfork(memory_pool.allocator()),
+                .pid = pid_counter,
+                ._kernel_allocator = self._kernel_allocator,
+                .current_core = 0,
+                .fds = try self.dupe_fds(),
+                .blocked_by_process = self.blocked_by_process,
+                .blocks_process = self.blocks_process,
+                .cwd = cwd_handle,
+                .node = .{},
+                ._process_memory_allocator = memory_pool,
+            };
+            return process;
         }
 
         pub fn change_directory(self: *Self, path: []const u8) !void {
-            const cwd_handle = try std.fs.path.resolvePosix(self._allocator, &.{path});
-            self._allocator.free(self.cwd);
+            const cwd_handle = try std.fs.path.resolvePosix(self._kernel_allocator, &.{path});
+            self._kernel_allocator.free(self.cwd);
             self.cwd = cwd_handle;
         }
 
@@ -156,7 +195,7 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
         }
 
         pub fn set_stack_pointer(self: *Self, ptr: *u8) void {
-            var blocked_by_process: ?*ProcessImpl = null;
+            var blocked_by_process: ?*ImplType = null;
             if (self.blocked_by_process) |p| {
                 blocked_by_process = &p.impl;
             }
@@ -180,7 +219,7 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
 
         // swap stack with the process that is waiting for us, only if was swapped before
         pub fn restore_stack(self: *Self) void {
-            var blocks_process: ?*ProcessImpl = null;
+            var blocks_process: ?*ImplType = null;
             if (self.blocks_process) |p| {
                 blocks_process = &p.impl;
             }
@@ -239,11 +278,11 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
 
         pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, _: i32, _: i32, _: i32) !*anyopaque {
             if (addr == null) {
-                var number_of_pages = @divTrunc(length, process_memory_pool.ProcessMemoryPool.page_size);
-                if (@rem(length, process_memory_pool.ProcessMemoryPool.page_size) != 0) {
+                var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
+                if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
-                const maybe_address = process_memory_pool.instance.allocate_pages(number_of_pages, self.pid);
+                const maybe_address = self._process_memory_allocator.allocate_pages(number_of_pages);
                 if (maybe_address) |address| {
                     return address.ptr;
                 }
@@ -253,12 +292,12 @@ pub fn ProcessInterface(comptime ProcessImpl: anytype) type {
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
             if (maybe_address) |addr| {
-                var number_of_pages = @divTrunc(length, process_memory_pool.ProcessMemoryPool.page_size);
-                if (@rem(length, process_memory_pool.ProcessMemoryPool.page_size) != 0) {
+                var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
+                if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
 
-                process_memory_pool.instance.free_pages(addr, number_of_pages, self.pid);
+                self._process_memory_allocator.release_pages(addr, number_of_pages);
             }
         }
 
@@ -299,7 +338,7 @@ pub fn initialize_context_switching() void {
     arch_process.initialize_context_switching();
 }
 
-pub const Process = ProcessInterface(arch.HardwareProcess);
+pub const Process = ProcessInterface(arch.HardwareProcess, kernel.memory.heap.ProcessMemoryPool);
 
 fn process_init() void {}
 

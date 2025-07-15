@@ -19,7 +19,7 @@
 //
 
 const std = @import("std");
-
+const log = std.log.scoped(.yasld);
 const DependencyTable = @import("item_table.zig").DependencyTable;
 const SymbolTable = @import("item_table.zig").SymbolTable;
 
@@ -49,8 +49,7 @@ pub const Parser = struct {
     plt_address: usize,
     header: *const Header,
 
-    pub fn create(header: *const Header, stdout: anytype) Parser {
-        _ = stdout;
+    pub fn create(header: *const Header) Parser {
         const name: []const u8 = std.mem.span(@as([*:0]const u8, @ptrFromInt(@intFromPtr(header) + @sizeOf(Header))));
         const imported_libraries = DependencyTable{
             .number_of_items = header.external_libraries_amount,
@@ -111,49 +110,49 @@ pub const Parser = struct {
         };
     }
 
-    pub fn print(self: Parser, stdout: anytype) void {
-        stdout.print("              name: {s}\n", .{self.name});
-        stdout.print("imported libraries: {d}, size: {x}\n", .{ self.imported_libraries.number_of_items, self.imported_libraries.address() });
+    pub fn print(self: Parser) void {
+        log.debug("              name: {s}", .{self.name});
+        log.debug("imported libraries: {d}, size: {x}", .{ self.imported_libraries.number_of_items, self.imported_libraries.address() });
         {
             var it = self.imported_libraries.iter();
             while (it) |library| : (it = library.next()) {
-                stdout.print("  {s}\n", .{library.data.name()});
+                log.debug("  {s}", .{library.data.name()});
             }
         }
-        stdout.print("symbol table relocations: {d}\n", .{self.symbol_table_relocations.relocations.len});
+        log.debug("symbol table relocations: {d}", .{self.symbol_table_relocations.relocations.len});
         for (self.symbol_table_relocations.relocations) |rel| {
-            stdout.print("  address: 0x{x}\n", .{@intFromPtr(&rel)});
-            stdout.print("  index: 0x{x}, symbol index: 0x{x}\n", .{ rel.index, rel.symbol_index });
+            log.debug("  address: 0x{x}", .{@intFromPtr(&rel)});
+            log.debug("  index: 0x{x}, symbol index: 0x{x}", .{ rel.index, rel.symbol_index });
         }
-        stdout.print("local relocations: {d}\n", .{self.local_relocations.relocations.len});
+        log.debug("local relocations: {d}", .{self.local_relocations.relocations.len});
         for (self.local_relocations.relocations) |rel| {
-            stdout.print("  index: 0x{x}, target_offset: 0x{x}, section: {s}\n", .{ rel.index, rel.target_offset, @tagName(@as(Section, @enumFromInt(rel.section))) });
+            log.debug("  index: 0x{x}, target_offset: 0x{x}, section: {s}", .{ rel.index, rel.target_offset, @tagName(@as(Section, @enumFromInt(rel.section))) });
         }
-        stdout.print("data relocations: {d}\n", .{self.data_relocations.relocations.len});
+        log.debug("data relocations: {d}", .{self.data_relocations.relocations.len});
         for (self.data_relocations.relocations) |rel| {
-            stdout.print("  from: 0x{x}, to: 0x{x}, section: {s}\n", .{ rel.from, rel.to, @tagName(@as(Section, @enumFromInt(rel.section))) });
+            log.debug("  from: 0x{x}, to: 0x{x}, section: {s}", .{ rel.from, rel.to, @tagName(@as(Section, @enumFromInt(rel.section))) });
         }
         {
-            stdout.print("imported symbols: {d}\n", .{self.imported_symbols.number_of_items});
+            log.debug("imported symbols: {d}", .{self.imported_symbols.number_of_items});
             var it = self.imported_symbols.iter();
             while (it) |symbol| : (it = symbol.next()) {
                 const name = symbol.data.name();
-                stdout.print("  {s}: offset: {d}\n", .{ name, symbol.data.offset });
+                log.debug("  {s}: offset: {d}", .{ name, symbol.data.offset });
             }
         }
         {
-            stdout.print("exported symbols: {d}\n", .{self.exported_symbols.number_of_items});
+            log.debug("exported symbols: {d}", .{self.exported_symbols.number_of_items});
             var it = self.exported_symbols.iter();
             while (it) |symbol| : (it = symbol.next()) {
-                stdout.print("  {s}: offset: {d}\n", .{ symbol.data.name(), symbol.data.offset });
+                log.debug("  {s}: offset: {d}", .{ symbol.data.name(), symbol.data.offset });
             }
         }
-        stdout.print(".text: 0x{x}\n", .{self.text_address});
-        stdout.print(".init: 0x{x}\n", .{self.init_address});
-        stdout.print(".data: 0x{x}\n", .{self.data_address});
-        stdout.print(".plt: 0x{x}\n", .{self.plt_address});
-        stdout.print(".got: 0x{x}\n", .{self.got_address});
-        stdout.print(".got.plt: 0x{x}\n", .{self.got_plt_address});
+        log.debug(".text: 0x{x}", .{self.text_address});
+        log.debug(".init: 0x{x}", .{self.init_address});
+        log.debug(".data: 0x{x}", .{self.data_address});
+        log.debug(".plt: 0x{x}", .{self.plt_address});
+        log.debug(".got: 0x{x}", .{self.got_address});
+        log.debug(".got.plt: 0x{x}", .{self.got_plt_address});
     }
 
     pub fn get_data(self: Parser) []const u8 {

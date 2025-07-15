@@ -19,7 +19,9 @@
 //
 
 const std = @import("std");
-pub const IFile = @import("../fs/ifile.zig").IFile;
+
+const kernel = @import("../kernel.zig");
+pub const IFile = kernel.fs.IFile;
 
 const interface = @import("interface");
 
@@ -35,12 +37,17 @@ fn DriverInterface(comptime SelfType: type) type {
             return interface.VirtualCall(self, "unload", .{}, bool);
         }
 
-        pub fn ifile(self: *Self) ?IFile {
-            return interface.VirtualCall(self, "ifile", .{}, ?IFile);
+        pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
+            return interface.VirtualCall(self, "ifile", .{allocator}, ?IFile);
+        }
+
+        pub fn name(self: *const Self) []const u8 {
+            return interface.VirtualCall(self, "name", .{}, []const u8);
         }
 
         pub fn delete(self: *Self) void {
             interface.VirtualCall(self, "delete", .{}, void);
+            interface.DestructorCall(self);
         }
     };
 }

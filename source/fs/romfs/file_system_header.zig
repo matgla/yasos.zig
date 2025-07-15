@@ -23,14 +23,13 @@ const std = @import("std");
 const FileHeader = @import("file_header.zig").FileHeader;
 const FileReader = @import("file_reader.zig").FileReader;
 
-const FileType = @import("../../kernel/fs/ifile.zig").FileType;
+const kernel = @import("kernel");
+const FileType = kernel.fs.FileType;
+const IFile = kernel.fs.IFile;
+const FileMemoryMapAttributes = kernel.fs.FileMemoryMapAttributes;
+const IoctlCommonCommands = kernel.fs.IoctlCommonCommands;
 
-const IFile = @import("../../kernel/fs/ifile.zig").IFile;
-
-const c = @import("../../libc_imports.zig").c;
-
-const FileMemoryMapAttributes = @import("../../kernel/fs/ifile.zig").FileMemoryMapAttributes;
-const IoctlCommonCommands = @import("../../kernel/fs/ifile.zig").IoctlCommonCommands;
+const c = @import("libc_imports").c;
 
 pub const FileSystemHeader = struct {
     _allocator: std.mem.Allocator,
@@ -121,8 +120,8 @@ pub const FileSystemHeader = struct {
     }
 };
 
-test "Parse filesystem header" {
-    const test_data = @embedFile("test.romfs");
+test "RomFs.ShouldParseFilesystemHeader" {
+    const test_data = @embedFile("tests/test.romfs");
     const maybe_fs = FileSystemHeader.init(test_data);
     try std.testing.expect(maybe_fs != null);
     if (maybe_fs) |fs| {
