@@ -217,7 +217,7 @@ export fn kernel_process(argument: *KernelAllocator) void {
     if (maybe_process) |process| {
         var maybe_uartfile = kernel.fs.get_ivfs().get("/dev/uart0", process.get_memory_allocator());
         if (maybe_uartfile) |*uartfile| {
-            // defer uartfile.delete();
+            defer uartfile.delete();
             attach_default_filedescriptors_to_root_process(uartfile, process);
         } else {
             kernel.log.err("default streams were not assigned: /dev/uart0 do not exists", .{});
