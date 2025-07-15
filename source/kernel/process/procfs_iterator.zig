@@ -22,8 +22,14 @@ const std = @import("std");
 const interface = @import("interface");
 const kernel = @import("../kernel.zig");
 
+const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
+
+pub const ProcInfoType = enum {
+    meminfo,
+};
+
 pub const ProcInfo = struct {
-    file: kernel.fs.IFile,
+    infotype: ProcInfoType,
     node: std.DoublyLinkedList.Node,
 };
 
@@ -31,10 +37,12 @@ pub const ProcFsIterator = struct {
     pub usingnamespace interface.DeriveFromBase(kernel.fs.IDirectoryIterator, ProcFsIterator);
     pub const Self = @This();
     _node: ?*std.DoublyLinkedList.Node,
+    _allocator: std.mem.Allocator,
 
-    pub fn create(first_node: ?*std.DoublyLinkedList.Node) ProcFsIterator {
+    pub fn create(first_node: ?*std.DoublyLinkedList.Node, allocator: std.mem.Allocator) ProcFsIterator {
         return .{
             ._node = first_node,
+            ._allocator = allocator,
         };
     }
 
@@ -42,7 +50,10 @@ pub const ProcFsIterator = struct {
         if (self._node) |node| {
             self._node = node.*.next;
             const info: *ProcInfo = @fieldParentPtr("node", node);
-            return info.file.share();
+            switch (info.infotype) {
+                .meminfo => return (MemInfoFile.create()).new(self._allocator) catch return null,
+            }
+            return null;
         }
         return null;
     }

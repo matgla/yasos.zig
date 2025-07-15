@@ -38,6 +38,7 @@ const log = std.log.scoped(.@"vfs/procfs");
 const ProcFsIterator = @import("procfs_iterator.zig").ProcFsIterator;
 const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
+const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
 
 pub const ProcDirectory = struct {
     pub usingnamespace interface.DeriveFromBase(ReadOnlyFile, ProcDirectory);
@@ -58,8 +59,7 @@ pub const ProcDirectory = struct {
     pub fn delete(self: *Self) void {
         var it = self._files.pop();
         while (it) |node| {
-            var procinfo: *ProcInfo = @fieldParentPtr("node", node);
-            procinfo.file.delete();
+            const procinfo: *ProcInfo = @fieldParentPtr("node", node);
             self._allocator.destroy(procinfo);
             it = self._files.pop();
         }
@@ -70,18 +70,17 @@ pub const ProcDirectory = struct {
     }
 
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.IFile {
+        _ = self;
         log.debug("getting file: {s}", .{path});
-        _ = allocator;
-        var it = self._files.first;
-        while (it) |node| {
-            var procinfo: *ProcInfo = @fieldParentPtr("node", node);
-            var filename = procinfo.file.name(self._allocator);
-            defer filename.deinit();
-            if (std.mem.eql(u8, path, filename.get_name())) {
-                return procinfo.file.share();
+        const maybe_filetype = std.meta.stringToEnum(ProcInfoType, path);
+        if (maybe_filetype) |f| {
+            switch (f) {
+                .meminfo => {
+                    return (MemInfoFile.create()).new(allocator) catch return null;
+                },
             }
-            it = node.next;
         }
+
         return null;
     }
 
@@ -172,7 +171,7 @@ pub const ProcFs = struct {
         };
         var meminfo = try allocator.create(ProcInfo);
         meminfo.node = .{};
-        meminfo.file = try (MemInfoFile.create()).new(allocator);
+        meminfo.infotype = .meminfo;
         procfs._root.add_file(&meminfo.node);
         return procfs;
     }
@@ -211,6 +210,6 @@ pub const ProcFs = struct {
 
     pub fn iterator(self: *ProcFs, path: []const u8) ?IDirectoryIterator {
         log.debug("Getting iterator for: {s}", .{path});
-        return (ProcFsIterator.create(self._root._files.first)).new(self._allocator) catch return null;
+        return (ProcFsIterator.create(self._root._files.first, self._allocator)).new(self._allocator) catch return null;
     }
 };

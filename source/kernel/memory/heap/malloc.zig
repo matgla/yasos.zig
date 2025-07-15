@@ -166,9 +166,7 @@ pub fn MallocAllocator(comptime options: anytype) type {
             _ = log2_align;
             std.debug.assert(len > 0);
             const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
-            if (comptime is_leaks_detection_enabled() or (@hasField(@TypeOf(options), "dump_stats") and options.dump_stats)) {
-                memory_in_use += @as(isize, @intCast(len));
-            }
+            memory_in_use += @as(isize, @intCast(len));
             if (comptime is_leaks_detection_enabled()) {
                 log.debug("allocating {d}B at 0x{x}", .{ len, @intFromPtr(ptr) });
                 const stack_trace_depth = arch.panic.get_stack_trace_depth(return_address);
@@ -231,9 +229,7 @@ pub fn MallocAllocator(comptime options: anytype) type {
         ) void {
             _ = log2_buf_align;
             c.free(buf.ptr);
-            if (comptime is_leaks_detection_enabled() or (@hasField(@TypeOf(options), "dump_stats") and options.dump_stats)) {
-                memory_in_use -= @as(isize, @intCast(buf.len));
-            }
+            memory_in_use -= @as(isize, @intCast(buf.len));
 
             if (comptime is_leaks_detection_enabled()) {
                 tracker.remove(buf.ptr);

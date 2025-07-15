@@ -63,15 +63,6 @@ pub const std_options: std.Options = .{
             .scope = .yasld,
             .level = .err,
         },
-        .{
-            .scope = .@"vfs/procfs",
-            .level = .debug,
-        },
-        .{
-            .scope = .@"vfs/meminfo",
-            .level = .debug,
-        },
-
         // .{
         //     .scope = .@"yasld/module",
         //     .level = .info,

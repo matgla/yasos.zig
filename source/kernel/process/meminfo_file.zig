@@ -46,8 +46,33 @@ pub const MemInfoFile = struct {
             ._buffer = .{0} ** BufferSize,
         };
 
-        _ = std.fmt.bufPrint(&meminfo._buffer, "MemUsed: {:>16} kB", .{kernel.memory.heap.malloc.get_usage()}) catch {};
+        const memory_used: usize = kernel.memory.heap.malloc.get_usage();
+        const memory_used_slow = kernel.process.process_manager.instance.get_process_memory_pool().get_used_size();
+        const memory_used_combined = memory_used + memory_used_slow;
+        var written_length: usize = 0;
+        var sizebuf = [_]u8{0} ** 16;
+        var buf = std.fmt.bufPrint(&meminfo._buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)}) catch
+            &meminfo._buffer;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(meminfo._buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
+        written_length += buf.len;
+        _ = std.fmt.bufPrint(meminfo._buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch {};
+
         return meminfo;
+    }
+
+    fn format_size(memsize: u64, buffer: []u8) []const u8 {
+        if (memsize >= 1000000000000) {
+            return std.fmt.bufPrint(buffer, "---", .{}) catch buffer[0..];
+        } else if (memsize >= 1024 * 1024 * 1024) {
+            return std.fmt.bufPrint(buffer, "{d: >8} MB", .{memsize / 1024 / 1024}) catch buffer[0..];
+        } else if (memsize >= 1024 * 1024) {
+            return std.fmt.bufPrint(buffer, "{d: >8} KB", .{memsize / 1024}) catch buffer[0..];
+        } else {
+            return std.fmt.bufPrint(buffer, "{d: >8} B", .{memsize}) catch buffer[0..];
+        }
+
+        return buffer;
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {

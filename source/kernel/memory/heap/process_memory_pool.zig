@@ -195,4 +195,8 @@ pub const ProcessMemoryPool = struct {
             }
         }
     }
+
+    pub fn get_used_size(self: ProcessMemoryPool) usize {
+        return self.page_bitmap.count() * page_size;
+    }
 };

@@ -25,7 +25,7 @@ def test_list_rootfs(request):
     session = request.node.stash[session_key] 
     session.write_command("ls")
     line = session.read_line_except_logs()
-    assert sorted([".", "..", "dev", "usr", "lib", "tmp", "bin" ]) == sorted(line.split())
+    assert sorted([".", "..", "dev", "usr", "lib", "tmp", "bin", "proc" ]) == sorted(line.split())
 
 def test_list_bin(request):
     session = request.node.stash[session_key] 

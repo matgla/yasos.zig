@@ -86,6 +86,10 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             return self.processes.append(&new_process.node);
         }
 
+        pub fn get_process_memory_pool(self: Self) kernel.memory.heap.ProcessMemoryPool {
+            return self._process_memory_pool;
+        }
+
         pub fn delete_process(self: *Self, pid: u32) void {
             var next = self.processes.first;
             while (next) |node| {
