@@ -30,8 +30,7 @@ const interface = @import("interface");
 
 const log = std.log.scoped(.vfs);
 
-pub const VirtualFileSystem = struct {
-    pub usingnamespace interface.DeriveFromBase(IFileSystem, VirtualFileSystem);
+pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     const Self = @This();
     mount_points: MountPoints,
 
@@ -48,7 +47,7 @@ pub const VirtualFileSystem = struct {
     pub fn create(self: *Self, path: []const u8, mode: i32, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.create(node.left, mode, allocator);
+            return node.point.filesystem.interface.create(node.left, mode, allocator);
         }
         return null;
     }
@@ -56,7 +55,7 @@ pub const VirtualFileSystem = struct {
     pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.mkdir(node.left, mode);
+            return node.point.filesystem.interface.mkdir(node.left, mode);
         }
         return -1;
     }
@@ -64,7 +63,7 @@ pub const VirtualFileSystem = struct {
     pub fn remove(self: *Self, path: []const u8) i32 {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.remove(node.left);
+            return node.point.filesystem.interface.remove(node.left);
         }
         return -1;
     }
@@ -77,7 +76,7 @@ pub const VirtualFileSystem = struct {
     pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.traverse(node.left, callback, user_context);
+            return node.point.filesystem.interface.traverse(node.left, callback, user_context);
         }
         return -1;
     }
@@ -85,7 +84,7 @@ pub const VirtualFileSystem = struct {
     pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.iterator(node.left);
+            return node.point.filesystem.interface.iterator(node.left);
         }
         return null;
     }
@@ -93,7 +92,7 @@ pub const VirtualFileSystem = struct {
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.get(node.left, allocator);
+            return node.point.filesystem.interface.get(node.left, allocator);
         }
         return null;
     }
@@ -102,7 +101,7 @@ pub const VirtualFileSystem = struct {
         const maybe_node = self.mount_points.find_longest_matching_point(*const MountPoint, path);
         if (maybe_node) |*node| {
             // Check if the filesystem has the path
-            return node.point.filesystem.has_path(node.left);
+            return node.point.filesystem.interface.has_path(node.left);
         }
         return false;
     }
@@ -113,9 +112,9 @@ pub const VirtualFileSystem = struct {
 
     // Below are part of VirtualFileSystem interface, not IFileSystem
     pub fn init(allocator: std.mem.Allocator) VirtualFileSystem {
-        return .{
+        return VirtualFileSystem.init(.{
             .mount_points = MountPoints.init(allocator),
-        };
+        });
     }
 
     pub fn deinit(self: *Self) void {
@@ -126,21 +125,21 @@ pub const VirtualFileSystem = struct {
     pub fn mount_filesystem(self: *Self, path: []const u8, fs: IFileSystem) !void {
         try self.mount_points.mount_filesystem(path, fs);
     }
-};
+});
 
 var vfs_instance: VirtualFileSystem = undefined;
 var vfs_object: IFileSystem = undefined;
 
 pub fn vfs_init(allocator: std.mem.Allocator) void {
     log.info("initialization...", .{});
-    vfs_instance = VirtualFileSystem.init(allocator);
-    vfs_object = vfs_instance.interface();
+    vfs_instance = VirtualFileSystem.InstanceType.init(allocator);
+    vfs_object = vfs_instance.interface.create();
 }
 
 pub fn get_ivfs() *IFileSystem {
     return &vfs_object;
 }
 
-pub fn get_vfs() *VirtualFileSystem {
-    return &vfs_instance;
+pub fn get_vfs() *VirtualFileSystem.InstanceType {
+    return vfs_instance.data();
 }

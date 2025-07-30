@@ -17,9 +17,12 @@
 // IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub const fs = @import("driverfs.zig");
-pub const UartDriver = @import("uart/uart_driver.zig").UartDriver;
-pub const FlashDriver = @import("flash/flash_driver.zig").FlashDriver;
-pub const MmcDriver = @import("mmc/mmc_driver.zig").MmcDriver;
-pub const IDriver = @import("idriver.zig").IDriver;
-pub const DriverFsIterator = @import("driverfs_iterator.zig").DriverFsIterator;
+const hal = @import("hal_interface");
+
+pub const MmcSpi = struct {
+    pub fn create(comptime pins: hal.mmc.Pins, comptime config: hal.mmc.Config) MmcSpi {
+        _ = pins;
+        _ = config;
+        return .{};
+    }
+};

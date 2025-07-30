@@ -115,9 +115,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             var it = self.fds.iterator();
             while (it.next()) |*n| {
                 if (n.value_ptr.diriter) |*d| {
-                    d.delete();
+                    d.interface.delete();
                 }
-                n.value_ptr.file.delete();
+                n.value_ptr.file.interface.delete();
             }
             self.fds.deinit();
         }

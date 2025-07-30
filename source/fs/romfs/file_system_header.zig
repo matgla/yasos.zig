@@ -42,8 +42,8 @@ pub const FileSystemHeader = struct {
         var marker: [8]u8 = undefined;
         var df = device_file;
 
-        _ = df.seek(offset, c.SEEK_SET);
-        _ = df.read(marker[0..]);
+        _ = df.interface.seek(offset, c.SEEK_SET);
+        _ = df.interface.read(marker[0..]);
         if (!std.mem.eql(u8, marker[0..], "-rom1fs-")) {
             return null;
         }
@@ -53,7 +53,7 @@ pub const FileSystemHeader = struct {
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
-        _ = df.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        _ = df.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
         var mapped_memory_address: ?*const anyopaque = null;
         if (attr.mapped_address_r) |address| {
             mapped_memory_address = @ptrFromInt(@intFromPtr(address) + @as(usize, @intCast(offset)));

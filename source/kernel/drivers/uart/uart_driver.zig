@@ -27,45 +27,47 @@ const UartFile = @import("uart_file.zig").UartFile;
 const interface = @import("interface");
 
 pub fn UartDriver(comptime UartType: anytype) type {
-    return struct {
-        pub const Self = @This();
-        pub usingnamespace interface.DeriveFromBase(IDriver, Self);
-        const uart = UartType;
+    const Internal = struct {
+        const UartDriverImpl = interface.DeriveFromBase(IDriver, struct {
+            pub const Self = @This();
+            const uart = UartType;
 
-        pub fn create() Self {
-            return .{};
-        }
+            pub fn create() UartDriverImpl {
+                return UartDriverImpl.init(.{});
+            }
 
-        pub fn load(self: *Self) anyerror!void {
-            _ = self;
-            uart.flush();
-            uart.init(.{
-                .baudrate = 921600,
-            }) catch |err| {
-                return err;
-            };
-        }
+            pub fn load(self: *Self) anyerror!void {
+                _ = self;
+                uart.flush();
+                uart.init(.{
+                    .baudrate = 921600,
+                }) catch |err| {
+                    return err;
+                };
+            }
 
-        pub fn unload(self: *Self) bool {
-            _ = self;
-            return true;
-        }
+            pub fn unload(self: *Self) bool {
+                _ = self;
+                return true;
+            }
 
-        pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-            _ = self;
-            return (UartFile(uart).create(allocator)).new(allocator) catch {
-                return null;
-            };
-        }
+            pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
+                _ = self;
+                return (UartFile(uart).InstanceType.create(allocator)).interface.new(allocator) catch {
+                    return null;
+                };
+            }
 
-        pub fn delete(self: *Self) void {
-            // No specific cleanup needed for UART driver
-            _ = self;
-        }
+            pub fn delete(self: *Self) void {
+                // No specific cleanup needed for UART driver
+                _ = self;
+            }
 
-        pub fn name(self: *const Self) []const u8 {
-            _ = self;
-            return "uart";
-        }
+            pub fn name(self: *const Self) []const u8 {
+                _ = self;
+                return "uart";
+            }
+        });
     };
+    return Internal.UartDriverImpl;
 }

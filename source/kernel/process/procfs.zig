@@ -40,8 +40,7 @@ const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
 
-pub const ProcDirectory = struct {
-    pub usingnamespace interface.DeriveFromBase(ReadOnlyFile, ProcDirectory);
+pub const ProcDirectory = interface.DeriveFromBase(ReadOnlyFile, struct {
     const Self = @This();
 
     base: ReadOnlyFile,
@@ -49,11 +48,11 @@ pub const ProcDirectory = struct {
     _files: std.DoublyLinkedList,
 
     pub fn create(allocator: std.mem.Allocator) ProcDirectory {
-        return .{
-            .base = .{},
+        return ProcDirectory.init(.{
+            .base = ReadOnlyFile.init(.{}),
             ._allocator = allocator,
-            ._files = .{},
-        };
+            ._files = std.DoublyLinkedList{},
+        });
     }
 
     pub fn delete(self: *Self) void {
@@ -65,7 +64,7 @@ pub const ProcDirectory = struct {
         }
     }
 
-    pub fn add_file(self: *ProcDirectory, file: *std.DoublyLinkedList.Node) void {
+    pub fn add_file(self: *Self, file: *std.DoublyLinkedList.Node) void {
         self._files.append(file);
     }
 
@@ -76,7 +75,7 @@ pub const ProcDirectory = struct {
         if (maybe_filetype) |f| {
             switch (f) {
                 .meminfo => {
-                    return (MemInfoFile.create()).new(allocator) catch return null;
+                    return (MemInfoFile.InstanceType.create()).interface.new(allocator) catch return null;
                 },
             }
         }
@@ -84,7 +83,7 @@ pub const ProcDirectory = struct {
         return null;
     }
 
-    pub fn read(self: *ProcDirectory, buffer: []u8) isize {
+    pub fn read(self: *Self, buffer: []u8) isize {
         _ = self;
         _ = buffer;
         return 0;
@@ -154,39 +153,39 @@ pub const ProcDirectory = struct {
     pub fn dupe(self: *Self) ?IFile {
         return self.new(self.allocator) catch return null;
     }
-};
+});
 
-pub const ProcFs = struct {
-    pub usingnamespace interface.DeriveFromBase(ReadOnlyFileSystem, ProcFs);
+pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
+    const Self = @This();
     base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
     _root: ProcDirectory,
 
     pub fn init(allocator: std.mem.Allocator) !ProcFs {
         log.info("created", .{});
-        var procfs = ProcFs{
-            .base = ReadOnlyFileSystem{},
+        var procfs = ProcFs.init(.{
+            .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
-            ._root = ProcDirectory.create(allocator),
-        };
+            ._root = ProcDirectory.InstanceType.create(allocator),
+        });
         var meminfo = try allocator.create(ProcInfo);
         meminfo.node = .{};
         meminfo.infotype = .meminfo;
-        procfs._root.add_file(&meminfo.node);
+        procfs.data()._root.data().add_file(&meminfo.node);
         return procfs;
     }
 
-    pub fn delete(self: *ProcFs) void {
+    pub fn delete(self: *Self) void {
         log.debug("deinitialization", .{});
-        self._root.delete();
+        self._root.data().delete();
     }
 
-    pub fn name(self: *const ProcFs) []const u8 {
+    pub fn name(self: *const Self) []const u8 {
         _ = self;
         return "procfs";
     }
 
-    pub fn traverse(self: *ProcFs, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
+    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         _ = self;
         _ = path;
         _ = callback;
@@ -194,22 +193,22 @@ pub const ProcFs = struct {
         return -1;
     }
 
-    pub fn get(self: *ProcFs, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         log.debug("Getting file: {s}", .{path});
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            return self._root.interface();
+            return self._root.interface.create();
         }
-        return self._root.get(path, allocator);
+        return self._root.data().get(path, allocator);
     }
 
-    pub fn has_path(self: *const ProcFs, path: []const u8) bool {
+    pub fn has_path(self: *const Self, path: []const u8) bool {
         _ = self;
         _ = path;
         return false;
     }
 
-    pub fn iterator(self: *ProcFs, path: []const u8) ?IDirectoryIterator {
+    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
         log.debug("Getting iterator for: {s}", .{path});
-        return (ProcFsIterator.create(self._root._files.first, self._allocator)).new(self._allocator) catch return null;
+        return (ProcFsIterator.InstanceType.create(self._root.data()._files.first, self._allocator)).interface.new(self._allocator) catch return null;
     }
-};
+});

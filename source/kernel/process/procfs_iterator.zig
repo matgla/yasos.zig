@@ -33,17 +33,16 @@ pub const ProcInfo = struct {
     node: std.DoublyLinkedList.Node,
 };
 
-pub const ProcFsIterator = struct {
-    pub usingnamespace interface.DeriveFromBase(kernel.fs.IDirectoryIterator, ProcFsIterator);
+pub const ProcFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
     pub const Self = @This();
     _node: ?*std.DoublyLinkedList.Node,
     _allocator: std.mem.Allocator,
 
     pub fn create(first_node: ?*std.DoublyLinkedList.Node, allocator: std.mem.Allocator) ProcFsIterator {
-        return .{
+        return ProcFsIterator.init(.{
             ._node = first_node,
             ._allocator = allocator,
-        };
+        });
     }
 
     pub fn next(self: *Self) ?kernel.fs.IFile {
@@ -51,7 +50,7 @@ pub const ProcFsIterator = struct {
             self._node = node.*.next;
             const info: *ProcInfo = @fieldParentPtr("node", node);
             switch (info.infotype) {
-                .meminfo => return (MemInfoFile.create()).new(self._allocator) catch return null,
+                .meminfo => return (MemInfoFile.InstanceType.create()).interface.new(self._allocator) catch return null,
             }
             return null;
         }
@@ -61,4 +60,4 @@ pub const ProcFsIterator = struct {
     pub fn delete(self: *Self) void {
         _ = self;
     }
-};
+});

@@ -68,73 +68,64 @@ pub const FileName = struct {
     }
 };
 
-fn FileInterface(comptime SelfType: type) type {
-    return struct {
-        pub const Self = SelfType;
-
-        pub fn read(self: *Self, buf: []u8) isize {
-            return interface.VirtualCall(self, "read", .{buf}, isize);
-        }
-
-        pub fn write(self: *Self, buf: []const u8) isize {
-            return interface.VirtualCall(self, "write", .{buf}, isize);
-        }
-
-        pub fn seek(self: *Self, offset: c.off_t, base: i32) c.off_t {
-            return interface.VirtualCall(self, "seek", .{ offset, base }, c.off_t);
-        }
-
-        pub fn close(self: *Self) i32 {
-            return interface.VirtualCall(self, "close", .{}, i32);
-        }
-
-        pub fn sync(self: *Self) i32 {
-            return interface.VirtualCall(self, "sync", .{}, i32);
-        }
-
-        pub fn tell(self: *Self) c.off_t {
-            return interface.VirtualCall(self, "tell", .{}, c.off_t);
-        }
-
-        pub fn size(self: *Self) isize {
-            return interface.VirtualCall(self, "size", .{}, isize);
-        }
-
-        pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-            return interface.VirtualCall(self, "name", .{allocator}, FileName);
-        }
-
-        pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
-            return interface.VirtualCall(self, "ioctl", .{ cmd, arg }, i32);
-        }
-
-        pub fn fcntl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
-            return interface.VirtualCall(self, "fcntl", .{ cmd, arg }, i32);
-        }
-
-        pub fn stat(self: *Self, data: *c.struct_stat) void {
-            return interface.VirtualCall(self, "stat", .{data}, void);
-        }
-
-        pub fn filetype(self: *Self) FileType {
-            return interface.VirtualCall(self, "filetype", .{}, FileType);
-        }
-
-        pub fn delete(self: *Self) void {
-            if (self.__refcount) |r| {
-                if (r.* == 1) {
-                    interface.VirtualCall(self, "delete", .{}, void);
-                }
-            }
-            interface.DestructorCall(self);
-        }
-    };
-}
-
-pub const IFile = interface.ConstructCountingInterface(FileInterface);
-pub const ReadOnlyFile = struct {
+pub const IFile = interface.ConstructCountingInterface(struct {
     pub const Self = @This();
-    pub usingnamespace interface.DeriveFromBase(IFile, Self);
+
+    pub fn read(self: *Self, buf: []u8) isize {
+        return interface.CountingInterfaceVirtualCall(self, "read", .{buf}, isize);
+    }
+
+    pub fn write(self: *Self, buf: []const u8) isize {
+        return interface.CountingInterfaceVirtualCall(self, "write", .{buf}, isize);
+    }
+
+    pub fn seek(self: *Self, offset: c.off_t, base: i32) c.off_t {
+        return interface.CountingInterfaceVirtualCall(self, "seek", .{ offset, base }, c.off_t);
+    }
+
+    pub fn close(self: *Self) i32 {
+        return interface.CountingInterfaceVirtualCall(self, "close", .{}, i32);
+    }
+
+    pub fn sync(self: *Self) i32 {
+        return interface.CountingInterfaceVirtualCall(self, "sync", .{}, i32);
+    }
+
+    pub fn tell(self: *Self) c.off_t {
+        return interface.CountingInterfaceVirtualCall(self, "tell", .{}, c.off_t);
+    }
+
+    pub fn size(self: *Self) isize {
+        return interface.CountingInterfaceVirtualCall(self, "size", .{}, isize);
+    }
+
+    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
+        return interface.CountingInterfaceVirtualCall(self, "name", .{allocator}, FileName);
+    }
+
+    pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
+        return interface.CountingInterfaceVirtualCall(self, "ioctl", .{ cmd, arg }, i32);
+    }
+
+    pub fn fcntl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
+        return interface.CountingInterfaceVirtualCall(self, "fcntl", .{ cmd, arg }, i32);
+    }
+
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        return interface.CountingInterfaceVirtualCall(self, "stat", .{data}, void);
+    }
+
+    pub fn filetype(self: *Self) FileType {
+        return interface.CountingInterfaceVirtualCall(self, "filetype", .{}, FileType);
+    }
+
+    pub fn delete(self: *Self) void {
+        interface.CountingInterfaceDestructorCall(self);
+    }
+});
+
+pub const ReadOnlyFile = interface.DeriveFromBase(IFile, struct {
+    pub const Self = @This();
 
     pub fn write(self: *Self, buf: []const u8) isize {
         _ = self;
@@ -146,4 +137,4 @@ pub const ReadOnlyFile = struct {
         _ = self;
         return -1;
     }
-};
+});

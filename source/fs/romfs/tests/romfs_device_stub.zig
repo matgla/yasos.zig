@@ -27,48 +27,48 @@ pub const RomfsDeviceFile = struct {
     }
 };
 
-pub const RomfsDeviceStub = struct {
-    pub usingnamespace interface.DeriveFromBase(IDriver, RomfsDeviceStub);
+pub const RomfsDeviceStub = interface.DeriveFromBase(IDriver, struct {
+    const Self = @This();
     file: ?std.fs.File,
     allocator: *const std.mem.Allocator,
     path: []const u8,
 
     pub fn create(allocator: *const std.mem.Allocator, path: [:0]const u8) RomfsDeviceStub {
-        return .{
+        return RomfsDeviceStub.init(.{
             .file = null,
             .allocator = allocator,
             .path = path,
-        };
+        });
     }
 
-    pub fn destroy(self: *RomfsDeviceStub) void {
+    pub fn destroy(self: *Self) void {
         if (self.file) |file| {
             file.close();
         }
     }
 
-    pub fn load(self: *RomfsDeviceStub) anyerror!void {
+    pub fn load(self: *Self) anyerror!void {
         const cwd = std.fs.cwd();
         self.file = try cwd.openFile(self.path, .{ .mode = .read_only });
     }
 
-    pub fn unload(self: *RomfsDeviceStub) bool {
+    pub fn unload(self: *Self) bool {
         _ = self;
         return true;
     }
 
-    pub fn ifile(self: *RomfsDeviceStub, allocator: std.mem.Allocator) ?IFile {
+    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
         _ = self;
         _ = allocator;
         return null;
     }
 
-    pub fn delete(self: *RomfsDeviceStub) void {
+    pub fn delete(self: *Self) void {
         _ = self;
     }
 
-    pub fn name(self: *const RomfsDeviceStub) []const u8 {
+    pub fn name(self: *const Self) []const u8 {
         _ = self;
         return "romfs";
     }
-};
+});

@@ -28,58 +28,64 @@ const IDriver = @import("idriver.zig").IDriver;
 
 const interface = @import("interface");
 
+const kernel = @import("../kernel.zig");
+
 const log = std.log.scoped(.@"vfs/driverfs");
 
-pub const DriverFs = struct {
-    pub usingnamespace interface.DeriveFromBase(ReadOnlyFileSystem, DriverFs);
+// const DriverDirectory = struct {
+//     pub usingnamespace
+// };
+
+pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
+    const Self = @This();
     base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
     _container: std.StringHashMap(IDriver),
 
     pub fn init(allocator: std.mem.Allocator) DriverFs {
         log.info("created", .{});
-        return .{
-            .base = ReadOnlyFileSystem{},
+        return DriverFs.init(.{
+            .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
             ._container = std.StringHashMap(IDriver).init(allocator),
-        };
+        });
     }
 
-    pub fn delete(self: *DriverFs) void {
+    pub fn delete(self: *Self) void {
         log.debug("deinitialization", .{});
         var it = self._container.iterator();
         while (it.next()) |driver| {
-            log.debug("removing driver: {s}", .{driver.value_ptr.name()});
-            driver.value_ptr.delete();
+            log.debug("removing driver: {s}", .{driver.value_ptr.interface.name()});
+            driver.value_ptr.interface.delete();
         }
         self._container.deinit();
     }
 
-    pub fn name(self: *const DriverFs) []const u8 {
+    pub fn name(self: *const Self) []const u8 {
         _ = self;
-        return "drivers";
+        return "dev";
     }
 
-    pub fn append(self: *DriverFs, driver: IDriver, node_name: []const u8) !void {
-        log.debug("mapping driver '{s}' to '{s}' ", .{ driver.name(), node_name });
+    pub fn append(self: *Self, driver: IDriver, node_name: []const u8) !void {
+        log.debug("mapping driver '{s}' to '{s}' ", .{ driver.interface.name(), node_name });
         self._container.put(node_name, driver) catch |err| {
-            log.err("adding driver {s} failed with an error: {s}", .{ driver.name(), @errorName(err) });
+            log.err("adding driver {s} failed with an error: {s}", .{ driver.interface.name(), @errorName(err) });
             return err;
         };
     }
 
-    pub fn load_all(self: *DriverFs) !void {
+    pub fn load_all(self: *Self) !void {
         log.debug("loading all drivers", .{});
         var it = self._container.iterator();
         while (it.next()) |driver| {
-            driver.value_ptr.load() catch |err| {
-                log.err("Loading driver {s} failed with an error: {s}", .{ driver.value_ptr.name(), @errorName(err) });
+            driver.value_ptr.interface.load() catch |err| {
+                log.err("Loading driver {s} failed with an error: {s}", .{ driver.value_ptr.interface.name(), @errorName(err) });
                 return err;
             };
         }
     }
 
-    pub fn traverse(self: *DriverFs, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
+    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         _ = self;
         _ = path;
         _ = callback;
@@ -87,22 +93,22 @@ pub const DriverFs = struct {
         return -1;
     }
 
-    pub fn get(self: *DriverFs, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+        log.debug("Getting file : {s}", .{path});
         if (self._container.getPtr(path)) |driver| {
-            return driver.ifile(allocator);
+            return driver.interface.ifile(allocator);
         }
         return null;
     }
 
-    pub fn has_path(self: *const DriverFs, path: []const u8) bool {
+    pub fn has_path(self: *const Self, path: []const u8) bool {
         _ = self;
         _ = path;
         return false;
     }
 
-    pub fn iterator(self: *DriverFs, path: []const u8) ?IDirectoryIterator {
-        _ = self;
-        _ = path;
-        return null;
+    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
+        log.debug("Getting iterator for: {s}", .{path});
+        return (kernel.driver.DriverFsIterator.InstanceType.create(self._container.iterator(), self._allocator)).interface.new(self._allocator) catch return null;
     }
-};
+});

@@ -31,32 +31,31 @@ const MemoryInfo = struct {
     total: usize,
 };
 
-pub const MemInfoFile = struct {
+pub const MemInfoFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct {
     const Self = @This();
     const BufferSize = 128;
-    pub usingnamespace interface.DeriveFromBase(kernel.fs.ReadOnlyFile, MemInfoFile);
     base: kernel.fs.ReadOnlyFile,
-    _position: usize = 0,
+    _position: usize,
     _buffer: [BufferSize]u8,
 
     pub fn create() MemInfoFile {
-        var meminfo = MemInfoFile{
-            .base = .{},
+        var meminfo = MemInfoFile.init(.{
+            .base = kernel.fs.ReadOnlyFile.init(.{}),
             ._position = 0,
             ._buffer = .{0} ** BufferSize,
-        };
+        });
 
         const memory_used: usize = kernel.memory.heap.malloc.get_usage();
         const memory_used_slow = kernel.process.process_manager.instance.get_process_memory_pool().get_used_size();
         const memory_used_combined = memory_used + memory_used_slow;
         var written_length: usize = 0;
         var sizebuf = [_]u8{0} ** 16;
-        var buf = std.fmt.bufPrint(&meminfo._buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)}) catch
-            &meminfo._buffer;
+        var buf = std.fmt.bufPrint(&meminfo.data()._buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)}) catch
+            &meminfo.data()._buffer;
         written_length += buf.len;
-        buf = std.fmt.bufPrint(meminfo._buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
+        buf = std.fmt.bufPrint(meminfo.data()._buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
         written_length += buf.len;
-        _ = std.fmt.bufPrint(meminfo._buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch {};
+        _ = std.fmt.bufPrint(meminfo.data()._buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch {};
 
         return meminfo;
     }
@@ -81,7 +80,7 @@ pub const MemInfoFile = struct {
             return 0;
         }
         const read_length = @min(self._buffer.len - self._position, buffer.len);
-        @memcpy(buffer, self._buffer[self._position .. self._position + read_length]);
+        @memcpy(buffer[0..read_length], self._buffer[self._position .. self._position + read_length]);
         self._position += read_length;
         return @intCast(read_length);
     }
@@ -152,4 +151,4 @@ pub const MemInfoFile = struct {
     pub fn delete(self: *Self) void {
         _ = self;
     }
-};
+});

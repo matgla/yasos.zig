@@ -19,63 +19,41 @@ const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const MmcFile = @import("mmc_file.zig").MmcFile;
 
-pub fn MmcDriver(comptime MmcType: anytype) type {
-    return struct {
-        const Self = @This();
-        const mmc = MmcType;
+const interface = @import("interface");
 
-        const VTable = IDriver.VTable{
-            .load = load,
-            .unload = unload,
-            .ifile = ifile,
-            .destroy = _destroy,
-        };
+const hal = @import("hal");
 
-        pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
-            const object = try allocator.create(Self);
-            object.* = Self.create(allocator);
-            return object;
-        }
+pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
+    const Self = @This();
+    mmc: hal.mmc.Mmc,
 
-        pub fn destroy(self: *Self) void {
-            self._allocator.destroy(self);
-        }
+    pub fn create(mmc: hal.mmc.Mmc) MmcDriver {
+        return MmcDriver.init(.{
+            .mmc = mmc,
+        });
+    }
 
-        pub fn create() Self {
-            return .{};
-        }
+    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
+        _ = self;
+        _ = allocator;
+        return null;
+    }
 
-        pub fn idriver(self: *Self) IDriver {
-            return .{
-                .ptr = self,
-                .vtable = &VTable,
-            };
-        }
+    pub fn load(self: *Self) anyerror!void {
+        _ = self;
+    }
 
-        fn load(_: *anyopaque) !void {
-            try mmc.init(.{
-                .bus_width = 4,
-                .clock_speed = 50_000_000,
-                .timeout_ms = 1000,
-                .use_dma = false,
-            });
-        }
+    pub fn unload(self: *Self) bool {
+        _ = self;
+        return true;
+    }
 
-        fn unload(_: *anyopaque) bool {
-            return true;
-        }
+    pub fn delete(self: *Self) void {
+        _ = self;
+    }
 
-        fn ifile(self: *anyopaque) ?IFile {
-            // const self: *Self = @ptrCast(@alignCast(ctx));
-            const file = MmcFile(mmc).new(self._allocator) catch {
-                return null;
-            };
-            return file.ifile();
-        }
-
-        fn _destroy(ctx: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            self._allocator.destroy(self);
-        }
-    };
-}
+    pub fn name(self: *const Self) []const u8 {
+        _ = self;
+        return "mmc";
+    }
+});

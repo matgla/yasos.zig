@@ -19,35 +19,31 @@
 
 const std = @import("std");
 
+const kernel = @import("../kernel.zig");
+
 const interface = @import("interface");
 
-const kernel = @import("kernel");
 const IDirectoryIterator = kernel.fs.IDirectoryIterator;
-const IFile = kernel.fs.IFile;
-const FileHeader = @import("file_header.zig").FileHeader;
-const RomFsFile = @import("romfs_file.zig").RomFsFile;
 
-pub const RomFsDirectoryIterator = interface.DeriveFromBase(IDirectoryIterator, struct {
+pub const DriverFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
     pub const Self = @This();
-    _file: ?FileHeader,
+    pub const IteratorType = std.StringHashMap(kernel.driver.IDriver).Iterator;
+
+    _iterator: IteratorType,
     _allocator: std.mem.Allocator,
 
-    pub fn create(first_file: ?FileHeader, allocator: std.mem.Allocator) RomFsDirectoryIterator {
-        return RomFsDirectoryIterator.init(.{
-            ._file = first_file,
+    pub fn create(iterator: IteratorType, allocator: std.mem.Allocator) DriverFsIterator {
+        return DriverFsIterator.init(.{
+            ._iterator = iterator,
             ._allocator = allocator,
         });
     }
 
-    pub fn next(self: *Self) ?IFile {
-        if (self._file) |*file| {
-            const ifile: IFile = RomFsFile.InstanceType.create(file.*, self._allocator).interface.new(self._allocator) catch {
-                return null;
-            };
-            self._file = file.next();
-            return ifile;
+    pub fn next(self: *Self) ?kernel.fs.IFile {
+        if (self._iterator.next()) |driver| {
+            return driver.value_ptr.interface.ifile(self._allocator);
         }
-        return null; // End of iteration
+        return null;
     }
 
     pub fn delete(self: *Self) void {
