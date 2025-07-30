@@ -115,9 +115,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             var it = self.fds.iterator();
             while (it.next()) |*n| {
                 if (n.value_ptr.diriter) |*d| {
-                    d.delete();
+                    d.interface.delete();
                 }
-                n.value_ptr.file.delete();
+                n.value_ptr.file.interface.delete();
             }
             self.fds.deinit();
         }
@@ -192,6 +192,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn stack_pointer(self: Self) *const u8 {
             return self.impl.stack_pointer();
+        }
+
+        pub fn get_stack_bottom(self: Self) *const u8 {
+            return self.impl.get_stack_bottom();
         }
 
         pub fn set_stack_pointer(self: *Self, ptr: *u8) void {

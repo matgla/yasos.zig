@@ -1,7 +1,8 @@
 FROM ubuntu:24.04
 
 ARG TARGETPLATFORM
-ARG ZIG_VERSION="0.15.0-dev.828+3ce8d19f7"
+ARG ZIG_VERSION="0.15.0-dev.1380+e98aeeb73"
+
 ARG ARM_NONE_EABI_GCC_VERSION="14.2.rel1"
 
 ENV PATH="/opt/zig:/opt/arm-none-eabi-gcc/bin:$PATH"
@@ -38,4 +39,6 @@ RUN apt-get install -y genromfs
 RUN apt-get install -y libusb-1.0-0-dev libtool build-essential
 RUN apt-get install -y pkg-config
 RUN cd /opt && git clone https://github.com/raspberrypi/openocd.git
+RUN apt-get install -y libjim-dev
 RUN cd /opt/openocd && ./bootstrap && ./configure --disable-werror && make -j$(nproc) && make install
+RUN apt-get install -y curl

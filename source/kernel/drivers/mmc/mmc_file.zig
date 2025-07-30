@@ -17,151 +17,125 @@ const std = @import("std");
 
 const c = @import("libc_imports").c;
 
-const IFile = @import("../../fs/ifile.zig").IFile;
-const FileType = @import("../../fs/ifile.zig").FileType;
+const hal = @import("hal");
+const interface = @import("interface");
 
-pub fn MmcFile(comptime MmcType: anytype) type {
-    return struct {
+const kernel = @import("../../kernel.zig");
+
+const log = std.log.scoped(.@"mmc/driver");
+
+pub fn MmcFile(comptime DriverType: type) type {
+    return interface.DeriveFromBase(kernel.fs.IFile, struct {
         const Self = @This();
-        const mmc = MmcType;
 
         /// VTable for IFile interface
-        const VTable = IFile.VTable{
-            .read = read,
-            .write = write,
-            .seek = seek,
-            .close = close,
-            .sync = sync,
-            .tell = tell,
-            .size = size,
-            .name = name,
-            .ioctl = ioctl,
-            .fcntl = fcntl,
-            .stat = stat,
-            .filetype = filetype,
-            .dupe = dupe,
-            .destroy = _destroy,
-        };
-
         _allocator: std.mem.Allocator,
+        _mmc: *hal.mmc.Mmc,
+        _name: []const u8,
+        _driver: *DriverType,
+        _current_block: u32,
 
-        pub fn new(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
-            const object = try allocator.create(Self);
-            object.* = Self.create(allocator);
-            return object;
-        }
-
-        pub fn destroy(self: *Self) void {
-            self._allocator.destroy(self);
-        }
-
-        pub fn create(allocator: std.mem.Allocator) Self {
-            return .{
+        pub fn create(mmc: *hal.mmc.Mmc, allocator: std.mem.Allocator, filename: []const u8, driver: *DriverType) MmcFile(DriverType) {
+            return MmcFile(DriverType).init(.{
                 ._allocator = allocator,
-            };
+                ._mmc = mmc,
+                ._name = filename,
+                ._driver = driver,
+                ._current_block = 0,
+            });
         }
 
-        pub fn ifile(self: *Self) IFile {
-            return .{
-                .ptr = self,
-                .vtable = &VTable,
-            };
+        pub fn read(self: *Self, buf: []u8) isize {
+            return self._driver.read(self._current_block << 9, buf);
         }
 
-        fn read(ctx: *anyopaque, buf: []u8) isize {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            _ = self;
-            _ = buf;
-            return 0;
+        pub fn write(self: *Self, buf: []const u8) isize {
+            return self._driver.write(self._current_block << 9, buf);
         }
 
-        fn write(ctx: *anyopaque, buf: []const u8) isize {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            _ = self;
-            _ = buf;
-            return 0;
+        pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+            switch (whence) {
+                c.SEEK_SET => {
+                    if (offset < 0 or (offset >> 9) > self._driver.size_in_sectors()) {
+                        return -1;
+                    }
+
+                    self._current_block = @intCast(offset >> 9);
+                },
+                c.SEEK_END => {
+                    // const file_size: c.off_t = @intCast(self.header.size());
+                    // if (file_size >= offset) {
+                    //     self.position = file_size - @as(c.off_t, @intCast(offset));
+                    // } else {
+                    //     // set errno
+                    //     return -1;
+                    // }
+                    log.err("SEEK_END is not implemented for MMC disk", .{});
+                    return -1;
+                },
+                c.SEEK_CUR => {
+                    const new_position = self._current_block - @as(u32, @intCast((offset >> 9)));
+                    if (new_position < 0) {
+                        return -1;
+                    }
+                    self._current_block = @intCast(new_position);
+                },
+                else => return -1,
+            }
+            return @as(c.off_t, @intCast(self._current_block)) << 9;
         }
 
-        fn seek(ctx: *anyopaque, offset: c.off_t, whence: i32) c.off_t {
-            _ = ctx;
-            _ = offset;
-            _ = whence;
-            return 0;
-        }
-
-        fn close(ctx: *anyopaque) i32 {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            _ = self;
-            return 0;
-            // return self.mmc.close();
-        }
-
-        fn sync(ctx: *anyopaque) i32 {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            _ = self;
-            return 0;
-        }
-
-        fn tell(ctx: *anyopaque) c.off_t {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            _ = self;
-            return 0;
-        }
-
-        fn size(ctx: *anyopaque) isize {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        pub fn close(self: *Self) i32 {
             _ = self;
             return 0;
         }
 
-        fn name(ctx: *anyopaque) []const u8 {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        pub fn sync(self: *Self) i32 {
             _ = self;
-            return "";
+            return 0;
         }
 
-        fn ioctl(ctx: *anyopaque, op: i32, arg: ?*anyopaque) i32 {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        pub fn tell(self: *Self) c.off_t {
             _ = self;
-            _ = op;
+            return 0;
+        }
+
+        pub fn size(self: *Self) isize {
+            _ = self;
+            return 0;
+        }
+
+        pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
+            _ = allocator;
+            return kernel.fs.FileName.init(self._name, null);
+        }
+
+        pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
+            _ = self;
+            _ = cmd;
             _ = arg;
             return 0;
         }
 
-        fn fcntl(ctx: *anyopaque, op: i32, maybe_arg: ?*anyopaque) i32 {
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        pub fn fcntl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
             _ = self;
-            _ = op;
-            _ = maybe_arg;
+            _ = cmd;
+            _ = arg;
             return 0;
         }
 
-        fn stat(ctx: *const anyopaque, buf: *c.struct_stat) void {
-            _ = ctx;
-            buf.st_dev = 0;
-            buf.st_ino = 0;
-            buf.st_mode = 0;
-            buf.st_nlink = 0;
-            buf.st_uid = 0;
-            buf.st_gid = 0;
-            buf.st_rdev = 0;
-            buf.st_size = 0;
-            buf.st_blksize = 1;
-            buf.st_blocks = 1;
+        pub fn stat(self: *Self, data: *c.struct_stat) void {
+            _ = self;
+            _ = data;
         }
 
-        fn filetype(_: *const anyopaque) FileType {
-            return FileType.BlockDevice;
+        pub fn filetype(self: *Self) kernel.fs.FileType {
+            _ = self;
+            return kernel.fs.FileType.BlockDevice;
         }
 
-        pub fn dupe(ctx: *anyopaque) ?IFile {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            return self.ifile();
+        pub fn delete(self: *Self) void {
+            _ = self.close();
         }
-
-        fn _destroy(ctx: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            self.destroy();
-        }
-    };
+    });
 }

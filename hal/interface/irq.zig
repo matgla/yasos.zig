@@ -40,7 +40,7 @@ pub fn Irq(comptime IrqImpl: anytype) type {
         }
 
         pub fn trigger_supervisor_call(_: Self, number: u32, arg: *const anyopaque, out: *anyopaque) void {
-            const f: *const fn (_: u32, _: *const volatile anyopaque, _: *volatile anyopaque) callconv(.C) void = @ptrCast(&IrqImpl.trigger_supervisor_call);
+            const f: *const fn (_: u32, _: *const volatile anyopaque, _: *volatile anyopaque) callconv(.c) void = @ptrCast(&IrqImpl.trigger_supervisor_call);
             @call(.never_inline, f, .{ number, arg, out });
         }
 

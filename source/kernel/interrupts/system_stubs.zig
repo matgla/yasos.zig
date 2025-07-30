@@ -72,7 +72,7 @@ pub export fn _close(fd: c_int) c_int {
     if (maybe_process) |process| {
         var maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |*file| {
-            _ = file.file.close();
+            _ = file.file.interface.close();
             _ = process.fds.remove(@intCast(fd));
             return 0;
         }
@@ -89,7 +89,7 @@ pub export fn _read(fd: c_int, data: *anyopaque, size: usize) isize {
     if (maybe_process) |process| {
         var maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |*file| {
-            return file.file.read(@as([*:0]u8, @ptrCast(data))[0..size]);
+            return file.file.interface.read(@as([*:0]u8, @ptrCast(data))[0..size]);
         }
     }
     return 0;
@@ -100,7 +100,7 @@ pub export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
     if (maybe_process) |process| {
         var maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |*file| {
-            return file.file.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
+            return file.file.interface.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
         }
     }
     return -1;
@@ -111,7 +111,7 @@ pub export fn _ioctl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
     if (maybe_process) |process| {
         var maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |*file| {
-            return file.file.ioctl(request, data);
+            return file.file.interface.ioctl(request, data);
         }
     }
     return -1;
@@ -122,7 +122,7 @@ pub export fn _fcntl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
     if (maybe_process) |process| {
         var maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |*file| {
-            return file.file.fcntl(request, data);
+            return file.file.interface.fcntl(request, data);
         }
     }
     return -1;

@@ -25,31 +25,26 @@ pub const IFile = kernel.fs.IFile;
 
 const interface = @import("interface");
 
-fn DriverInterface(comptime SelfType: type) type {
-    return struct {
-        pub const Self = SelfType;
+pub const IDriver = interface.ConstructInterface(struct {
+    pub const Self = @This();
 
-        pub fn load(self: *Self) anyerror!void {
-            return interface.VirtualCall(self, "load", .{}, anyerror!void);
-        }
+    pub fn load(self: *Self) anyerror!void {
+        return interface.VirtualCall(self, "load", .{}, anyerror!void);
+    }
 
-        pub fn unload(self: *Self) bool {
-            return interface.VirtualCall(self, "unload", .{}, bool);
-        }
+    pub fn unload(self: *Self) bool {
+        return interface.VirtualCall(self, "unload", .{}, bool);
+    }
 
-        pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-            return interface.VirtualCall(self, "ifile", .{allocator}, ?IFile);
-        }
+    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
+        return interface.VirtualCall(self, "ifile", .{allocator}, ?IFile);
+    }
 
-        pub fn name(self: *const Self) []const u8 {
-            return interface.VirtualCall(self, "name", .{}, []const u8);
-        }
+    pub fn name(self: *const Self) []const u8 {
+        return interface.VirtualCall(self, "name", .{}, []const u8);
+    }
 
-        pub fn delete(self: *Self) void {
-            interface.VirtualCall(self, "delete", .{}, void);
-            interface.DestructorCall(self);
-        }
-    };
-}
-
-pub const IDriver = interface.ConstructInterface(DriverInterface);
+    pub fn delete(self: *Self) void {
+        interface.DestructorCall(self);
+    }
+});

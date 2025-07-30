@@ -75,7 +75,7 @@ pub const MountPoint = struct {
             allocator.destroy(child);
         }
 
-        self.filesystem.delete();
+        self.filesystem.interface.delete();
         // allocator.destroy(self);
     }
 };
@@ -195,10 +195,14 @@ pub const MountPoints = struct {
         }
 
         // verify if path exists in FS and mount if so
-        if (longest_matching_point.point.filesystem.has_path(longest_matching_point.left)) {
+        if (longest_matching_point.point.filesystem.interface.has_path(longest_matching_point.left)) {
             try longest_matching_point.point.appendChild(self.allocator, longest_matching_point.left, filesystem);
         } else {
             return MountPointError.PathNotExists;
+        }
+        var fs = filesystem;
+        if (fs.interface.mount() < 0) {
+            return MountPointError.NotMounted;
         }
     }
 
@@ -223,94 +227,62 @@ pub const MountPoints = struct {
     }
 };
 
-// Unit Tests
-const FileSystemStub = struct {
-    has_file: bool = true,
-    pub usingnamespace interface.DeriveFromBase(IFileSystem, FileSystemStub);
-
-    pub fn mount(_: *FileSystemStub) i32 {
-        return 0;
-    }
-
-    pub fn umount(_: *FileSystemStub) i32 {
-        return 0;
-    }
-
-    pub fn create(_: *FileSystemStub, _: []const u8, _: i32) ?IFile {
-        return null;
-    }
-
-    pub fn mkdir(_: *FileSystemStub, _: []const u8, _: i32) i32 {
-        return 0;
-    }
-
-    pub fn remove(_: *FileSystemStub, _: []const u8) i32 {
-        return 0;
-    }
-
-    pub fn name(_: *const FileSystemStub) []const u8 {
-        return "";
-    }
-
-    pub fn traverse(_: *FileSystemStub, _: []const u8, _: *const fn (file: *IFile, _: *anyopaque) bool, _: *anyopaque) i32 {
-        return 0;
-    }
-
-    pub fn get(_: *FileSystemStub, _: []const u8) ?IFile {
-        return null;
-    }
-
-    pub fn has_path(self: *const FileSystemStub, _: []const u8) bool {
-        return self.has_file;
-    }
-
-    pub fn delete(self: *FileSystemStub) void {
-        _ = self;
-    }
-
-    pub fn iterator(self: *FileSystemStub, path: []const u8) ?IDirectoryIterator {
-        _ = self;
-        _ = path;
-        return null; // No directory iterator for stub
-    }
-};
-test "error when root not mounted" {
+test "MountPoints.ShouldErrorWhenRootNotMounted" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
     var sut = MountPoints.init(std.testing.allocator);
-    var fsstub = FileSystemStub{};
-    try std.testing.expectError(MountPointError.RootNotMounted, sut.mount_filesystem("/a", fsstub.interface()));
+    var fsstub = FileSystemStub.init(.{
+        .has_file = false,
+    });
+    try std.testing.expectError(MountPointError.RootNotMounted, sut.mount_filesystem("/a", fsstub.interface.create()));
 }
 
-test "mount root" {
+test "MountPoints.MountRoot" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
     var sut = MountPoints.init(std.testing.allocator);
-    var fsstub = FileSystemStub{};
-    try sut.mount_filesystem("/", fsstub.interface());
+
+    var fsstub = FileSystemStub.init(.{
+        .has_file = true,
+    });
+    try sut.mount_filesystem("/", fsstub.interface.create());
     try std.testing.expect(sut.root != null);
     try std.testing.expectEqualStrings("/", sut.root.?.path);
 }
 
-test "reject too long path" {
+test "MountPoints.RejectTooLongPath" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
     var sut = MountPoints.init(std.testing.allocator);
-    var fsstub = FileSystemStub{};
-    try sut.mount_filesystem("/", fsstub.interface());
-    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem("/" ** (config.fs.max_mount_point_size + 1), fsstub.interface()));
+
+    var fsstub = FileSystemStub.init(.{
+        .has_file = true,
+    });
+    try sut.mount_filesystem("/", fsstub.interface.create());
+    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem("/" ** (config.fs.max_mount_point_size + 1), fsstub.interface.create()));
 }
 
-test "reject root if already mounted" {
+test "MountPoints.RejectRootIfAlreadyMounted" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+
     var sut = MountPoints.init(std.testing.allocator);
-    var fsstub = FileSystemStub{};
-    try sut.mount_filesystem("/", fsstub.interface());
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.interface()));
+    var fsstub = FileSystemStub.init(.{
+        .has_file = true,
+    });
+    try sut.mount_filesystem("/", fsstub.interface.create());
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.interface.create()));
 }
 
-test "mount childs" {
+test "MountPoints.MountChilds" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub{};
+    var fsstub = FileSystemStub.init(.{
+        .has_file = true,
+    });
     var maybe_child = sut.find_longest_matching_point(*const MountPoint, "/a/b/x/d");
     try std.testing.expect(maybe_child == null);
 
-    try sut.mount_filesystem("/", fsstub.interface());
-    try sut.mount_filesystem("/a/b", fsstub.interface());
+    try sut.mount_filesystem("/", fsstub.interface.create());
+    try sut.mount_filesystem("/a/b", fsstub.interface.create());
 
     try std.testing.expect(sut.root != null);
     try std.testing.expectEqual(1, sut.root.?.children.len());
@@ -340,7 +312,7 @@ test "mount childs" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("/", child.parent.?.path);
 
-    try sut.mount_filesystem("/a/c", fsstub.interface());
+    try sut.mount_filesystem("/a/c", fsstub.interface.create());
     maybe_child = sut.find_longest_matching_point(*const MountPoint, "a/c/d");
     try std.testing.expect(maybe_child != null);
     child = maybe_child.?;
@@ -349,7 +321,7 @@ test "mount childs" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("/", child.parent.?.path);
 
-    try sut.mount_filesystem("/a/c/a/c/", fsstub.interface());
+    try sut.mount_filesystem("/a/c/a/c/", fsstub.interface.create());
     maybe_child = sut.find_longest_matching_point(*const MountPoint, "a/c/a");
     try std.testing.expect(maybe_child != null);
     child = maybe_child.?;
@@ -365,7 +337,7 @@ test "mount childs" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("a/c", child.parent.?.path);
 
-    try sut.mount_filesystem("/a/c/a/c/e", fsstub.interface());
+    try sut.mount_filesystem("/a/c/a/c/e", fsstub.interface.create());
     maybe_child = sut.find_longest_matching_point(*const MountPoint, "/a/c/a/c/e/deep/path/is/here");
     try std.testing.expect(maybe_child != null);
     child = maybe_child.?;
@@ -374,45 +346,57 @@ test "mount childs" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("a/c", child.parent.?.path);
 
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.interface()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fsstub.interface()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/b", fsstub.interface()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fsstub.interface()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c", fsstub.interface()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c/e", fsstub.interface()));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.interface.create()));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fsstub.interface.create()));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/b", fsstub.interface.create()));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fsstub.interface.create()));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c", fsstub.interface.create()));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c/e", fsstub.interface.create()));
 }
 
-test "report error when trying to mount relative path" {
+test "MountPoints.ReportErrorWhenTryingToMountRelativePath" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub{};
-    try sut.mount_filesystem("/", fsstub.interface());
-    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("otherfs/smth", fsstub.interface()));
-    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("", fsstub.interface()));
+    var fsstub = FileSystemStub.init(.{
+        .has_file = true,
+    });
+    try sut.mount_filesystem("/", fsstub.interface.create());
+    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("otherfs/smth", fsstub.interface.create()));
+    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("", fsstub.interface.create()));
 }
 
-test "handle not existing path" {
+test "MountPoints.HandleNotExistingPath" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub{ .has_file = false };
-    try sut.mount_filesystem("/", fsstub.interface());
-    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c", fsstub.interface()));
-    fsstub.has_file = true;
-    try sut.mount_filesystem("/a/c", fsstub.interface());
-    fsstub.has_file = false;
-    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c/d", fsstub.interface()));
+    var fsstub = FileSystemStub.init(.{
+        .has_file = false,
+    });
+    try sut.mount_filesystem("/", fsstub.interface.create());
+    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c", fsstub.interface.create()));
+    fsstub.data().has_file = true;
+    try sut.mount_filesystem("/a/c", fsstub.interface.create());
+    fsstub.data().has_file = false;
+    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c/d", fsstub.interface.create()));
 }
 
-test "remove childs" {
+test "MountPoints.RemoveChilds" {
+    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub{};
-    try sut.mount_filesystem("/", fsstub.interface());
-    try sut.mount_filesystem("/a/b", fsstub.interface());
-    try sut.mount_filesystem("/a/c", fsstub.interface());
-    try sut.mount_filesystem("/a/c/a/c/", fsstub.interface());
-    try sut.mount_filesystem("/a/c/e", fsstub.interface());
-    try sut.mount_filesystem("/a/c/e/c/f", fsstub.interface());
+    var fsstub = FileSystemStub.init(.{
+        .has_file = true,
+    });
+    try sut.mount_filesystem("/", fsstub.interface.create());
+    try sut.mount_filesystem("/a/b", fsstub.interface.create());
+    try sut.mount_filesystem("/a/c", fsstub.interface.create());
+    try sut.mount_filesystem("/a/c/a/c/", fsstub.interface.create());
+    try sut.mount_filesystem("/a/c/e", fsstub.interface.create());
+    try sut.mount_filesystem("/a/c/e/c/f", fsstub.interface.create());
 
     var maybe_child = sut.find_longest_matching_point(*const MountPoint, "/a/c/e/c/f/deep/path");
     try std.testing.expect(maybe_child != null);

@@ -40,7 +40,7 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
         .path = name,
         .address = null,
     };
-    _ = fs.get_ivfs().traverse("/lib", traverse_directory, &context);
+    _ = fs.get_ivfs().interface.traverse("/lib", traverse_directory, &context);
     if (context.address) |address| {
         return address;
     }
@@ -49,7 +49,7 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    const filename = file.name(kernel_allocator);
+    const filename = file.interface.name(kernel_allocator);
     defer filename.deinit();
     if (std.mem.eql(u8, module_context.path, filename.get_name())) {
         var attr: FileMemoryMapAttributes = .{
@@ -57,7 +57,7 @@ fn traverse_directory(file: *IFile, context: *anyopaque) bool {
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
-        _ = file.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        _ = file.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
         if (attr.mapped_address_r) |address| {
             module_context.address = address;
             return false;
@@ -84,15 +84,15 @@ pub fn deinit() void {
 }
 
 pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
-    var maybe_file = fs.get_ivfs().get(path, allocator);
+    var maybe_file = fs.get_ivfs().interface.get(path, allocator);
     if (maybe_file) |*f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
-        _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        f.delete();
+        _ = f.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        f.interface.delete();
         var header_address: *const anyopaque = undefined;
 
         if (attr.mapped_address_r) |address| {
@@ -124,15 +124,15 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_a
 }
 
 pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
-    var maybe_file = fs.get_ivfs().get(path, allocator);
+    var maybe_file = fs.get_ivfs().interface.get(path, allocator);
     if (maybe_file) |*f| {
-        defer f.delete();
+        defer f.interface.delete();
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
-        _ = f.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+        _ = f.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
         // f.destroy();
         var header_address: *const anyopaque = undefined;
 

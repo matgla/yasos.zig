@@ -64,8 +64,8 @@ export fn crt_init() void {
 
     c.unreset_block_wait(c.RESETS_RESET_BITS &
         ~(c.RESETS_RESET_ADC_BITS | c.RESETS_RESET_RTC_BITS | c.RESETS_RESET_SPI0_BITS |
-        c.RESETS_RESET_SPI1_BITS | c.RESETS_RESET_UART0_BITS |
-        c.RESETS_RESET_UART1_BITS | c.RESETS_RESET_USBCTRL_BITS));
+            c.RESETS_RESET_SPI1_BITS | c.RESETS_RESET_UART0_BITS |
+            c.RESETS_RESET_UART1_BITS | c.RESETS_RESET_USBCTRL_BITS));
 
     initialize_data();
     initialize_bss();
