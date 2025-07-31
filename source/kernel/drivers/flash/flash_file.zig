@@ -40,12 +40,14 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             _flash: *FlashType,
             _allocator: std.mem.Allocator,
             _current_address: u32,
+            _name: []const u8,
 
-            pub fn create(allocator: std.mem.Allocator, flash: *FlashType) FlashFileImpl {
+            pub fn create(allocator: std.mem.Allocator, flash: *FlashType, filename: []const u8) FlashFileImpl {
                 return FlashFileImpl.init(.{
                     ._flash = flash,
                     ._allocator = allocator,
                     ._current_address = 0,
+                    ._name = filename,
                 });
             }
 
@@ -95,9 +97,8 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             }
 
             pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-                _ = self;
                 _ = allocator;
-                return FileName.init("flash", null);
+                return FileName.init(self._name, null);
             }
 
             pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {

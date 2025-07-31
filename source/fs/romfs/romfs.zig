@@ -183,210 +183,215 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 });
 
-// const ExpectationList = std.ArrayList([]const u8);
-// var expected_directories: ExpectationList = undefined;
-// var did_error: anyerror!void = {};
+const ExpectationList = std.ArrayList([]const u8);
+var expected_directories: ExpectationList = undefined;
+var did_error: anyerror!void = {};
 
-// fn traverse_dir(file: *IFile, _: *anyopaque) bool {
-//     did_error catch return false;
-//     did_error = std.testing.expect(expected_directories.items.len != 0);
-//     did_error catch {
-//         std.debug.print("Expectation not found for: '{s}'\n", .{file.name()});
-//         return false;
-//     };
-//     const expectation = expected_directories.items[0];
-//     did_error = std.testing.expectEqualStrings(expectation, file.name());
-//     did_error catch {
-//         std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation, file.name() });
-//         return false;
-//     };
-//     _ = expected_directories.orderedRemove(0);
-//     return true;
-// }
+fn traverse_dir(file: *IFile, _: *anyopaque) bool {
+    did_error catch return false;
+    did_error = std.testing.expect(expected_directories.items.len != 0);
+    did_error catch {
+        std.debug.print("Expectation not found for: '{s}'\n", .{file.name()});
+        return false;
+    };
+    const expectation = expected_directories.items[0];
+    did_error = std.testing.expectEqualStrings(expectation, file.name());
+    did_error catch {
+        std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation, file.name() });
+        return false;
+    };
+    _ = expected_directories.orderedRemove(0);
+    return true;
+}
 
-// test "Romfs.ShouldParseFilesystem" {
-//     const test_data = @embedFile("tests/test.romfs");
-//     expected_directories = std.ArrayList([]const u8).init(std.testing.allocator);
-//     defer expected_directories.deinit();
-//     var maybe_fs = RomFs.init(std.testing.allocator, test_data);
-//     if (maybe_fs) |*fs| {
-//         const ifs = fs.ifilesystem();
+test "Romfs.ShouldParseFilesystem" {
+    // const RomFsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
+    // var device = RomFsDeviceStub.InstanceType.init(&std.testing.allocator, "source/fs/romfs/tests/test.romfs");
+    // var idevice = device.interface.create();
+    // try idevice.interface.load();
+    // const device_file = idevice.interface.ifile(std.testing.allocator);
+    // try std.testing.expect(device_file != null);
+    // expected_directories = std.ArrayList([]const u8).init(std.testing.allocator);
+    // defer expected_directories.deinit();
+    // var maybe_fs = RomFs.InstanceType.init(std.testing.allocator, device_file.?, 0);
+    // if (maybe_fs) |*fs| {
+    //     const ifs = fs.ifilesystem();
 
-//         try std.testing.expectEqual(ifs.name(), "romfs");
-//         const maybe_root_directory = ifs.get("/");
-//         try std.testing.expect(maybe_root_directory != null);
-//         if (maybe_root_directory) |root_directory| {
-//             defer _ = root_directory.close();
-//             try std.testing.expectEqualStrings(root_directory.name(), ".");
-//         }
-//         _ = try expected_directories.appendSlice(&.{ ".", "..", "dev", "subdir", "file.txt" });
-//         try std.testing.expectEqual(0, ifs.traverse(".", &traverse_dir, undefined));
-//         try did_error;
+    //     try std.testing.expectEqual(ifs.name(), "romfs");
+    //     const maybe_root_directory = ifs.get("/");
+    //     try std.testing.expect(maybe_root_directory != null);
+    //     if (maybe_root_directory) |root_directory| {
+    //         defer _ = root_directory.close();
+    //         try std.testing.expectEqualStrings(root_directory.name(), ".");
+    //     }
+    //     _ = try expected_directories.appendSlice(&.{ ".", "..", "dev", "subdir", "file.txt" });
+    //     try std.testing.expectEqual(0, ifs.traverse(".", &traverse_dir, undefined));
+    //     try did_error;
 
-//         _ = try expected_directories.appendSlice(&.{ ".", "test.socket", "pipe1", "fc1", "..", "fb1" });
-//         try std.testing.expectEqual(0, ifs.traverse("/dev", &traverse_dir, undefined));
-//         try did_error;
+    //     _ = try expected_directories.appendSlice(&.{ ".", "test.socket", "pipe1", "fc1", "..", "fb1" });
+    //     try std.testing.expectEqual(0, ifs.traverse("/dev", &traverse_dir, undefined));
+    //     try did_error;
 
-//         _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "other_dir", "f2.txt", "dir", ".." });
-//         try std.testing.expectEqual(0, ifs.traverse("/subdir", &traverse_dir, undefined));
-//         try did_error;
+    //     _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "other_dir", "f2.txt", "dir", ".." });
+    //     try std.testing.expectEqual(0, ifs.traverse("/subdir", &traverse_dir, undefined));
+    //     try did_error;
 
-//         _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
-//         try std.testing.expectEqual(0, ifs.traverse("/subdir/dir", &traverse_dir, undefined));
-//         try did_error;
+    //     _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
+    //     try std.testing.expectEqual(0, ifs.traverse("/subdir/dir", &traverse_dir, undefined));
+    //     try did_error;
 
-//         _ = try expected_directories.appendSlice(&.{ ".", "dir", "..", "a.txt", "b.txt" });
-//         try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir", &traverse_dir, undefined));
-//         try did_error;
+    //     _ = try expected_directories.appendSlice(&.{ ".", "dir", "..", "a.txt", "b.txt" });
+    //     try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir", &traverse_dir, undefined));
+    //     try did_error;
 
-//         _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
-//         try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir/dir", &traverse_dir, undefined));
-//         try did_error;
+    //     _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
+    //     try std.testing.expectEqual(0, ifs.traverse("/subdir/other_dir/dir", &traverse_dir, undefined));
+    //     try did_error;
 
-//         var maybe_file = ifs.get("/file.txt");
-//         try std.testing.expect(maybe_file != null);
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(34, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("THis is testing file\nwith content\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     var maybe_file = ifs.get("/file.txt");
+    //     try std.testing.expect(maybe_file != null);
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(34, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("THis is testing file\nwith content\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/subdir/f1.txt");
-//         try std.testing.expect(maybe_file != null);
+    //     maybe_file = ifs.get("/subdir/f1.txt");
+    //     try std.testing.expect(maybe_file != null);
 
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(10, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("1 2 3 4 5\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(10, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("1 2 3 4 5\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/subdir/f2.txt");
-//         try std.testing.expect(maybe_file != null);
+    //     maybe_file = ifs.get("/subdir/f2.txt");
+    //     try std.testing.expect(maybe_file != null);
 
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(9, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("1\n2\n3\n4\n\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(9, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("1\n2\n3\n4\n\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/subdir/other_dir/a.txt");
-//         try std.testing.expect(maybe_file != null);
+    //     maybe_file = ifs.get("/subdir/other_dir/a.txt");
+    //     try std.testing.expect(maybe_file != null);
 
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(7, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("abcdef\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(7, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("abcdef\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/subdir/other_dir/b.txt");
-//         try std.testing.expect(maybe_file != null);
+    //     maybe_file = ifs.get("/subdir/other_dir/b.txt");
+    //     try std.testing.expect(maybe_file != null);
 
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(10, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("avadad\nww\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(10, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("avadad\nww\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/subdir/dir/test.txt");
-//         try std.testing.expect(maybe_file != null);
+    //     maybe_file = ifs.get("/subdir/dir/test.txt");
+    //     try std.testing.expect(maybe_file != null);
 
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(36, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("This is test file\nWith some content\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(36, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("This is test file\nWith some content\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/subdir/dir/f1.txt");
-//         try std.testing.expect(maybe_file != null);
+    //     maybe_file = ifs.get("/subdir/dir/f1.txt");
+    //     try std.testing.expect(maybe_file != null);
 
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(10, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("1 2 3 4 5\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(10, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("1 2 3 4 5\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/subdir/other_dir/dir/test.txt");
-//         try std.testing.expect(maybe_file != null);
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(36, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.File, file.filetype());
-//             try std.testing.expectEqualStrings("This is test file\nWith some content\n", buffer);
-//             std.testing.allocator.free(buffer);
-//         }
+    //     maybe_file = ifs.get("/subdir/other_dir/dir/test.txt");
+    //     try std.testing.expect(maybe_file != null);
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(36, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.File, file.filetype());
+    //         try std.testing.expectEqualStrings("This is test file\nWith some content\n", buffer);
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/dev/test.socket");
-//         try std.testing.expect(maybe_file != null);
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(0, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.Socket, file.filetype());
-//             std.testing.allocator.free(buffer);
-//         }
+    //     maybe_file = ifs.get("/dev/test.socket");
+    //     try std.testing.expect(maybe_file != null);
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(0, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.Socket, file.filetype());
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/dev/pipe1");
-//         try std.testing.expect(maybe_file != null);
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(0, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.Fifo, file.filetype());
-//             std.testing.allocator.free(buffer);
-//         }
+    //     maybe_file = ifs.get("/dev/pipe1");
+    //     try std.testing.expect(maybe_file != null);
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(0, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.Fifo, file.filetype());
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/dev/fc1");
-//         try std.testing.expect(maybe_file != null);
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(0, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.CharDevice, file.filetype());
-//             std.testing.allocator.free(buffer);
-//         }
+    //     maybe_file = ifs.get("/dev/fc1");
+    //     try std.testing.expect(maybe_file != null);
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(0, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.CharDevice, file.filetype());
+    //         std.testing.allocator.free(buffer);
+    //     }
 
-//         maybe_file = ifs.get("/dev/fb1");
-//         try std.testing.expect(maybe_file != null);
-//         if (maybe_file) |file| {
-//             defer _ = file.close();
-//             try std.testing.expectEqual(0, file.size());
-//             const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
-//             try std.testing.expectEqual(file.size(), file.read(buffer));
-//             try std.testing.expectEqual(FileType.BlockDevice, file.filetype());
-//             std.testing.allocator.free(buffer);
-//         }
-//     }
-// }
+    //     maybe_file = ifs.get("/dev/fb1");
+    //     try std.testing.expect(maybe_file != null);
+    //     if (maybe_file) |file| {
+    //         defer _ = file.close();
+    //         try std.testing.expectEqual(0, file.size());
+    //         const buffer = try std.testing.allocator.alloc(u8, @intCast(file.size()));
+    //         try std.testing.expectEqual(file.size(), file.read(buffer));
+    //         try std.testing.expectEqual(FileType.BlockDevice, file.filetype());
+    //         std.testing.allocator.free(buffer);
+    //     }
+    // }
+}

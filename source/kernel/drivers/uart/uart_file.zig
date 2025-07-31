@@ -36,17 +36,19 @@ pub fn UartFile(comptime UartType: anytype) type {
             _echo: bool,
             _nonblock: bool,
             _allocator: std.mem.Allocator,
+            _name: []const u8,
 
             pub fn delete(self: *Self) void {
                 _ = self;
             }
 
-            pub fn create(allocator: std.mem.Allocator) UartFileImpl {
+            pub fn create(allocator: std.mem.Allocator, filename: []const u8) UartFileImpl {
                 return UartFileImpl.init(.{
                     ._icanonical = true,
                     ._echo = true,
                     ._nonblock = false,
                     ._allocator = allocator,
+                    ._name = filename,
                 });
             }
 
@@ -117,8 +119,7 @@ pub fn UartFile(comptime UartType: anytype) type {
 
             pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
                 _ = allocator;
-                _ = self;
-                return FileName.init("uart", null);
+                return FileName.init(self._name, null);
             }
 
             pub fn ioctl(self: *Self, op: i32, arg: ?*anyopaque) i32 {

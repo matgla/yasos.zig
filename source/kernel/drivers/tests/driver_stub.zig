@@ -15,34 +15,24 @@
 
 const std = @import("std");
 
-const IDriver = @import("../idriver.zig").IDriver;
-const IFile = @import("../../fs/fs.zig").IFile;
-const MmcFile = @import("mmc_file.zig").MmcFile;
-
 const interface = @import("interface");
 
-const hal = @import("hal");
+const IDriver = @import("../idriver.zig").IDriver;
+const kernel = @import("../../kernel.zig");
 
-pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
+pub const DriverStub = interface.DeriveFromBase(IDriver, struct {
     const Self = @This();
-    mmc: hal.mmc.Mmc,
-    _name: []const u8,
+    _file: ?kernel.fs.IFile,
 
-    pub fn create(mmc: hal.mmc.Mmc, driver_name: []const u8) MmcDriver {
-        return MmcDriver.init(.{
-            .mmc = mmc,
-            ._name = driver_name,
+    pub fn init(file: ?kernel.fs.IFile) DriverStub {
+        return DriverStub.init(.{
+            ._file = file,
         });
-    }
-
-    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-        _ = self;
-        _ = allocator;
-        return null;
     }
 
     pub fn load(self: *Self) anyerror!void {
         _ = self;
+        return;
     }
 
     pub fn unload(self: *Self) bool {
@@ -50,11 +40,17 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         return true;
     }
 
-    pub fn delete(self: *Self) void {
-        _ = self;
+    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.IFile {
+        _ = allocator;
+        return self._file;
     }
 
     pub fn name(self: *const Self) []const u8 {
-        return self._name;
+        _ = self;
+        return "none";
+    }
+
+    pub fn delete(self: *Self) void {
+        _ = self;
     }
 });

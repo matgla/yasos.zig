@@ -33,15 +33,17 @@ pub const FlashDriver = interface.DeriveFromBase(IDriver, struct {
     const FlashType = @TypeOf(board.flash.flash0);
 
     _flash: FlashType,
+    _name: []const u8,
 
-    pub fn create(flash: FlashType) FlashDriver {
+    pub fn create(flash: FlashType, driver_name: []const u8) FlashDriver {
         return FlashDriver.init(.{
             ._flash = flash,
+            ._name = driver_name,
         });
     }
 
     pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-        const file = FlashFile(FlashType).InstanceType.create(allocator, &self._flash).interface.new(allocator) catch {
+        const file = FlashFile(FlashType).InstanceType.create(allocator, &self._flash, self._name).interface.new(allocator) catch {
             return null;
         };
         return file;
@@ -61,7 +63,6 @@ pub const FlashDriver = interface.DeriveFromBase(IDriver, struct {
     }
 
     pub fn name(self: *const Self) []const u8 {
-        _ = self;
-        return "flash";
+        return self._name;
     }
 });

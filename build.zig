@@ -120,45 +120,69 @@ pub fn build(b: *std.Build) !void {
     } else {
         generate.step.dependOn(&configure.step);
     }
+
     const optimize = b.standardOptimizeOption(.{});
-    const tests = b.addTest(.{
-        .name = "yasos_tests",
-        .target = b.standardTargetOptions(.{}),
+    const target = b.standardTargetOptions(.{});
+    const kernel_tests = b.addTest(.{
+        .name = "kernel_tests",
+        .target = target,
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         .optimize = optimize,
-        .root_source_file = b.path("tests.zig"),
+        .root_source_file = b.path("source/kernel/tests.zig"),
     });
+
+    const fs_tests = b.addTest(.{
+        .name = "fs_tests",
+        .target = target,
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .optimize = optimize,
+        .root_source_file = b.path("source/fs/tests.zig"),
+    });
+
     const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
     generate_defconfig_for_tests.step.dependOn(&venv.step);
     generate_defconfig_for_tests.has_side_effects = true;
-    tests.step.dependOn(&generate_defconfig_for_tests.step);
-    b.installArtifact(tests);
-    tests.linkLibC();
+    kernel_tests.step.dependOn(&generate_defconfig_for_tests.step);
+    fs_tests.step.dependOn(&generate_defconfig_for_tests.step);
+
     const kernel_module_for_tests = b.addModule("kernel_under_test", .{
         .root_source_file = b.path("source/kernel/kernel.zig"),
     });
-    tests.root_module.addImport("kernel", kernel_module_for_tests);
+    fs_tests.root_module.addImport("kernel", kernel_module_for_tests);
+
+    b.installArtifact(kernel_tests);
+    b.installArtifact(fs_tests);
+
+    kernel_tests.linkLibC();
+    fs_tests.linkLibC();
 
     const test_config_module = b.addModule("test_config", .{
         .root_source_file = b.path("config/tests/config.zig"),
     });
-    tests.root_module.addImport("config", test_config_module);
+    kernel_tests.root_module.addImport("config", test_config_module);
+    fs_tests.root_module.addImport("config", test_config_module);
 
     const oop = b.dependency("modules/oop", .{});
-    tests.root_module.addImport("interface", oop.module("interface"));
-    kernel_module_for_tests.addImport("interface", oop.module("interface"));
+    kernel_tests.root_module.addImport("interface", oop.module("interface"));
+    fs_tests.root_module.addImport("interface", oop.module("interface"));
 
     const libc_imports_for_tests = b.addModule("libc_imports_for_tests", .{
         .root_source_file = b.path("source/libc_imports.zig"),
     });
     libc_imports_for_tests.addIncludePath(b.path("."));
+    kernel_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
+    fs_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
+
+    const run_kernel_tests = b.addRunArtifact(kernel_tests);
+    const run_fs_tests = b.addRunArtifact(fs_tests);
+
+    run_tests_step.dependOn(&run_kernel_tests.step);
+    run_tests_step.dependOn(&run_fs_tests.step);
+
+    kernel_tests.root_module.addIncludePath(b.path("."));
+    fs_tests.root_module.addIncludePath(b.path("."));
+    kernel_module_for_tests.addImport("interface", oop.module("interface"));
     kernel_module_for_tests.addImport("libc_imports", libc_imports_for_tests);
-    tests.root_module.addImport("libc_imports", libc_imports_for_tests);
-
-    const run_tests = b.addRunArtifact(tests);
-    run_tests_step.dependOn(&run_tests.step);
-    tests.root_module.addIncludePath(b.path("."));
-
     if (!has_config) {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
         return;

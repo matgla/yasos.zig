@@ -80,10 +80,10 @@ pub const std_options: std.Options = .{
             .scope = .@"vfs/driverfs",
             .level = .debug,
         },
-        // .{
-        //     .scope = .@"kernel/fs/mount_points",
-        //     .level = .info,
-        // } },
+        .{
+            .scope = .@"kernel/fs/mount_points",
+            .level = .debug,
+        },
     },
 };
 
@@ -141,28 +141,33 @@ fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !voi
 fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     kernel.fs.vfs_init(allocator);
     var driverfs = kernel.driver.fs.DriverFs.InstanceType.init(allocator);
-    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).InstanceType.create()).interface.new(allocator) catch |err| {
+    const uart0name = "uart0";
+    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(uart0name)).interface.new(allocator) catch |err| {
         kernel.log.err("Can't create uart driver instance: '{s}'", .{@errorName(err)});
         return err;
     };
-    try driverfs.data().append(uart_driver, "uart0");
+    try driverfs.data().append(uart_driver, uart0name);
 
-    var flash_driver = (kernel.driver.FlashDriver.InstanceType.create(board.flash.flash0)).interface.new(allocator) catch |err| {
+    const flash0name = "flash0";
+    var flash_driver = (kernel.driver.FlashDriver.InstanceType.create(board.flash.flash0, flash0name)).interface.new(allocator) catch |err| {
         kernel.log.err("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return err;
     };
-    try driverfs.data().append(flash_driver, "flash0");
+    try driverfs.data().append(flash_driver, flash0name);
 
     if (@hasDecl(board, "mmc")) {
         kernel.log.info("Iterating through {s}\n", .{@typeName(board.mmc)});
         inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
-            const mmc_driver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, m.name))).interface.new(allocator) catch |err| {
-                kernel.log.err("Can't create {s} driver instance: '{s}'", .{ m.name, @errorName(err) });
+            comptime var i: i32 = 0;
+            const name = std.fmt.comptimePrint("mmc{d}", .{i});
+
+            const mmc_driver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, name), name)).interface.new(allocator) catch |err| {
+                kernel.log.err("Can't create {s} driver instance: '{s}'", .{ name, @errorName(err) });
                 return err;
             };
-            _ = mmc_driver;
-
+            driverfs.data().append(mmc_driver, name) catch {};
             kernel.log.info("adding mmc driver: {s}", .{m.name});
+            i = i + 1;
         }
     } else {
         kernel.log.debug("Board has no mmc interfaces", .{});

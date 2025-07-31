@@ -234,80 +234,80 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 });
 
-// test "RomFsFile.ShouldCreateAndRemoveFiles" {
-//     const TestDirectoryTraverser = @import("../tests/directory_traverser.zig").TestDirectoryTraverser;
-//     try TestDirectoryTraverser.init(std.testing.allocator);
-//     var fs = try RamFs.init(std.testing.allocator);
-//     var sut = fs.interface();
-//     defer _ = sut.umount();
+test "RomFsFile.ShouldCreateAndRemoveFiles" {
+    const TestDirectoryTraverser = @import("../tests/directory_traverser.zig").TestDirectoryTraverser;
+    try TestDirectoryTraverser.init(std.testing.allocator);
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.umount();
 
-//     try std.testing.expectEqualStrings("ramfs", sut.name());
-//     try std.testing.expectEqual(0, sut.mkdir("/test", 0));
-//     try std.testing.expectEqual(0, sut.mkdir("/test/dir", 0));
-//     try std.testing.expectEqual(0, sut.mkdir("test/dir/nested", 0));
-//     try std.testing.expectEqual(0, sut.mkdir("other", 0));
-//     try std.testing.expectEqual(-1, sut.mkdir("/test/dir", 0));
+    try std.testing.expectEqualStrings("ramfs", sut.interface.name());
+    try std.testing.expectEqual(0, sut.interface.mkdir("/test", 0));
+    try std.testing.expectEqual(0, sut.interface.mkdir("/test/dir", 0));
+    try std.testing.expectEqual(0, sut.interface.mkdir("test/dir/nested", 0));
+    try std.testing.expectEqual(0, sut.interface.mkdir("other", 0));
+    try std.testing.expectEqual(-1, sut.interface.mkdir("/test/dir", 0));
 
-//     try std.testing.expectEqual(-1, sut.mkdir("nonexisting/dir/nested", 0));
+    try std.testing.expectEqual(-1, sut.interface.mkdir("nonexisting/dir/nested", 0));
 
-//     try std.testing.expectEqual(false, sut.has_path("other2"));
-//     try std.testing.expectEqual(true, sut.has_path("/"));
-//     try std.testing.expectEqual(true, sut.has_path("/test"));
-//     try std.testing.expectEqual(true, sut.has_path("/test/dir"));
-//     try std.testing.expectEqual(true, sut.has_path("/test/dir/nested"));
-//     try std.testing.expectEqual(true, sut.has_path("/other"));
-//     try std.testing.expectEqual(true, sut.has_path("test"));
-//     try std.testing.expectEqual(true, sut.has_path("test/dir"));
-//     try std.testing.expectEqual(true, sut.has_path("test/dir/nested"));
-//     try std.testing.expectEqual(true, sut.has_path("other"));
+    try std.testing.expectEqual(false, sut.interface.has_path("other2"));
+    try std.testing.expectEqual(true, sut.interface.has_path("/"));
+    try std.testing.expectEqual(true, sut.interface.has_path("/test"));
+    try std.testing.expectEqual(true, sut.interface.has_path("/test/dir"));
+    try std.testing.expectEqual(true, sut.interface.has_path("/test/dir/nested"));
+    try std.testing.expectEqual(true, sut.interface.has_path("/other"));
+    try std.testing.expectEqual(true, sut.interface.has_path("test"));
+    try std.testing.expectEqual(true, sut.interface.has_path("test/dir"));
+    try std.testing.expectEqual(true, sut.interface.has_path("test/dir/nested"));
+    try std.testing.expectEqual(true, sut.interface.has_path("other"));
 
-//     var maybe_file = sut.create("/test/file.txt", 0, std.testing.allocator);
-//     try std.testing.expect(maybe_file != null);
-//     if (maybe_file) |*file| {
-//         file.delete();
-//     }
+    var maybe_file = sut.interface.create("/test/file.txt", 0, std.testing.allocator);
+    try std.testing.expect(maybe_file != null);
+    if (maybe_file) |*file| {
+        file.interface.delete();
+    }
 
-//     try std.testing.expectEqual(null, sut.create("/test/file.txt", 0, std.testing.allocator));
+    try std.testing.expectEqual(null, sut.interface.create("/test/file.txt", 0, std.testing.allocator));
 
-//     maybe_file = sut.create("test/dir/nested/file", 0, std.testing.allocator);
-//     try std.testing.expect(maybe_file != null);
-//     if (maybe_file) |*file| {
-//         file.delete();
-//     }
+    maybe_file = sut.interface.create("test/dir/nested/file", 0, std.testing.allocator);
+    try std.testing.expect(maybe_file != null);
+    if (maybe_file) |*file| {
+        file.interface.delete();
+    }
 
-//     try std.testing.expectEqual(true, sut.has_path("/test/file.txt"));
-//     try std.testing.expectEqual(true, sut.has_path("/test/dir/nested/file"));
+    try std.testing.expectEqual(true, sut.interface.has_path("/test/file.txt"));
+    try std.testing.expectEqual(true, sut.interface.has_path("/test/dir/nested/file"));
 
-//     try TestDirectoryTraverser.append("test");
-//     try TestDirectoryTraverser.append("other");
+    try TestDirectoryTraverser.append("test");
+    try TestDirectoryTraverser.append("other");
 
-//     try std.testing.expectEqual(-1, sut.traverse("/test/file.txt", TestDirectoryTraverser.traverse_dir, undefined));
-//     try std.testing.expectEqual(0, sut.traverse("/", TestDirectoryTraverser.traverse_dir, undefined));
-//     try TestDirectoryTraverser.did_error;
-//     try std.testing.expectEqual(0, TestDirectoryTraverser.size());
+    try std.testing.expectEqual(-1, sut.interface.traverse("/test/file.txt", TestDirectoryTraverser.traverse_dir, undefined));
+    try std.testing.expectEqual(0, sut.interface.traverse("/", TestDirectoryTraverser.traverse_dir, undefined));
+    try TestDirectoryTraverser.did_error;
+    try std.testing.expectEqual(0, TestDirectoryTraverser.size());
 
-//     try TestDirectoryTraverser.append("dir");
-//     try TestDirectoryTraverser.append("file.txt");
+    try TestDirectoryTraverser.append("dir");
+    try TestDirectoryTraverser.append("file.txt");
 
-//     try std.testing.expectEqual(0, sut.traverse("/test", TestDirectoryTraverser.traverse_dir, undefined));
-//     try TestDirectoryTraverser.did_error;
-//     try std.testing.expectEqual(0, TestDirectoryTraverser.size());
+    try std.testing.expectEqual(0, sut.interface.traverse("/test", TestDirectoryTraverser.traverse_dir, undefined));
+    try TestDirectoryTraverser.did_error;
+    try std.testing.expectEqual(0, TestDirectoryTraverser.size());
 
-//     // reject non empty directory removal
-//     try std.testing.expectEqual(-1, sut.remove("/test"));
-//     maybe_file = sut.get("/test/file.txt", std.testing.allocator);
-//     try std.testing.expect(maybe_file != null);
-//     if (maybe_file) |*file| {
-//         defer file.delete();
-//         try std.testing.expectEqual(18, file.write("Some data for file"));
-//     }
+    // reject non empty directory removal
+    try std.testing.expectEqual(-1, sut.interface.remove("/test"));
+    maybe_file = sut.interface.get("/test/file.txt", std.testing.allocator);
+    try std.testing.expect(maybe_file != null);
+    if (maybe_file) |*file| {
+        defer file.interface.delete();
+        try std.testing.expectEqual(18, file.interface.write("Some data for file"));
+    }
 
-//     try std.testing.expectEqual(0, sut.remove("/test/file.txt"));
-//     try std.testing.expectEqual(false, sut.has_path("/test/file.txt"));
-//     try std.testing.expectEqual(0, sut.remove("/test/dir/nested/file"));
-//     try std.testing.expectEqual(0, sut.remove("/test/dir/nested"));
-//     try std.testing.expectEqual(0, sut.remove("/test/dir"));
-//     try std.testing.expectEqual(0, sut.remove("/test"));
+    try std.testing.expectEqual(0, sut.interface.remove("/test/file.txt"));
+    try std.testing.expectEqual(false, sut.interface.has_path("/test/file.txt"));
+    try std.testing.expectEqual(0, sut.interface.remove("/test/dir/nested/file"));
+    try std.testing.expectEqual(0, sut.interface.remove("/test/dir/nested"));
+    try std.testing.expectEqual(0, sut.interface.remove("/test/dir"));
+    try std.testing.expectEqual(0, sut.interface.remove("/test"));
 
-//     try TestDirectoryTraverser.deinit();
-// }
+    try TestDirectoryTraverser.deinit();
+}

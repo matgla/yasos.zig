@@ -13,13 +13,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-const std = @import("std");
-
 comptime {
-    _ = @import("drivers/tests.zig");
-    _ = @import("fs/tests.zig");
-}
-
-test {
-    std.testing.refAllDeclsRecursive(@This());
+    _ = @import("mount_points.zig");
 }
