@@ -97,8 +97,8 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return null;
     }
 
-    pub fn has_path(self: *const Self, path: []const u8) bool {
-        const maybe_node = self.mount_points.find_longest_matching_point(*const MountPoint, path);
+    pub fn has_path(self: *Self, path: []const u8) bool {
+        var maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
             // Check if the filesystem has the path
             return node.point.filesystem.interface.has_path(node.left);

@@ -177,7 +177,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        _ = self.close();
     }
 });
 
@@ -186,7 +186,8 @@ test "RamFsFile.ShouldReadAndWriteFile" {
     defer data.deinit();
 
     var sut = RamFsFile.InstanceType.create(&data, std.testing.allocator);
-    var file = sut.interface.create();
+    var file = try sut.interface.new(std.testing.allocator);
+    defer file.interface.delete();
 
     try std.testing.expectEqualStrings("test_file", file.interface.name(std.testing.allocator).get_name());
     try std.testing.expectEqual(22, file.interface.write("Some data inside file\n"));
@@ -213,8 +214,9 @@ test "RamFsFile.ShouldSeekFile" {
     defer data.deinit();
 
     var sut = RamFsFile.InstanceType.create(&data, std.testing.allocator);
-    var file = sut.interface.create();
+    var file = try sut.interface.new(std.testing.allocator);
     defer _ = file.interface.close();
+    defer file.interface.delete();
     try std.testing.expectEqual(10, file.interface.seek(10, c.SEEK_CUR));
     try std.testing.expectEqual(22, file.interface.write("Some data inside file\n"));
     var buf: [16]u8 = undefined;

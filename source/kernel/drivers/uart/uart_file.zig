@@ -39,7 +39,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             _name: []const u8,
 
             pub fn delete(self: *Self) void {
-                _ = self;
+                _ = self.close();
             }
 
             pub fn create(allocator: std.mem.Allocator, filename: []const u8) UartFileImpl {

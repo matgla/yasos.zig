@@ -142,6 +142,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
 
             pub fn delete(self: *Self) void {
                 log.debug("Flash file 0x{x} destruction", .{@intFromPtr(self)});
+                _ = self.close();
             }
         });
     };

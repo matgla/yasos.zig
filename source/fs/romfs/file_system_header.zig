@@ -121,11 +121,11 @@ pub const FileSystemHeader = struct {
         return kernel.fs.FileName.init(n, self._allocator);
     }
 
-    pub fn create_file_header_with_offset(self: FileSystemHeader, offset: c.off_t) FileHeader {
+    pub fn create_file_header_with_offset(self: *FileSystemHeader, offset: c.off_t) FileHeader {
         return FileHeader.init(self._device_file, self._reader.get_offset() + offset, self._offset, self._mapped_memory, self._allocator);
     }
 
-    pub fn first_file_header(self: FileSystemHeader) ?FileHeader {
+    pub fn first_file_header(self: *FileSystemHeader) ?FileHeader {
         return self.create_file_header_with_offset(self._reader.get_data_offset());
     }
 };
@@ -138,25 +138,47 @@ test "FileSystemHeader.ShouldParseFilesystemHeader" {
     var device_file = idevice.interface.ifile(std.testing.allocator);
     try std.testing.expect(device_file != null);
     defer device_file.?.interface.delete();
-
     var maybe_fs = FileSystemHeader.init(std.testing.allocator, device_file.?, 0);
     try std.testing.expect(maybe_fs != null);
     if (maybe_fs) |*fs| {
         try std.testing.expectEqual(fs.size(), 1040);
         try std.testing.expect(fs.validate_checksum());
-        const name = fs.name().?;
-        defer name.deinit();
-        try std.testing.expectEqualStrings("ROMFS_TEST", name.get_name());
-        // // try std.testing.expectEqualStrings(fs.first_file_header().name(), ".");
-        // try std.testing.expectEqual(fs.first_file_header().filetype(), FileType.Directory);
+        {
+            const name = fs.name().?;
+            defer name.deinit();
+            try std.testing.expectEqualStrings("ROMFS_TEST", name.get_name());
+        }
+        {
+            var fh = fs.first_file_header();
+            try std.testing.expect(fh != null);
+            var name = fh.?.name(std.testing.allocator);
+            defer name.deinit();
+            try std.testing.expectEqualStrings(name.get_name(), ".");
+            try std.testing.expectEqual(fh.?.filetype(), FileType.Directory);
 
-        // try std.testing.expectEqualStrings(fs.first_file_header().next().?.name(), "..");
-        // const maybe_file = fs.first_file_header().next().?.next().?.next().?.next();
-        // if (maybe_file) |file| {
-        //     try std.testing.expectEqualStrings(file.name(), "file.txt");
-        //     try std.testing.expect(file.validate_checksum());
-        //     try std.testing.expectEqualStrings(file.data()[0..20], "THis is testing file");
-        //     try std.testing.expectEqual(file.filetype(), FileType.File);
-        // }
+            {
+                var next_fh = fh.?.next();
+                try std.testing.expect(next_fh != null);
+                var next_name = next_fh.?.name(std.testing.allocator);
+                defer next_name.deinit();
+                try std.testing.expectEqualStrings(next_name.get_name(), "..");
+                {
+                    var fh2 = next_fh.?.next();
+                    var fh3 = fh2.?.next();
+                    var fh4 = fh3.?.next();
+                    try std.testing.expect(fh4 != null);
+                    if (fh4) |*file| {
+                        var nextnext_name = file.name(std.testing.allocator);
+                        defer nextnext_name.deinit();
+                        try std.testing.expectEqualStrings(nextnext_name.get_name(), "file.txt");
+                        try std.testing.expect(file.validate_checksum());
+                        var data: [20]u8 = undefined;
+                        file.read_bytes(data[0..20], 0);
+                        try std.testing.expectEqualStrings(data[0..], "THis is testing file");
+                        try std.testing.expectEqual(file.filetype(), FileType.File);
+                    }
+                }
+            }
+        }
     }
 }

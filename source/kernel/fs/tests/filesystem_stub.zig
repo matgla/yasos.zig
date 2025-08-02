@@ -55,7 +55,7 @@ pub const FileSystemStub = interface.DeriveFromBase(kernel.fs.IFileSystem, struc
         return null;
     }
 
-    pub fn has_path(self: *const Self, _: []const u8) bool {
+    pub fn has_path(self: *Self, _: []const u8) bool {
         return self.has_file;
     }
 

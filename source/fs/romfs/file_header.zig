@@ -122,12 +122,13 @@ pub const FileHeader = struct {
 
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result
     // if result is equal to 0, then checksum is correct
-    pub fn validate_checksum(self: FileHeader) bool {
-        const length = @min(self.memory.len, 512);
+    pub fn validate_checksum(self: *FileHeader) bool {
+        const length = std.mem.alignBackward(u32, @min(self.size(), 512), 4);
         var i: u32 = 0;
         var checksum_value: u32 = 0;
         while (i < length) {
-            checksum_value +%= FileHeader.read(u32, self.memory[i .. i + 4]);
+            const word = self._reader.read(u32, i);
+            checksum_value +%= word;
             i += 4;
         }
         return checksum_value == 0;

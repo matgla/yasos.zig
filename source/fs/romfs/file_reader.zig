@@ -77,12 +77,3 @@ pub const FileReader = struct {
         _ = self._device_file.interface.read(buffer[0..]);
     }
 };
-
-test "RomFsFileReader.ShouldReadHeader" {
-    // const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
-    // var romfs_device = try RomfsDeviceStub.InstanceType.init(&std.testing.allocator, "source/fs/romfs/tests/test.romfs").interface.new(std.testing.allocator);
-    // defer romfs_device.interface.delete();
-    // try idriver.load();
-    // const idevicefile = idriver.ifile();
-    // _ = idevicefile;
-}

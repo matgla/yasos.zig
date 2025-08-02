@@ -58,6 +58,8 @@ test "DriverFsIterator.IterateThroughElements" {
     var mapping = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
     defer mapping.deinit();
 
-    var driver0 = DriverStub.InstanceType.init(file0.interface.create());
+    var ifile = try file0.interface.new(std.testing.allocator);
+    defer ifile.interface.delete();
+    var driver0 = DriverStub.InstanceType.init(ifile);
     try mapping.put("file0", driver0.interface.create());
 }

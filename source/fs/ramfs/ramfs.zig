@@ -159,7 +159,8 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
                     const child: *FilesNode = @fieldParentPtr("list_node", node);
                     next = node.next;
                     var file: RamFsFile = RamFsFile.InstanceType.create(&child.node, self.allocator);
-                    var ifile = file.interface.create();
+                    var ifile = file.interface.new(self.allocator) catch return -1;
+                    defer ifile.interface.delete();
                     if (!callback(&ifile, user_context)) {
                         return 0;
                     }
@@ -181,7 +182,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return null;
     }
 
-    pub fn has_path(self: *const Self, path: []const u8) bool {
+    pub fn has_path(self: *Self, path: []const u8) bool {
         const node = Self.get_node(*const Self, self, path) catch return false;
         return node != null;
     }

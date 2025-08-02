@@ -71,7 +71,7 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "get", .{ path, allocator }, ?IFile);
     }
 
-    pub fn has_path(self: *const Self, path: []const u8) bool {
+    pub fn has_path(self: *Self, path: []const u8) bool {
         return interface.VirtualCall(self, "has_path", .{path}, bool);
     }
 

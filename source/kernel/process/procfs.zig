@@ -196,12 +196,12 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         log.debug("Getting file: {s}", .{path});
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            return self._root.interface.create();
+            return self._root.interface.new(self._allocator) catch return null;
         }
         return self._root.data().get(path, allocator);
     }
 
-    pub fn has_path(self: *const Self, path: []const u8) bool {
+    pub fn has_path(self: *Self, path: []const u8) bool {
         _ = self;
         _ = path;
         return false;
