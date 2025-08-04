@@ -28,27 +28,37 @@ const picosdk = @import("picosdk.zig").picosdk;
 
 const MmcSpi = @import("mmc/mmc_spi.zig").MmcSpi;
 
-const mmc_program = @cImport({
-    @cInclude("mmc.pio.h");
-});
-
-// pub fn delay_ticks(delay: u32) void {
-//     var d = delay;
-//     while (d > 0) {
-//         d -= 1;
-//         asm volatile ("nop");
-//     }
-// }
-
 pub const Mmc = union(enum) {
+    const Self = @This();
     spi: MmcSpi,
 
-    pub fn create(comptime pins: interface.mmc.Pins, comptime config: interface.mmc.Config) Mmc {
-        _ = pins;
+    pub fn create(comptime config: interface.mmc.MmcConfig) Mmc {
         switch (config.mode) {
-            .SPI => return .{ .spi = .{} },
+            .SPI => return .{
+                .spi = MmcSpi.create(config),
+            },
             else => unreachable,
         }
+    }
+
+    pub fn init(self: *Self) !void {
+        try self.spi.init();
+    }
+
+    pub fn get_config(self: Self) interface.mmc.MmcConfig {
+        return self.spi._config;
+    }
+
+    pub fn build_command(self: Self, command: u6, argument: u32) [6]u8 {
+        return self.spi.build_command(command, argument);
+    }
+
+    pub fn transmit_blocking(self: Self, src: []const u8, dest: ?[]u8) void {
+        return self.spi.transmit_blocking(src, dest);
+    }
+
+    pub fn chip_select(self: Self, select: bool) void {
+        return self.spi.chip_select(select);
     }
 };
 

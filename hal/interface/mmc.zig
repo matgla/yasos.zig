@@ -23,24 +23,42 @@ const std = @import("std");
 pub fn Mmc(comptime MmcType: anytype) type {
     const MMCImplementation = MmcType;
     return struct {
+        pub const Pins = PinsConfig;
+        pub const Config = MmcConfig;
         const Self = @This();
         impl: MMCImplementation,
 
-        pub fn create(pins: Pins, config: Config) Self {
+        pub fn create(config: Config) Self {
             return Self{
-                .impl = MMCImplementation.create(pins, config),
+                .impl = MMCImplementation.create(config),
             };
         }
 
-        pub fn init(self: *Self, comptime config: Config) InitializeError!void {
-            try self.impl.init(config);
+        pub fn init(self: *Self) anyerror!void {
+            try self.impl.init();
+        }
+
+        pub fn get_config(self: Self) MmcConfig {
+            return self.impl.get_config();
+        }
+
+        pub fn build_command(self: Self, command: u6, argument: u32) [6]u8 {
+            return self.impl.build_command(command, argument);
+        }
+
+        pub fn transmit_blocking(self: Self, src: []const u8, dest: ?[]u8) void {
+            return self.impl.transmit_blocking(src, dest);
+        }
+
+        pub fn chip_select(self: Self, select: bool) void {
+            return self.impl.chip_select(select);
         }
     };
 }
 
 pub const InitializeError = error{};
 
-pub const Pins = struct {
+pub const PinsConfig = struct {
     clk: u32,
     cmd: u32,
     d0: u32,
@@ -52,10 +70,11 @@ pub const Mode = enum {
     MMC,
 };
 
-pub const Config = struct {
+pub const MmcConfig = struct {
     bus_width: u8 = 4,
     clock_speed: u32 = 50 * 1000 * 1000,
     timeout_ms: u32 = 1000,
     use_dma: bool = true,
     mode: Mode,
+    pins: PinsConfig,
 };

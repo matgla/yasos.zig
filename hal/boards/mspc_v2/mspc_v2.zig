@@ -16,17 +16,16 @@ pub const flash = struct {
 };
 
 pub const mmc = struct {
-    pub const mmc0 = hal.mmc.Mmc(.{
-        .clk = 32,
-        .cmd = 33,
-        .d0 = 34,
+    pub var mmc0 = hal.mmc.Mmc.create(.{
+        .bus_width = 1,
+        .clock_speed = 50 * 1000 * 1000,
+        .timeout_ms = 1000,
+        .use_dma = false,
+        .mode = .SPI,
+        .pins = .{
+            .clk = 32,
+            .cmd = 33,
+            .d0 = 34,
+        },
     });
 };
-
-// pub const mmc = struct {
-//     pub var mmc0 = hal.mmc.Mmc(0, 0, 1, 2, .{
-//         .clk = 32,
-//         .cmd = 33,
-//         .d0 = 34,
-//     }, hal.internal.Mmc).create();
-// };

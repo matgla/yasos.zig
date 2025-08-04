@@ -1,0 +1,35 @@
+.program mmc_spi_transmit
+.side_set 1
+.wrap_target
+    out pins, 1 side 0 [1]
+    in pins, 1 side 1 [1]
+.wrap
+
+% c-sdk {
+
+#include "hardware/gpio.h"
+
+static inline void pio_mmc_spi_transmit_init(PIO pio, uint sm, uint program_offset, float clkdiv, uint pin_sck, uint pin_mosi, uint pin_miso) {
+    pio_sm_config c = mmc_spi_transmit_program_get_default_config(program_offset);
+    sm_config_set_out_pins(&c, pin_mosi, 1);
+    sm_config_set_in_pins(&c, pin_miso);
+    sm_config_set_sideset_pins(&c, pin_sck);
+    
+    sm_config_set_out_shift(&c, false, true, 8);
+    sm_config_set_in_shift(&c, false, true, 8);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_set_pins_with_mask64(pio, sm, 0ul, (1ull << pin_sck) | (1ull << pin_mosi));
+    pio_sm_set_pindirs_with_mask64(pio, sm, (1ull << pin_sck) | (1ull << pin_mosi), (1ull << pin_sck) | (1ull << pin_mosi) | (1ull << pin_miso));
+
+    pio_gpio_init(pio, pin_sck);
+    pio_gpio_init(pio, pin_mosi);
+    pio_gpio_init(pio, pin_miso);
+
+    hw_set_bits(&pio->input_sync_bypass, 1u << (pin_miso % 32));
+
+    pio_sm_init(pio, sm, program_offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+%}

@@ -149,6 +149,6 @@ pub const MemInfoFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct 
     }
 
     pub fn delete(self: *Self) void {
-        self.close();
+        _ = self.close();
     }
 });

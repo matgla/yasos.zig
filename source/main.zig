@@ -156,11 +156,9 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     try driverfs.data().append(flash_driver, flash0name);
 
     if (@hasDecl(board, "mmc")) {
-        kernel.log.info("Iterating through {s}\n", .{@typeName(board.mmc)});
         inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
-
             const mmc_driver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, name), name)).interface.new(allocator) catch |err| {
                 kernel.log.err("Can't create {s} driver instance: '{s}'", .{ name, @errorName(err) });
                 return err;

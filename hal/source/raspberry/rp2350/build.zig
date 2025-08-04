@@ -89,11 +89,16 @@ pub fn build(b: *std.Build) !void {
     const picosdk = try configureCmake(b);
 
     const mmc_pio = try generate_pio(b, "mmc.pio", picosdk);
-
     hal.addAnonymousImport("mmc_pio", .{
         .root_source_file = mmc_pio,
     });
     hal.addIncludePath(mmc_pio.dirname());
+
+    const mmc_spi_pio = try generate_pio(b, "mmc/mmc_spi.pio", picosdk);
+    hal.addAnonymousImport("mmc_spi_pio", .{
+        .root_source_file = mmc_spi_pio,
+    });
+    hal.addIncludePath(mmc_spi_pio.dirname());
 
     hal.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated" }) });
 

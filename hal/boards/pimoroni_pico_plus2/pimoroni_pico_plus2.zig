@@ -17,14 +17,15 @@ pub const flash = struct {
 
 pub const mmc = struct {
     pub var mmc0 = hal.mmc.Mmc.create(.{
-        .clk = 6,
-        .cmd = 7,
-        .d0 = 8,
-    }, .{
         .bus_width = 1,
         .clock_speed = 50 * 1000 * 1000,
         .timeout_ms = 1000,
         .use_dma = false,
         .mode = .SPI,
+        .pins = .{
+            .clk = 6,
+            .cmd = 7,
+            .d0 = 8,
+        },
     });
 };

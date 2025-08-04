@@ -17,15 +17,96 @@ const std = @import("std");
 
 const c = @import("libc_imports").c;
 
-const IFile = @import("../../fs/ifile.zig").IFile;
-const FileType = @import("../../fs/ifile.zig").FileType;
+const hal = @import("hal");
+const interface = @import("interface");
 
-pub fn MmcFile(comptime MmcType: anytype) type {
-    return struct {
-        const Self = @This();
-        const mmc = MmcType;
+const kernel = @import("../../kernel.zig");
 
-        /// VTable for IFile interface
-        _allocator: std.mem.Allocator,
-    };
-}
+pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
+    const Self = @This();
+
+    /// VTable for IFile interface
+    _allocator: std.mem.Allocator,
+    _mmc: *hal.mmc.Mmc,
+    _name: []const u8,
+
+    pub fn create(mmc: *hal.mmc.Mmc, allocator: std.mem.Allocator, filename: []const u8) MmcFile {
+        return MmcFile.init(.{
+            ._allocator = allocator,
+            ._mmc = mmc,
+            ._name = filename,
+        });
+    }
+
+    pub fn read(self: *Self, buf: []u8) isize {
+        _ = self;
+        _ = buf;
+        return 0;
+    }
+
+    pub fn write(self: *Self, buf: []const u8) isize {
+        _ = self;
+        _ = buf;
+        return 0;
+    }
+
+    pub fn seek(self: *Self, offset: c.off_t, base: i32) c.off_t {
+        _ = self;
+        _ = offset;
+        _ = base;
+        return 0;
+    }
+
+    pub fn close(self: *Self) i32 {
+        _ = self;
+        return 0;
+    }
+
+    pub fn sync(self: *Self) i32 {
+        _ = self;
+        return 0;
+    }
+
+    pub fn tell(self: *Self) c.off_t {
+        _ = self;
+        return 0;
+    }
+
+    pub fn size(self: *Self) isize {
+        _ = self;
+        return 0;
+    }
+
+    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
+        _ = allocator;
+        return kernel.fs.FileName.init(self._name, null);
+    }
+
+    pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
+        _ = self;
+        _ = cmd;
+        _ = arg;
+        return 0;
+    }
+
+    pub fn fcntl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
+        _ = self;
+        _ = cmd;
+        _ = arg;
+        return 0;
+    }
+
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        _ = self;
+        _ = data;
+    }
+
+    pub fn filetype(self: *Self) kernel.fs.FileType {
+        _ = self;
+        return kernel.fs.FileType.BlockDevice;
+    }
+
+    pub fn delete(self: *Self) void {
+        _ = self.close();
+    }
+});
