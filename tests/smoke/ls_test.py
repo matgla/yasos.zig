@@ -33,3 +33,13 @@ def test_list_bin(request):
     session.write_command("ls")
     line = session.read_line_except_logs()
     assert set(["ls", "cat", "sh"]).issubset(line.split())
+    
+def test_list_argument(request):
+    session = request.node.stash[session_key] 
+    session.write_command("ls /bin")
+    line = session.read_line_except_logs()
+    assert set(["ls", "cat", "sh"]).issubset(line.split())
+    session.write_command("ls /usr")
+    line = session.read_line_except_logs()
+    assert set(["bin", "include", "lib"]).issubset(line.split())
+    

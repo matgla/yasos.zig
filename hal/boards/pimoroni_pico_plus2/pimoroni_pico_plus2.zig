@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 pub const hal = @import("hal");
 
 pub const uart = struct {
-    pub const uart0 = hal.uart.Uart(0, .{ .tx = 0, .rx = 1 }, hal.internal.Uart).create();
+    pub const uart0 = hal.uart.Uart(0, .{ .tx = 32, .rx = 33 }, hal.internal.Uart).create();
 };
 
 pub const psram = struct {
@@ -23,9 +23,9 @@ pub const mmc = struct {
         .use_dma = false,
         .mode = .SPI,
         .pins = .{
-            .clk = 6,
-            .cmd = 7,
-            .d0 = 8,
+            .clk = 5,
+            .cmd = 18,
+            .d0 = 19,
         },
     });
 };

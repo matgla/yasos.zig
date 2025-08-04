@@ -212,6 +212,8 @@ pub fn build(b: *std.Build) !void {
             "../../../libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_ticks/ticks.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_pio/pio.c",
+            // "../../../libs/pico-sdk/src/common/pico_time/time.c",
+            // "../../../libs/pico-sdk/src/common/pico_sync/lock_core.c",
         },
         .flags = &.{"-std=c23"},
     });

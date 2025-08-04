@@ -63,6 +63,10 @@ pub const std_options: std.Options = .{
             .scope = .yasld,
             .level = .err,
         },
+        .{
+            .scope = .@"mmc/driver",
+            .level = .debug,
+        },
         // .{
         //     .scope = .@"yasld/module",
         //     .level = .info,
