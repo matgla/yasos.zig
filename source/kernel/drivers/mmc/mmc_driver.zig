@@ -25,6 +25,8 @@ const hal = @import("hal");
 
 const log = std.log.scoped(.@"mmc/driver");
 
+const card_parser = @import("card_parser.zig");
+
 const CardType = enum(u2) {
     MMCv3,
     SDv1,
@@ -103,7 +105,7 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
 
     fn reset(self: *const Self) error{MMCResetFailure}!void {
         log.info("resetting", .{});
-        const response = self.send_command(0, 0, R1);
+        const response = self.send_command(0, 0, R1, true);
         if (response.r1 != 0x1) return error.MMCResetFailure;
     }
 
@@ -121,9 +123,8 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         return std.mem.bigToNative(u32, std.mem.bytesAsValue(u32, &resp).*);
     }
 
-    fn send_command(self: *const Self, cmd: u6, argument: u32, RespType: type) RespType {
+    fn send_command(self: *const Self, cmd: u6, argument: u32, RespType: type, comptime deselect: bool) RespType {
         self._mmc.chip_select(true);
-        defer self._mmc.chip_select(false);
         const command = self._mmc.build_command(cmd, argument);
         self._mmc.transmit_blocking(command[0..], null);
         var repeat: i32 = 0;
@@ -132,9 +133,9 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         while (repeat < 20) {
             const r = self.wait_for_response_r1();
             if ((r & 0x8) == 0) {
-                log.info("GOT r1 {x}", .{r});
                 resp.r1 = r;
                 if (RespType == R1) {
+                    if (deselect) self._mmc.chip_select(false);
                     return resp;
                 }
                 break;
@@ -143,9 +144,9 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         }
 
         if (RespType == R3) {
-            log.info("Getting R3 reponse", .{});
             resp.ocr = self.read_response_r3();
         }
+        if (deselect) self._mmc.chip_select(false);
         return resp;
     }
 
@@ -153,12 +154,12 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         log.debug("starting initialization with ACMD41", .{});
         var retries: i32 = 0;
         while (retries < 10) {
-            hal.time.sleep_ms(100);
-            const cmd55_resp = self.send_command(55, 0, R1);
+            hal.time.sleep_ms(150);
+            const cmd55_resp = self.send_command(55, 0, R1, true);
             if (cmd55_resp.r1 != 0x1) {
                 return error.CardInitializationFailure;
             }
-            const acmd41_resp = self.send_command(41, argument, R1);
+            const acmd41_resp = self.send_command(41, argument, R1, true);
             if (acmd41_resp.r1 == 0x00) {
                 return CardType.SDv1;
             } else if (acmd41_resp.r1 != 0x01) {
@@ -171,17 +172,96 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         return null;
     }
 
+    fn get_data_token(comptime cmd: u6) !u8 {
+        const v: u8 = switch (cmd) {
+            9, 10, 17, 18, 28, 6 => 0xfe,
+            25 => 0xfc,
+            else => {
+                log.err("Got unknown packet command: 0x{x}", .{cmd});
+                return error.UnknownPacketCommand;
+            },
+        };
+        return v;
+    }
+
+    fn receive_data_packet(self: Self, comptime cmd: u6, output: []u8) !void {
+        const token = try get_data_token(cmd);
+        var buffer: [2]u8 = [_]u8{ 0x00, 0x00 };
+        var repeat: i32 = 100;
+        while (repeat > 0) {
+            hal.time.sleep_ms(1);
+            self._mmc.receive_blocking(buffer[0..1]);
+            if (buffer[0] == token) break;
+            if ((buffer[0] & 0xe0) == 0) {
+                return error.GotErrorToken;
+            }
+            repeat -= 1;
+        }
+
+        if (token != buffer[0] and repeat == 0) {
+            log.err("Invalid token received, expected: 0x{x}, got: 0x{x}", .{ token, buffer[0] });
+        }
+
+        self._mmc.receive_blocking(output);
+        self._mmc.receive_blocking(buffer[0..2]);
+        const crc = std.mem.bigToNative(u16, std.mem.bytesToValue(u16, &buffer));
+        const received_crc = std.hash.crc.Crc16Xmodem.hash(output);
+        if (crc != received_crc) {
+            log.err("Incorrect crc, received: 0x{x}, calculated: 0x{x}", .{ crc, received_crc });
+            return error.CrcVerificationFailure;
+        }
+    }
+
+    fn block_read_impl(self: Self, comptime cmd: u6, argument: u32, output: []u8) anyerror!void {
+        const cmd_resp = self.send_command(cmd, argument, R1, false);
+        errdefer self._mmc.chip_select(false);
+        if (cmd_resp.r1 != 0x00) {
+            self._mmc.chip_select(false);
+            return error.IncorrectResponse;
+        }
+        try self.receive_data_packet(cmd, output);
+        self._mmc.chip_select(false);
+
+        const dummy: [1]u8 = [_]u8{0xff};
+        self._mmc.transmit_blocking(dummy[0..], null);
+    }
+
+    fn read_cid(self: *Self) !card_parser.CID {
+        var buffer: [16]u8 = [_]u8{0x00} ** 16;
+        try self.block_read_impl(10, 0, buffer[0..]);
+        log.info("Got CID: {any}", .{buffer});
+        return std.mem.bytesToValue(card_parser.CID, &buffer);
+    }
+
+    fn read_csd(self: *Self) !card_parser.CSDv2 {
+        var buffer: [16]u8 = [_]u8{0x00} ** 16;
+        try self.block_read_impl(9, 0, buffer[0..]);
+        return try card_parser.CardParser.parse_csdv2(buffer[0..]);
+    }
+
+    fn dump_struct(t: anytype) void {
+        log.debug("{s}", .{@typeName(@TypeOf(t))});
+        inline for (std.meta.fields(@TypeOf(t))) |f| {
+            if (@FieldType(@TypeOf(t), f.name) == bool) {
+                log.debug("  {s}: {}", .{ f.name, @field(t, f.name) });
+            } else {
+                log.debug("  {s}: {x}", .{ f.name, @field(t, f.name) });
+            }
+        }
+    }
+
     fn initialize_spi_mmc(self: *Self) anyerror!void {
         log.info("initializing MMC using SPI mode", .{});
         self.reset() catch return error.CardInitializationFailure;
-        const cmd8_resp = self.send_command(8, 0x1aa, R7);
+        log.debug("sending CMD8", .{});
+        const cmd8_resp = self.send_command(8, 0x1aa, R7, true);
         if (cmd8_resp.r1 != 0x1) {
             log.debug("CMD8 was rejected with response code: 0x{x}, trying ACMD41", .{cmd8_resp.r1});
             self._card_type = try self.initiate_intitialization_process(0);
             if (self._card_type == null) {
                 var retries: i32 = 0;
                 while (retries < 10) {
-                    const cmd1_resp = self.send_command(1, 0, R1);
+                    const cmd1_resp = self.send_command(1, 0, R1, true);
                     if (cmd1_resp.r1 == 0x00) {
                         self._card_type = CardType.MMCv3;
                     } else if (cmd1_resp.r1 != 0x01) {
@@ -194,9 +274,19 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
             // verify is SD or MMC
         } else {
             if ((cmd8_resp.ocr & 0xfff) == 0x1aa) {
-                self._card_type = try self.initiate_intitialization_process(1);
-                if (self._card_type) |card_type| {
-                    log.info("Found card with type: {s}", .{@tagName(card_type)});
+                self._card_type = try self.initiate_intitialization_process(0x40000000);
+                if (self._card_type != null) {
+                    const cmd58_resp = self.send_command(58, 0, R3, true);
+                    if (cmd58_resp.r1 == 0) {
+                        if ((cmd58_resp.ocr & 0x40000000) == 0) {
+                            self._card_type = CardType.SDv2Byte;
+                        } else {
+                            self._card_type = CardType.SDv2Block;
+                        }
+                    } else {
+                        log.warn("incorrect R1 for CMD58: 0x{x}", .{cmd58_resp.r1});
+                        return error.UnknownCard;
+                    }
                 } else {
                     return error.UnknownCard;
                 }
@@ -206,7 +296,22 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
             }
         }
 
-        // const cmd0 = self._mmc.build_command(0, 0);
-        // self._mmc.transmit_blocking(cmd0, null);
+        if (self._card_type) |card_type| {
+            log.info("Found card with type: {s}", .{@tagName(card_type)});
+            var change_buffer: [64]u8 = [_]u8{0x00} ** 64;
+            const resp = try self.block_read_impl(6, 0x80000001, change_buffer[0..]);
+            _ = resp; // we don't care about the response here, just that it worked
+        }
+        log.info("Detecting card properties", .{});
+        var buffer: [16]u8 = [_]u8{0x00} ** 16;
+        const csd = try self.read_csd();
+        dump_struct(csd);
+        try self.block_read_impl(9, 0, buffer[0..]);
+        self._mmc.change_speed_to(csd.get_speed() / 2);
+
+        // read first block as test
+        var first_block: [512]u8 = [_]u8{0x00} ** 512;
+        try self.block_read_impl(17, 0, first_block[0..]);
+        log.info("First block read: {s}", .{std.fmt.fmtSliceHexLower(first_block[0..])});
     }
 });

@@ -26,13 +26,17 @@ const picosdk = @import("picosdk.zig").picosdk;
 
 const core = @import("cortex-m");
 
+export fn irq0() void {
+    Time.timer_fired();
+}
+
 pub const Time = struct {
     pub const SysTick = core.SysTick;
     var is_initialized: bool = false;
-    var fired = false;
+    var fired: bool = false;
+    var firedptr: *volatile bool = @ptrCast(&fired);
 
     pub fn sleep_ms(ms: u64) void {
-        log.info("sleeping for: {d} ms", .{ms});
         var left = ms;
         while (left > 0) {
             sleep_us(1000);
@@ -41,31 +45,24 @@ pub const Time = struct {
     }
 
     pub fn sleep_us(us: u64) void {
-        log.info("sleeping for: {d} us", .{us});
         if (!is_initialized) {
             init();
             is_initialized = true;
         }
-        fired = false;
-        picosdk.timer0_hw.*.alarm[2] = @intCast(us);
-        log.info("Waiting for timeout", .{});
-        while (!fired) {}
-        log.info("Timer finished", .{});
+        firedptr.* = false;
+        const target: u64 = picosdk.timer0_hw.*.timerawl + us;
+        picosdk.timer0_hw.*.alarm[0] = @intCast(target);
+        while (!firedptr.*) {}
     }
 
     fn init() void {
-        log.info("initialization started ", .{});
-        picosdk.hw_set_bits(&picosdk.timer0_hw.*.inte, @as(u32, 1) << 2);
-        const irq = picosdk.timer_hardware_alarm_get_irq_num(picosdk.timer0_hw, 2);
-
-        picosdk.irq_set_exclusive_handler(irq, &Time.timer_fired);
+        picosdk.hw_set_bits(&picosdk.timer0_hw.*.inte, @as(u32, 1) << 0);
+        const irq = picosdk.timer_hardware_alarm_get_irq_num(picosdk.timer0_hw, 0);
         picosdk.irq_set_enabled(irq, true);
-        log.info("initialization finished", .{});
     }
 
-    fn timer_fired() callconv(.C) void {
-        log.info("Timer fired", .{});
-        picosdk.hw_clear_bits(&picosdk.timer0_hw.*.intr, @as(u32, 1) << 2);
+    fn timer_fired() void {
+        picosdk.hw_clear_bits(&picosdk.timer0_hw.*.intr, @as(u32, 1) << 0);
         fired = true;
     }
 };

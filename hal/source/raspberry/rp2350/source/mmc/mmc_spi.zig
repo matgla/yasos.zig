@@ -25,6 +25,7 @@ const log = std.log.scoped(.@"mmc/spi");
 
 const mmc_spi = @cImport({
     @cInclude("mmc_spi.pio.h");
+    @cInclude("hardware/clocks.h");
     @cInclude("hardware/pio.h");
     @cInclude("hardware/gpio.h");
 });
@@ -116,6 +117,34 @@ pub const MmcSpi = struct {
         mmc_spi.gpio_put(self._sclk, false);
     }
 
+    pub fn receive_blocking(self: MmcSpi, dest: []u8) void {
+        const pio: *volatile mmc_spi.pio_hw_t = @ptrCast(self._pio);
+        const txfifo: *volatile mmc_spi.io_rw_8 = @ptrCast(&pio.txf[self._sm]);
+        const rxfifo: *volatile mmc_spi.io_rw_8 = @ptrCast(&pio.rxf[self._sm]);
+
+        var tx_remain: u32 = dest.len;
+        var rx_remain: u32 = dest.len;
+        var rx_index: u32 = 0;
+
+        while (tx_remain != 0 or rx_remain != 0) {
+            if (tx_remain != 0 and !mmc_spi.pio_sm_is_tx_fifo_full(self._pio, self._sm)) {
+                txfifo.* = 0xff;
+                tx_remain -= 1;
+            }
+
+            if (rx_remain != 0 and !mmc_spi.pio_sm_is_rx_fifo_empty(self._pio, self._sm)) {
+                if (rx_index < dest.len) {
+                    dest[rx_index] = @intCast(rxfifo.*);
+                    rx_index += 1;
+                } else {
+                    _ = rxfifo.*;
+                }
+                rx_remain -= 1;
+            }
+        }
+        mmc_spi.gpio_put(self._sclk, false);
+    }
+
     pub fn transmit_dma() isize {
         return 0;
     }
@@ -127,5 +156,16 @@ pub const MmcSpi = struct {
             return error.PIOInitializationFailure;
         }
         mmc_spi.pio_mmc_spi_transmit_init(self._pio, self._sm, offset, 60.0, self._sclk, self._mosi, self._miso);
+    }
+
+    pub fn change_speed_to(self: MmcSpi, speed_hz: u32) void {
+        const frequency = mmc_spi.clock_get_hz(mmc_spi.clk_sys);
+        var bus_frequency = speed_hz;
+        if (speed_hz >= self._config.clock_speed) {
+            bus_frequency = self._config.clock_speed;
+        }
+        const divider = frequency / speed_hz / 2;
+        log.info("Changed speed to {d} kHz, dividing by: {d}", .{ speed_hz / 1000, divider });
+        mmc_spi.pio_sm_set_clkdiv_int_frac(self._pio, self._sm, @intCast(divider), 0);
     }
 };

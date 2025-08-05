@@ -15,4 +15,5 @@
 
 comptime {
     _ = @import("driverfs_iterator.zig");
+    _ = @import("mmc/card_parser.zig");
 }

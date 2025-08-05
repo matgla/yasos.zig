@@ -1,8 +1,8 @@
 .program mmc_spi_transmit
 .side_set 1
 .wrap_target
-    out pins, 1 side 0 [1]
-    in pins, 1 side 1 [1]
+    out pins, 1 side 0 
+    in pins, 1 side 1 
 .wrap
 
 % c-sdk {
@@ -25,6 +25,14 @@ static inline void pio_mmc_spi_transmit_init(PIO pio, uint sm, uint program_offs
     pio_gpio_init(pio, pin_sck);
     pio_gpio_init(pio, pin_mosi);
     pio_gpio_init(pio, pin_miso);
+
+    gpio_set_slew_rate(pin_sck, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(pin_mosi, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(pin_miso, GPIO_SLEW_RATE_FAST);
+
+    gpio_set_drive_strength(pin_sck, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(pin_mosi, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(pin_miso, GPIO_DRIVE_STRENGTH_2MA);
 
     hw_set_bits(&pio->input_sync_bypass, 1u << (pin_miso % 32));
 

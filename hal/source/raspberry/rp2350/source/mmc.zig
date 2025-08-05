@@ -57,8 +57,16 @@ pub const Mmc = union(enum) {
         return self.spi.transmit_blocking(src, dest);
     }
 
+    pub fn receive_blocking(self: Self, dest: []u8) void {
+        return self.spi.receive_blocking(dest);
+    }
+
     pub fn chip_select(self: Self, select: bool) void {
         return self.spi.chip_select(select);
+    }
+
+    pub fn change_speed_to(self: Self, speed_hz: u32) void {
+        return self.spi.change_speed_to(speed_hz);
     }
 };
 
