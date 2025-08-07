@@ -165,11 +165,11 @@ pub fn build(b: *std.Build) !void {
     hal.addAssemblyFile(b.path("startup/startup.S"));
 
     cortex_m0plus.include_dirs = hal.include_dirs;
-    const boot2_binary = prepare_bootloader(b);
-    const boot2_module = b.createModule(
-        .{ .root_source_file = boot2_binary },
-    );
-    hal.addImport("rp2040_boot2_binary", boot2_module);
+    // const boot2_binary = prepare_bootloader(b);
+    // const boot2_module = b.createModule(
+    // .{ .root_source_file = boot2_binary },
+    // );
+    // hal.addImport("rp2040_boot2_binary", boot2_module);
 }
 
 fn prepare_bootloader(b: *std.Build) std.Build.LazyPath {

@@ -18,6 +18,7 @@ const std = @import("std");
 const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const MmcFile = @import("mmc_file.zig").MmcFile;
+const MmcPartitionDriver = @import("mmc_partition_driver.zig").MmcPartitionDriver;
 
 const interface = @import("interface");
 
@@ -61,18 +62,25 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     _mmc: hal.mmc.Mmc,
     _name: []const u8,
     _card_type: ?CardType,
+    _size: u32,
 
     pub fn create(mmc: hal.mmc.Mmc, driver_name: []const u8) MmcDriver {
         return MmcDriver.init(.{
             ._mmc = mmc,
             ._name = driver_name,
             ._card_type = null,
+            ._size = 0,
         });
     }
 
     pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-        const file = MmcFile.InstanceType.create(&self._mmc, allocator, self._name).interface.new(allocator) catch return null;
+        const file = MmcFile(Self).InstanceType.create(&self._mmc, allocator, self._name, self).interface.new(allocator) catch return null;
         return file;
+    }
+
+    pub fn partition_driver(self: *Self, allocator: std.mem.Allocator) ?IDriver {
+        const driver = MmcPartitionDriver(Self).InstanceType.create(self, "mmc_smth").interface.new(allocator) catch return null;
+        return driver;
     }
 
     pub fn load(self: *Self) anyerror!void {
@@ -101,6 +109,52 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
 
     pub fn name(self: *const Self) []const u8 {
         return self._name;
+    }
+
+    pub fn read(self: Self, address: usize, buf: []u8) isize {
+        if (address % 512 != 0) {
+            log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
+            return -1;
+        }
+
+        if (buf.len % 512 != 0 or buf.len == 0) {
+            log.err("Buffer must be aligned to 512 bytes, got: {d}", .{buf.len});
+            return -1;
+        }
+
+        const block_address = address >> 9;
+        const num_blocks = buf.len / 512;
+        var i: usize = 0;
+        while (i < num_blocks) : (i += 1) {
+            self.block_read_impl(17, block_address + i, buf[512 * i .. 512 * (i + 1)]) catch return -1;
+        }
+
+        return @intCast(buf.len);
+    }
+
+    pub fn write(self: Self, address: usize, buf: []const u8) isize {
+        if (address % 512 != 0) {
+            log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
+            return -1;
+        }
+
+        if (buf.len % 512 != 0 or buf.len == 0) {
+            log.err("Buffer must be aligned to 512 bytes, got: {d}", .{buf.len});
+            return -1;
+        }
+
+        const block_address = address >> 9;
+        const num_blocks = buf.len / 512;
+        var i: usize = 0;
+        while (i < num_blocks) : (i += 1) {
+            self.block_write_impl(24, block_address + i, buf[512 * i .. 512 * (i + 1)]) catch return -1;
+        }
+
+        return @intCast(buf.len);
+    }
+
+    pub fn size_in_sectors(self: *const Self) u32 {
+        return self._size;
     }
 
     fn reset(self: *const Self) error{MMCResetFailure}!void {
@@ -175,7 +229,7 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     fn get_data_token(comptime cmd: u6) !u8 {
         const v: u8 = switch (cmd) {
             9, 10, 17, 18, 28, 6 => 0xfe,
-            25 => 0xfc,
+            24, 25 => 0xfc,
             else => {
                 log.err("Got unknown packet command: 0x{x}", .{cmd});
                 return error.UnknownPacketCommand;
@@ -212,6 +266,31 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         }
     }
 
+    fn transmit_data_packet(self: Self, comptime cmd: u6, input: []const u8) !void {
+        const token = try get_data_token(cmd);
+        var buffer: [1]u8 = [_]u8{token};
+        const crc = std.hash.crc.Crc16Xmodem.hash(input);
+        self._mmc.transmit_blocking(buffer[0..1], null);
+        self._mmc.transmit_blocking(input[0..], null);
+        const native_crc = std.mem.nativeToBig(u16, crc);
+        const crc_buffer = std.mem.toBytes(native_crc);
+        self._mmc.transmit_blocking(crc_buffer[0..2], null);
+
+        var repeat: i32 = 100;
+        while (repeat > 0) {
+            self._mmc.receive_blocking(buffer[0..]);
+            if (buffer[0] & 0x1f == 0x05) {
+                return;
+            } else if (buffer[0] & 0x1f == 0x0b) {
+                return error.WriteRejectedCrcError;
+            } else if (buffer[0] & 0x1f == 0x0d) {
+                return error.WriteRejectedWriteError;
+            }
+            hal.time.sleep_ms(1);
+            repeat -= 1;
+        }
+    }
+
     fn block_read_impl(self: Self, comptime cmd: u6, argument: u32, output: []u8) anyerror!void {
         const cmd_resp = self.send_command(cmd, argument, R1, false);
         errdefer self._mmc.chip_select(false);
@@ -223,6 +302,23 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         self._mmc.chip_select(false);
 
         const dummy: [1]u8 = [_]u8{0xff};
+        self._mmc.transmit_blocking(dummy[0..], null);
+    }
+
+    fn block_write_impl(self: Self, comptime cmd: u6, argument: u32, input: []const u8) anyerror!void {
+        log.info("Writing block with command: {d}, argument: {x}", .{ cmd, argument });
+        const cmd_resp = self.send_command(cmd, argument, R1, false);
+        errdefer self._mmc.chip_select(false);
+        if (cmd_resp.r1 != 0x00) {
+            self._mmc.chip_select(false);
+            return error.IncorrectResponse;
+        }
+        const dummy: [1]u8 = [_]u8{0xff};
+        self._mmc.transmit_blocking(dummy[0..], null);
+
+        try self.transmit_data_packet(cmd, input);
+        self._mmc.chip_select(false);
+
         self._mmc.transmit_blocking(dummy[0..], null);
     }
 
@@ -271,7 +367,6 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
                     retries += 1;
                 }
             }
-            // verify is SD or MMC
         } else {
             if ((cmd8_resp.ocr & 0xfff) == 0x1aa) {
                 self._card_type = try self.initiate_intitialization_process(0x40000000);
@@ -303,15 +398,9 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
             _ = resp; // we don't care about the response here, just that it worked
         }
         log.info("Detecting card properties", .{});
-        var buffer: [16]u8 = [_]u8{0x00} ** 16;
         const csd = try self.read_csd();
+        self._size = csd.get_size() / csd.get_sector_size();
         dump_struct(csd);
-        try self.block_read_impl(9, 0, buffer[0..]);
         self._mmc.change_speed_to(csd.get_speed() / 2);
-
-        // read first block as test
-        var first_block: [512]u8 = [_]u8{0x00} ** 512;
-        try self.block_read_impl(17, 0, first_block[0..]);
-        log.info("First block read: {s}", .{std.fmt.fmtSliceHexLower(first_block[0..])});
     }
 });

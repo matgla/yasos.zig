@@ -194,6 +194,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return self.impl.stack_pointer();
         }
 
+        pub fn get_stack_bottom(self: Self) *const u8 {
+            return self.impl.get_stack_bottom();
+        }
+
         pub fn set_stack_pointer(self: *Self, ptr: *u8) void {
             var blocked_by_process: ?*ImplType = null;
             if (self.blocked_by_process) |p| {

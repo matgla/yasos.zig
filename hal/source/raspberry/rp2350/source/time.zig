@@ -26,10 +26,6 @@ const picosdk = @import("picosdk.zig").picosdk;
 
 const core = @import("cortex-m");
 
-export fn irq0() void {
-    Time.timer_fired();
-}
-
 pub const Time = struct {
     pub const SysTick = core.SysTick;
     var is_initialized: bool = false;
@@ -45,24 +41,10 @@ pub const Time = struct {
     }
 
     pub fn sleep_us(us: u64) void {
-        if (!is_initialized) {
-            init();
-            is_initialized = true;
-        }
-        firedptr.* = false;
         const target: u64 = picosdk.timer0_hw.*.timerawl + us;
-        picosdk.timer0_hw.*.alarm[0] = @intCast(target);
-        while (!firedptr.*) {}
+        const value: *volatile u32 = @ptrCast(&picosdk.timer0_hw.*.timerawl);
+        while (value.* < target) {}
     }
 
-    fn init() void {
-        picosdk.hw_set_bits(&picosdk.timer0_hw.*.inte, @as(u32, 1) << 0);
-        const irq = picosdk.timer_hardware_alarm_get_irq_num(picosdk.timer0_hw, 0);
-        picosdk.irq_set_enabled(irq, true);
-    }
-
-    fn timer_fired() void {
-        picosdk.hw_clear_bits(&picosdk.timer0_hw.*.intr, @as(u32, 1) << 0);
-        fired = true;
-    }
+    fn init() void {}
 };

@@ -165,7 +165,6 @@ pub const MmcSpi = struct {
             bus_frequency = self._config.clock_speed;
         }
         const divider = frequency / speed_hz / 2;
-        log.info("Changed speed to {d} kHz, dividing by: {d}", .{ speed_hz / 1000, divider });
         mmc_spi.pio_sm_set_clkdiv_int_frac(self._pio, self._sm, @intCast(divider), 0);
     }
 };

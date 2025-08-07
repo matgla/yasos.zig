@@ -22,67 +22,55 @@ const interface = @import("interface");
 
 const kernel = @import("../../kernel.zig");
 
-const log = std.log.scoped(.@"mmc/driver");
-
-pub fn MmcFile(comptime DriverType: type) type {
-    return interface.DeriveFromBase(kernel.fs.IFile, struct {
+pub const MmcPartitionFile =
+    interface.DeriveFromBase(kernel.fs.IFile, struct {
         const Self = @This();
 
         /// VTable for IFile interface
         _allocator: std.mem.Allocator,
-        _mmc: *hal.mmc.Mmc,
         _name: []const u8,
-        _driver: *DriverType,
-        _current_block: u32,
+        _dev: *kernel.fs.IFile,
+        _start_lba: u32,
+        _size_in_sectors: u32,
+        _current_position: c.off_t,
 
-        pub fn create(mmc: *hal.mmc.Mmc, allocator: std.mem.Allocator, filename: []const u8, driver: *DriverType) MmcFile(DriverType) {
-            return MmcFile(DriverType).init(.{
+        pub fn create(allocator: std.mem.Allocator, filename: []const u8, dev: *kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
+            return MmcPartitionFile.init(.{
                 ._allocator = allocator,
-                ._mmc = mmc,
                 ._name = filename,
-                ._driver = driver,
-                ._current_block = 0,
+                ._dev = dev,
+                ._start_lba = start_lba,
+                ._size_in_sectors = size_in_sectors,
+                ._current_position = @as(c.off_t, @intCast(start_lba)) << 9,
             });
         }
 
         pub fn read(self: *Self, buf: []u8) isize {
-            return self._driver.read(self._current_block << 9, buf);
+            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET);
+            const readed = self._dev.interface.read(buf);
+            self._current_position += readed;
+            return readed;
         }
 
         pub fn write(self: *Self, buf: []const u8) isize {
-            return self._driver.write(self._current_block << 9, buf);
+            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET);
+            const written = self._dev.interface.write(buf);
+            self._current_position += written;
+            return written;
         }
 
-        pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
-            switch (whence) {
-                c.SEEK_SET => {
-                    if (offset < 0 or (offset >> 9) > self._driver.size_in_sectors()) {
-                        return -1;
-                    }
-
-                    self._current_block = @intCast(offset >> 9);
-                },
-                c.SEEK_END => {
-                    // const file_size: c.off_t = @intCast(self.header.size());
-                    // if (file_size >= offset) {
-                    //     self.position = file_size - @as(c.off_t, @intCast(offset));
-                    // } else {
-                    //     // set errno
-                    //     return -1;
-                    // }
-                    log.err("SEEK_END is not implemented for MMC disk", .{});
-                    return -1;
-                },
-                c.SEEK_CUR => {
-                    const new_position = self._current_block - @as(u32, @intCast((offset >> 9)));
-                    if (new_position < 0) {
-                        return -1;
-                    }
-                    self._current_block = @intCast(new_position);
-                },
-                else => return -1,
+        pub fn seek(self: *Self, offset: c.off_t, base: i32) c.off_t {
+            if (offset > (self._start_lba + self._size_in_sectors) << 9) {
+                kernel.log.err("Seek offset {d} is out of bounds for MMC partition file", .{offset});
+                return -1;
             }
-            return @as(c.off_t, @intCast(self._current_block)) << 9;
+            if (@as(c.off_t, @intCast(self._start_lba)) + (offset >> 9) < @as(c.off_t, @intCast(self._start_lba))) {
+                kernel.log.err("Seek offset {d} is before the start of MMC partition file", .{offset});
+                return -1;
+            }
+            const seek_offset = (@as(c.off_t, @intCast(self._start_lba)) << 9) + offset;
+            self._current_position = self._dev.interface.seek(seek_offset, base);
+            return self._current_position;
         }
 
         pub fn close(self: *Self) i32 {
@@ -101,8 +89,7 @@ pub fn MmcFile(comptime DriverType: type) type {
         }
 
         pub fn size(self: *Self) isize {
-            _ = self;
-            return 0;
+            return @intCast(self._size_in_sectors << 9);
         }
 
         pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
@@ -138,4 +125,3 @@ pub fn MmcFile(comptime DriverType: type) type {
             _ = self.close();
         }
     });
-}

@@ -255,6 +255,14 @@ export fn get_next_task() *const u8 {
     @panic("Context switch called without tasks available");
 }
 
+export fn get_stack_bottom() *const u8 {
+    if (instance.scheduler.get_current()) |task| {
+        return task.get_stack_bottom();
+    }
+
+    @panic("Context switch called without tasks available");
+}
+
 export fn get_current_task() *const u8 {
     if (instance.scheduler.get_current()) |task| {
         return task.stack_pointer();

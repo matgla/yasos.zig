@@ -224,9 +224,9 @@ pub const ArmProcess = struct {
 
     pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype) !Self {
         const stack = try process_allocator.alignedAlloc(u8, .@"8", stack_size);
-        if (comptime config.process.use_stack_overflow_detection) {
-            @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
-        }
+        // if (comptime config.process.use_stack_overflow_detection) {
+        // @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
+        // }
         const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg);
         return ArmProcess{
             .stack = stack,
@@ -240,16 +240,20 @@ pub const ArmProcess = struct {
     }
 
     pub fn stack_pointer(self: *const Self) *const u8 {
-        if (config.process.use_stack_overflow_detection) {
-            if (!self.validate_stack()) {
-                if (!config.process.use_mpu_stack_protection) {
-                    @panic("Stack overlflow occured, please reset");
-                } else {
-                    @panic("TODO: implement process kill here");
-                }
-            }
-        }
+        // if (config.process.use_stack_overflow_detection) {
+        //     if (!self.validate_stack()) {
+        //         if (!config.process.use_mpu_stack_protection) {
+        //             @panic("Stack overlflow occured, please reset");
+        //         } else {
+        //             @panic("TODO: implement process kill here");
+        //         }
+        //     }
+        // }
         return self.stack_position;
+    }
+
+    pub fn get_stack_bottom(self: *const Self) *const u8 {
+        return @ptrCast(self.stack.ptr);
     }
 
     pub fn set_stack_pointer(self: *Self, ptr: *u8, blocked_by_process: ?*Self) void {
@@ -288,9 +292,9 @@ pub const ArmProcess = struct {
     }
 
     pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) void {
-        if (comptime config.process.use_stack_overflow_detection) {
-            @memcpy(self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
-        }
+        // if (comptime config.process.use_stack_overflow_detection) {
+        // @memcpy(self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
+        // }
         const args = [_]usize{
             argc,
             argv,
@@ -301,7 +305,7 @@ pub const ArmProcess = struct {
     }
 
     pub fn validate_stack(self: *const Self) bool {
-        if (!config.process.use_stack_overflow_detection) @compileError("Stack overflow detection is disabled in config!");
+        // if (!config.process.use_stack_overflow_detection) @compileError("Stack overflow detection is disabled in config!");
         return std.mem.eql(u8, self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
     }
 

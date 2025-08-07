@@ -200,6 +200,10 @@ pub const MountPoints = struct {
         } else {
             return MountPointError.PathNotExists;
         }
+        var fs = filesystem;
+        if (fs.interface.mount() < 0) {
+            return MountPointError.NotMounted;
+        }
     }
 
     pub fn umount(self: *MountPoints, path: []const u8) !void {

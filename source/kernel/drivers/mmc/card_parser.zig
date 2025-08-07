@@ -121,9 +121,15 @@ pub const CSDv2 = packed struct {
     always1: bool,
 
     pub fn get_speed(self: CSDv2) u32 {
-        // TRAN_SPEED is in kHz, so we convert it to Hz.
-
         return @intFromFloat(tran_speed_time_values[self.tran_speed >> 3] * @as(f32, @floatFromInt(tran_speed_rate_values[self.tran_speed & 0x07])));
+    }
+
+    pub fn get_sector_size(self: CSDv2) u32 {
+        return @as(u32, @intCast(@as(u32, 1) << self.read_bl_len));
+    }
+
+    pub fn get_size(self: CSDv2) u32 {
+        return @as(u32, @intCast(self.c_size + 1)) * self.get_sector_size();
     }
 };
 

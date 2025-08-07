@@ -34,40 +34,69 @@ const interface = @import("interface");
 const RamFsFile = @import("ramfs_file.zig").RamFsFile;
 const RamFsData = @import("ramfs_data.zig").RamFsData;
 
+const FilesNode = struct {
+    node: RamFsData,
+    children: std.DoublyLinkedList,
+    list_node: std.DoublyLinkedList.Node,
+
+    pub fn deinit(self: *FilesNode, allocator: std.mem.Allocator) void {
+        var next = self.children.pop();
+
+        while (next) |node| {
+            const child: *FilesNode = @fieldParentPtr("list_node", node);
+            next = self.children.pop();
+            child.deinit(allocator);
+            allocator.destroy(child);
+        }
+        self.node.deinit();
+    }
+
+    pub fn get(self: *const FilesNode, node_name: []const u8) ?*FilesNode {
+        var next = self.children.first;
+        while (next) |node| {
+            const child: *FilesNode = @fieldParentPtr("list_node", node);
+            next = node.next;
+            if (std.mem.eql(u8, child.node.name(), node_name)) {
+                return child;
+            }
+        }
+        return null;
+    }
+};
+
+const RamFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
+    const Self = @This();
+    _allocator: std.mem.Allocator,
+    _current: ?*std.DoublyLinkedList.Node,
+
+    pub fn create(data: *std.DoublyLinkedList, allocator: std.mem.Allocator) RamFsIterator {
+        return RamFsIterator.init(.{
+            ._allocator = allocator,
+            ._current = data.first,
+        });
+    }
+
+    pub fn next(self: *Self) ?IFile {
+        if (self._current) |current| {
+            const file = RamFsFile.InstanceType.create(&(@as(*FilesNode, @fieldParentPtr("list_node", current))).node, self._allocator);
+            self._current = current.next;
+            return file.interface.new(self._allocator) catch |err| {
+                log.err("RamFs: Failed to create file from iterator: {s}", .{@errorName(err)});
+                return null;
+            };
+        }
+        return null;
+    }
+
+    pub fn delete(self: *Self) void {
+        _ = self;
+    }
+});
+
 pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     const Self = @This();
     allocator: std.mem.Allocator,
     root: FilesNode,
-
-    const FilesNode = struct {
-        node: RamFsData,
-        children: std.DoublyLinkedList,
-        list_node: std.DoublyLinkedList.Node,
-
-        pub fn deinit(self: *FilesNode, allocator: std.mem.Allocator) void {
-            var next = self.children.pop();
-
-            while (next) |node| {
-                const child: *FilesNode = @fieldParentPtr("list_node", node);
-                next = self.children.pop();
-                child.deinit(allocator);
-                allocator.destroy(child);
-            }
-            self.node.deinit();
-        }
-
-        pub fn get(self: *const FilesNode, node_name: []const u8) ?*FilesNode {
-            var next = self.children.first;
-            while (next) |node| {
-                const child: *FilesNode = @fieldParentPtr("list_node", node);
-                next = node.next;
-                if (std.mem.eql(u8, child.node.name(), node_name)) {
-                    return child;
-                }
-            }
-            return null;
-        }
-    };
 
     pub fn init(allocator: std.mem.Allocator) !RamFs {
         return RamFs.init(.{
@@ -81,9 +110,10 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
-        _ = self;
         _ = path;
-        return null;
+        return RamFsIterator.InstanceType.create(&self.root.children, self.allocator).interface.new(self.allocator) catch {
+            return null;
+        };
     }
 
     pub fn mount(self: *Self) i32 {
@@ -102,10 +132,14 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
 
     pub fn create(self: *Self, path: []const u8, _: i32, allocator: std.mem.Allocator) ?IFile {
         if (self.create_node(path, FileType.File)) |node| {
+            log.info("Creating file at path: {s}", .{path});
             return RamFsFile.InstanceType.create(&node.node, allocator).interface.new(allocator) catch |err| {
                 kernel.log.err("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
                 return null;
             };
+        } else {
+            kernel.log.err("RamFs: Failed to create file at path: {s}, file already exists", .{path});
+            return null;
         }
         return null;
     }
@@ -227,6 +261,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
                     .children = .{},
                     .list_node = .{},
                 };
+                log.info("Creating node at path: {s}", .{path});
                 parent_node.children.append(&new.list_node);
                 return new;
             }

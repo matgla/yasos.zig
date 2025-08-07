@@ -30,6 +30,7 @@ const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
 
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
+const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
 
 const panic_helper = @import("arch").panic;
 
@@ -142,6 +143,41 @@ fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !voi
     };
 }
 
+fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) void {
+    var buffer: [1024]u8 = [_]u8{0x00} ** 1024;
+    _ = mmcfile.interface.read(buffer[0..]);
+    const mbr = kernel.fs.MBR.create(buffer[0..]);
+    if (mbr.is_valid()) {
+        kernel.log.debug("MBR is valid, partition count: {d}", .{mbr.partitions.len});
+        comptime var i: i32 = 0;
+        inline for (mbr.partitions) |part| {
+            if (part.size_in_sectors != 0) {
+                kernel.log.debug("Mounting partition {d}:\n  boot_indicator: {x}\n  start_chs: {d}\n  partition_type: {x}\n  end_chs: {d}\n  start_lba: {x}\n  size: {x} sectors", .{
+                    i,
+                    part.boot_indicator,
+                    part.start_chs,
+                    part.partition_type,
+                    part.end_chs,
+                    part.start_lba,
+                    part.size_in_sectors,
+                });
+                const partname = std.fmt.comptimePrint("mmc{d}p{d}", .{ 0, i });
+                const partition_driver = kernel.driver.MmcPartitionDriver.InstanceType.create(mmcfile.share(), partname, part.start_lba, part.size_in_sectors).interface.new(allocator) catch |err| {
+                    kernel.log.err("Can't create partition driver: {s}", .{@errorName(err)});
+                    return;
+                };
+                driverfs.data().append(partition_driver, partname) catch |err| {
+                    kernel.log.err("Can't append partition driver: {s}", .{@errorName(err)});
+                    return;
+                };
+            }
+            i += 1;
+        }
+    } else {
+        kernel.log.err("Invalid MBR found", .{});
+    }
+}
+
 fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     kernel.fs.vfs_init(allocator);
     var driverfs = kernel.driver.fs.DriverFs.InstanceType.init(allocator);
@@ -158,33 +194,46 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         return err;
     };
     try driverfs.data().append(flash_driver, flash0name);
-
+    var maybe_mmcfile: ?kernel.fs.IFile = null;
+    var maybe_mmcdriver: ?kernel.driver.IDriver = null;
     if (@hasDecl(board, "mmc")) {
         inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
-            const mmc_driver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, name), name)).interface.new(allocator) catch |err| {
+            maybe_mmcdriver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, name), name)).interface.new(allocator) catch |err| {
                 kernel.log.err("Can't create {s} driver instance: '{s}'", .{ name, @errorName(err) });
                 return err;
             };
-            driverfs.data().append(mmc_driver, name) catch {};
+            driverfs.data().append(maybe_mmcdriver.?, name) catch {};
             kernel.log.info("adding mmc driver: {s}", .{m.name});
             i = i + 1;
+            maybe_mmcfile = maybe_mmcdriver.?.interface.ifile(allocator);
         }
     } else {
         kernel.log.debug("Board has no mmc interfaces", .{});
     }
     try driverfs.data().load_all();
 
+    if (maybe_mmcfile) |*mmcfile| {
+        add_mmc_partition_drivers(mmcfile, allocator, &driverfs);
+        mmcfile.interface.delete();
+    }
+
     var maybe_flash_file = flash_driver.interface.ifile(allocator);
     if (maybe_flash_file) |*flash| {
         try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash.*, 0x80000)), "/");
+        var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
+        if (maybe_mmcpart0) |*mmcfile| {
+            try mount_filesystem(try allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, mmcfile.*)), "/root");
+            mmcfile.interface.delete();
+        }
         try mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
         try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
     } else {
         kernel.log.err("Can't get Flash Driver", .{});
     }
+
     return;
 }
 

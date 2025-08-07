@@ -15,17 +15,29 @@
 
 const std = @import("std");
 
-pub fn dump_stack_trace(log: anytype, address: usize) void {
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, null);
-    while (stack.next()) |return_address| : (index += 1) {
-        log.err("  {d: >3}: 0x{X:0>8}", .{ index, if (return_address > 0) return_address - 1 else return_address });
-    }
-}
+pub const MBRPartitionEntry = packed struct {
+    boot_indicator: u8,
+    start_chs: u24,
+    partition_type: u8,
+    end_chs: u24,
+    start_lba: u32,
+    size_in_sectors: u32,
+};
 
-pub fn get_stack_trace_depth(address: usize) usize {
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, null);
-    while (stack.next()) |_| : (index += 1) {}
-    return index;
-}
+pub const MBR = struct {
+    partitions: [4]MBRPartitionEntry,
+    _signature: u16,
+
+    pub fn create(buffer: []const u8) MBR {
+        var mbr: MBR = undefined;
+        for (0..4) |i| {
+            mbr.partitions[i] = std.mem.bytesToValue(MBRPartitionEntry, &buffer[446 + i * @sizeOf(MBRPartitionEntry)]);
+        }
+        mbr._signature = std.mem.bytesToValue(u16, buffer[510..512]);
+        return mbr;
+    }
+
+    pub fn is_valid(self: MBR) bool {
+        return self._signature == 0xAA55;
+    }
+};

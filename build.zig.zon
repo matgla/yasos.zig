@@ -1,13 +1,17 @@
 .{
     .name = .yasos,
     .version = "0.0.1",
-    .minimum_zig_version = "0.15.0-dev.869+640a13065",
+    .minimum_zig_version = "0.15.0-dev.1380+e98aeeb73",
     .dependencies = .{
         .yasos_hal = .{ .path = "hal" },
         .yasld = .{ .path = "dynamic_loader" },
         .@"modules/oop" = .{
             .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#9d1b69a4164dc3dc0e79a35168a3de84002eea28",
             .hash = "oop_zig-0.0.1-SbIaG8tVAAAP1sIXuq1xVHZkdmFCgkEf1y17K9wdJvEs",
+        },
+        .@"modules/fatfs" = .{
+            .url = "git+https://github.com/matgla/zfat.git/?ref=HEAD#7f30c4f4483e135613d700bc908d72b762bc6d9f",
+            .hash = "zfat-0.15.0-SNNK9WDCTQDVE9wgIpa6ja7psB97jxkOmNihy67IB7HW",
         },
     },
     .paths = .{

@@ -25,7 +25,7 @@ const IFile = @import("../fs/ifile.zig").IFile;
 const fs = @import("../fs/vfs.zig");
 
 const kernel = @import("kernel");
-const log = kernel.log;
+const log = std.log.scoped(.syscall);
 
 const systick = @import("systick.zig");
 
@@ -93,13 +93,18 @@ pub const VForkContext = extern struct {
 };
 
 extern fn switch_to_next_task() void;
-extern fn start_first_task(lr: *usize) void;
 extern fn push_return_address() void;
-extern fn switch_to_main_task(lr: usize) void;
+extern fn switch_to_main_task(lr: usize, with_fpu: bool) void;
 var sp: usize = 0;
+var with_fpu: bool = false;
 
 pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
     sp = @as(*const volatile usize, @ptrCast(@alignCast(arg))).*;
+    if (sp & 1 == 1) {
+        with_fpu = true;
+        sp -= 1;
+    }
+    std.log.info("Starting root process with stack pointer: {x}\n", .{sp});
     switch_to_next_task();
     return 0;
 }
@@ -107,7 +112,8 @@ pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
 pub fn sys_stop_root_process(arg: *const volatile anyopaque) !i32 {
     _ = arg;
     hal.time.systick.disable();
-    switch_to_main_task(sp);
+    std.log.info("Stopping root process with stack pointer: {x}\n", .{sp});
+    switch_to_main_task(sp, with_fpu);
     return 0;
 }
 
@@ -445,11 +451,14 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
         if (maybe_file) |*file| {
             defer file.interface.delete();
             if (file.interface.filetype() == FileType.Directory) {
-                process.change_directory(path_slice) catch {
-                    // log.print("chdir: failed to change directory: {s}\n", .{@errorName(err)});
+                process.change_directory(path_slice) catch |err| {
+                    log.warn("chdir: failed to change directory: {s}\n", .{@errorName(err)});
                     return -1;
                 };
                 return 0;
+            } else {
+                log.warn("chdir: path is not a directory: {s}\n", .{path_slice});
+                return -1;
             }
         }
     }

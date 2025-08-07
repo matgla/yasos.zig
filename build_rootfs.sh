@@ -79,6 +79,8 @@ mkdir -p rootfs
 mkdir -p rootfs/usr/include
 mkdir -p rootfs/usr/lib
 mkdir -p rootfs/proc
+mkdir -p rootfs/root
+mkdir -p rootfs/home
 cd rootfs
 ln -s usr/lib  
 ln -s usr/bin
