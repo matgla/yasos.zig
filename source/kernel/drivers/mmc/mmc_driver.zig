@@ -178,6 +178,10 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     }
 
     fn send_command(self: *const Self, cmd: u6, argument: u32, RespType: type, comptime deselect: bool) RespType {
+        while (self._mmc.is_busy()) {
+            hal.time.sleep_ms(1);
+        }
+
         self._mmc.chip_select(true);
         const command = self._mmc.build_command(cmd, argument);
         self._mmc.transmit_blocking(command[0..], null);
@@ -228,8 +232,8 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
 
     fn get_data_token(comptime cmd: u6) !u8 {
         const v: u8 = switch (cmd) {
-            9, 10, 17, 18, 28, 6 => 0xfe,
-            24, 25 => 0xfc,
+            9, 10, 17, 18, 28, 24, 6 => 0xfe,
+            25 => 0xfc,
             else => {
                 log.err("Got unknown packet command: 0x{x}", .{cmd});
                 return error.UnknownPacketCommand;
@@ -270,25 +274,27 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         const token = try get_data_token(cmd);
         var buffer: [1]u8 = [_]u8{token};
         const crc = std.hash.crc.Crc16Xmodem.hash(input);
-        self._mmc.transmit_blocking(buffer[0..1], null);
-        self._mmc.transmit_blocking(input[0..], null);
         const native_crc = std.mem.nativeToBig(u16, crc);
         const crc_buffer = std.mem.toBytes(native_crc);
-        self._mmc.transmit_blocking(crc_buffer[0..2], null);
 
-        var repeat: i32 = 100;
-        while (repeat > 0) {
-            self._mmc.receive_blocking(buffer[0..]);
-            if (buffer[0] & 0x1f == 0x05) {
-                return;
-            } else if (buffer[0] & 0x1f == 0x0b) {
-                return error.WriteRejectedCrcError;
-            } else if (buffer[0] & 0x1f == 0x0d) {
-                return error.WriteRejectedWriteError;
-            }
-            hal.time.sleep_ms(1);
-            repeat -= 1;
+        log.info("Transmitting data packet with command: {d}, token: {x}, crc: {x}", .{ cmd, token, crc });
+        self._mmc.transmit_blocking(buffer[0..], null);
+        self._mmc.transmit_blocking(input[0..], null);
+        self._mmc.transmit_blocking(crc_buffer[0..2], null);
+        self._mmc.receive_blocking(buffer[0..]);
+        log.info("Received response: {x}", .{buffer[0]});
+
+        if (buffer[0] & 0x1f == 0x05) {
+            return;
+        } else if (buffer[0] & 0x1f == 0x0b) {
+            return error.WriteRejectedCrcError;
+        } else if (buffer[0] & 0x1f == 0x0d) {
+            return error.WriteRejectedWriteError;
+        } else {
+            return error.UnknownWriteResponse;
         }
+        // buffer[0] = 0xff; // clear the buffer
+        self._mmc.transmit_blocking(buffer, null);
     }
 
     fn block_read_impl(self: Self, comptime cmd: u6, argument: u32, output: []u8) anyerror!void {
@@ -313,13 +319,13 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
             self._mmc.chip_select(false);
             return error.IncorrectResponse;
         }
-        const dummy: [1]u8 = [_]u8{0xff};
-        self._mmc.transmit_blocking(dummy[0..], null);
+        // const dummy: [1]u8 = [_]u8{0xff};
+        // self._mmc.transmit_blocking(dummy[0..], null);
 
         try self.transmit_data_packet(cmd, input);
         self._mmc.chip_select(false);
 
-        self._mmc.transmit_blocking(dummy[0..], null);
+        // self._mmc.transmit_blocking(dummy[0..], null);
     }
 
     fn read_cid(self: *Self) !card_parser.CID {
@@ -401,6 +407,6 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         const csd = try self.read_csd();
         self._size = csd.get_size() / csd.get_sector_size();
         dump_struct(csd);
-        self._mmc.change_speed_to(csd.get_speed() / 2);
+        self._mmc.change_speed_to(csd.get_speed() / 4);
     }
 });

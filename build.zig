@@ -276,6 +276,7 @@ pub fn build(b: *std.Build) !void {
                 .target = kernel_exec.root_module.resolved_target.?,
                 .@"no-libc" = true,
                 .@"static-rtc" = date[0..],
+                .mkfs = true,
             });
             _ = try zfat.builder.addUserInputOption("no-libc", "true");
             const zfat_module = zfat.module("zfat");

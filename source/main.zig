@@ -137,10 +137,25 @@ fn allocate_filesystem(allocator: std.mem.Allocator, fs: anytype) !kernel.fs.IFi
 }
 
 fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !void {
+    var retry = false;
+    var mod_ifs = ifs;
+    if (std.mem.eql(u8, mod_ifs.interface.name(), "fatfs")) {
+        mod_ifs.interface.format() catch |format_err| {
+            kernel.log.err("Can't format filesystem '{s}' with error: {s}", .{ ifs.interface.name(), @errorName(format_err) });
+            return format_err;
+        };
+    }
     kernel.fs.get_vfs().mount_filesystem(point, ifs) catch |err| {
         kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.interface.name(), @errorName(err) });
-        return err;
+        // create mkfs executable
+        retry = true;
     };
+    if (retry) {
+        kernel.fs.get_vfs().mount_filesystem(point, ifs) catch |err| {
+            kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.interface.name(), @errorName(err) });
+            return err;
+        };
+    }
 }
 
 fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) void {
@@ -224,7 +239,11 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash.*, 0x80000)), "/");
         var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
         if (maybe_mmcpart0) |*mmcfile| {
-            try mount_filesystem(try allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, mmcfile.*)), "/root");
+            const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, mmcfile.*)) catch null;
+            if (maybe_rootfs) |rootfs| {
+                mount_filesystem(rootfs, "/root") catch {};
+            }
+
             mmcfile.interface.delete();
         }
         try mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/tmp");

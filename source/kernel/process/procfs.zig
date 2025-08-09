@@ -211,4 +211,9 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         log.debug("Getting iterator for: {s}", .{path});
         return (ProcFsIterator.InstanceType.create(self._root.data()._files.first, self._allocator)).interface.new(self._allocator) catch return null;
     }
+    pub fn format(self: *Self) anyerror!void {
+        _ = self;
+        // ProcDirectory is read-only, so formatting is not applicable
+        return error.NotSupported;
+    }
 });

@@ -68,6 +68,10 @@ pub const Mmc = union(enum) {
     pub fn change_speed_to(self: Self, speed_hz: u32) void {
         return self.spi.change_speed_to(speed_hz);
     }
+
+    pub fn is_busy(self: Self) bool {
+        return self.spi.is_busy();
+    }
 };
 
 // pub fn Mmc(comptime pio_index: usize, comptime clk_pio_sm: usize, comptime data_pio_sm: usize, comptime cmd_pio_sm: usize, comptime pins: interface.mmc.Pins) type {

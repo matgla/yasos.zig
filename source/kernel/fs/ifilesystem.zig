@@ -82,6 +82,10 @@ pub const IFileSystem = interface.ConstructInterface(struct {
     pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
         return interface.VirtualCall(self, "iterator", .{path}, ?IDirectoryIterator);
     }
+
+    pub fn format(self: *Self) anyerror!void {
+        try interface.VirtualCall(self, "format", .{}, anyerror!void);
+    }
 });
 
 pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {

@@ -61,6 +61,10 @@ pub fn Mmc(comptime MmcType: anytype) type {
         pub fn change_speed_to(self: Self, speed_hz: u32) void {
             return self.impl.change_speed_to(speed_hz);
         }
+
+        pub fn is_busy(self: Self) bool {
+            return self.impl.is_busy();
+        }
     };
 }
 

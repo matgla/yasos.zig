@@ -110,6 +110,12 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         self.mount_points.deinit();
     }
 
+    pub fn format(self: *Self) anyerror!void {
+        // VirtualFileSystem does not support formatting
+        _ = self;
+        return error.NotSupported;
+    }
+
     // Below are part of VirtualFileSystem interface, not IFileSystem
     pub fn init(allocator: std.mem.Allocator) VirtualFileSystem {
         return VirtualFileSystem.init(.{

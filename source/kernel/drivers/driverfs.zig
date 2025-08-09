@@ -222,4 +222,9 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
         return self._root.data().iterator(path);
     }
+
+    pub fn format(self: *Self) anyerror!void {
+        _ = self;
+        return error.NotSupported; // Driver directory cannot be formatted
+    }
 });

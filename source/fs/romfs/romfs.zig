@@ -117,6 +117,12 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return null;
     }
 
+    pub fn format(self: *Self) anyerror!void {
+        _ = self;
+        // RomFS is read-only, so formatting is not applicable
+        return error.NotSupported;
+    }
+
     fn get_file_header(self: *Self, path: []const u8) ?FileHeader {
         const path_without_trailing_separator = std.mem.trimRight(u8, path, "/");
         var it = try std.fs.path.componentIterator(path);

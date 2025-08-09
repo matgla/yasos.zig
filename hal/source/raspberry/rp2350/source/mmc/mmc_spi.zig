@@ -167,4 +167,8 @@ pub const MmcSpi = struct {
         const divider = frequency / speed_hz / 2;
         mmc_spi.pio_sm_set_clkdiv_int_frac(self._pio, self._sm, @intCast(divider), 0);
     }
+
+    pub fn is_busy(self: MmcSpi) bool {
+        return !mmc_spi.gpio_get(self._miso);
+    }
 };

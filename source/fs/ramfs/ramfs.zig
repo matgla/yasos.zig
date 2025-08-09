@@ -184,6 +184,12 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return "ramfs";
     }
 
+    pub fn format(self: *Self) anyerror!void {
+        _ = self;
+        // RamFS is a memory-based filesystem, so formatting is not applicable
+        return error.NotSupported;
+    }
+
     pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
         const maybe_node = Self.get_node(*Self, self, path) catch return -1;
         if (maybe_node) |file_node| {

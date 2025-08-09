@@ -137,10 +137,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             return null;
         };
         defer allocator.free(filepath);
-        _ = fatfs.File.create(filepath) catch |err| {
+        var file = fatfs.File.create(filepath) catch |err| {
             log.err("Failed to create file: {s}", .{@errorName(err)});
             return null;
         };
+        file.close();
         return self.get(path, allocator);
     }
 
@@ -214,6 +215,20 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return false;
     }
 
+    pub fn format(self: *Self) anyerror!void {
+        log.info("Formatting FAT filesystem", .{});
+
+        fatfs.disks[0] = &self._disk_wrapper.interface;
+        fatfs.mkfs(
+            "0:",
+            .{ .filesystem = .fat32, .sector_align = 1, .use_partitions = false },
+            &buffer,
+        ) catch |err| {
+            log.err("Failed to format FAT filesystem: {s}", .{@errorName(err)});
+            return err;
+        };
+    }
+
     const DiskWrapper = struct {
         const sector_size = 512;
         device: kernel.fs.IFile,
@@ -250,6 +265,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
         pub fn write(interface: *fatfs.Disk, buff: [*]const u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
+            log.debug("Writing to sector {d}, count {d}", .{ sector, count });
             if (self.device.interface.seek(@as(c.off_t, @intCast(sector * sector_size)), c.SEEK_SET) < 0) return error.IoError;
             if (self.device.interface.write(buff[0 .. sector_size * count]) != sector_size * count) {
                 return error.IoError;
