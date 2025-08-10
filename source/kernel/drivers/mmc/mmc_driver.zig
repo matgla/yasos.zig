@@ -351,10 +351,6 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         try self.transmit_data_packet(cmd, input);
         self._mmc.chip_select(false);
 
-        const dummy: [1]u8 = [_]u8{0xff};
-        while (self._mmc.is_busy()) {
-            self._mmc.transmit_blocking(dummy[0..], null);
-        }
         // self._mmc.transmit_blocking(dummy[0..], null);
     }
 
