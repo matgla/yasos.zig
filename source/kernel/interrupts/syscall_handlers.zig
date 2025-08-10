@@ -170,14 +170,20 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
 
     const maybe_process = process_manager.instance.get_current_process();
-    const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
+    var path_slice: []const u8 = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
     if (maybe_process) |process| {
+        var relative_path = false;
+        if (!std.mem.startsWith(u8, path_slice, "/")) {
+            path_slice = std.fmt.allocPrint(kernel_allocator, "{s}/{s}", .{ process.cwd, path_slice }) catch {
+                return -1;
+            };
+            relative_path = true;
+        }
+        defer if (relative_path) kernel_allocator.free(path_slice);
+
         const maybe_file = fs.get_ivfs().interface.get(path_slice, process.get_memory_allocator());
         if (maybe_file) |file| {
-            // defer file.destroy();
             const fd = process.get_free_fd();
-            // const maybe_ifile = file.dupe();
-            // if (maybe_ifile) |ifile| {
             process.fds.put(fd, .{
                 .file = file,
                 .path = blk: {

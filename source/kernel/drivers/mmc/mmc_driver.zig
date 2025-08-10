@@ -285,17 +285,20 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         const native_crc = std.mem.nativeToBig(u16, crc);
         const crc_buffer = std.mem.toBytes(native_crc);
 
-        log.info("Transmitting data packet with command: {d}, token: {x}, crc: {x}", .{ cmd, token, crc });
+        log.debug("Transmitting data packet with command: {d}, token: {x}, crc: {x}", .{ cmd, token, crc });
 
         self._mmc.transmit_blocking(buffer[0..], null);
         self._mmc.transmit_blocking(input[0..], null);
         self._mmc.transmit_blocking(crc_buffer[0..2], null);
         self._mmc.receive_blocking(buffer[0..]);
-        log.info("Received response: {x}", .{buffer[0]});
+        log.debug("Received response: {x}", .{buffer[0]});
 
         if (buffer[0] & 0x1f == 0x05) {
             return;
-        } else if (buffer[0] & 0x1f == 0x0b) {
+        }
+
+        log.warn("Write response was not successful, received: {x}", .{buffer[0]});
+        if (buffer[0] & 0x1f == 0x0b) {
             return error.WriteRejectedCrcError;
         } else if (buffer[0] & 0x1f == 0x0d) {
             return error.WriteRejectedWriteError;

@@ -65,23 +65,6 @@ pub const std_options: std.Options = .{
             .level = .err,
         },
         .{
-            .scope = .@"mmc/driver",
-            .level = .debug,
-        },
-        // .{
-        //     .scope = .@"yasld/module",
-        //     .level = .info,
-        // }, .{
-        //     .scope = .malloc,
-        //     .level = .info,
-        // }, .{
-        //     .scope = .@"kernel/memory_pool",
-        //     .level = .info,
-        // }, .{
-        //     .scope = .@"kernel/process",
-        //     .level = .info,
-        // },
-        .{
             .scope = .@"vfs/driverfs",
             .level = .debug,
         },
@@ -137,14 +120,14 @@ fn allocate_filesystem(allocator: std.mem.Allocator, fs: anytype) !kernel.fs.IFi
 }
 
 fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !void {
-    var mod_ifs = ifs;
+    // var mod_ifs = ifs;
 
-    if (std.mem.eql(u8, mod_ifs.interface.name(), "fatfs")) {
-        mod_ifs.interface.format() catch |format_err| {
-            kernel.log.err("Can't format filesystem '{s}' with error: {s}", .{ ifs.interface.name(), @errorName(format_err) });
-            return format_err;
-        };
-    }
+    // if (std.mem.eql(u8, mod_ifs.interface.name(), "fatfs")) {
+    //     mod_ifs.interface.format() catch |format_err| {
+    //         kernel.log.err("Can't format filesystem '{s}' with error: {s}", .{ ifs.interface.name(), @errorName(format_err) });
+    //         return format_err;
+    //     };
+    // }
 
     kernel.fs.get_vfs().mount_filesystem(point, ifs) catch |err| {
         kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.interface.name(), @errorName(err) });

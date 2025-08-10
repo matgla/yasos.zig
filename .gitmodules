@@ -22,3 +22,6 @@
 [submodule "apps/yasvi"]
 	path = apps/yasvi
 	url = git@github.com:matgla/yasvi.git
+[submodule "apps/mkfs/libs/fatfs"]
+	path = apps/mkfs/libs/fatfs
+	url = https://github.com/abbrev/fatfs.git
