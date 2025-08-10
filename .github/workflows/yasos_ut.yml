@@ -10,7 +10,7 @@ jobs:
   execute_system_tests:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.14
+      image: ghcr.io/matgla/yasos.zig:v0.15
       credentials: 
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
