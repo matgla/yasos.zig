@@ -26,8 +26,8 @@ jobs:
         shell: bash
         continue-on-error: true
         run: 
-          $HOME/.zvm/self/zvm i 0.14.1
-          $HOME/.zvm/self/zvm run 0.14.1 zig build test 
+          $HOME/.zvm/self/zvm i 0.14.1 \
+          $HOME/.zvm/self/zvm run 0.14.1 build test 
       
       - name: Execute tests 
         shell: bash
