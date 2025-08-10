@@ -20,6 +20,7 @@ jobs:
           submodules: 'recursive' 
       - name: Install zvm 
         run: 
+          apt-get update && apt-get install -y curl
           curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash 
       - name: Fetch packages
         continue-on-error: true
