@@ -29,6 +29,11 @@
 switch_to_next_task:
   // call scheduler to configure next task for the execution 
   bl get_next_task
+  push {r0-r1} 
+  bl get_stack_bottom
+  msr psplim, r0
+  pop {r0-r1}
+
   // load task context
   b load_context
 
@@ -53,7 +58,13 @@ load_context:
 .thumb_func:
 switch_to_main_task:
   msr msp, r0 
+  cmp r1, #1
+  bne switch_no_fpu
+  ldr r0, =0xffffffe9
+  b return_to_main_task
+switch_no_fpu:
   ldr r0, =0xfffffff9
+return_to_main_task:
   bx r0
 
 
@@ -110,6 +121,14 @@ irq_svcall:
   bne call_svcall
   ldr r0, =sp_call
   str sp, [r0] 
+  tst lr, #0x10
+  bne omit_fpu 
+  ldr r0, =sp_call_fpu
+  push {r1}
+  mov r1, #1
+  str r1, [r0]
+  pop {r1}
+omit_fpu: 
   mov r0, 1
 call_svcall: 
   push {r0, lr}

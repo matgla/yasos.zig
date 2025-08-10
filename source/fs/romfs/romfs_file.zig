@@ -35,27 +35,27 @@ const FileHeader = @import("file_header.zig").FileHeader;
 const IoctlCommonCommands = kernel.fs.IoctlCommonCommands;
 const FileMemoryMapAttributes = kernel.fs.FileMemoryMapAttributes;
 
-pub const RomFsFile = struct {
+pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     const Self = @This();
-    pub usingnamespace interface.DeriveFromBase(ReadOnlyFile, Self);
     base: ReadOnlyFile,
     /// Pointer to data instance, data is kept by filesystem
     header: FileHeader,
     allocator: std.mem.Allocator,
 
     /// Current position in file
-    position: c.off_t = 0,
+    position: c.off_t,
 
     // RomFsFile interface
     pub fn create(header: FileHeader, allocator: std.mem.Allocator) RomFsFile {
-        return .{
-            .base = .{},
+        return RomFsFile.init(.{
+            .base = ReadOnlyFile.init(.{}),
             .header = header,
             .allocator = allocator,
-        };
+            .position = 0,
+        });
     }
 
-    pub fn read(self: *RomFsFile, buffer: []u8) isize {
+    pub fn read(self: *Self, buffer: []u8) isize {
         const data_size: c.off_t = @intCast(self.header.size());
         if (self.position >= data_size) {
             return 0;
@@ -161,4 +161,4 @@ pub const RomFsFile = struct {
     pub fn delete(self: *Self) void {
         _ = self.close();
     }
-};
+});

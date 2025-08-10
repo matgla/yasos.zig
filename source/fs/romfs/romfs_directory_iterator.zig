@@ -27,22 +27,21 @@ const IFile = kernel.fs.IFile;
 const FileHeader = @import("file_header.zig").FileHeader;
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
 
-pub const RomFsDirectoryIterator = struct {
-    pub usingnamespace interface.DeriveFromBase(IDirectoryIterator, RomFsDirectoryIterator);
+pub const RomFsDirectoryIterator = interface.DeriveFromBase(IDirectoryIterator, struct {
     pub const Self = @This();
     _file: ?FileHeader,
     _allocator: std.mem.Allocator,
 
     pub fn create(first_file: ?FileHeader, allocator: std.mem.Allocator) RomFsDirectoryIterator {
-        return RomFsDirectoryIterator{
+        return RomFsDirectoryIterator.init(.{
             ._file = first_file,
             ._allocator = allocator,
-        };
+        });
     }
 
     pub fn next(self: *Self) ?IFile {
         if (self._file) |*file| {
-            const ifile: IFile = RomFsFile.create(file.*, self._allocator).new(self._allocator) catch {
+            const ifile: IFile = RomFsFile.InstanceType.create(file.*, self._allocator).interface.new(self._allocator) catch {
                 return null;
             };
             self._file = file.next();
@@ -54,4 +53,4 @@ pub const RomFsDirectoryIterator = struct {
     pub fn delete(self: *Self) void {
         _ = self;
     }
-};
+});

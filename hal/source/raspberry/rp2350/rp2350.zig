@@ -38,12 +38,14 @@ pub const irq = @import("hal_interface").irq.Irq(internal.Irq).create();
 pub const atomic = @import("hal_interface").atomic.AtomicInterface(internal.HardwareAtomic);
 pub var external_memory = @import("hal_interface").external_memory.ExternalMemory(internal.ExternalMemory).create();
 pub const memory = @import("hal_interface").memory.Memory(internal.Memory).create();
-pub const mmc = @import("hal_interface").mmc;
 pub const flash = @import("hal_interface").flash;
 // pub const Flash = flash.Flash(internal.Flash);
 
 pub const hw_atomic = internal.HardwareAtomic;
 
+pub const mmc = struct {
+    pub const Mmc = @import("hal_interface").mmc.Mmc(internal.Mmc);
+};
 pub const mmio = struct {
     pub fn Mmio(comptime RegisterDescription: anytype) type {
         return internal.Mmio(RegisterDescription);

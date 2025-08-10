@@ -20,18 +20,31 @@
 
 const std = @import("std");
 
+const log = std.log.scoped(.@"hal/time");
+
 const picosdk = @import("picosdk.zig").picosdk;
 
 const core = @import("cortex-m");
 
 pub const Time = struct {
     pub const SysTick = core.SysTick;
+    var is_initialized: bool = false;
+    var fired: bool = false;
+    var firedptr: *volatile bool = @ptrCast(&fired);
 
     pub fn sleep_ms(ms: u64) void {
-        picosdk.sleep_ms(@intCast(ms));
+        var left = ms;
+        while (left > 0) {
+            sleep_us(1000);
+            left -= 1;
+        }
     }
 
     pub fn sleep_us(us: u64) void {
-        picosdk.sleep_us(@intCast(us));
+        const target: u64 = picosdk.timer0_hw.*.timerawl + us;
+        const value: *volatile u32 = @ptrCast(&picosdk.timer0_hw.*.timerawl);
+        while (value.* < target) {}
     }
+
+    fn init() void {}
 };

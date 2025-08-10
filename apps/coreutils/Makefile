@@ -23,6 +23,9 @@ build/cat.o: cat.c prepare
 build/echo.o: echo.c prepare
 	$(CC) $(CFLAGS) -c $< -o build/echo.o
 
+build/touch.o: touch.c prepare
+	$(CC) $(CFLAGS) -c $< -o build/touch.o
+
 build/ls: build/ls.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
@@ -31,15 +34,20 @@ build/ls.elf: build/ls.o
 
 build/cat: build/cat.o
 	$(CC) $(LDFLAGS) $^ -o $@
+
 build/echo: build/echo.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
+build/touch: build/touch.o
+	$(CC) $(LDFLAGS) $^ -o $@
 
-install: build/ls build/cat build/echo build/ls.elf
+
+install: build/ls build/cat build/echo build/ls.elf build/touch
 	mkdir -p $(BINDIR)
 	cp build/ls $(BINDIR)
 	cp build/cat $(BINDIR)
 	cp build/echo $(BINDIR)
+	cp build/touch $(BINDIR)
 
 clean:
 	rm -rf build

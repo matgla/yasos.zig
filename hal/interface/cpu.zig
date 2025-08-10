@@ -49,5 +49,9 @@ pub fn Cpu(comptime cpu: anytype) type {
         pub fn coreid(_: Self) u8 {
             return CpuImplementation.coreid();
         }
+
+        pub fn set_stack_guard(_: Self, stack_guard: ?*const u8) void {
+            CpuImplementation.set_stack_guard(stack_guard);
+        }
     };
 }

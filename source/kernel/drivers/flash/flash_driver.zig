@@ -28,40 +28,41 @@ const interface = @import("interface");
 const hal = @import("hal");
 const board = @import("board");
 
-pub const FlashDriver = struct {
-    pub usingnamespace interface.DeriveFromBase(IDriver, FlashDriver);
+pub const FlashDriver = interface.DeriveFromBase(IDriver, struct {
+    const Self = @This();
     const FlashType = @TypeOf(board.flash.flash0);
 
     _flash: FlashType,
+    _name: []const u8,
 
-    pub fn create(flash: FlashType) FlashDriver {
-        return .{
+    pub fn create(flash: FlashType, driver_name: []const u8) FlashDriver {
+        return FlashDriver.init(.{
             ._flash = flash,
-        };
+            ._name = driver_name,
+        });
     }
 
-    pub fn ifile(self: *FlashDriver, allocator: std.mem.Allocator) ?IFile {
-        const file = FlashFile(FlashType).create(allocator, &self._flash).new(allocator) catch {
+    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
+        const file = FlashFile(FlashType).InstanceType.create(allocator, &self._flash, self._name).interface.new(allocator) catch {
             return null;
         };
         return file;
     }
 
-    pub fn load(self: *FlashDriver) anyerror!void {
+    pub fn load(self: *Self) anyerror!void {
         try self._flash.init();
     }
 
-    pub fn unload(self: *FlashDriver) bool {
+    pub fn unload(self: *Self) bool {
         _ = self;
         return true;
     }
 
-    pub fn delete(self: *FlashDriver) void {
+    pub fn delete(self: *Self) void {
         _ = self;
     }
 
-    pub fn name(self: *const FlashDriver) []const u8 {
-        _ = self;
-        return "flash";
+    pub fn name(self: *const Self) []const u8 {
+        return self._name;
     }
-};
+});

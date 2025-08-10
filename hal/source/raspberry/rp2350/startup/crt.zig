@@ -22,6 +22,7 @@ const c = @cImport({
     @cInclude("hardware/regs/resets.h");
     @cInclude("hardware/resets.h");
     @cInclude("pico/runtime_init.h");
+    @cInclude("pico/time.h");
 });
 
 const config = @import("config").cpu;
@@ -68,8 +69,8 @@ export fn crt_init() void {
 
     c.unreset_block_wait(c.RESETS_RESET_BITS &
         ~(c.RESETS_RESET_ADC_BITS | c.RESETS_RESET_HSTX_BITS | c.RESETS_RESET_SPI0_BITS |
-        c.RESETS_RESET_SPI1_BITS | c.RESETS_RESET_UART0_BITS |
-        c.RESETS_RESET_UART1_BITS | c.RESETS_RESET_USBCTRL_BITS));
+            c.RESETS_RESET_SPI1_BITS | c.RESETS_RESET_UART0_BITS |
+            c.RESETS_RESET_UART1_BITS | c.RESETS_RESET_USBCTRL_BITS));
 
     initialize_data();
     initialize_bss();
@@ -88,4 +89,6 @@ export fn crt_init() void {
     for (&sio.spinlocks) |*lock| {
         lock.write(1);
     }
+
+    // c.alarm_pool_init_default();
 }
