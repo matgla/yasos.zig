@@ -19,10 +19,11 @@ jobs:
         with:
           submodules: 'recursive' 
       - name: Install zvm 
+        shell: bash
         run: 
-          apt-get update && apt-get install -y curl
           curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash 
       - name: Fetch packages
+        shell: bash
         continue-on-error: true
         run: 
           $HOME/.zvm/self/zvm i 0.14.1
