@@ -41,3 +41,5 @@ RUN apt-get install -y pkg-config
 RUN cd /opt && git clone https://github.com/raspberrypi/openocd.git
 RUN apt-get install -y libjim-dev
 RUN cd /opt/openocd && ./bootstrap && ./configure --disable-werror && make -j$(nproc) && make install
+RUN apt-get install -y curl
+RUN curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
