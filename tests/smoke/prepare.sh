@@ -12,6 +12,7 @@ cd $ROOT_DIR
 zvm list 
 if [ $? -ne 0 ]; then
     curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
+    cat ~/.bashrc 
     source ~/.bashrc
 fi
 zvm i 0.14.1
