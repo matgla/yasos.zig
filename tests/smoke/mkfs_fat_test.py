@@ -15,26 +15,20 @@
  along with this program. If not, see <https://www.gnu.org/licenses/>.
  """
 
-
 from .conftest import session_key
 
-def test_change_dir(request):
-    session = request.node.stash[session_key]
+def test_mmc_card_fat(request):
+    session = request.node.stash[session_key] 
+    session.write_command("mkfs.fat /dev/mmc0p0")
+    session.write_command("cd /root")
     session.write_command("pwd")
     line = session.read_line_except_logs()
-    assert line == "/"
-    
-    session.write_command("cd bin")
+    assert line == "/root"
     session.write_command("ls")
     line = session.read_line_except_logs()
-    assert set(["ls", "cat", "sh"]).issubset(line.split())
-
-    session.write_command("pwd")
+    assert len(line.split()) == 0
+    session.write_command("touch test.txt")
+    session.write_command("ls")
     line = session.read_line_except_logs()
-    assert line == "/bin"
-
-    session.write_command("cd ..")
-    session.write_command("pwd")
-    line = session.read_line_except_logs()
-    assert line == "/"
+    assert set(["test.txt"]).issubset(line.split())  
     

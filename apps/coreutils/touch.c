@@ -40,7 +40,6 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  printf("Opening parent: %s\n", parent);
   int pos = 0;
   for (int i = 255; i > 0; i--) {
     if (parent[i] == '/') {
@@ -56,12 +55,9 @@ int main(int argc, char *argv[]) {
   }
   closedir(dir);
 
-  printf("Parent directory opened successfully.\n");
-  printf("Creating file: %s\n", argv[1]);
   parent[pos] = '/';
   FILE *file = fopen(parent, "w");
   if (file == NULL) {
-    printf("Failed to create file: %s\n", argv[1]);
     return -1;
   }
   fclose(file);
