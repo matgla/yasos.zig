@@ -18,6 +18,15 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: 'recursive' 
+      - name: Install zvm 
+        run: 
+          curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash 
+      - name: Fetch packages
+        continue-on-error: true
+        run: 
+          $HOME/.zvm/self/zvm i 0.14.1
+          $HOME/.zvm/self/zvm run 0.14.1 zig build test 
+      
       - name: Execute tests 
         shell: bash
         run: 
