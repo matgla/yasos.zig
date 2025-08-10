@@ -30,6 +30,7 @@ const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
 
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
+const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
 
 const panic_helper = @import("arch").panic;
 
@@ -63,25 +64,14 @@ pub const std_options: std.Options = .{
             .scope = .yasld,
             .level = .err,
         },
-        // .{
-        //     .scope = .@"yasld/module",
-        //     .level = .info,
-        // }, .{
-        //     .scope = .malloc,
-        //     .level = .info,
-        // }, .{
-        //     .scope = .@"kernel/memory_pool",
-        //     .level = .info,
-        // }, .{
-        //     .scope = .@"kernel/process",
-        //     .level = .info,
-        // }, .{
-        //     .scope = .@"vfs/driverfs",
-        //     .level = .info,
-        // }, .{
-        //     .scope = .@"kernel/fs/mount_points",
-        //     .level = .info,
-        // } },
+        .{
+            .scope = .@"vfs/driverfs",
+            .level = .debug,
+        },
+        .{
+            .scope = .@"kernel/fs/mount_points",
+            .level = .debug,
+        },
     },
 };
 
@@ -117,12 +107,12 @@ fn allocate_filesystem(allocator: std.mem.Allocator, fs: anytype) !kernel.fs.IFi
         return (fs catch |err| {
             kernel.log.err("Can't initialize {s} with an error: {s}", .{ @typeName(@typeInfo(@TypeOf(fs)).error_union.payload), @errorName(err) });
             return err;
-        }).new(allocator) catch |err| {
+        }).interface.new(allocator) catch |err| {
             kernel.log.err("Can't allocate {s} with an error: {s}", .{ @typeName(@typeInfo(@TypeOf(fs)).error_union.payload), @errorName(err) });
             return err;
         };
     } else {
-        return fs.new(allocator) catch |err| {
+        return fs.interface.new(allocator) catch |err| {
             kernel.log.err("Can't allocate {s} with an error: {s}", .{ @typeName(@TypeOf(fs)), @errorName(err) });
             return err;
         };
@@ -130,37 +120,115 @@ fn allocate_filesystem(allocator: std.mem.Allocator, fs: anytype) !kernel.fs.IFi
 }
 
 fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !void {
+    // var mod_ifs = ifs;
+
+    // if (std.mem.eql(u8, mod_ifs.interface.name(), "fatfs")) {
+    //     mod_ifs.interface.format() catch |format_err| {
+    //         kernel.log.err("Can't format filesystem '{s}' with error: {s}", .{ ifs.interface.name(), @errorName(format_err) });
+    //         return format_err;
+    //     };
+    // }
+
     kernel.fs.get_vfs().mount_filesystem(point, ifs) catch |err| {
-        kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.name(), @errorName(err) });
-        return err;
+        kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.interface.name(), @errorName(err) });
     };
+}
+
+fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) void {
+    var buffer: [1024]u8 = [_]u8{0x00} ** 1024;
+    _ = mmcfile.interface.read(buffer[0..]);
+    const mbr = kernel.fs.MBR.create(buffer[0..]);
+    if (mbr.is_valid()) {
+        kernel.log.debug("MBR is valid, partition count: {d}", .{mbr.partitions.len});
+        comptime var i: i32 = 0;
+        inline for (mbr.partitions) |part| {
+            if (part.size_in_sectors != 0) {
+                kernel.log.debug("Mounting partition {d}:\n  boot_indicator: {x}\n  start_chs: {d}\n  partition_type: {x}\n  end_chs: {d}\n  start_lba: {x}\n  size: {x} sectors", .{
+                    i,
+                    part.boot_indicator,
+                    part.start_chs,
+                    part.partition_type,
+                    part.end_chs,
+                    part.start_lba,
+                    part.size_in_sectors,
+                });
+                const partname = std.fmt.comptimePrint("mmc{d}p{d}", .{ 0, i });
+                const partition_driver = kernel.driver.MmcPartitionDriver.InstanceType.create(mmcfile.share(), partname, part.start_lba, part.size_in_sectors).interface.new(allocator) catch |err| {
+                    kernel.log.err("Can't create partition driver: {s}", .{@errorName(err)});
+                    return;
+                };
+                driverfs.data().append(partition_driver, partname) catch |err| {
+                    kernel.log.err("Can't append partition driver: {s}", .{@errorName(err)});
+                    return;
+                };
+            }
+            i += 1;
+        }
+    } else {
+        kernel.log.err("Invalid MBR found", .{});
+    }
 }
 
 fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     kernel.fs.vfs_init(allocator);
-    var driverfs = kernel.driver.fs.DriverFs.init(allocator);
-    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).create()).new(allocator) catch |err| {
+    var driverfs = kernel.driver.fs.DriverFs.InstanceType.init(allocator);
+    const uart0name = "uart0";
+    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(uart0name)).interface.new(allocator) catch |err| {
         kernel.log.err("Can't create uart driver instance: '{s}'", .{@errorName(err)});
         return err;
     };
-    try driverfs.append(uart_driver, "uart0");
+    try driverfs.data().append(uart_driver, uart0name);
 
-    var flash_driver = (kernel.driver.FlashDriver.create(board.flash.flash0)).new(allocator) catch |err| {
+    const flash0name = "flash0";
+    var flash_driver = (kernel.driver.FlashDriver.InstanceType.create(board.flash.flash0, flash0name)).interface.new(allocator) catch |err| {
         kernel.log.err("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return err;
     };
-    try driverfs.append(flash_driver, "flash0");
-    try driverfs.load_all();
+    try driverfs.data().append(flash_driver, flash0name);
+    var maybe_mmcfile: ?kernel.fs.IFile = null;
+    var maybe_mmcdriver: ?kernel.driver.IDriver = null;
+    if (@hasDecl(board, "mmc")) {
+        inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
+            comptime var i: i32 = 0;
+            const name = std.fmt.comptimePrint("mmc{d}", .{i});
+            maybe_mmcdriver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, name), name)).interface.new(allocator) catch |err| {
+                kernel.log.err("Can't create {s} driver instance: '{s}'", .{ name, @errorName(err) });
+                return err;
+            };
+            driverfs.data().append(maybe_mmcdriver.?, name) catch {};
+            kernel.log.info("adding mmc driver: {s}", .{m.name});
+            i = i + 1;
+            maybe_mmcfile = maybe_mmcdriver.?.interface.ifile(allocator);
+        }
+    } else {
+        kernel.log.debug("Board has no mmc interfaces", .{});
+    }
+    try driverfs.data().load_all();
 
-    var maybe_flash_file = flash_driver.ifile(allocator);
+    if (maybe_mmcfile) |*mmcfile| {
+        add_mmc_partition_drivers(mmcfile, allocator, &driverfs);
+        mmcfile.interface.delete();
+    }
+
+    var maybe_flash_file = flash_driver.interface.ifile(allocator);
     if (maybe_flash_file) |*flash| {
-        try mount_filesystem(try allocate_filesystem(allocator, RomFs.init(allocator, flash.*, 0x80000)), "/");
-        try mount_filesystem(try allocate_filesystem(allocator, RamFs.init(allocator)), "/tmp");
+        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash.*, 0x80000)), "/");
+        var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
+        if (maybe_mmcpart0) |*mmcfile| {
+            const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, mmcfile.*)) catch null;
+            if (maybe_rootfs) |rootfs| {
+                mount_filesystem(rootfs, "/root") catch {};
+            }
+
+            mmcfile.interface.delete();
+        }
+        try mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
-        try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.init(allocator)), "/proc");
+        try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
     } else {
         kernel.log.err("Can't get Flash Driver", .{});
     }
+
     return;
 }
 
@@ -215,9 +283,9 @@ export fn kernel_process(argument: *KernelAllocator) void {
 
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_uartfile = kernel.fs.get_ivfs().get("/dev/uart0", process.get_memory_allocator());
+        var maybe_uartfile = kernel.fs.get_ivfs().interface.get("/dev/uart0", process.get_memory_allocator());
         if (maybe_uartfile) |*uartfile| {
-            defer uartfile.delete();
+            defer uartfile.interface.delete();
             attach_default_filedescriptors_to_root_process(uartfile, process);
         } else {
             kernel.log.err("default streams were not assigned: /dev/uart0 do not exists", .{});

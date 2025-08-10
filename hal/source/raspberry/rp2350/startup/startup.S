@@ -18,8 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 
 .syntax unified 
-.arch armv6-m
-.cpu cortex-m0plus
+.cpu cortex-m33
 .thumb 
 
 #define PPB_BASE 0xe0000000
@@ -34,15 +33,15 @@ __vector_table:
   .word _start
   .word irq_nmi 
   .word irq_hard_fault
-  .word irq_reserved 
-  .word irq_reserved 
-  .word irq_reserved 
-  .word irq_reserved 
+  .word irq_memmanage
+  .word irq_busfault
+  .word irq_usagefault
+  .word irq_securefault
   .word irq_reserved 
   .word irq_reserved 
   .word irq_reserved 
   .word irq_svcall 
-  .word irq_reserved 
+  .word irq_debugmonitor
   .word irq_reserved 
   .word irq_pendsv
   .word irq_systick
@@ -140,6 +139,8 @@ __unhandled_user_irq:
 .type _start,%function
 .thumb_func 
 _start:
+  ldr r1, =__stack_bottom__
+  msr msplim, r1
   ldr r1, =__vector_table 
   ldr r0, =(PPB_BASE + M0PLUS_VTOR_OFFSET)
   str r1, [r0]

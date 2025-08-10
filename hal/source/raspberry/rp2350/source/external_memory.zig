@@ -376,7 +376,7 @@ pub const ExternalMemory = struct {
         index = start;
         for (data) |*i| {
             if (i.* != @as(u8, @intCast(index % 256))) {
-                log.err("Memory failure: memory mismatch at: {d}, expected: {d}, got: {d}", .{ i, index % 256, i.* });
+                log.err("Memory failure: memory mismatch at: {d}, expected: {d}, got: {d}", .{ @intFromPtr(i), index % 256, i.* });
                 self._psram_size = 0;
                 self._initialized = false;
                 return false;

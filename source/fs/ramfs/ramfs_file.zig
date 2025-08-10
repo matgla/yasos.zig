@@ -34,22 +34,23 @@ const RamFsData = @import("ramfs_data.zig").RamFsData;
 const log = kernel.log;
 const interface = @import("interface");
 
-pub const RamFsFile = struct {
-    pub usingnamespace interface.DeriveFromBase(IFile, RamFsFile);
+pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
+    const Self = @This();
     _data: *RamFsData,
     _allocator: std.mem.Allocator,
 
     /// Current position in file
-    _position: usize = 0,
+    _position: usize,
 
     pub fn create(data: *RamFsData, allocator: std.mem.Allocator) RamFsFile {
-        return .{
+        return RamFsFile.init(.{
             ._data = data,
             ._allocator = allocator,
-        };
+            ._position = 0,
+        });
     }
 
-    pub fn read(self: *RamFsFile, buffer: []u8) isize {
+    pub fn read(self: *Self, buffer: []u8) isize {
         if (self._position >= self._data.data.items.len) {
             return 0;
         }
@@ -59,7 +60,7 @@ pub const RamFsFile = struct {
         return @intCast(length);
     }
 
-    pub fn write(self: *RamFsFile, data: []const u8) isize {
+    pub fn write(self: *Self, data: []const u8) isize {
         if (self._data.data.items.len < data.len + self._position) {
             self._data.data.resize(self._position + data.len) catch {
                 return 0;
@@ -72,7 +73,7 @@ pub const RamFsFile = struct {
         return @intCast(data.len);
     }
 
-    pub fn seek(self: *RamFsFile, offset: c.off_t, whence: i32) c.off_t {
+    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0) {
@@ -110,37 +111,37 @@ pub const RamFsFile = struct {
         return 0;
     }
 
-    pub fn close(self: *RamFsFile) i32 {
+    pub fn close(self: *Self) i32 {
         _ = self;
         return 0;
     }
 
-    pub fn dupe(self: *RamFsFile) ?IFile {
-        const new_file = self._allocator.create(RamFsFile) catch return null;
+    pub fn dupe(self: *Self) ?IFile {
+        const new_file = self._allocator.create(Self) catch return null;
         new_file.* = self.*;
         return new_file.ifile();
     }
 
-    pub fn sync(self: *RamFsFile) i32 {
+    pub fn sync(self: *Self) i32 {
         _ = self;
         // always in sync
         return 0;
     }
 
-    pub fn tell(self: *RamFsFile) c.off_t {
+    pub fn tell(self: *Self) c.off_t {
         return @intCast(self._position);
     }
 
-    pub fn size(self: *RamFsFile) isize {
+    pub fn size(self: *Self) isize {
         return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
-    pub fn name(self: *RamFsFile, allocator: std.mem.Allocator) FileName {
+    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
         _ = allocator;
         return FileName.init(self._data.name(), null);
     }
 
-    pub fn ioctl(self: *RamFsFile, cmd: i32, data: ?*anyopaque) i32 {
+    pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
                 var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
@@ -154,11 +155,11 @@ pub const RamFsFile = struct {
         return 0;
     }
 
-    pub fn fcntl(self: *RamFsFile, _: i32, _: ?*anyopaque) i32 {
+    pub fn fcntl(self: *Self, _: i32, _: ?*anyopaque) i32 {
         _ = self;
         return 0;
     }
-    pub fn stat(self: *RamFsFile, buf: *c.struct_stat) void {
+    pub fn stat(self: *Self, buf: *c.struct_stat) void {
         buf.st_dev = 0;
         buf.st_ino = 0;
         buf.st_mode = 0;
@@ -171,40 +172,40 @@ pub const RamFsFile = struct {
         buf.st_blocks = 1;
     }
 
-    pub fn filetype(self: *RamFsFile) FileType {
+    pub fn filetype(self: *Self) FileType {
         return self._data.type;
     }
 
-    pub fn delete(self: *RamFsFile) void {
-        _ = self;
+    pub fn delete(self: *Self) void {
+        _ = self.close();
     }
-};
+});
 
 test "RamFsFile.ShouldReadAndWriteFile" {
     var data = try RamFsData.create_file(std.testing.allocator, "test_file");
     defer data.deinit();
 
-    var sut = RamFsFile.create(&data, std.testing.allocator);
-    var file = sut.interface();
+    var sut = RamFsFile.InstanceType.create(&data, std.testing.allocator);
+    var file = try sut.interface.new(std.testing.allocator);
+    defer file.interface.delete();
 
-    try std.testing.expectEqualStrings("test_file", file.name(std.testing.allocator).get_name());
-    try std.testing.expectEqual(22, file.write("Some data inside file\n"));
-    try std.testing.expectEqual(4, file.write("test"));
+    try std.testing.expectEqualStrings("test_file", file.interface.name(std.testing.allocator).get_name());
+    try std.testing.expectEqual(22, file.interface.write("Some data inside file\n"));
+    try std.testing.expectEqual(4, file.interface.write("test"));
     var buf: [8]u8 = undefined;
-    try std.testing.expectEqual(0, file.read(&buf));
-
-    try std.testing.expectEqual(0, file.seek(0, c.SEEK_SET));
-    try std.testing.expectEqual(8, file.read(&buf));
+    try std.testing.expectEqual(0, file.interface.read(&buf));
+    try std.testing.expectEqual(0, file.interface.seek(0, c.SEEK_SET));
+    try std.testing.expectEqual(8, file.interface.read(&buf));
     try std.testing.expectEqualStrings("Some dat", &buf);
 
     var buf2: [4]u8 = undefined;
-    try std.testing.expectEqual(4, file.read(&buf2));
+    try std.testing.expectEqual(4, file.interface.read(&buf2));
     try std.testing.expectEqualStrings("a in", &buf2);
 
-    try std.testing.expectEqual(8, file.read(&buf));
+    try std.testing.expectEqual(8, file.interface.read(&buf));
     try std.testing.expectEqualStrings("side fil", &buf);
     @memset(buf[0..], 0);
-    try std.testing.expectEqual(6, file.read(&buf));
+    try std.testing.expectEqual(6, file.interface.read(&buf));
     try std.testing.expectEqualStrings("e\ntest", buf[0..6]);
 }
 
@@ -212,31 +213,32 @@ test "RamFsFile.ShouldSeekFile" {
     var data = try RamFsData.create_file(std.testing.allocator, "test_file");
     defer data.deinit();
 
-    var sut = RamFsFile.create(&data, std.testing.allocator);
-    var file = sut.interface();
-    defer _ = file.close();
-    try std.testing.expectEqual(10, file.seek(10, c.SEEK_CUR));
-    try std.testing.expectEqual(22, file.write("Some data inside file\n"));
+    var sut = RamFsFile.InstanceType.create(&data, std.testing.allocator);
+    var file = try sut.interface.new(std.testing.allocator);
+    defer _ = file.interface.close();
+    defer file.interface.delete();
+    try std.testing.expectEqual(10, file.interface.seek(10, c.SEEK_CUR));
+    try std.testing.expectEqual(22, file.interface.write("Some data inside file\n"));
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqual(-1, file.seek(-40, c.SEEK_CUR));
-    try std.testing.expectEqual(32, file.tell());
+    try std.testing.expectEqual(-1, file.interface.seek(-40, c.SEEK_CUR));
+    try std.testing.expectEqual(32, file.interface.tell());
 
-    try std.testing.expectEqual(0, file.seek(-32, c.SEEK_CUR));
-    try std.testing.expectEqual(16, file.read(&buf));
+    try std.testing.expectEqual(0, file.interface.seek(-32, c.SEEK_CUR));
+    try std.testing.expectEqual(16, file.interface.read(&buf));
     try std.testing.expectEqualStrings(" " ** 10 ++ "Some d", &buf);
 
-    try std.testing.expectEqual(32, file.seek(0, c.SEEK_END));
-    try std.testing.expectEqual(32, file.tell());
+    try std.testing.expectEqual(32, file.interface.seek(0, c.SEEK_END));
+    try std.testing.expectEqual(32, file.interface.tell());
 
-    try std.testing.expectEqual(-1, file.seek(33, c.SEEK_END));
-    try std.testing.expectEqual(0, file.seek(32, c.SEEK_END));
-    try std.testing.expectEqual(0, file.tell());
+    try std.testing.expectEqual(-1, file.interface.seek(33, c.SEEK_END));
+    try std.testing.expectEqual(0, file.interface.seek(32, c.SEEK_END));
+    try std.testing.expectEqual(0, file.interface.tell());
 
-    try std.testing.expectEqual(-1, file.seek(-2, c.SEEK_SET));
-    try std.testing.expectEqual(0, file.seek(0, c.SEEK_SET));
-    try std.testing.expectEqual(0, file.tell());
-    try std.testing.expectEqual(132, file.seek(132, c.SEEK_SET));
-    try std.testing.expectEqual(132, file.tell());
+    try std.testing.expectEqual(-1, file.interface.seek(-2, c.SEEK_SET));
+    try std.testing.expectEqual(0, file.interface.seek(0, c.SEEK_SET));
+    try std.testing.expectEqual(0, file.interface.tell());
+    try std.testing.expectEqual(132, file.interface.seek(132, c.SEEK_SET));
+    try std.testing.expectEqual(132, file.interface.tell());
 
-    try std.testing.expectEqual(32 + @sizeOf(RamFsData), file.size());
+    try std.testing.expectEqual(32 + @sizeOf(RamFsData), file.interface.size());
 }

@@ -110,11 +110,17 @@ pub const Builder = struct {
             });
             boardModule.addImport("hal", mcu.module("hal"));
 
-            const exe = b.addExecutable(.{
-                .name = execName,
+            const root_module = b.addModule("root", .{
                 .root_source_file = root_path,
                 .target = target,
                 .optimize = optimize,
+            });
+
+            const exe = b.addExecutable(.{
+                .name = execName,
+                .root_module = root_module,
+                // .target = target,
+                // .optimize = optimize,
             });
             exe.want_lto = false;
             exe.link_function_sections = true;

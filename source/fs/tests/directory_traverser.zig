@@ -43,7 +43,7 @@ pub const TestDirectoryTraverser = struct {
     }
 
     pub fn traverse_dir(file: *kernel.fs.IFile, _: *anyopaque) bool {
-        const name = file.name(std.testing.allocator).get_name();
+        const name = file.interface.name(std.testing.allocator).get_name();
         did_error catch return false;
 
         const maybe_expectation = expected_directories.pop();

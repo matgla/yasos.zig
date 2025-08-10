@@ -40,7 +40,7 @@ pub const Irq = struct {
         c.NVIC_SetPriority(irq_num, priority);
     }
 
-    pub fn trigger_supervisor_call(_: u32, _: *const volatile anyopaque, _: *volatile anyopaque) callconv(.Naked) void {
+    pub fn trigger_supervisor_call(_: u32, _: *const volatile anyopaque, _: *volatile anyopaque) callconv(.naked) void {
         asm volatile (
             \\ svc 0 
             \\ bx lr

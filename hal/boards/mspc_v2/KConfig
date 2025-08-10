@@ -28,6 +28,10 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
     default CPU_RP2350
   endchoice
 
+  choice CONFIG_PROCESS_SCHEDULER
+    default CONFIG_SCHEDULER_ROUND_ROBIN
+  endchoice
+
   config CONFIG_BUILD_LINKER_SCRIPT_PATH
     default "${hal_root}/source/raspberry/rp2350/linker_script.ld" 
 
@@ -39,5 +43,9 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
 
   config CONFIG_PSRAM_CS_PIN 
     default 0
+
+  config CONFIG_BUILD_USE_NEWLIB 
+    default y
+
 endif
 

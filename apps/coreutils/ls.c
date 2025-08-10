@@ -26,6 +26,15 @@
 int main(int argc, char *argv[]) {
   char cwd[256] = {0};
   getcwd(cwd, sizeof(cwd));
+  if (argc > 1) {
+    if (argv[1][0] == '/') {
+      // If the first argument is an absolute path, use it as the directory
+      snprintf(cwd, sizeof(cwd), "%s", argv[1]);
+    } else {
+      // Otherwise, treat it as a relative path
+      snprintf(cwd, sizeof(cwd), "%s/%s", cwd, argv[1]);
+    }
+  }
   DIR *dir = opendir(cwd);
   if (dir == NULL) {
     return 1;

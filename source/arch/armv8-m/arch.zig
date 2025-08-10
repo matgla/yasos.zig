@@ -26,3 +26,23 @@ pub const irq_handlers = @import("arm-m").irq_handlers;
 pub const panic = @import("arm-m").panic;
 pub const HardwareProcess = @import("arm-m").HardwareProcess;
 pub const get_lr = @import("arm-m").get_lr;
+
+export fn irq_memmanage() void {
+    @panic("Memory management fault occurred");
+}
+
+export fn irq_busfault() void {
+    @panic("Bus fault occurred");
+}
+
+export fn irq_usagefault() void {
+    @panic("Usage fault occurred");
+}
+
+export fn irq_securefault() void {
+    @panic("Secure fault occurred");
+}
+
+export fn irq_debugmonitor() void {
+    @panic("Debug monitor fault occurred");
+}

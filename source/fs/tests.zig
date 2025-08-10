@@ -18,7 +18,13 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
+
 comptime {
-    _ = @import("ramfs/tests.zig");
     _ = @import("romfs/tests.zig");
+    _ = @import("ramfs/tests.zig");
+}
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
 }

@@ -71,6 +71,7 @@ if $CLEAR; then
   rm -rf apps/hexdump/build
   rm -rf libs/libm/build
   rm -rf apps/yasvi/build
+  rm -rf apps/mkfs/build
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
@@ -79,6 +80,8 @@ mkdir -p rootfs
 mkdir -p rootfs/usr/include
 mkdir -p rootfs/usr/lib
 mkdir -p rootfs/proc
+mkdir -p rootfs/root
+mkdir -p rootfs/home
 cd rootfs
 ln -s usr/lib  
 ln -s usr/bin
@@ -179,6 +182,7 @@ build_makefile textvaders
 build_makefile hello_world
 build_makefile hexdump
 build_makefile yasvi
+build_makefile mkfs
 
 cd ..
 
