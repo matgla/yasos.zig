@@ -253,9 +253,9 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     fn receive_data_packet(self: Self, comptime cmd: u6, output: []u8) !void {
         const token = try get_data_token(cmd);
         var buffer: [2]u8 = [_]u8{ 0x00, 0x00 };
-        var repeat: i32 = 100;
+        var repeat: i32 = 1000;
         while (repeat > 0) {
-            hal.time.sleep_ms(1);
+            hal.time.sleep_us(1);
             self._mmc.receive_blocking(buffer[0..1]);
             if (buffer[0] == token) break;
             if ((buffer[0] & 0xe0) == 0) {
