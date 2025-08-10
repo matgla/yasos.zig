@@ -137,25 +137,9 @@ fn allocate_filesystem(allocator: std.mem.Allocator, fs: anytype) !kernel.fs.IFi
 }
 
 fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !void {
-    var retry = false;
-    var mod_ifs = ifs;
-    if (std.mem.eql(u8, mod_ifs.interface.name(), "fatfs")) {
-        mod_ifs.interface.format() catch |format_err| {
-            kernel.log.err("Can't format filesystem '{s}' with error: {s}", .{ ifs.interface.name(), @errorName(format_err) });
-            return format_err;
-        };
-    }
     kernel.fs.get_vfs().mount_filesystem(point, ifs) catch |err| {
         kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.interface.name(), @errorName(err) });
-        // create mkfs executable
-        retry = true;
     };
-    if (retry) {
-        kernel.fs.get_vfs().mount_filesystem(point, ifs) catch |err| {
-            kernel.log.err("Can't mount '{s}' with type '{s}': {s}", .{ point, ifs.interface.name(), @errorName(err) });
-            return err;
-        };
-    }
 }
 
 fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) void {

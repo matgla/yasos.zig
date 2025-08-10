@@ -275,7 +275,12 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         pub fn ioctl(interface: *fatfs.Disk, cmd: fatfs.IoCtl, buff: [*]u8) fatfs.Disk.Error!void {
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             switch (cmd) {
-                .sync => {},
+                .sync => {
+                    // log.info("Syncing disk", .{self.device.interface.sync() catch |err| {
+                    //     log.err("Failed to sync disk: {s}", .{@errorName(err)});
+                    //     return error.IoError;
+                    // }});
+                },
                 .get_sector_count => {
                     @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(self.device.interface.size() >> 9);
                 },

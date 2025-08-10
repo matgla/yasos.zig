@@ -35,6 +35,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     _file: ?fatfs.File,
     _allocator: std.mem.Allocator,
     _path: [:0]const u8,
+    _is_open: bool,
 
     pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) ?FatFsFile {
         // try top open directory
@@ -47,6 +48,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
                 ._file = null,
                 ._allocator = allocator,
                 ._path = path,
+                ._is_open = true,
             });
         } else {
             const file = fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing }) catch return null;
@@ -54,6 +56,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
                 ._file = file,
                 ._allocator = allocator,
                 ._path = path,
+                ._is_open = true,
             });
         }
         return null;
@@ -110,6 +113,10 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn close(self: *Self) i32 {
+        if (!self._is_open) {
+            return 0;
+        }
+        self._is_open = false;
         self._allocator.free(self._path);
         if (self._file) |*file| {
             file.close();
