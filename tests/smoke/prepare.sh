@@ -8,8 +8,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 cd $ROOT_DIR
-/usr/bin/zvm i 0.14.1
-/usr/bin/zvm run 0.14.1 build defconfig -Ddefconfig_file=$SCRIPT_DIR/configs/pimoroni_pico_plus2_and_vga_defconfig
+
+zvm list 
+if [ $? -ne 0 ]; then
+    curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
+    source ~/.bashrc
+fi
+zvm i 0.14.1
+zvm run 0.14.1 build defconfig -Ddefconfig_file=$SCRIPT_DIR/configs/pimoroni_pico_plus2_and_vga_defconfig
 zig build defconfig -Ddefconfig_file=$SCRIPT_DIR/configs/pimoroni_pico_plus2_and_vga_defconfig
 
 if [ $? -ne 0 ]; then
