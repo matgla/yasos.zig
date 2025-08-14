@@ -62,7 +62,7 @@ pub const std_options: std.Options = .{
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{
             .scope = .yasld,
-            .level = .err,
+            .level = .info,
         },
         .{
             .scope = .@"vfs/driverfs",

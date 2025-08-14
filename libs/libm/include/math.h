@@ -21,3 +21,8 @@
 #pragma once
 
 double ldexp(double x, int exp);
+double fabs(double x);
+double sin(double x);
+float sinf(float x);
+long double sinl(long double x);
+long double fabsl(long double x);

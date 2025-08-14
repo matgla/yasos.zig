@@ -82,7 +82,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         }
 
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
-            var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool);
+            var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null);
             return self.processes.append(&new_process.node);
         }
 

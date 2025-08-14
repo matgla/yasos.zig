@@ -14,7 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 pub const c = @cImport({
-    @cInclude("source/sys/include/syscalls.h");
+    @cInclude("libs/libc/sys/syscall.h");
     @cInclude("libs/libc/unistd.h");
     @cInclude("libs/libc/sys/stat.h");
     @cInclude("libs/libc/sys/ioctl.h");

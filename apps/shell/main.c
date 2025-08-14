@@ -231,6 +231,7 @@ int execute_command(const char *command, char *args[]) {
     disable_raw_mode();
     int rc = 0;
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
+      printf("Executing command: %s\n", command);
       strcat(cwd, "/");
       strcat(cwd, command);
       rc = execv(cwd, args);
@@ -259,6 +260,7 @@ int parse_command(char *buffer) {
   bool command_found = false;
   const char *command = NULL;
   int argc = 0;
+
   char *part = NULL;
 
   if (strlen(buffer) == 0) {

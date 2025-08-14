@@ -76,6 +76,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         cwd: []u8,
         node: std.DoublyLinkedList.Node,
         _process_memory_allocator: ProcessMemoryAllocator,
+        _parent: ?*Self = null,
 
         pub const State = enum(u2) {
             Ready,
@@ -84,7 +85,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             Terminated,
         };
 
-        pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: anytype, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType) !*Self {
+        pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: anytype, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType, parent: ?*Self) !*Self {
             pid_counter += 1;
             const process = try kernel_allocator.create(Self);
             kernel.log.debug("initializing memory allocator for pid: {d}", .{pid_counter});
@@ -108,6 +109,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .cwd = cwd_handle,
                 .node = .{},
                 ._process_memory_allocator = process_memory_allocator,
+                ._parent = parent,
             };
             return process;
         }
@@ -176,6 +178,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .cwd = cwd_handle,
                 .node = .{},
                 ._process_memory_allocator = memory_pool,
+                ._parent = self,
             };
             return process;
         }
@@ -314,6 +317,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 fd += 1;
             }
             return fd;
+        }
+
+        pub fn get_parent(self: Self) ?*Self {
+            return self._parent;
         }
 
         pub fn sleep_for_us(self: *Self, us: u64) void {

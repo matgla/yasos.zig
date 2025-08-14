@@ -1,0 +1,25 @@
+From e7cf4a9102b9b578264a8fa2daa30534d16d02df Mon Sep 17 00:00:00 2001
+From: Mateusz Stadnik <matgla@live.com>
+Date: Thu, 14 Aug 2025 08:52:12 +0200
+Subject: [PATCH] Removed --gc-sections
+
+---
+ scripts/portability.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/scripts/portability.sh b/scripts/portability.sh
+index 570d9e29..d5d6df3b 100644
+--- a/scripts/portability.sh
++++ b/scripts/portability.sh
+@@ -19,7 +19,7 @@ then
+   CFLAGS+=" -Wno-deprecated-declarations"
+   : ${LDOPTIMIZE:=-Wl,-dead_strip} ${STRIP:=strip}
+ else
+-  : ${LDOPTIMIZE:=-Wl,--gc-sections -Wl,--as-needed} ${STRIP:=strip -s -R .note* -R .comment}
++  : ${LDOPTIMIZE:=-Wl,--as-needed} ${STRIP:=strip -s -R .note* -R .comment}
+ fi
+ 
+ # Disable pointless warnings only clang produces
+-- 
+2.50.1
+

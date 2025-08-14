@@ -183,6 +183,7 @@ build_makefile hello_world
 build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs
+$SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 
 cd ..
 
@@ -195,3 +196,4 @@ if $BUILD_IMAGE; then
   mv rootfs/bin/tcc.elf rootfs/bin/tcc
   genromfs -f $OUTPUT_FILE -d rootfs -V rootfs 
 fi
+

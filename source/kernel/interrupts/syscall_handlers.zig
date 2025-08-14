@@ -136,9 +136,16 @@ pub fn sys_semaphore_release(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
+    const check_parent: *const volatile u8 = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
+        if (check_parent.* != 0) {
+            const maybe_parent = process.get_parent();
+            if (maybe_parent) |parent| {
+                return @intCast(parent.pid);
+            }
+            return 0;
+        }
         return @intCast(process.pid);
     }
     return -1;
@@ -310,7 +317,14 @@ pub fn sys_link(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
+    const context: *const volatile c.stat_context = @ptrCast(@alignCast(arg));
+    fs.get_ivfs().interface.stat(
+        std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?))),
+        context.result,
+        process_manager.instance.get_current_process().?.get_memory_allocator() orelse kernel_allocator,
+    ) catch |err| {
+        return err;
+    };
     return -1;
 }
 pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
@@ -535,4 +549,16 @@ pub fn sys_dlsym(arg: *const volatile anyopaque) !i32 {
         return 0;
     }
     return -1;
+}
+
+pub fn sys_getuid(arg: *const volatile anyopaque) !i32 {
+    _ = arg;
+    // we are always root until we implement user management
+    return 0;
+}
+
+pub fn sys_geteuid(arg: *const volatile anyopaque) !i32 {
+    _ = arg;
+    // we are always root until we implement user management
+    return 0;
 }
