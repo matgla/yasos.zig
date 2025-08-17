@@ -141,4 +141,17 @@ pub const FileHeader = struct {
         }
         return FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, self._mapped_memory, self._allocator);
     }
+
+    pub fn stat(self: *FileHeader, buf: *c.struct_stat) void {
+        buf.st_dev = 0;
+        buf.st_ino = 0;
+        buf.st_mode = 0;
+        buf.st_nlink = 0;
+        buf.st_uid = 0;
+        buf.st_gid = 0;
+        buf.st_rdev = 0;
+        buf.st_size = @intCast(self.size());
+        buf.st_blksize = 1;
+        buf.st_blocks = 1;
+    }
 };

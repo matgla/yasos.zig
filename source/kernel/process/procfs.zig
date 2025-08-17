@@ -211,9 +211,24 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         log.debug("Getting iterator for: {s}", .{path});
         return (ProcFsIterator.InstanceType.create(self._root.data()._files.first, self._allocator)).interface.new(self._allocator) catch return null;
     }
+
     pub fn format(self: *Self) anyerror!void {
         _ = self;
         // ProcDirectory is read-only, so formatting is not applicable
         return error.NotSupported;
+    }
+
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        if (path.len == 0 or std.mem.eql(u8, path, "/")) {
+            self._root.data().stat(data);
+            return 0;
+        }
+        const maybe_file = self._root.data().get(path, self._allocator);
+        if (maybe_file) |file| {
+            _ = file;
+            self._root.data().stat(data);
+            return 0;
+        }
+        return -1;
     }
 });

@@ -229,6 +229,28 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         };
     }
 
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        const path_c = self._allocator.dupeZ(u8, path) catch {
+            log.err("Failed to allocate memory for path: {s}", .{path});
+            return -1;
+        };
+        defer self._allocator.free(path_c);
+        const finfo = fatfs.stat(path_c) catch {
+            return -1;
+        };
+        data.st_blksize = 512;
+        data.st_size = @intCast(finfo.size);
+        data.st_mode = if (finfo.kind == .Directory) c.S_IFDIR else c.S_IFREG;
+        data.st_nlink = 1; // Number of links,
+        data.st_uid = 0;
+        data.st_gid = 0; // Group ID
+        data.st_dev = 0; // Device ID
+        data.st_ino = 0; // Inode number
+        data.st_rdev = 0; // Device type (for special files)
+        data.st_blocks = @intCast((finfo.size + 511) / 512);
+        return 0;
+    }
+
     const DiskWrapper = struct {
         const sector_size = 512;
         device: kernel.fs.IFile,

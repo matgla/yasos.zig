@@ -21,6 +21,8 @@
 ///! This module provides basic file implementation for RamFS filesystem
 const std = @import("std");
 
+const c = @import("libc_imports").c;
+
 const config = @import("config");
 
 const kernel = @import("kernel");
@@ -69,6 +71,19 @@ pub const RamFsData = struct {
 
     pub fn name(self: *const RamFsData) []const u8 {
         return std.mem.sliceTo(&self._name_buffer, 0);
+    }
+
+    pub fn stat(self: RamFsData, buf: *c.struct_stat) void {
+        buf.st_dev = 0;
+        buf.st_ino = 0;
+        buf.st_mode = 0;
+        buf.st_nlink = 0;
+        buf.st_uid = 0;
+        buf.st_gid = 0;
+        buf.st_rdev = 0;
+        buf.st_size = @intCast(self.data.items.len);
+        buf.st_blksize = 1;
+        buf.st_blocks = 1;
     }
 };
 

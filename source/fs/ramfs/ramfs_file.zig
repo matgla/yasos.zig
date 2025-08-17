@@ -159,18 +159,6 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         _ = self;
         return 0;
     }
-    pub fn stat(self: *Self, buf: *c.struct_stat) void {
-        buf.st_dev = 0;
-        buf.st_ino = 0;
-        buf.st_mode = 0;
-        buf.st_nlink = 0;
-        buf.st_uid = 0;
-        buf.st_gid = 0;
-        buf.st_rdev = 0;
-        buf.st_size = @intCast(self._data.data.items.len + @sizeOf(RamFsData));
-        buf.st_blksize = 1;
-        buf.st_blocks = 1;
-    }
 
     pub fn filetype(self: *Self) FileType {
         return self._data.type;

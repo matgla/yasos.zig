@@ -111,10 +111,6 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "fcntl", .{ cmd, arg }, i32);
     }
 
-    pub fn stat(self: *Self, data: *c.struct_stat) void {
-        return interface.CountingInterfaceVirtualCall(self, "stat", .{data}, void);
-    }
-
     pub fn filetype(self: *Self) FileType {
         return interface.CountingInterfaceVirtualCall(self, "filetype", .{}, FileType);
     }

@@ -20,6 +20,8 @@
 
 const std = @import("std");
 
+const c = @import("libc_imports").c;
+
 const IFile = @import("ifile.zig").IFile;
 
 const interface = @import("interface");
@@ -85,6 +87,10 @@ pub const IFileSystem = interface.ConstructInterface(struct {
 
     pub fn format(self: *Self) anyerror!void {
         try interface.VirtualCall(self, "format", .{}, anyerror!void);
+    }
+
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        return interface.VirtualCall(self, "stat", .{ path, data }, i32);
     }
 });
 

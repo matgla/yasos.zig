@@ -318,14 +318,15 @@ pub fn sys_link(arg: *const volatile anyopaque) !i32 {
 }
 pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.stat_context = @ptrCast(@alignCast(arg));
-    fs.get_ivfs().interface.stat(
-        std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?))),
-        context.result,
-        process_manager.instance.get_current_process().?.get_memory_allocator() orelse kernel_allocator,
-    ) catch |err| {
-        return err;
-    };
-    return -1;
+    if (context.pathname == null or context.statbuf == null) {
+        return errno(c.EFAULT);
+    }
+    const path = std.mem.span(@as([*:0]const u8, @ptrCast(context.pathname.?)));
+    log.err("sys_stat: pathname: {s}, statbuf: {*}", .{ path, context.statbuf.? });
+    return fs.get_ivfs().interface.stat(
+        path,
+        context.statbuf,
+    );
 }
 pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
     _ = arg;

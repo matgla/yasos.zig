@@ -20,6 +20,8 @@
 
 const kernel = @import("kernel");
 
+const c = @import("libc_imports").c;
+
 const IFileSystem = kernel.fs.IFileSystem;
 const IDirectoryIterator = kernel.fs.IDirectoryIterator;
 const IFile = kernel.fs.IFile;
@@ -188,6 +190,15 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         _ = self;
         // RamFS is a memory-based filesystem, so formatting is not applicable
         return error.NotSupported;
+    }
+
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        const maybe_node = Self.get_node(*Self, self, path) catch return -1;
+        if (maybe_node) |node| {
+            node.node.stat(data);
+            return 0;
+        }
+        return -1;
     }
 
     pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
