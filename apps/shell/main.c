@@ -223,6 +223,7 @@ int execute_command(const char *command, char *args[]) {
   }
 
   pid_t pid = vfork();
+  printf("vfork returned %d\n", pid);
   if (pid == -1) {
     printf("spawn process failure\n");
   } else if (pid == 0) {
@@ -231,7 +232,6 @@ int execute_command(const char *command, char *args[]) {
     disable_raw_mode();
     int rc = 0;
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
-      printf("Executing command: %s\n", command);
       strcat(cwd, "/");
       strcat(cwd, command);
       rc = execv(cwd, args);
@@ -240,11 +240,11 @@ int execute_command(const char *command, char *args[]) {
       }
     }
     rc = execvp(command, args);
-    exit(0);
   } else {
     int rc = 0;
-    enable_raw_mode();
+    printf("Waiting for process %d\n", pid);
     waitpid(pid, &rc, 0);
+    enable_raw_mode();
   }
   // try to call command
   return 0;
@@ -298,10 +298,10 @@ int main(int argc, char *argv[]) {
     enable_raw_mode();
     char ch;
     while (true) {
-      printf("$ ");
+      printf("mysh$ ");
       fflush(stdout);
-      scanline(&screen.lines[screen.current_line], MAX_LINE_SIZE);
-      if (parse_command(&screen.lines[screen.current_line]) == -1)
+      scanline(screen.lines[screen.current_line], MAX_LINE_SIZE);
+      if (parse_command(screen.lines[screen.current_line]) == -1)
         break;
     }
 

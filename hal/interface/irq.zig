@@ -47,5 +47,13 @@ pub fn Irq(comptime IrqImpl: anytype) type {
         pub fn trigger(_: Self, irq: IrqType) void {
             IrqImpl.trigger(irq);
         }
+
+        pub fn enter_critical_section(_: Self) void {
+            IrqImpl.enter_critical_section();
+        }
+
+        pub fn leave_critical_section(_: Self) void {
+            IrqImpl.leave_critical_section();
+        }
     };
 }

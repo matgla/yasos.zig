@@ -92,7 +92,7 @@ pub const VForkContext = extern struct {
     result: *volatile c.pid_t,
 };
 
-extern fn switch_to_next_task() void;
+extern fn switch_to_the_first_task() void;
 extern fn push_return_address() void;
 extern fn switch_to_main_task(lr: usize, with_fpu: bool) void;
 var sp: usize = 0;
@@ -105,7 +105,7 @@ pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
         sp -= 1;
     }
     std.log.info("Starting root process with stack pointer: {x}\n", .{sp});
-    switch_to_next_task();
+    switch_to_the_first_task();
     return 0;
 }
 
@@ -243,16 +243,14 @@ pub fn sys_close(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    // const context: *const volatile c_int = @ptrCast(@alignCast(arg));
+    const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        process_manager.instance.delete_process(process.pid);
+        process_manager.instance.delete_process(process.pid, context.*);
     } else {
         @panic("No process found");
     }
-    // log.print("Process exited with code {d}\n", .{context.*});
-    return 0;
+    return context.*;
 }
 
 pub fn sys_read(arg: *const volatile anyopaque) !i32 {
@@ -275,7 +273,7 @@ pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
     // const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        process_manager.instance.delete_process(process.pid);
+        process_manager.instance.delete_process(process.pid, -1);
     } else {
         @panic("No process found");
     }
@@ -302,9 +300,9 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    const result = try process_manager.instance.vfork();
-    hal.irq.trigger(.pendsv);
+    const context: *const volatile c.vfork_context = @ptrCast(@alignCast(arg));
+    const result = try process_manager.instance.vfork(context);
+    // hal.irq.trigger(.pendsv);
     return result;
 }
 

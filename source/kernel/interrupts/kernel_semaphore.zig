@@ -39,7 +39,7 @@ pub const KernelSemaphore = struct {
             const process: *Process = @fieldParentPtr("node", node);
             next = node.next;
             if (process.is_blocked_by(semaphore)) {
-                process.unblock();
+                process.unblock_semaphore(semaphore);
             }
         }
         return 0;
@@ -51,11 +51,9 @@ pub const KernelSemaphore = struct {
             // this must be service call
             const maybe_process = process_manager.instance.get_current_process();
             if (maybe_process) |process| {
-                process.block(semaphore);
+                process.block_semaphore(semaphore);
             }
-            if (process_manager.instance.scheduler.schedule_next()) {
-                hal.irq.trigger(.pendsv);
-            }
+            hal.irq.trigger(.pendsv);
             // process is blocked, let's trigger scheduler
             return 1;
         }

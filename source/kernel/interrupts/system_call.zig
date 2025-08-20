@@ -41,14 +41,18 @@ comptime {
     }
 }
 
-extern fn store_and_switch_to_next_task(lr: usize) void;
+extern fn store_and_switch_to_next_task(lr: usize) usize;
+extern fn switch_to_the_next_task(lr: usize) usize;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
 
-fn context_switch_handler(lr: usize) void {
-    if (process_manager.instance.scheduler.schedule_next()) {
-        store_and_switch_to_next_task(lr);
+fn context_switch_handler(lr: usize) usize {
+    switch (process_manager.instance.scheduler.schedule_next()) {
+        .Switch => return switch_to_the_next_task(lr),
+        .StoreAndSwitch => return store_and_switch_to_next_task(lr),
+        else => return lr,
     }
+    return lr;
 }
 
 fn sys_unhandled_factory(comptime i: usize) type {

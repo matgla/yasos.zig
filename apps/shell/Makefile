@@ -3,12 +3,18 @@ CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
 LDFLAGS = -fvisibility=hidden -g
 SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
+LDFLAGS_ELF = $(LDFLAGS) 
 
 TARGET = build/sh
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 INCLUDEDIR ?= $(PREFIX)/include
+
+ifeq ($(CC), armv8m-tcc)
+    LDFLAGS_ELF += -Wl,-oformat=elf32-littlearm
+endif
+
 
 # Rules
 all: $(TARGET) $(TARGET).elf
@@ -21,7 +27,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) $^ -o $@
 
 $(TARGET).elf: $(OBJS)
-	$(CC) $(LDFLAGS) -Wl,-oformat=elf32-littlearm $^ -o $@
+	$(CC) $(LDFLAGS_ELF) $^ -o $@
 
 install: $(TARGET) 
 	mkdir -p $(BINDIR)
