@@ -106,7 +106,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                     const has_shared_stack = p.has_stack_shared_with_parent();
                     p.unblock_all(return_code);
                     if (has_shared_stack) {
-                        self.scheduler.current = p.release_parent_after_getting_freedom();
+                        _ = p.release_parent_after_getting_freedom();
                         should_restore_parent = true;
                     }
                     self.processes.remove(&p.node);
@@ -209,6 +209,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             if (maybe_current_process) |p| {
                 // TODO: move loader to struct, pass allocator to loading functions
                 const executable = try dynamic_loader.load_executable(path, p.get_memory_allocator(), p.get_process_memory_allocator(), p.pid);
+
                 var argc: usize = 0;
                 while (argv[argc] != null) : (argc += 1) {}
 

@@ -408,7 +408,7 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    return process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
+    return try process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {

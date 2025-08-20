@@ -334,6 +334,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (action.blocked == self._parent.?) {
                     action.action(action.context, 0);
                     self._blocks.remove(&action.node);
+                    self._kernel_allocator.destroy(action);
                 }
             }
 
@@ -361,6 +362,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 const action: *BlockedProcessAction = @fieldParentPtr("node", node);
                 action.action(action.context, result);
                 action.blocked.unblock_from(self);
+                self._kernel_allocator.destroy(action);
                 next = self._blocks.pop();
             }
         }

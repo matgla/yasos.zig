@@ -72,6 +72,7 @@ if $CLEAR; then
   rm -rf libs/libm/build
   rm -rf apps/yasvi/build
   rm -rf apps/mkfs/build
+  rm -rf apps/longjump_tester/build
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
@@ -183,6 +184,8 @@ build_makefile hello_world
 build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs
+build_makefile longjump_tester
+
 $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 
 cd ..

@@ -235,11 +235,12 @@ int execute_command(const char *command, char *args[]) {
       strcat(cwd, "/");
       strcat(cwd, command);
       rc = execv(cwd, args);
-      if (rc == 0) {
-        exit(0);
-      }
     }
-    rc = execvp(command, args);
+    if (rc < 0) {
+      rc = execvp(command, args);
+      printf("execvp returned %d\n", rc);
+      exit(rc);
+    }
   } else {
     int rc = 0;
     printf("Waiting for process %d\n", pid);
