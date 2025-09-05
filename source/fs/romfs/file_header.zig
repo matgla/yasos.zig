@@ -167,6 +167,5 @@ pub const FileHeader = struct {
         buf.st_size = @intCast(self.size());
         buf.st_blksize = 1;
         buf.st_blocks = 1;
-        kernel.log.err("Stat returned mode: {x}", .{buf.st_mode});
     }
 };

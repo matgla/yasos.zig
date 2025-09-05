@@ -18,7 +18,7 @@ eval set -- "$PARSED"
 
 if [[ ! -v CC ]]; then
   CC=armv8m-tcc
-else 
+else
   echo "Using CC: $CC"
 fi
 # Default value
@@ -54,7 +54,7 @@ PREFIX=$SCRIPT_DIR/rootfs/usr
 echo "Building rootfs from $SCRIPT_DIR..."
 cd $SCRIPT_DIR
 
-if $CLEAR; then 
+if $CLEAR; then
   echo "Clearing..."
   rm -rf rootfs
   rm -rf apps/shell/build
@@ -84,7 +84,7 @@ mkdir -p rootfs/proc
 mkdir -p rootfs/root
 mkdir -p rootfs/home
 cd rootfs
-ln -s usr/lib  
+ln -s usr/lib
 ln -s usr/bin
 ls -lah
 pwd
@@ -93,18 +93,18 @@ mkdir -p rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
 mkdir -p rootfs/dev
 pwd
-cd libs 
+cd libs
 
 build_cross_compiler()
 {
   echo "Building cross compiler..."
   cd tinycc
   mkdir -p bin
-  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc 
+  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
   make install
@@ -125,7 +125,7 @@ build_c_compiler()
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  VERBOSE=1 make armv8m-tcc -j8 
+  VERBOSE=1 make armv8m-tcc -j8
 
   if [ $? -ne 0 ]; then
     exit -1;
@@ -175,7 +175,7 @@ cd ..
 
 cd apps
 
-build_makefile shell
+# build_makefile shell
 build_makefile coreutils
 build_makefile cowsay
 build_makefile ascii_animations
@@ -197,6 +197,6 @@ if $BUILD_IMAGE; then
   rm -rf rootfs/usr/share
   rm -f rootfs/bin/tcc
   mv rootfs/bin/tcc.elf rootfs/bin/tcc
-  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs 
+  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
 fi
 

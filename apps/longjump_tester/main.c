@@ -18,25 +18,26 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-#include <stdio.h>
 #include <setjmp.h>
+#include <stdio.h>
 
 jmp_buf jump_buffer;
 
 void test_function() {
-    printf("Inside test_function\n");
-    longjmp(jump_buffer, 42);  // Jump back to where setjmp was called
+  printf("Inside test_function\n");
+  longjmp(jump_buffer, 42); // Jump back to where setjmp was called
 }
 
 int main() {
-    int ret = setjmp(jump_buffer);
+  printf("Starting main function, buffer is: %p\n", (void *)jump_buffer);
+  int ret = setjmp(jump_buffer);
 
-    if (ret == 0) {
-        printf("First time through, ret = %d\n", ret);
-        test_function();
-    } else {
-        printf("Returned via longjmp, ret = %d\n", ret);
-    }
+  if (ret == 0) {
+    printf("First time through, ret = %d\n", ret);
+    test_function();
+  } else {
+    printf("Returned via longjmp, ret = %d\n", ret);
+  }
 
-    return 0;
+  return 0;
 }

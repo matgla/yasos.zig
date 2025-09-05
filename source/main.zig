@@ -297,8 +297,12 @@ export fn kernel_process(argument: *KernelAllocator) void {
             return;
         };
 
-        const args: [][]u8 = &.{};
-        _ = sh.main(@ptrCast(args.ptr), args.len) catch |err| {
+        var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };
+        var arg2: [1]u8 = [_]u8{0};
+        var args: [2][*c]u8 = .{ @ptrCast(&arg1), @ptrCast(&arg2) };
+        kernel.log.info("Array pointer: {x}, -> {x}", .{ @intFromPtr(&args), @intFromPtr(&args[0]) });
+
+        _ = sh.main(@ptrCast(&args[0]), 1) catch |err| {
             kernel.log.err("Cannot execute main: {s}", .{@errorName(err)});
         };
     }
