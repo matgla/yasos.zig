@@ -120,9 +120,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
-        std.log.err("Stat called for path: {s}", .{path});
         if (maybe_node) |*node| {
-            std.log.err("Stat delegated to filesystem: {s}", .{node.point.filesystem.interface.name()});
             return node.point.filesystem.interface.stat(node.left, data);
         }
         return -1;

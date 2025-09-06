@@ -578,3 +578,23 @@ pub fn sys_geteuid(arg: *const volatile anyopaque) !i32 {
     // we are always root until we implement user management
     return 0;
 }
+
+pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.dup_context = @ptrCast(@alignCast(arg));
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        var maybe_file = process.fds.get(@intCast(context.fd));
+        if (maybe_file) |*file| {
+            const fd = process.get_free_fd();
+            process.fds.put(fd, .{
+                .file = file.file.share(),
+                .path = file.path,
+                .diriter = null,
+            }) catch {
+                return -1;
+            };
+            return fd;
+        }
+    }
+    return -1;
+}

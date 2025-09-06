@@ -157,7 +157,6 @@ pub const FileHeader = struct {
     }
 
     pub fn stat(self: *FileHeader, buf: *c.struct_stat) void {
-        std.log.err("Stat called for file, got mode: {s}", .{@tagName(self.filetype())});
         buf.st_dev = 0;
         buf.st_ino = 0;
         buf.st_mode = @intCast(filetype_to_mode(self.filetype()));

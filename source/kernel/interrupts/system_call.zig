@@ -111,6 +111,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_dlsym => return handlers.sys_dlsym,
             c.sys_getuid => return handlers.sys_getuid,
             c.sys_geteuid => return handlers.sys_geteuid,
+            c.sys_dup => return handlers.sys_dup,
             else => return sys_unhandled_factory(index).handler,
         }
     }

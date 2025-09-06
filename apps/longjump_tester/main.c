@@ -21,23 +21,17 @@
 #include <setjmp.h>
 #include <stdio.h>
 
-jmp_buf jump_buffer;
+int global;
 
-void test_function() {
-  printf("Inside test_function\n");
-  longjmp(jump_buffer, 42); // Jump back to where setjmp was called
+extern int compare(void *a, void *b) {
+  global++;
+  return *(int *)a - *(int *)b;
 }
 
 int main() {
-  printf("Starting main function, buffer is: %p\n", (void *)jump_buffer);
-  int ret = setjmp(jump_buffer);
-
-  if (ret == 0) {
-    printf("First time through, ret = %d\n", ret);
-    test_function();
-  } else {
-    printf("Returned via longjmp, ret = %d\n", ret);
-  }
-
+  char data[4] = {0, 7, 1, 3};
+  global = 42;
+  qsort(data, 4, 1, &compare);
+  qsort(data, 4, 1, compare);
   return 0;
 }
