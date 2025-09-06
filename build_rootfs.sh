@@ -176,7 +176,7 @@ cd ..
 cd apps
 
 # build_makefile shell
-build_makefile coreutils
+# build_makefile coreutils
 build_makefile cowsay
 build_makefile ascii_animations
 build_makefile textvaders

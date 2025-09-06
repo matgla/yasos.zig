@@ -75,6 +75,10 @@ pub const std_options: std.Options = .{
     },
 };
 
+pub const os = struct {
+    pub const PATH_MAX = 128;
+};
+
 fn initialize_board() void {
     try board.uart.uart0.init(.{
         .baudrate = 921600,
@@ -298,9 +302,7 @@ export fn kernel_process(argument: *KernelAllocator) void {
         };
 
         var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };
-        var arg2: [1]u8 = [_]u8{0};
-        var args: [2][*c]u8 = .{ @ptrCast(&arg1), @ptrCast(&arg2) };
-        kernel.log.info("Array pointer: {x}, -> {x}", .{ @intFromPtr(&args), @intFromPtr(&args[0]) });
+        var args: [2][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0) };
 
         _ = sh.main(@ptrCast(&args[0]), 1) catch |err| {
             kernel.log.err("Cannot execute main: {s}", .{@errorName(err)});

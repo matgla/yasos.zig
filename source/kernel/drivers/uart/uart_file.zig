@@ -71,6 +71,22 @@ pub fn UartFile(comptime UartType: anytype) type {
                     if (ch[0] == '\r') {
                         ch[0] = '\n';
                     }
+
+                    if (ch[0] == 8 or ch[0] == 127) {
+                        if (index > 0) {
+                            buffer[index] = 0;
+                            index -= 1;
+                            if (self._echo) {
+                                ch[0] = 8;
+                                _ = Self.uart.write_some(ch[0..1]) catch {};
+                                ch[0] = ' ';
+                                _ = Self.uart.write_some(ch[0..1]) catch {};
+                                ch[0] = 8;
+                                _ = Self.uart.write_some(ch[0..1]) catch {};
+                            }
+                        }
+                        continue;
+                    }
                     buffer[index] = ch[0];
                     if (self._echo) {
                         _ = uart.write_some(ch[0..1]) catch {};
@@ -81,9 +97,9 @@ pub fn UartFile(comptime UartType: anytype) type {
                             break;
                         }
                     }
-                    return @intCast(index);
+                    // return @intCast(index);
                 }
-                return 0;
+                return @intCast(index);
             }
 
             pub fn write(self: *Self, data: []const u8) isize {

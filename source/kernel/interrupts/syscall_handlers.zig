@@ -188,6 +188,7 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
         }
         defer if (relative_path) kernel_allocator.free(path_slice);
 
+        std.log.err("Opening path: {s}\n", .{path_slice});
         const maybe_file = fs.get_ivfs().interface.get(path_slice, process.get_memory_allocator());
         if (maybe_file) |file| {
             const fd = process.get_free_fd();
@@ -320,7 +321,23 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
         return errno(c.EFAULT);
     }
     const path = std.mem.span(@as([*:0]const u8, @ptrCast(context.pathname.?)));
-    log.err("sys_stat: pathname: {s}, statbuf: {*}", .{ path, context.statbuf.? });
+    if (path.len > 0 and path[0] != '/') {
+        if (process_manager.instance.get_current_process()) |current_process| {
+            const pwd = current_process.get_current_directory();
+            const full_path = std.fmt.allocPrint(kernel_allocator, "{s}/{s}", .{ pwd, path }) catch {
+                return -1;
+            };
+            defer kernel_allocator.free(full_path);
+            const real = std.fs.path.resolve(kernel_allocator, &.{full_path}) catch {
+                return -1;
+            };
+            defer kernel_allocator.free(real);
+            return fs.get_ivfs().interface.stat(
+                real,
+                context.statbuf,
+            );
+        }
+    }
     return fs.get_ivfs().interface.stat(
         path,
         context.statbuf,

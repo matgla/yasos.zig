@@ -124,11 +124,13 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        std.log.err("VFS stat called for path: {s}", .{path});
         var maybe_node = self.get_file_header(path);
         if (maybe_node) |*node| {
             node.stat(data);
             return 0;
         }
+        std.log.err("Stat failed, path not found: {s}", .{path});
         return -1;
     }
 
@@ -139,6 +141,10 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         var maybe_node = self.root.first_file_header();
         if (maybe_node == null) {
             return null;
+        }
+        std.log.err("Path size is: {d}, first component size: '{s}'", .{ path_without_trailing_separator.len, path_without_trailing_separator });
+        if (path_without_trailing_separator.len <= 1) {
+            return maybe_node;
         }
         while (component) |part| : (component = it.next()) {
             var filename = maybe_node.?.name(self.allocator);
