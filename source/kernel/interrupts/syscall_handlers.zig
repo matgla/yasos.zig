@@ -483,7 +483,21 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
+        var relative_path = false;
+        var path_slice: []const u8 = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
+        if (path_slice[0] != '/') {
+            if (process.cwd[process.cwd.len - 1] == '/') {
+                path_slice = std.fmt.allocPrint(kernel_allocator, "{s}{s}", .{ process.cwd, path_slice }) catch {
+                    return -1;
+                };
+            } else {
+                path_slice = std.fs.path.resolve(kernel_allocator, &.{ process.cwd, path_slice }) catch {
+                    return -1;
+                };
+            }
+            relative_path = true;
+        }
+        defer if (relative_path) kernel_allocator.free(path_slice);
         if (path_slice.len == 0) {
             return -1;
         }

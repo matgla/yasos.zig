@@ -103,7 +103,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             const process = try kernel_allocator.create(Self);
             kernel.log.debug("initializing memory allocator for pid: {d}", .{pid_counter});
             var process_memory_allocator = ProcessMemoryAllocator.init(pid_counter, process_memory_pool);
-            const cwd_handle = try kernel_allocator.alloc(u8, cwd.len + 1);
+            const cwd_handle = try kernel_allocator.alloc(u8, cwd.len);
             @memcpy(cwd_handle[0..cwd.len], cwd);
             cwd_handle[cwd.len] = 0;
             const args = [_]usize{
@@ -219,15 +219,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn change_directory(self: *Self, path: []const u8) !void {
-            if (path[0] != '/') {
-                const cwd_handle = try std.fs.path.resolvePosix(self._kernel_allocator, &.{ self.cwd, path });
-                self._kernel_allocator.free(self.cwd);
-                self.cwd = cwd_handle;
-            } else {
-                const cwd_handle = try std.fs.path.resolvePosix(self._kernel_allocator, &.{path});
-                self._kernel_allocator.free(self.cwd);
-                self.cwd = cwd_handle;
-            }
+            self._kernel_allocator.free(self.cwd);
+            self.cwd = try self._kernel_allocator.dupe(u8, path);
         }
 
         pub fn get_current_directory(self: Self) []const u8 {
