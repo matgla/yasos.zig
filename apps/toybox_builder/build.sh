@@ -3,17 +3,16 @@
 cd "$(dirname "$0")"
 pwd
 cp yasos.config ../toybox/.config
-PATCH_FILES=(*.patch)
 
 
-for PATCH_FILE in "${PATCH_FILES[@]}"; do
+for PATCH_FILE in *.patch; do
     echo "Found patch file: $PATCH_FILE"
     cp $PATCH_FILE ../toybox/
 done
 
 cd ../toybox
 
-for PATCH_FILE in "${PATCH_FILES[@]}"; do
+for PATCH_FILE in *.patch; do
     if git apply --check "$PATCH_FILE"; then
         echo "Patch can be applied. Applying now..."
         git apply "$PATCH_FILE"
