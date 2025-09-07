@@ -219,9 +219,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn change_directory(self: *Self, path: []const u8) !void {
-            const cwd_handle = try std.fs.path.resolvePosix(self._kernel_allocator, &.{path});
-            self._kernel_allocator.free(self.cwd);
-            self.cwd = cwd_handle;
+            if (path[0] != '/') {
+                const cwd_handle = try std.fs.path.resolvePosix(self._kernel_allocator, &.{ self.cwd, path });
+                self._kernel_allocator.free(self.cwd);
+                self.cwd = cwd_handle;
+            } else {
+                const cwd_handle = try std.fs.path.resolvePosix(self._kernel_allocator, &.{path});
+                self._kernel_allocator.free(self.cwd);
+                self.cwd = cwd_handle;
+            }
         }
 
         pub fn get_current_directory(self: Self) []const u8 {
