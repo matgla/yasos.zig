@@ -163,6 +163,12 @@ pub fn UartFile(comptime UartType: anytype) type {
                             termios.c_cc[1] = 0;
                             termios.c_cc[2] = 0;
                             termios.c_cc[3] = 0;
+                            if (self._icanonical) {
+                                termios.c_lflag |= c.ICANON;
+                            }
+                            if (self._echo) {
+                                termios.c_lflag |= c.ECHO;
+                            }
                             return 0;
                         },
                         else => {

@@ -186,17 +186,21 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
             };
             relative_path = true;
         }
-        defer if (relative_path) kernel_allocator.free(path_slice);
 
-        std.log.err("Opening path: {s}\n", .{path_slice});
-        const maybe_file = fs.get_ivfs().interface.get(path_slice, process.get_memory_allocator());
+        defer if (relative_path) kernel_allocator.free(path_slice);
+        const realpath = std.fs.path.resolve(kernel_allocator, &.{path_slice}) catch {
+            return -1;
+        };
+        defer kernel_allocator.free(realpath);
+
+        const maybe_file = fs.get_ivfs().interface.get(realpath, process.get_memory_allocator());
         if (maybe_file) |file| {
             const fd = process.get_free_fd();
             process.fds.put(fd, .{
                 .file = file,
                 .path = blk: {
                     var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                    std.mem.copyForwards(u8, path_buffer[0..path_slice.len], path_slice);
+                    std.mem.copyForwards(u8, path_buffer[0..realpath.len], realpath);
                     break :blk path_buffer;
                 },
                 .diriter = null,
@@ -207,13 +211,13 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
             // }
         } else if ((context.flags & c.O_CREAT) != 0) {
             const fd = process.get_free_fd();
-            const maybe_ifile = fs.get_ivfs().interface.create(path_slice, context.mode, process.get_memory_allocator());
+            const maybe_ifile = fs.get_ivfs().interface.create(realpath, context.mode, process.get_memory_allocator());
             if (maybe_ifile) |ifile| {
                 process.fds.put(fd, .{
                     .file = ifile,
                     .path = blk: {
                         var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                        std.mem.copyForwards(u8, path_buffer[0..path_slice.len], path_slice);
+                        std.mem.copyForwards(u8, path_buffer[0..realpath.len], realpath);
                         break :blk path_buffer;
                     },
                     .diriter = null,

@@ -39,10 +39,14 @@ pub const SymbolEntry = struct {
     address: usize,
 };
 
+extern const indirect_call_thunk_template_size: usize;
+extern fn indirect_call_thunk_template_start() void;
+
 pub const LoadedSharedData = struct {
     text: ?[]const u8,
     init: ?[]const u8,
     plt: ?[]const u8,
+    thunks: []u8,
     xip: bool,
     exported_symbols: SymbolTable,
     allocator: std.mem.Allocator,
@@ -60,6 +64,7 @@ pub const LoadedSharedData = struct {
                 .text = parser.get_text(),
                 .init = parser.get_init(),
                 .plt = parser.get_plt(),
+                .thunks = undefined,
                 .xip = xip,
                 .exported_symbols = parser.exported_symbols,
                 .allocator = allocator,
@@ -71,6 +76,23 @@ pub const LoadedSharedData = struct {
 
     pub fn destroy(self: *LoadedSharedData) void {
         self.allocator.destroy(self);
+    }
+
+    pub fn allocate_thunks(self: *LoadedSharedData, size: usize) !void {
+        self.thunks = try self.process_allocator.alloc(u8, size * indirect_call_thunk_template_size);
+    }
+
+    pub fn generate_thunk(self: *LoadedSharedData, index: usize, r9: usize, symbol: usize) !usize {
+        const position = index * indirect_call_thunk_template_size;
+        if (position + indirect_call_thunk_template_size > self.thunks.len) {
+            return error.IndexOutOfBounds;
+        }
+        const thunk_template: [*]const u8 = @ptrFromInt(@intFromPtr(&indirect_call_thunk_template_start) - 1);
+        const thunk_slice: []const u8 = thunk_template[0..indirect_call_thunk_template_size];
+        @memcpy(self.thunks[position .. position + indirect_call_thunk_template_size], thunk_slice[0..]);
+        @memcpy(self.thunks[position + 12 .. position + 12 + @sizeOf(usize)], std.mem.asBytes(&r9));
+        @memcpy(self.thunks[position + 16 .. position + 16 + @sizeOf(usize)], std.mem.asBytes(&symbol));
+        return @intFromPtr(&self.thunks[position]);
     }
 };
 

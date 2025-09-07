@@ -288,8 +288,40 @@ pub const Loader = struct {
             got[i].symbol_offset = address;
         }
 
+        var number_of_function_pointer_relocations: usize = 0;
+        var current_function_pointer_relocation_index: usize = 0;
+        for (parser.symbol_table_relocations.relocations) |rel| {
+            if (rel.function_pointer == 1) {
+                number_of_function_pointer_relocations += 1;
+            }
+        }
+        const maybe_shared_data = module.shared_data;
+        if (maybe_shared_data) |shared| {
+            try shared.allocate_thunks(number_of_function_pointer_relocations);
+        }
+
         for (parser.symbol_table_relocations.relocations) |rel| {
             var maybe_symbol: ?*const Symbol = null;
+            if (rel.function_pointer == 1) {
+                maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
+                if (maybe_symbol == null) {
+                    log.err("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
+                    return LoaderError.SymbolNotFound;
+                }
+                if (maybe_shared_data) |shared| {
+                    const maybe_symbol_entry = self.find_symbol(module, maybe_symbol.?.name());
+                    if (maybe_symbol_entry) |symbol_entry| {
+                        const address = shared.generate_thunk(current_function_pointer_relocation_index, @intFromPtr(got.ptr), symbol_entry.address) catch |err| {
+                            log.err("[yasld] Can't generate thunk for symbol: '{s}': {s}", .{ maybe_symbol.?.name(), @errorName(err) });
+                            return err;
+                        };
+                        current_function_pointer_relocation_index += 1;
+                        got[rel.index].symbol_offset = address;
+                    }
+                }
+                got[rel.index].base_register = @intFromPtr(got.ptr);
+                continue;
+            }
             if (rel.is_exported_symbol == 1) {
                 maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
             } else {

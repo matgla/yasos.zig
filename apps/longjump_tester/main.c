@@ -23,14 +23,16 @@
 
 int global;
 
-extern int compare(void *a, void *b) {
+static int compare(void *a, void *b) {
   global++;
+  printf("global in compare: %d\n", global);
   return *(int *)a - *(int *)b;
 }
 
 int main() {
   char data[4] = {0, 7, 1, 3};
   global = 42;
+  printf("global before qsort: %d\n", global);
   qsort(data, 4, 1, &compare);
   qsort(data, 4, 1, compare);
   return 0;

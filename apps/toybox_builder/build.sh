@@ -3,16 +3,24 @@
 cd "$(dirname "$0")"
 pwd
 cp yasos.config ../toybox/.config
-PATCH_FILE="0001-Removed-gc-sections.patch"
-cp $PATCH_FILE ../toybox/
+PATCH_FILES=(*.patch)
+
+
+for PATCH_FILE in "${PATCH_FILES[@]}"; do
+    echo "Found patch file: $PATCH_FILE"
+    cp $PATCH_FILE ../toybox/
+done
+
 cd ../toybox
 
-if git apply --check "$PATCH_FILE"; then
-    echo "Patch can be applied. Applying now..."
-    git apply "$PATCH_FILE"
-else
-    echo "Patch already applied or conflicts exist. Skipping."
-fi
+for PATCH_FILE in "${PATCH_FILES[@]}"; do
+    if git apply --check "$PATCH_FILE"; then
+        echo "Patch can be applied. Applying now..."
+        git apply "$PATCH_FILE"
+    else
+        echo "Patch already applied or conflicts exist. Skipping."
+    fi
+done
 
 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="-I$1/usr/include -g" LDFLAGS="-Wl,-oformat=elf32-littlearm" make toybox
 mv -f ../toybox/toybox ../toybox/toybox.elf

@@ -156,37 +156,37 @@ build_cross_compiler
 echo "Building libc..."
 build_makefile libc
 
-# echo "Building libdl..."
-# build_makefile libdl
+echo "Building libdl..."
+build_makefile libdl
 
-# echo "Building libpthread..."
-# build_makefile pthread
+echo "Building libpthread..."
+build_makefile pthread
 
-# echo "Building yasos_curses..."
-# build_makefile yasos_curses
+echo "Building yasos_curses..."
+build_makefile yasos_curses
 
-# echo "Building libm..."
-# build_makefile libm
+echo "Building libm..."
+build_makefile libm
 
-# echo "Building target C compiler..."
-# build_c_compiler
+echo "Building target C compiler..."
+build_c_compiler
 
 cd ..
 
 cd apps
 
-# build_makefile shell
-# build_makefile coreutils
-# build_makefile cowsay
-# build_makefile ascii_animations
-# build_makefile textvaders
-# build_makefile hello_world
-# build_makefile hexdump
-# build_makefile yasvi
-# build_makefile mkfs
+build_makefile shell
+build_makefile coreutils
+build_makefile cowsay
+build_makefile ascii_animations
+build_makefile textvaders
+build_makefile hello_world
+build_makefile hexdump
+build_makefile yasvi
+build_makefile mkfs
 build_makefile longjump_tester
 
-# $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
+$SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 
 cd ..
 
