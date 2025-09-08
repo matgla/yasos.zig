@@ -46,5 +46,9 @@ pub const Time = struct {
         while (value.* < target) {}
     }
 
+    pub fn get_time_us() u64 {
+        return (@as(u64, picosdk.timer0_hw.*.timerawh) << 32) | picosdk.timer0_hw.*.timerawl;
+    }
+
     fn init() void {}
 };

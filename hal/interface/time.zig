@@ -41,5 +41,9 @@ pub fn Time(comptime time: anytype) type {
         pub fn sleep_ms(_: Self, ms: u64) void {
             TimeImplementation.sleep_ms(ms);
         }
+
+        pub fn get_time_us(_: Self) u64 {
+            return TimeImplementation.get_time_us();
+        }
     };
 }

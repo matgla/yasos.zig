@@ -158,7 +158,7 @@ pub const FileHeader = struct {
 
     pub fn stat(self: *FileHeader, buf: *c.struct_stat) void {
         buf.st_dev = 0;
-        buf.st_ino = 0;
+        buf.st_ino = @intCast(self._reader.get_offset());
         buf.st_mode = @intCast(filetype_to_mode(self.filetype()));
         buf.st_nlink = 0;
         buf.st_uid = 0;

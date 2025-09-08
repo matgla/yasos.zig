@@ -32,6 +32,8 @@ const SymbolEntry = @import("module.zig").SymbolEntry;
 const LoadedSharedData = @import("module.zig").LoadedSharedData;
 const LoadedUniqueData = @import("module.zig").LoadedUniqueData;
 
+const kernel = @import("kernel");
+
 const log = std.log.scoped(.yasld);
 
 const LoaderError = error{
@@ -69,15 +71,6 @@ pub const Loader = struct {
     }
 
     pub fn deinit(self: *Loader) void {
-        // var it = self.modules_list.iterator();
-        // while (it.next()) |n| {
-        // var next = n.value_ptr.first;
-        // while (next) |node| {
-        // var module: *Module = @fieldParentPtr("list_node", node);
-        // module.destroy();
-        //         next = node.next;
-        //     }
-        // }
         self.modules_list.deinit();
     }
 
@@ -134,33 +127,37 @@ pub const Loader = struct {
 
     fn load_module(self: *Loader, module: *Module, module_address: *const anyopaque, process_allocator: std.mem.Allocator) !void {
         log.debug("parsing header", .{});
+        kernel.benchmark.timestamp("processing header");
         const header = self.process_header(module_address) catch |err| {
             log.err("Wrong magic cookie, not a yaff file", .{});
             return err;
         };
         print_header(header);
-
+        kernel.benchmark.timestamp("processing parser");
         const parser = Parser.create(header);
         parser.print();
 
         try module.set_name(parser.name);
-
+        kernel.benchmark.timestamp("child modules");
         try self.import_child_modules(header, &parser, module);
-
+        kernel.benchmark.timestamp("loading shared data");
         // if module is already loaded just data must be loaded
         const shared_data = try self.get_shared_data(parser.name, process_allocator, &parser, module.xip);
         module.add_shared_data(shared_data);
         try self.process_data(header, &parser, module);
         // module.exported_symbols = parser.exported_symbols;
+        kernel.benchmark.timestamp("initializers");
 
         const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
         try module.relocate_init(init_ptr[0..header.init_length], header);
         module.process_initializers();
-
+        kernel.benchmark.timestamp("symtab relocations");
         try self.process_symbol_table_relocations(&parser, module, header);
+        kernel.benchmark.timestamp("local relocations");
         try self.process_local_relocations(&parser, module);
+        kernel.benchmark.timestamp("data relocations");
         try self.process_data_relocations(&parser, module);
-
+        kernel.benchmark.timestamp("finalizing");
         log.debug(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
         log.debug(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
         log.debug(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
@@ -272,7 +269,6 @@ pub const Loader = struct {
         if (maybe_init == null) {
             log.debug("[yasld] Can't find symbol '__start_data'", .{});
         }
-
         for (0..got.len) |i| {
             if (i < 3) {
                 continue;
@@ -396,7 +392,7 @@ pub const Loader = struct {
 
     fn process_header(_: Loader, module_address: *const anyopaque) error{IncorrectSignature}!*const Header {
         const header: *const Header = @ptrCast(@alignCast(module_address));
-        if (!std.mem.eql(u8, std.mem.asBytes(&header.marker), "YAFF")) {
+        if (!std.mem.eql(u8, std.mem.asBytes(&header.magic), "YAFF")) {
             return error.IncorrectSignature;
         }
         return header;

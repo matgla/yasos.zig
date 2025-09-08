@@ -24,7 +24,7 @@ const IFile = @import("../fs/ifile.zig").IFile;
 
 const fs = @import("../fs/vfs.zig");
 
-const kernel = @import("kernel");
+const kernel = @import("../kernel.zig");
 const log = std.log.scoped(.syscall);
 
 const systick = @import("systick.zig");
@@ -248,6 +248,7 @@ pub fn sys_close(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
+    kernel.benchmark.timestamp("exit");
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -515,6 +516,7 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
                 return -1;
             }
         }
+        std.log.err("chdir: path does not exist: {s}\n", .{path_slice});
     }
     return -1;
 }

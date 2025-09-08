@@ -49,7 +49,7 @@ var system_call_handler: ?SystemCallHandler = null;
 export var sp_call: usize = 0;
 export var sp_call_fpu: bool = false;
 
-export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
     if (number == 1) {
         if (sp_call_fpu) {
             sp_call |= 1;

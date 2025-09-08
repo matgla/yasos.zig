@@ -3,9 +3,9 @@ linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/
 * and https://github.com/raspberrypi/pico-sdk/blob/master/src/rp2_common/pico_crt0/rp2040/memmap_default.ld
 *
 * exported symbols:
-* __preinit_array_start 
-* __preinit_array_end 
-* __init_array_start 
+* __preinit_array_start
+* __preinit_array_end
+* __init_array_start
 * __init_array_end
 * __fini_array_start
 * __fini_array_end
@@ -15,19 +15,19 @@ linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/
 *
 */
 
-MEMORY 
+MEMORY
 {
-  flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 512K 
+  flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 512K
   romfs(rx!w)       : ORIGIN = 0x10080000, LENGTH = 1536K
-  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 256K 
-  process_ram(rxw)  : ORIGIN = 0x20040000, LENGTH = 128K 
-  scratch_x(rxw)    : ORIGIN = 0x20080000, LENGTH = 4K 
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 256K
+  process_ram(rxw)  : ORIGIN = 0x20040000, LENGTH = 128K
+  scratch_x(rxw)    : ORIGIN = 0x20080000, LENGTH = 4K
   scratch_y(rxw)    : ORIGIN = 0x20081000, LENGTH = 4K
 }
 
 SECTIONS
 {
-  .text : 
+  .text :
   {
     . = ALIGN(4);
     KEEP(*(.vectors))
@@ -37,7 +37,7 @@ SECTIONS
     *(.text*)
     KEEP(*(.init))
     KEEP(*(.fini))
-    
+
     *(.rodata*)
     KEEP(*(.eh_frame*))
 
@@ -69,47 +69,48 @@ SECTIONS
     KEEP(*(SORT(.fini_array.*)))
     KEEP(*(.fini_array))
     PROVIDE_HIDDEN(__fini_array_end = .);
-  } > flash 
+  } > flash
 
-  /* ARM exception handling */ 
-  .ARM.extab : 
+  /* ARM exception handling */
+  .ARM.extab :
   {
-    *(.ARM.extab* .gnu.linkonce.armextab.*) 
-  } > flash 
+    *(.ARM.extab* .gnu.linkonce.armextab.*)
+  } > flash
 
   __exidx_start = .;
-  .ARM.exidx : 
+  .ARM.exidx :
   {
     *(.ARM.exidx* .gnu.linkonce.armexidx.*)
-  } > flash 
-  __exidx_end = .; 
+  } > flash
+  __exidx_end = .;
 
-   .romfs : 
+   .romfs :
   {
     __romfs_start__ = .;
     KEEP(*(.romfs))
     __romfs_end__ = .;
   } > romfs
-  /* keep this at beginning of ram or align to arm alignment requirement for 
+  /* keep this at beginning of ram or align to arm alignment requirement for
    cortex-m0plus */
-  .ram_vector_table (NOLOAD) : 
+  .ram_vector_table (NOLOAD) :
   {
     *(.ram_vector_table)
-  } > kernel_ram 
+  } > kernel_ram
 
   __data_start_flash__ = LOADADDR(.data);
-  .data : 
+  .data :
   {
     . = ALIGN(4);
     __data_start__ = .;
     *(vtable)
     *(.time_critical*)
+    *(.time_critical)
     *(.data)
     *(.data*)
     __data_end__ = .;
-  } > kernel_ram AT> flash 
+  } > kernel_ram AT> flash
 
-  .bss (NOLOAD) : 
+  .bss (NOLOAD) :
   {
     . = ALIGN(4);
     __bss_start__ = .;
@@ -118,18 +119,18 @@ SECTIONS
     *(COMMON)
     . = ALIGN(4);
     __bss_end__ = .;
-  } > kernel_ram 
+  } > kernel_ram
 
   .heap (NOLOAD):
   {
     __end__ = .;
     end = __end__;
     KEEP(*(.heap*))
-  } > kernel_ram 
+  } > kernel_ram
 
   __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
 
-  .scratch_x : 
+  .scratch_x :
   {
     __scratch_x_start__ = .;
     *(.scratch_x.*)
@@ -138,13 +139,13 @@ SECTIONS
   } > scratch_x AT > flash
   __scratch_x_source__ = LOADADDR(.scratch_x);
 
-  .scratch_y : 
+  .scratch_y :
   {
     __scratch_y_start__ = .;
     *(.scratch_y.*)
     . = ALIGN(4);
     __scratch_y_end__ = .;
-  } > scratch_y AT > flash 
+  } > scratch_y AT > flash
   __scratch_y_source__ = LOADADDR(.scratch_y);
 
   .stack1_dummy (NOLOAD):
@@ -155,7 +156,7 @@ SECTIONS
   .stack_dummy (NOLOAD):
   {
     KEEP(*(.stack*))
-  } > scratch_y 
+  } > scratch_y
 
   __stack_limit__ = ORIGIN(process_ram) + LENGTH(process_ram);
   __stack1_top__ = ORIGIN(scratch_x) + LENGTH(scratch_x);
@@ -167,7 +168,7 @@ SECTIONS
   __kernel_ram_end__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
   __process_ram_start__ = ORIGIN(process_ram);
   __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
-  
-  PROVIDE(__stack = __stack_top__); 
+
+  PROVIDE(__stack = __stack_top__);
   ASSERT(__stack_limit__ >= __heap_limit__, "region RAM overflowed")
 }

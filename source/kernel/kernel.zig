@@ -37,3 +37,4 @@ pub const dynamic_loader = @import("modules.zig");
 pub const irq = @import("interrupts/interrupts.zig");
 
 pub const driver = @import("drivers/drivers.zig");
+pub const benchmark = @import("benchmark.zig");

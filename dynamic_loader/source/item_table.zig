@@ -24,16 +24,18 @@ const Symbol = @import("symbol.zig").Symbol;
 pub fn ItemTable(comptime ItemType: anytype) type {
     return struct {
         root: *const ItemType,
+        lookup: []u16,
         number_of_items: u16,
         alignment: u8,
 
         const Self = @This();
 
-        pub fn create(table_address: usize, elements: u16, alignment: u8) Self {
+        pub fn create(table_address: usize, elements: u16, alignment: u8, lookup: []u16) Self {
             return .{
                 .root = @ptrFromInt(table_address),
                 .number_of_items = elements,
                 .alignment = alignment,
+                .lookup = lookup,
             };
         }
 
@@ -63,17 +65,11 @@ pub fn ItemTable(comptime ItemType: anytype) type {
         }
 
         pub fn element_at(self: Self, index: usize) ?*const ItemType {
-            var it = self.iter();
-            var i: usize = 0;
-            while (it) |symbol| : ({
-                it = symbol.next();
-                i += 1;
-            }) {
-                if (i == index) {
-                    return symbol.data;
-                }
+            if (index >= self.lookup.len) {
+                return null;
             }
-            return null;
+            const offset = self.lookup[index];
+            return @ptrFromInt(@intFromPtr(self.root) + offset);
         }
 
         pub const Iterator = struct {

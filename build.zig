@@ -236,6 +236,8 @@ pub fn build(b: *std.Build) !void {
 
             kernel_exec.root_module.addImport("kernel", kernel_module);
             kernel_exec.root_module.addImport("yasld", yasld.module("yasld"));
+            yasld.module("yasld").addImport("kernel", kernel_module);
+            yasld.module("yasld").addIncludePath(b.path("./libs/tinycc"));
             kernel_exec.root_module.addImport("libc_imports", libc_imports_module);
             kernel_exec.root_module.addIncludePath(b.path("."));
             const arch_module = b.addModule("arch", .{
