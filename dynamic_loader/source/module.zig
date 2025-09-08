@@ -252,13 +252,18 @@ pub const Module = struct {
 
     pub fn find_local_symbol(self: Module, name: []const u8) ?usize {
         if (self.shared_data) |shared_data| {
-            var it = shared_data.exported_symbols.iter();
-            while (it) |symbol| : (it = symbol.next()) {
-                if (symbol.data.name().len == name.len and std.mem.eql(u8, symbol.data.name(), name)) {
-                    const base = self.get_base_address(@enumFromInt(symbol.data.section)) catch return null;
-                    return base + symbol.data.offset;
-                }
+            const maybe_symbol = shared_data.exported_symbols.element_by_name(name);
+            if (maybe_symbol) |symbol| {
+                const base = self.get_base_address(@enumFromInt(symbol.section)) catch return null;
+                return base + symbol.offset;
             }
+            // var it = shared_data.exported_symbols.iter();
+            // while (it) |symbol| : (it = symbol.next()) {
+            //     if (symbol.data.name().len == name.len and std.mem.eql(u8, symbol.data.name(), name)) {
+            //         const base = self.get_base_address(@enumFromInt(symbol.data.section)) catch return null;
+            //         return base + symbol.data.offset;
+            //     }
+            // }
         }
         return null;
     }

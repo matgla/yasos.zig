@@ -101,9 +101,6 @@ pub fn print_header(header: *const Header) void {
     log.debug("    imported_symbols_offset: {d},", .{header.imported_symbols_offset});
     log.debug("    exported_symbols_offset: {d},", .{header.exported_symbols_offset});
     log.debug("    text_offset: {d},", .{header.text_offset});
-    log.debug("    imported_symbols_lookup_offset: {d},", .{header.imported_symbols_lookup_offset});
-    // log.debug("    exported_symbols_lookup_offset: {d},", .{header.exported_symbols_lookup_offset});
-
     log.debug("  }}", .{});
 }
 

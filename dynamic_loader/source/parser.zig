@@ -28,13 +28,7 @@ const Dependency = @import("dependency.zig").Dependency;
 const relocation = @import("relocation_table.zig");
 const Header = @import("header.zig").Header;
 const Section = @import("section.zig").Section;
-
-const YaffHashTable = struct {
-    nbucket: u32,
-    nchain: u32,
-    bucket: []u32,
-    chain: []u32,
-};
+const YaffHashTable = @import("hashtable.zig").YaffHashTable;
 
 const SymbolTableRelocations = relocation.RelocationTable(relocation.SymbolTableRelocation);
 const LocalRelocations = relocation.RelocationTable(relocation.LocalRelocation);
@@ -119,8 +113,6 @@ pub const Parser = struct {
             imported_symbols_hash_table.chain = imported_hash_table_data[2 + imported_hash_table_data[0] ..][0..imported_hash_table_data[1]];
         }
 
-        std.log.err("Detected imported symbols hash table with {d} buckets and {d} chains, offset: {x}", .{ imported_symbols_hash_table.nbucket, imported_symbols_hash_table.nchain, header.imported_symbols_hash_table_offset });
-
         var exported_symbols_hash_table: YaffHashTable = .{
             .nbucket = 0,
             .nchain = 0,
@@ -134,7 +126,6 @@ pub const Parser = struct {
             exported_symbols_hash_table.bucket = exported_hash_table_data[2..][0..exported_hash_table_data[0]];
             exported_symbols_hash_table.chain = exported_hash_table_data[2 + exported_hash_table_data[0] ..][0..exported_hash_table_data[1]];
         }
-        std.log.err("Detected exported symbols hash table with {d} buckets and {d} chains, offset: {x}", .{ exported_symbols_hash_table.nbucket, exported_symbols_hash_table.nchain, header.exported_symbols_hash_table_offset });
 
         return Parser{
             .name = name,

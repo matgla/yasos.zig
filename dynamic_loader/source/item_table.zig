@@ -18,8 +18,11 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
 const Dependency = @import("dependency.zig").Dependency;
 const Symbol = @import("symbol.zig").Symbol;
+
+const YaffHashTable = @import("hashtable.zig").YaffHashTable;
 
 pub fn ItemTable(comptime ItemType: anytype) type {
     return struct {
@@ -27,15 +30,17 @@ pub fn ItemTable(comptime ItemType: anytype) type {
         lookup: []u16,
         number_of_items: u16,
         alignment: u8,
+        hashtable: ?YaffHashTable = null,
 
         const Self = @This();
 
-        pub fn create(table_address: usize, elements: u16, alignment: u8, lookup: []u16) Self {
+        pub fn create(table_address: usize, elements: u16, alignment: u8, lookup: []u16, hashtable: ?YaffHashTable) Self {
             return .{
                 .root = @ptrFromInt(table_address),
                 .number_of_items = elements,
                 .alignment = alignment,
                 .lookup = lookup,
+                .hashtable = hashtable,
             };
         }
 
@@ -70,6 +75,21 @@ pub fn ItemTable(comptime ItemType: anytype) type {
             }
             const offset = self.lookup[index];
             return @ptrFromInt(@intFromPtr(self.root) + offset);
+        }
+
+        pub fn element_by_name(self: *const Self, name: []const u8) ?*const ItemType {
+            if (self.hashtable) |ht| {
+                return ht.lookup(name, self);
+            }
+            // Fallback to linear search
+            var it = self.root;
+            for (0..self.number_of_items) |_| {
+                if (std.mem.eql(u8, it.name(), name)) {
+                    return it;
+                }
+                it = it.next(self.alignment);
+            }
+            return null;
         }
 
         pub const Iterator = struct {
