@@ -140,7 +140,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         if (maybe_node == null) {
             return null;
         }
-        if (path_without_trailing_separator.len <= 1) {
+        if (path_without_trailing_separator.len < 1) {
             return maybe_node;
         }
         while (component) |part| : (component = it.next()) {

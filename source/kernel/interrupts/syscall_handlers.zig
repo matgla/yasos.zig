@@ -485,39 +485,41 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var relative_path = false;
+        var slice_allocated = false;
         var path_slice: []const u8 = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
         if (path_slice[0] != '/') {
             if (process.cwd[process.cwd.len - 1] == '/') {
                 path_slice = std.fmt.allocPrint(kernel_allocator, "{s}{s}", .{ process.cwd, path_slice }) catch {
                     return -1;
                 };
-            } else {
-                path_slice = std.fs.path.resolve(kernel_allocator, &.{ process.cwd, path_slice }) catch {
-                    return -1;
-                };
             }
-            relative_path = true;
+            slice_allocated = true;
         }
-        defer if (relative_path) kernel_allocator.free(path_slice);
-        if (path_slice.len == 0) {
+        defer if (slice_allocated) kernel_allocator.free(path_slice);
+
+        const resolved_path = std.fs.path.resolve(kernel_allocator, &.{ process.cwd, path_slice }) catch {
+            return -1;
+        };
+        defer kernel_allocator.free(resolved_path);
+
+        if (resolved_path.len == 0) {
             return -1;
         }
-        var maybe_file = fs.get_ivfs().interface.get(path_slice, process.get_memory_allocator());
+        var maybe_file = fs.get_ivfs().interface.get(resolved_path, process.get_memory_allocator());
         if (maybe_file) |*file| {
             defer file.interface.delete();
             if (file.interface.filetype() == FileType.Directory) {
-                process.change_directory(path_slice) catch |err| {
-                    log.warn("chdir: failed to change directory: {s}\n", .{@errorName(err)});
+                process.change_directory(resolved_path) catch |err| {
+                    log.warn("chdir: failed to change directory: {s}", .{@errorName(err)});
                     return -1;
                 };
                 return 0;
             } else {
-                log.warn("chdir: path is not a directory: {s}\n", .{path_slice});
+                log.warn("chdir: path is not a directory: {s}", .{path_slice});
                 return -1;
             }
         }
-        std.log.err("chdir: path does not exist: {s}\n", .{path_slice});
+        std.log.err("chdir: path does not exist: {s}", .{path_slice});
     }
     return -1;
 }
