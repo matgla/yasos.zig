@@ -15,26 +15,20 @@
  along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <stdio.h>
+.thumb
+.syntax unified
+.cpu cortex-m33
 
-int main(int argc, char *argv[]) {
-  int i;
-  int newline = 1;
+.global indirect_call_thunk_template_start
+.thumb_func
+.type indirect_call_thunk_template_start, %function
+indirect_call_thunk_template_start:
+    ldr r9, r9_value
+    ldr ip, original_function_address
+    bx ip
+    nop
+r9_value: .word 0xffffffff
+original_function_address: .word 0xffffffff
 
-  for (i = 1; i < argc; i++) {
-    if (argv[i][0] == '-' && argv[i][1] == 'n') {
-      newline = 0;
-      continue;
-    }
-    if (i > 1) {
-      putchar(' ');
-    }
-    fputs(argv[i], stdout);
-  }
-
-  if (newline) {
-    putchar('\n');
-  }
-
-  return 0;
-}
+.global indirect_call_thunk_template_size
+indirect_call_thunk_template_size: .word . - indirect_call_thunk_template_start

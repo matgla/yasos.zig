@@ -41,17 +41,21 @@ comptime {
     }
 }
 
-extern fn store_and_switch_to_next_task(lr: usize) void;
+extern fn store_and_switch_to_next_task(lr: usize) usize;
+extern fn switch_to_the_next_task(lr: usize) usize;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
 
-fn context_switch_handler(lr: usize) void {
-    if (process_manager.instance.scheduler.schedule_next()) {
-        store_and_switch_to_next_task(lr);
+fn context_switch_handler(lr: usize) linksection(".time_critical") usize {
+    switch (process_manager.instance.scheduler.schedule_next()) {
+        .Switch => return switch_to_the_next_task(lr),
+        .StoreAndSwitch => return store_and_switch_to_next_task(lr),
+        else => return lr,
     }
+    return lr;
 }
 
-fn sys_unhandled_factory(comptime i: usize) type {
+fn sys_unhandled_factory(comptime i: usize) linksection(".time_critical") type {
     return struct {
         fn handler(arg: *const volatile anyopaque) !i32 {
             _ = arg;
@@ -105,6 +109,9 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_dlopen => return handlers.sys_dlopen,
             c.sys_dlclose => return handlers.sys_dlclose,
             c.sys_dlsym => return handlers.sys_dlsym,
+            c.sys_getuid => return handlers.sys_getuid,
+            c.sys_geteuid => return handlers.sys_geteuid,
+            c.sys_dup => return handlers.sys_dup,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -120,7 +127,7 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
-pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) void {
+pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") void {
     const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
     const result: i32 = result_or_error catch |err| {
         c_result.*.err = @intFromError(err);
@@ -132,12 +139,12 @@ pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) voi
     c_result.*.err = -1;
 }
 
-pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
     write_result(out, syscall_lookup_table[number](arg));
 }
 
 // can be called only from the user process, not from the kernel
-pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) void {
+pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) linksection(".time_critical") void {
     var svc_arg: *const anyopaque = undefined;
     var svc_out: *anyopaque = undefined;
 

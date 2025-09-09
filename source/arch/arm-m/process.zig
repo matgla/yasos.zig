@@ -43,6 +43,8 @@ fn void_or_value(comptime value: anytype) void_or_register() {
     return {};
 }
 
+extern fn push_registers_on_stack(sp: usize, lr: usize) *u8;
+
 pub const HardwareStoredRegisters = extern struct {
     r0: u32,
     r1: u32,
@@ -166,7 +168,8 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
     };
 }
 
-pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize) *u8 {
+pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize, use_fpu: bool) *u8 {
+    _ = use_fpu; // unused in this function, but used in the caller
     var hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
     if (maybe_args) |args| {
         if (args.len >= 1) {
@@ -198,20 +201,15 @@ pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const
 }
 
 pub fn init() void {
+    std.log.info("Initializing ARM Cortex-M process module...", .{});
     hal.time.systick.init(@intCast(hal.cpu.frequency() / 1000)) catch @panic("Unable to initialize systick");
     hal.time.systick.disable();
 }
 
 pub fn initialize_context_switching() void {
-    hal.irq.set_priority(.supervisor_call, 0x00);
+    hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
     hal.irq.set_priority(.pendsv, 0xfe);
-    hal.irq.set_priority(.systick, 0xff);
-}
-
-extern fn context_switch_push_registers_to_stack(result_ptr: usize, pid: usize, lr: usize, restore: usize) *u8;
-
-pub fn dump_registers_on_stack(result_ptr: usize, ret: usize, lr: usize, restore: usize) *u8 {
-    return context_switch_push_registers_to_stack(result_ptr, ret, lr, restore);
+    hal.irq.set_priority(.systick, 0x00);
 }
 
 pub const ArmProcess = struct {
@@ -227,7 +225,7 @@ pub const ArmProcess = struct {
         // if (comptime config.process.use_stack_overflow_detection) {
         // @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
         // }
-        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg);
+        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg, true);
         return ArmProcess{
             .stack = stack,
             .stack_position = stack_position,
@@ -257,68 +255,93 @@ pub const ArmProcess = struct {
     }
 
     pub fn set_stack_pointer(self: *Self, ptr: *u8, blocked_by_process: ?*Self) void {
+        _ = blocked_by_process;
         // if the process is using its parent stack, then we have to copy stack to parent
         // and set stack position to the freshly pushed registers
-        if (!self.has_own_stack) {
-            // temporary hack
-            if (blocked_by_process) |p| {
-                if (@intFromPtr(ptr) < @intFromPtr(p.stack_position)) {
-                    const diff = @intFromPtr(p.stack_position) - @intFromPtr(ptr);
-                    self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) - diff);
-                } else {
-                    const diff = @intFromPtr(ptr) - @intFromPtr(p.stack_position);
-                    self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) + diff);
-                }
-                @memcpy(self.stack, p.stack);
-                p.stack_position = ptr;
-            }
-        } else {
-            self.stack_position = ptr;
-        }
+        // if (!self.has_own_stack) {
+        //     // temporary hack
+        //     if (blocked_by_process) |p| {
+        //         if (@intFromPtr(ptr) < @intFromPtr(p.stack_position)) {
+        //             const diff = @intFromPtr(p.stack_position) - @intFromPtr(ptr);
+        //             self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) - diff);
+        //         } else {
+        //             const diff = @intFromPtr(ptr) - @intFromPtr(p.stack_position);
+        //             self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) + diff);
+        //         }
+        //         @memcpy(self.stack, p.stack);
+        //         p.stack_position = ptr;
+        //     }
+        // } else {
+        self.stack_position = ptr;
+        // }
     }
 
     pub fn vfork(self: *Self, process_allocator: std.mem.Allocator) !Self {
+        // update stack position
+        var psp_value: usize = 0;
+        asm volatile (
+            \\ mrs %[out], psp
+            : [out] "=r" (psp_value),
+        );
+
         const stack: []align(8) u8 = try process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
-        const stack_position = self.stack_position;
+        // const stack_position: *u8 = @ptrFromInt(psp_value);
+        // parent should push to new stack
+
+        // this only matters for parent process
+
         @memcpy(stack, self.stack);
+        // const new_stack_position = push_registers_on_stack(psp_value, 0xfffffffd);
         const parent_stack = self.stack;
         self.stack = stack;
+        // parent won't do anything, let's compute stack offset
+        const stack_position: usize = psp_value - @intFromPtr(parent_stack.ptr);
+        self.stack_position = &self.stack[stack_position];
+
         self.has_own_stack = false;
+
+        asm volatile (
+            \\ msr psp, %[new_psp]
+            : // No output operands
+            : [new_psp] "r" (stack_position + @intFromPtr(stack.ptr)), // Set the new PSP,
+        );
+
         return .{
             .stack = parent_stack,
-            .stack_position = stack_position,
+            .stack_position = @ptrFromInt(psp_value - @sizeOf(SoftwareStoredRegisters)),
             .has_own_stack = false,
         };
     }
 
-    pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) void {
-        // if (comptime config.process.use_stack_overflow_detection) {
-        // @memcpy(self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
-        // }
+    pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype, use_fpu: bool) void {
         const args = [_]usize{
             argc,
             argv,
             symbol,
             got,
         };
-        self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4]);
+        self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4], use_fpu);
+        asm volatile (
+            \\ msr psp, %[new_psp]
+            : // No output operands
+            : [new_psp] "r" (self.stack_position),
+        );
     }
 
     pub fn validate_stack(self: *const Self) bool {
-        // if (!config.process.use_stack_overflow_detection) @compileError("Stack overflow detection is disabled in config!");
         return std.mem.eql(u8, self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
     }
 
-    pub fn restore_stack(self: *Self, blocks_process: ?*Self) void {
-        if (blocks_process) |p| {
-            if (!p.has_own_stack) {
-                @memcpy(self.stack, p.stack);
-                const stack = p.stack;
-                p.stack = self.stack;
-                self.stack = stack;
-                p.has_own_stack = true;
-                self.has_own_stack = true;
-            }
+    pub fn restore_parent_stack(self: *Self, parent: *Self) void {
+        if (!parent.has_own_stack) {
+            @memcpy(self.stack, parent.stack);
+            const stack = parent.stack;
+            const stack_position = @intFromPtr(parent.stack_position) - @intFromPtr(parent.stack.ptr);
+            parent.stack = self.stack;
+            parent.stack_position = &self.stack[stack_position];
+            self.stack = stack;
+            parent.has_own_stack = true;
+            self.has_own_stack = true;
         }
     }
 };

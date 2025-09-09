@@ -141,4 +141,31 @@ pub const FileHeader = struct {
         }
         return FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, self._mapped_memory, self._allocator);
     }
+
+    fn filetype_to_mode(ftype: FileType) c.mode_t {
+        switch (ftype) {
+            FileType.HardLink => unreachable,
+            FileType.Directory => return c.S_IFDIR,
+            FileType.File => return c.S_IFREG,
+            FileType.SymbolicLink => return c.S_IFLNK,
+            FileType.BlockDevice => return c.S_IFBLK,
+            FileType.CharDevice => return c.S_IFCHR,
+            FileType.Socket => return c.S_IFSOCK,
+            FileType.Fifo => return c.S_IFIFO,
+        }
+        return 0;
+    }
+
+    pub fn stat(self: *FileHeader, buf: *c.struct_stat) void {
+        buf.st_dev = 0;
+        buf.st_ino = @intCast(self._reader.get_offset());
+        buf.st_mode = @intCast(filetype_to_mode(self.filetype()));
+        buf.st_nlink = 0;
+        buf.st_uid = 0;
+        buf.st_gid = 0;
+        buf.st_rdev = 0;
+        buf.st_size = @intCast(self.size());
+        buf.st_blksize = 1;
+        buf.st_blocks = 1;
+    }
 };

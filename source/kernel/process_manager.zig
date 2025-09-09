@@ -44,6 +44,8 @@ extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const any
 
 extern fn reload_current_task() void;
 
+extern var sp_call_fpu: bool;
+
 fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
     return struct {
         pub const ContainerType = std.DoublyLinkedList;
@@ -82,21 +84,31 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         }
 
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
-            var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool);
-            return self.processes.append(&new_process.node);
+            var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null);
+            self.processes.append(&new_process.node);
         }
 
         pub fn get_process_memory_pool(self: Self) kernel.memory.heap.ProcessMemoryPool {
             return self._process_memory_pool;
         }
 
-        pub fn delete_process(self: *Self, pid: u32) void {
+        pub fn delete_process(self: *Self, pid: u32, return_code: i32) void {
             var next = self.processes.first;
+            var should_restore_parent = false;
+            defer if (should_restore_parent) {
+                hal.irq.trigger(.pendsv);
+                //reload_current_task();
+            };
             while (next) |node| {
                 const p: *Process = @fieldParentPtr("node", node);
                 next = node.next;
                 if (p.pid == pid) {
-                    p.unblock_parent();
+                    const has_shared_stack = p.has_stack_shared_with_parent();
+                    p.unblock_all(return_code);
+                    if (has_shared_stack) {
+                        _ = p.release_parent_after_getting_freedom();
+                        should_restore_parent = true;
+                    }
                     self.processes.remove(&p.node);
                     dynamic_loader.release_executable(pid);
                     p.deinit();
@@ -110,11 +122,12 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                             };
                         }
 
-                        if (self.scheduler.schedule_next()) {
-                            switch_to_next_task();
-                        } else {
-                            @panic("ProcessManager: No process to schedule");
-                        }
+                        // if (self.scheduler.schedule_next()) {
+                        //     switch_to_next_task();
+                        // } else {
+                        //     @panic("ProcessManager: No process to schedule");
+                        // }
+                        hal.irq.trigger(.pendsv);
                     }
                     break;
                 }
@@ -150,21 +163,28 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             p.state = Process.State.Ready;
         }
 
-        pub fn vfork(self: *Self) !i32 {
+        pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
             const maybe_current_process = self.scheduler.get_current();
             if (maybe_current_process) |current_process| {
-                const new_process = current_process.vfork(&self._process_memory_pool) catch {
+                const new_process = current_process.vfork(&self._process_memory_pool, context) catch {
                     return -1;
                 };
 
-                current_process.wait_for_process(new_process) catch {
+                const Action = struct {
+                    pub fn on_process_unblock(ctx: ?*anyopaque, rc: i32) void {
+                        _ = ctx;
+                        _ = rc;
+                    }
+                };
+
+                current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch {
                     return -1;
                 };
+
                 self.processes.append(&new_process.node);
-                // switch without context switch
-                // self.scheduler.current = &new_process.node;
-
-                return @intCast(new_process.pid);
+                context.pid.* = 0;
+                hal.irq.trigger(.pendsv);
+                return 0;
             }
             return -1;
         }
@@ -180,6 +200,11 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         };
 
         pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
+            var should_restore_parent = false;
+            defer if (should_restore_parent) {
+                hal.irq.trigger(.pendsv);
+                // reload_current_task();
+            };
             const maybe_current_process = self.scheduler.get_current();
             if (maybe_current_process) |p| {
                 // TODO: move loader to struct, pass allocator to loading functions
@@ -199,20 +224,46 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                     return -1;
                 }
 
-                p.restore_stack(); // process is still blocked so it won't be scheduled, unblocking when child finishes
-                // TODO: add & support
-                p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
-
-                // switch to me
-                reload_current_task();
-
+                _ = p.release_parent_after_getting_freedom();
+                p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address, sp_call_fpu);
+                should_restore_parent = true;
                 return 0;
             }
             return -1;
         }
 
-        pub fn waitpid(_: Self, _: i32, _: *i32) !i32 {
-            return -1;
+        pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
+            var next = self.processes.first;
+            while (next) |node| {
+                const p: *Process = @fieldParentPtr("node", node);
+                if (p.pid == pid) {
+                    return p;
+                }
+                next = node.next;
+            }
+            return null;
+        }
+
+        pub fn waitpid(self: *Self, pid: i32, status: *i32) !i32 {
+            const maybe_current_process = self.get_current_process();
+            if (maybe_current_process) |current_process| {
+                const maybe_process = self.get_process_for_pid(pid);
+                if (maybe_process) |p| {
+                    const Action = struct {
+                        pub fn on_process_finished(context: ?*anyopaque, rc: i32) void {
+                            const s: *i32 = @ptrCast(@alignCast(context));
+                            s.* = rc;
+                        }
+                    };
+                    current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
+                        return -1;
+                    };
+                    // switch_to_next_task();
+                    hal.irq.trigger(.pendsv);
+                }
+            }
+
+            return 0;
         }
 
         // This must take asking core into consideration since, more than one processes are going in the parallel
@@ -231,13 +282,11 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
 }
 pub const ProcessManager = ProcessManagerGenerator(Scheduler);
 
-extern fn context_switch_get_psp() usize;
-extern fn context_switch_push_registers_to_stack(stack_pointer: *u8) *u8;
-
 pub var instance: ProcessManager = undefined;
 
 pub fn initialize_process_manager(allocator: std.mem.Allocator) void {
     log.info("Process manager initialization...", .{});
+    process.init();
     instance = ProcessManager.init(allocator);
     instance.scheduler.manager = &instance;
 }

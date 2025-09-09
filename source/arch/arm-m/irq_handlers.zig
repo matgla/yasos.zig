@@ -40,7 +40,7 @@ pub const VForkContext = extern struct {
     result: *volatile c.pid_t,
 };
 
-const ContextSwitchHandler = *const fn (lr: usize) void;
+const ContextSwitchHandler = *const fn (lr: usize) usize;
 const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
 
 var context_switch_handler: ?ContextSwitchHandler = null;
@@ -49,7 +49,7 @@ var system_call_handler: ?SystemCallHandler = null;
 export var sp_call: usize = 0;
 export var sp_call_fpu: bool = false;
 
-export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
+export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
     if (number == 1) {
         if (sp_call_fpu) {
             sp_call |= 1;
@@ -60,11 +60,11 @@ export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatil
     }
 }
 
-export fn irq_pendsv() void {
-    const lr: usize = arch.get_lr();
+export fn do_context_switch(lr: usize) usize {
     if (context_switch_handler) |handler| {
-        handler(lr);
+        return handler(lr);
     }
+    return lr;
 }
 
 pub fn set_context_switch_handler(handler: ContextSwitchHandler) void {

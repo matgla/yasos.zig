@@ -22,6 +22,8 @@ const c = @import("cmsis").cmsis;
 
 const cpu = @import("arch").Registers;
 
+const std = @import("std");
+
 pub const SysTick = struct {
     pub const SysTickError = error{
         ConfigurationFailure,

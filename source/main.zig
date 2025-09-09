@@ -62,7 +62,7 @@ pub const std_options: std.Options = .{
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{
             .scope = .yasld,
-            .level = .err,
+            .level = .info,
         },
         .{
             .scope = .@"vfs/driverfs",
@@ -72,7 +72,15 @@ pub const std_options: std.Options = .{
             .scope = .@"kernel/fs/mount_points",
             .level = .debug,
         },
+        .{
+            .scope = .benchmark,
+            .level = .debug,
+        },
     },
+};
+
+pub const os = struct {
+    pub const PATH_MAX = 128;
 };
 
 fn initialize_board() void {
@@ -297,8 +305,10 @@ export fn kernel_process(argument: *KernelAllocator) void {
             return;
         };
 
-        const args: [][]u8 = &.{};
-        _ = sh.main(@ptrCast(args.ptr), args.len) catch |err| {
+        var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };
+        var args: [2][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0) };
+
+        _ = sh.main(@ptrCast(&args[0]), 1) catch |err| {
             kernel.log.err("Cannot execute main: {s}", .{@errorName(err)});
         };
     }

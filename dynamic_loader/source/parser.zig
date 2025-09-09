@@ -28,6 +28,7 @@ const Dependency = @import("dependency.zig").Dependency;
 const relocation = @import("relocation_table.zig");
 const Header = @import("header.zig").Header;
 const Section = @import("section.zig").Section;
+const YaffHashTable = @import("hashtable.zig").YaffHashTable;
 
 const SymbolTableRelocations = relocation.RelocationTable(relocation.SymbolTableRelocation);
 const LocalRelocations = relocation.RelocationTable(relocation.LocalRelocation);
@@ -48,6 +49,8 @@ pub const Parser = struct {
     got_plt_address: usize,
     plt_address: usize,
     header: *const Header,
+    imported_symbols_hash_table: YaffHashTable,
+    exported_symbols_hash_table: YaffHashTable,
 
     pub fn create(header: *const Header) Parser {
         const name: []const u8 = std.mem.span(@as([*:0]const u8, @ptrFromInt(@intFromPtr(header) + @sizeOf(Header))));
@@ -55,6 +58,7 @@ pub const Parser = struct {
             .number_of_items = header.external_libraries_amount,
             .alignment = header.alignment,
             .root = @as(*const Dependency, @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(name.ptr) + name.len + 1, header.alignment))),
+            .lookup = &[_]u16{},
         };
 
         const symbol_table_array: [*]align(4) relocation.SymbolTableRelocation = @ptrFromInt(imported_libraries.address() + imported_libraries.size());
@@ -77,6 +81,7 @@ pub const Parser = struct {
             .number_of_items = header.imported_symbols_amount,
             .alignment = header.alignment,
             .root = @as(*const Symbol, @ptrFromInt(data_relocations.address() + data_relocations.size())),
+            .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.imported_symbols_lookup_offset))[0..header.imported_symbols_amount],
         };
 
         const imported_array_size = imported_array.size();
@@ -84,6 +89,7 @@ pub const Parser = struct {
             .number_of_items = header.exported_symbols_amount,
             .alignment = header.alignment,
             .root = @as(*const Symbol, @ptrFromInt(imported_array.address() + imported_array_size)),
+            .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.exported_symbols_lookup_offset))[0..header.exported_symbols_amount],
         };
 
         const text: usize = @intFromPtr(header) + header.text_offset;
@@ -92,6 +98,35 @@ pub const Parser = struct {
         const data: usize = plt + header.plt_length;
         const got: usize = data + header.data_length;
         const got_plt: usize = got + header.got_length;
+        var imported_symbols_hash_table: YaffHashTable = .{
+            .nbucket = 0,
+            .nchain = 0,
+            .bucket = &[_]u32{},
+            .chain = &[_]u32{},
+        };
+
+        if (header.imported_symbols_amount > 0) {
+            const imported_hash_table_data: [*]u32 = @as([*]u32, @ptrFromInt(@intFromPtr(header) + header.imported_symbols_hash_table_offset));
+            imported_symbols_hash_table.nbucket = imported_hash_table_data[0];
+            imported_symbols_hash_table.nchain = imported_hash_table_data[1];
+            imported_symbols_hash_table.bucket = imported_hash_table_data[2..][0..imported_hash_table_data[0]];
+            imported_symbols_hash_table.chain = imported_hash_table_data[2 + imported_hash_table_data[0] ..][0..imported_hash_table_data[1]];
+        }
+
+        var exported_symbols_hash_table: YaffHashTable = .{
+            .nbucket = 0,
+            .nchain = 0,
+            .bucket = &[_]u32{},
+            .chain = &[_]u32{},
+        };
+        if (header.exported_symbols_amount > 0) {
+            const exported_hash_table_data: [*]u32 = @as([*]u32, @ptrFromInt(@intFromPtr(header) + header.exported_symbols_hash_table_offset));
+            exported_symbols_hash_table.nbucket = exported_hash_table_data[0];
+            exported_symbols_hash_table.nchain = exported_hash_table_data[1];
+            exported_symbols_hash_table.bucket = exported_hash_table_data[2..][0..exported_hash_table_data[0]];
+            exported_symbols_hash_table.chain = exported_hash_table_data[2 + exported_hash_table_data[0] ..][0..exported_hash_table_data[1]];
+        }
+
         return Parser{
             .name = name,
             .imported_libraries = imported_libraries,
@@ -107,6 +142,8 @@ pub const Parser = struct {
             .got_plt_address = got_plt,
             .plt_address = plt,
             .header = header,
+            .imported_symbols_hash_table = imported_symbols_hash_table,
+            .exported_symbols_hash_table = exported_symbols_hash_table,
         };
     }
 

@@ -17,7 +17,7 @@
 // Public License along with this program. If not, see
 // <https://www.gnu.org/licenses/>.
 //
-
+const std = @import("std");
 const config = @import("config");
 
 const hal = @import("hal");

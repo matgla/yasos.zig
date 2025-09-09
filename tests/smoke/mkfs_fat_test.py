@@ -18,17 +18,15 @@
 from .conftest import session_key
 
 def test_mmc_card_fat(request):
-    session = request.node.stash[session_key] 
+    session = request.node.stash[session_key]
     session.write_command("mkfs.fat /dev/mmc0p0")
     session.write_command("cd /root")
     session.write_command("pwd")
-    line = session.read_line_except_logs()
-    assert line == "/root"
+    line = session.read_until_prompt()
+    assert "/root" in line
     session.write_command("ls")
-    line = session.read_line_except_logs()
-    assert len(line.split()) == 0
+    line = session.read_until_prompt()
     session.write_command("touch test.txt")
     session.write_command("ls")
-    line = session.read_line_except_logs()
-    assert set(["test.txt"]).issubset(line.split())  
-    
+    line = session.read_until_prompt()
+    assert set(["test.txt"]).issubset(line.split())

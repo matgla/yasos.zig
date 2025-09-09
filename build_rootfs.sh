@@ -18,7 +18,7 @@ eval set -- "$PARSED"
 
 if [[ ! -v CC ]]; then
   CC=armv8m-tcc
-else 
+else
   echo "Using CC: $CC"
 fi
 # Default value
@@ -54,7 +54,7 @@ PREFIX=$SCRIPT_DIR/rootfs/usr
 echo "Building rootfs from $SCRIPT_DIR..."
 cd $SCRIPT_DIR
 
-if $CLEAR; then 
+if $CLEAR; then
   echo "Clearing..."
   rm -rf rootfs
   rm -rf apps/shell/build
@@ -72,6 +72,7 @@ if $CLEAR; then
   rm -rf libs/libm/build
   rm -rf apps/yasvi/build
   rm -rf apps/mkfs/build
+  rm -rf apps/longjump_tester/build
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
@@ -83,7 +84,7 @@ mkdir -p rootfs/proc
 mkdir -p rootfs/root
 mkdir -p rootfs/home
 cd rootfs
-ln -s usr/lib  
+ln -s usr/lib
 ln -s usr/bin
 ls -lah
 pwd
@@ -92,18 +93,18 @@ mkdir -p rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
 mkdir -p rootfs/dev
 pwd
-cd libs 
+cd libs
 
 build_cross_compiler()
 {
   echo "Building cross compiler..."
   cd tinycc
   mkdir -p bin
-  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" 
+  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc 
+  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
   make install
@@ -120,11 +121,11 @@ build_c_compiler()
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   # gcc -o armv8m-tcc.o -c tcc.c -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM_ARCHV8M -DCONFIG_TCC_CROSSPREFIX="\"armv8m-\"" -I. -DTCC_GITHASH="\"2025-05-11 armv8m@ec701fe2*\"" -DTCC_DEBUG=2 -g -O0 -Wdeclaration-after-statement -Wno-unused-result
 
-  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=yaff" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
+  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O0 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=yaff" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  VERBOSE=1 make armv8m-tcc -j8 
+  VERBOSE=1 make armv8m-tcc -j8
 
   if [ $? -ne 0 ]; then
     exit -1;
@@ -183,6 +184,9 @@ build_makefile hello_world
 build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs
+build_makefile longjump_tester
+
+$SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 
 cd ..
 
@@ -193,5 +197,6 @@ if $BUILD_IMAGE; then
   rm -rf rootfs/usr/share
   rm -f rootfs/bin/tcc
   mv rootfs/bin/tcc.elf rootfs/bin/tcc
-  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs 
+  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
 fi
+

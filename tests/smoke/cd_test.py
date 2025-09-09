@@ -23,10 +23,10 @@ def test_change_dir(request):
     session.write_command("pwd")
     line = session.read_line_except_logs()
     assert line == "/"
-    
-    session.write_command("cd bin")
+
+    session.write_command("cd /bin")
     session.write_command("ls")
-    line = session.read_line_except_logs()
+    line = session.read_until_prompt()
     assert set(["ls", "cat", "sh"]).issubset(line.split())
 
     session.write_command("pwd")
@@ -37,4 +37,3 @@ def test_change_dir(request):
     session.write_command("pwd")
     line = session.read_line_except_logs()
     assert line == "/"
-    

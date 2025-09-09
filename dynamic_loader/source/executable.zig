@@ -18,6 +18,8 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
+
 const Module = @import("module.zig").Module;
 
 const get_loader = @import("loader.zig").get_loader;

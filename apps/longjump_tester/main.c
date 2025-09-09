@@ -18,35 +18,22 @@
  * <https://www.gnu.org/licenses/>.
  */
 
+#include <setjmp.h>
 #include <stdio.h>
-#include <string.h>
-#include <unistd.h>
 
-int main(int argc, char *argv[]) {
-  char cwd[256] = {0};
-  if (argc < 2) {
-    fprintf(stderr, "Usage: %s <directory>\n", argv[0]);
-    return 1;
-  }
-  if (argv[1][0] == '/') {
-    // Absolute path
-    strcpy(cwd, argv[1]);
-  } else {
-    // Relative path
-    getcwd(cwd, sizeof(cwd));
-    strcat(cwd, "/");
-    strcat(cwd, argv[1]);
-  }
-  FILE *file = fopen(cwd, "r");
-  if (file == NULL) {
-    perror("fopen");
-    return 1;
-  }
-  char buffer[256];
-  while (fgets(buffer, sizeof(buffer), file) != NULL) {
-    printf("%s", buffer);
-  }
-  printf("\n");
-  fclose(file);
+int global;
+
+static int compare(void *a, void *b) {
+  global++;
+  printf("global in compare: %d\n", global);
+  return *(int *)a - *(int *)b;
+}
+
+int main() {
+  char data[4] = {0, 7, 1, 3};
+  global = 42;
+  printf("global before qsort: %d\n", global);
+  qsort(data, 4, 1, &compare);
+  qsort(data, 4, 1, compare);
   return 0;
 }

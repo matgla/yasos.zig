@@ -69,15 +69,6 @@ pub const Loader = struct {
     }
 
     pub fn deinit(self: *Loader) void {
-        // var it = self.modules_list.iterator();
-        // while (it.next()) |n| {
-        // var next = n.value_ptr.first;
-        // while (next) |node| {
-        // var module: *Module = @fieldParentPtr("list_node", node);
-        // module.destroy();
-        //         next = node.next;
-        //     }
-        // }
         self.modules_list.deinit();
     }
 
@@ -139,29 +130,23 @@ pub const Loader = struct {
             return err;
         };
         print_header(header);
-
         const parser = Parser.create(header);
         parser.print();
 
         try module.set_name(parser.name);
-
         try self.import_child_modules(header, &parser, module);
-
         // if module is already loaded just data must be loaded
         const shared_data = try self.get_shared_data(parser.name, process_allocator, &parser, module.xip);
         module.add_shared_data(shared_data);
         try self.process_data(header, &parser, module);
         // module.exported_symbols = parser.exported_symbols;
-
         const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
         try module.relocate_init(init_ptr[0..header.init_length], header);
         module.process_initializers();
-
         try self.process_symbol_table_relocations(&parser, module, header);
         try self.process_local_relocations(&parser, module);
         try self.process_data_relocations(&parser, module);
-
-        log.info(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
+        log.debug(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
         log.debug(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
         log.debug(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
         log.debug(".bss  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
@@ -272,7 +257,6 @@ pub const Loader = struct {
         if (maybe_init == null) {
             log.debug("[yasld] Can't find symbol '__start_data'", .{});
         }
-
         for (0..got.len) |i| {
             if (i < 3) {
                 continue;
@@ -288,8 +272,40 @@ pub const Loader = struct {
             got[i].symbol_offset = address;
         }
 
+        var number_of_function_pointer_relocations: usize = 0;
+        var current_function_pointer_relocation_index: usize = 0;
+        for (parser.symbol_table_relocations.relocations) |rel| {
+            if (rel.function_pointer == 1) {
+                number_of_function_pointer_relocations += 1;
+            }
+        }
+        const maybe_shared_data = module.shared_data;
+        if (maybe_shared_data) |shared| {
+            try shared.allocate_thunks(number_of_function_pointer_relocations);
+        }
+
         for (parser.symbol_table_relocations.relocations) |rel| {
             var maybe_symbol: ?*const Symbol = null;
+            if (rel.function_pointer == 1) {
+                maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
+                if (maybe_symbol == null) {
+                    log.err("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
+                    return LoaderError.SymbolNotFound;
+                }
+                if (maybe_shared_data) |shared| {
+                    const maybe_symbol_entry = self.find_symbol(module, maybe_symbol.?.name());
+                    if (maybe_symbol_entry) |symbol_entry| {
+                        const address = shared.generate_thunk(current_function_pointer_relocation_index, @intFromPtr(got.ptr), symbol_entry.address) catch |err| {
+                            log.err("[yasld] Can't generate thunk for symbol: '{s}': {s}", .{ maybe_symbol.?.name(), @errorName(err) });
+                            return err;
+                        };
+                        current_function_pointer_relocation_index += 1;
+                        got[rel.index].symbol_offset = address;
+                    }
+                }
+                got[rel.index].base_register = @intFromPtr(got.ptr);
+                continue;
+            }
             if (rel.is_exported_symbol == 1) {
                 maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
             } else {
@@ -364,7 +380,7 @@ pub const Loader = struct {
 
     fn process_header(_: Loader, module_address: *const anyopaque) error{IncorrectSignature}!*const Header {
         const header: *const Header = @ptrCast(@alignCast(module_address));
-        if (!std.mem.eql(u8, std.mem.asBytes(&header.marker), "YAFF")) {
+        if (!std.mem.eql(u8, std.mem.asBytes(&header.magic), "YAFF")) {
             return error.IncorrectSignature;
         }
         return header;

@@ -236,6 +236,7 @@ pub fn build(b: *std.Build) !void {
 
             kernel_exec.root_module.addImport("kernel", kernel_module);
             kernel_exec.root_module.addImport("yasld", yasld.module("yasld"));
+            yasld.module("yasld").addIncludePath(b.path("./libs/tinycc"));
             kernel_exec.root_module.addImport("libc_imports", libc_imports_module);
             kernel_exec.root_module.addIncludePath(b.path("."));
             const arch_module = b.addModule("arch", .{
@@ -277,6 +278,7 @@ pub fn build(b: *std.Build) !void {
                 .@"no-libc" = true,
                 .@"static-rtc" = date[0..],
                 .mkfs = true,
+                .relative_path_api = .enabled_with_getcwd,
             });
             _ = try zfat.builder.addUserInputOption("no-libc", "true");
             const zfat_module = zfat.module("zfat");
