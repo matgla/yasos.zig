@@ -208,9 +208,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             const maybe_current_process = self.scheduler.get_current();
             if (maybe_current_process) |p| {
                 // TODO: move loader to struct, pass allocator to loading functions
-                kernel.benchmark.timestamp("LoadExec");
                 const executable = try dynamic_loader.load_executable(path, p.get_memory_allocator(), p.get_process_memory_allocator(), p.pid);
-                kernel.benchmark.timestamp("LoadedExec");
                 var argc: usize = 0;
                 while (argv[argc] != null) : (argc += 1) {}
 

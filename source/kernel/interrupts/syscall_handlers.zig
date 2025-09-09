@@ -231,24 +231,25 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_close(arg: *const volatile anyopaque) !i32 {
-    const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
-
+fn close_fd(fd: i32) i32 {
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(fd.*));
+        var maybe_file = process.fds.get(@intCast(fd));
         if (maybe_file) |*file| {
-            _ = file.file.interface.close();
             file.file.interface.delete();
-            _ = process.fds.remove(@intCast(fd.*));
+            _ = process.fds.remove(@intCast(fd));
             return 0;
         }
     }
     return -1;
 }
 
+pub fn sys_close(arg: *const volatile anyopaque) !i32 {
+    const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
+    return close_fd(fd.*);
+}
+
 pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
-    kernel.benchmark.timestamp("exit");
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -605,8 +606,14 @@ pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
     if (maybe_process) |process| {
         var maybe_file = process.fds.get(@intCast(context.fd));
         if (maybe_file) |*file| {
-            const fd = process.get_free_fd();
-            process.fds.put(fd, .{
+            var fd: i32 = 0;
+            if (context.newfd >= 0) {
+                fd = context.newfd;
+                _ = close_fd(fd);
+            } else {
+                fd = process.get_free_fd();
+            }
+            process.fds.put(@intCast(fd), .{
                 .file = file.file.share(),
                 .path = file.path,
                 .diriter = null,

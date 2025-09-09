@@ -59,19 +59,24 @@ pub const std_options: std.Options = .{
     .page_size_min = 1 * 1024,
     .logFn = kernel.kernel_stdout_log,
     .log_level = get_log_level(),
-    .log_scope_levels = &[_]std.log.ScopeLevel{ .{
-        .scope = .yasld,
-        .level = .info,
-    }, .{
-        .scope = .@"vfs/driverfs",
-        .level = .debug,
-    }, .{
-        .scope = .@"kernel/fs/mount_points",
-        .level = .debug,
-    }, .{
-        .scope = .benchmark,
-        .level = .debug,
-    } },
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{
+            .scope = .yasld,
+            .level = .info,
+        },
+        .{
+            .scope = .@"vfs/driverfs",
+            .level = .debug,
+        },
+        .{
+            .scope = .@"kernel/fs/mount_points",
+            .level = .debug,
+        },
+        .{
+            .scope = .benchmark,
+            .level = .debug,
+        },
+    },
 };
 
 pub const os = struct {

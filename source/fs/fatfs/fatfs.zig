@@ -197,13 +197,12 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return null;
         };
-        var maybe_file = FatFsFile.InstanceType.create(allocator, filepath);
-        if (maybe_file) |*file| {
+        const maybe_file = FatFsFile.InstanceType.create(allocator, filepath);
+        if (maybe_file) |file| {
             return file.interface.new(allocator) catch return null;
-        } else {
-            allocator.free(filepath);
-            return null;
         }
+        allocator.free(filepath);
+        return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
@@ -230,18 +229,33 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        const path_c = self._allocator.dupeZ(u8, path) catch {
+        if (std.mem.eql(u8, path, "/") or path.len == 0) {
+            data.st_blksize = 512;
+            data.st_size = 0;
+            data.st_mode = c.S_IFDIR;
+            data.st_nlink = 0; // Number of links,
+            data.st_uid = 0;
+            data.st_gid = 0; // Group ID
+            data.st_dev = 0; // Device ID
+            data.st_ino = 0; // Inode number
+            data.st_rdev = 0; // Device type (for special files)
+            data.st_blocks = 0;
+            return 0;
+        }
+        var path_c = std.fmt.allocPrintSentinel(self._allocator, "{s} ", .{path}, 0) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return -1;
         };
+        path_c[path_c.len - 1] = 0; // Null-terminate
         defer self._allocator.free(path_c);
-        const finfo = fatfs.stat(path_c) catch {
+        const finfo = fatfs.stat(path_c) catch |err| {
+            log.err("Failed to stat path: '{s}', with an error: {s}", .{ path_c, @errorName(err) });
             return -1;
         };
         data.st_blksize = 512;
         data.st_size = @intCast(finfo.size);
         data.st_mode = if (finfo.kind == .Directory) c.S_IFDIR else c.S_IFREG;
-        data.st_nlink = 1; // Number of links,
+        data.st_nlink = 0; // Number of links,
         data.st_uid = 0;
         data.st_gid = 0; // Group ID
         data.st_dev = 0; // Device ID

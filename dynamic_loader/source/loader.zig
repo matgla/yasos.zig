@@ -32,8 +32,6 @@ const SymbolEntry = @import("module.zig").SymbolEntry;
 const LoadedSharedData = @import("module.zig").LoadedSharedData;
 const LoadedUniqueData = @import("module.zig").LoadedUniqueData;
 
-const kernel = @import("kernel");
-
 const log = std.log.scoped(.yasld);
 
 const LoaderError = error{
