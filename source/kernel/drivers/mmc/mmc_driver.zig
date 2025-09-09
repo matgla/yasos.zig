@@ -335,7 +335,7 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     }
 
     fn block_write_impl(self: Self, comptime cmd: u6, argument: u32, input: []const u8) anyerror!void {
-        log.info("Writing block with command: {d}, argument: {x}", .{ cmd, argument });
+        log.debug("Writing block with command: {d}, argument: {x}", .{ cmd, argument });
         const cmd_resp = self.send_command(cmd, argument, R1, false);
         errdefer self._mmc.chip_select(false);
         if (cmd_resp.r1 != 0x00) {
