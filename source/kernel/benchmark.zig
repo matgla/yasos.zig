@@ -13,13 +13,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub const c = @cImport({
-    @cInclude("libs/libc/sys/syscall.h");
-    @cInclude("libs/libc/unistd.h");
-    @cInclude("libs/libc/sys/stat.h");
-    @cInclude("libs/libc/sys/ioctl.h");
-    @cInclude("libs/libc/termios.h");
-    @cInclude("libs/libc/dirent.h");
-    @cInclude("libs/libc/fcntl.h");
-    @cInclude("libs/libc/errno.h");
-});
+const std = @import("std");
+const hal = @import("hal");
+
+const log = std.log.scoped(.benchmark);
+
+var previous: u64 = 0;
+
+pub fn timestamp(name: []const u8) void {
+    const time = hal.time.get_time_us();
+    if (previous == 0) {
+        previous = time;
+        return;
+    }
+    log.debug("Timepoint '{s}' {d} us, diff: {d}", .{ name, time, time - previous });
+    previous = time;
+}

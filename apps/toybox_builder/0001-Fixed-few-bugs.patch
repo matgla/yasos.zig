@@ -1,0 +1,76 @@
+From f5e5cce766fa84d8e9937b2daa1cb1d2733b329d Mon Sep 17 00:00:00 2001
+From: Mateusz Stadnik <matgla@live.com>
+Date: Tue, 9 Sep 2025 21:17:38 +0200
+Subject: [PATCH] Fixed few bugs
+
+---
+ main.c                 | 2 +-
+ scripts/portability.sh | 2 +-
+ toys/pending/sh.c      | 5 +++--
+ toys/posix/echo.c      | 1 -
+ 4 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/main.c b/main.c
+index aa6a52cb..8dc2426d 100644
+--- a/main.c
++++ b/main.c
+@@ -224,7 +224,7 @@ void toy_singleinit(struct toy_list *which, char *argv[])
+ 
+     if (which->flags & TOYFLAG_LINEBUF) btype = _IOLBF;
+     else if (which->flags & TOYFLAG_NOBUF) btype = _IONBF;
+-    else buf = xmalloc(4096);
++    buf = xmalloc(4096);
+     setvbuf(stdout, buf, btype, buf ? 4096 : 0);
+   }
+ }
+diff --git a/scripts/portability.sh b/scripts/portability.sh
+index 570d9e29..d5d6df3b 100644
+--- a/scripts/portability.sh
++++ b/scripts/portability.sh
+@@ -19,7 +19,7 @@ then
+   CFLAGS+=" -Wno-deprecated-declarations"
+   : ${LDOPTIMIZE:=-Wl,-dead_strip} ${STRIP:=strip}
+ else
+-  : ${LDOPTIMIZE:=-Wl,--gc-sections -Wl,--as-needed} ${STRIP:=strip -s -R .note* -R .comment}
++  : ${LDOPTIMIZE:=-Wl,--as-needed} ${STRIP:=strip -s -R .note* -R .comment}
+ fi
+ 
+ # Disable pointless warnings only clang produces
+diff --git a/toys/pending/sh.c b/toys/pending/sh.c
+index 63026b99..ceac5f4d 100644
+--- a/toys/pending/sh.c
++++ b/toys/pending/sh.c
+@@ -489,7 +489,7 @@ static long get_lineno(struct sh_fcall **fff)
+ {
+   struct sh_fcall *ff;
+ 
+-  for (ff = TT.ff; !ff->source || !ff->name; ff = ff->next);
++  for (ff = TT.ff; (!ff->source || !ff->name) && (ff->next != ff); ff = ff->next);
+   if (fff) *fff = ff;
+ 
+   return ff->pl ? ff->pl->lineno : ff->lineno;
+@@ -3040,7 +3040,8 @@ if (DEBUG) { dprintf(2, "%d run command %p %s\n", getpid(), TT.ff, *pp->arg.v);
+ // TODO: when to prioritize $PATH over MAYFORK?
+     if (jj&(TOYFLAG_NOFORK|TOYFLAG_MAYFORK)) {
+       sigjmp_buf rebound, *prebound = toys.rebound;
+-      char temp[jj = offsetof(struct toy_context, rebound)];
++      jj = offsetof(struct toy_context, rebound);
++      char temp[256];
+ 
+       // This fakes lots of what toybox_main() does.
+       memcpy(&temp, &toys, jj);
+diff --git a/toys/posix/echo.c b/toys/posix/echo.c
+index 702efee6..53dac7d5 100644
+--- a/toys/posix/echo.c
++++ b/toys/posix/echo.c
+@@ -35,7 +35,6 @@ void echo_main(void)
+ {
+   int i = 0;
+   char *arg, *c, out[8];
+-
+   while ((arg = toys.optargs[i])) {
+     if (i++) putchar(' ');
+ 
+-- 
+2.51.0
+

@@ -227,4 +227,11 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         _ = self;
         return error.NotSupported; // Driver directory cannot be formatted
     }
+
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        _ = self;
+        _ = path;
+        _ = data;
+        return -1; // Stat not supported for driverfs
+    }
 });

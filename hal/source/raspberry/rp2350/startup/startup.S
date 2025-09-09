@@ -149,3 +149,6 @@ _start:
   ldr r1, =main 
   blx r1 
   bkpt #0
+_loop:
+  wfi
+  b _loop

@@ -5,7 +5,7 @@ SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 LDFLAGS_ELF = $(LDFLAGS) 
 
-TARGET = build/sh
+TARGET = build/jump_test
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin

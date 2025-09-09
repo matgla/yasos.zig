@@ -123,6 +123,15 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return error.NotSupported;
     }
 
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        var maybe_node = self.get_file_header(path);
+        if (maybe_node) |*node| {
+            node.stat(data);
+            return 0;
+        }
+        return -1;
+    }
+
     fn get_file_header(self: *Self, path: []const u8) ?FileHeader {
         const path_without_trailing_separator = std.mem.trimRight(u8, path, "/");
         var it = try std.fs.path.componentIterator(path);
@@ -130,6 +139,9 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         var maybe_node = self.root.first_file_header();
         if (maybe_node == null) {
             return null;
+        }
+        if (path_without_trailing_separator.len < 1) {
+            return maybe_node;
         }
         while (component) |part| : (component = it.next()) {
             var filename = maybe_node.?.name(self.allocator);

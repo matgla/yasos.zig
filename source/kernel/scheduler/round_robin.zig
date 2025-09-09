@@ -32,31 +32,35 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
         manager: *const ManagerType = undefined,
         current: ?*std.DoublyLinkedList.Node = null,
         next: ?*std.DoublyLinkedList.Node = null,
+        pub const ActionType = enum {
+            StoreAndSwitch,
+            Switch,
+            NoAction,
+        };
 
-        pub fn schedule_next(self: *Self) bool {
+        pub fn schedule_next(self: *Self) ActionType {
             if (self.manager.processes.len() == 0) {
-                return false;
+                return .NoAction;
             }
 
-            if (self.current == null) {
-                if (self.manager.processes.first) |node| {
-                    const process: *kernel.process.Process = @fieldParentPtr("node", node);
-                    process.set_core(@intCast(cpu.coreid()));
-                }
-                self.next = self.manager.processes.first;
-                return true;
+            var next: ?*std.DoublyLinkedList.Node = self.manager.processes.first;
+            if (self.current != null) {
+                next = self.current.?.next;
             }
-
-            var next = self.current.?.next;
 
             while (next) |node| {
                 // search for the next ready process
                 const process: *Process = @fieldParentPtr("node", node);
-
                 if (process.state == Process.State.Ready) {
                     process.set_core(@intCast(cpu.coreid()));
                     self.next = node;
-                    return true;
+                    if (self.current) |current_node| {
+                        const current_process: *Process = @fieldParentPtr("node", current_node);
+                        if (current_process.is_initialized()) {
+                            return .StoreAndSwitch;
+                        }
+                    }
+                    return .Switch;
                 }
 
                 next = node.next;
@@ -68,20 +72,33 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
 
                 if (node == self.current) {
                     // only already running process can be executed
-                    return false;
+                    return .NoAction;
                 }
+
                 // search for the next ready process
                 if (process.state == Process.State.Ready) {
                     process.set_core(@intCast(cpu.coreid()));
                     self.next = node;
-                    return true;
+
+                    if (self.current) |current_node| {
+                        const current_process: *Process = @fieldParentPtr("node", current_node);
+                        if (current_process.is_initialized()) {
+                            return .StoreAndSwitch;
+                        }
+                    }
+                    return .Switch;
                 }
                 next = node.next;
             }
-            return false;
+            return .NoAction;
         }
 
-        pub fn get_current(self: Self) ?*Process {
+        pub fn set_next(self: *Self, next: ?*std.DoublyLinkedList.Node) void {
+            self.next = next;
+            self.update_current();
+        }
+
+        pub fn get_current(self: *const Self) ?*Process {
             if (self.current) |node| {
                 return @fieldParentPtr("node", node);
             }
@@ -103,13 +120,16 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
         pub fn update_current(self: *Self) void {
             if (self.current) |current| {
                 const process: *Process = @fieldParentPtr("node", current);
-                process.state = Process.State.Ready;
+                process.reevaluate_state();
             }
+
             if (self.next) |next| {
                 const process: *Process = @fieldParentPtr("node", next);
                 process.state = Process.State.Running;
+                process._initialized = true;
             }
             self.current = self.next;
+            self.next = null;
         }
     };
 }

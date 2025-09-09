@@ -20,6 +20,8 @@
 
 const std = @import("std");
 
+const c = @import("libc_imports").c;
+
 const IFileSystem = @import("ifilesystem.zig").IFileSystem;
 const IDirectoryIterator = @import("ifilesystem.zig").IDirectoryIterator;
 const IFile = @import("ifile.zig").IFile;
@@ -114,6 +116,14 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         // VirtualFileSystem does not support formatting
         _ = self;
         return error.NotSupported;
+    }
+
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.interface.stat(node.left, data);
+        }
+        return -1;
     }
 
     // Below are part of VirtualFileSystem interface, not IFileSystem

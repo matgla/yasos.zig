@@ -25,3 +25,6 @@
 [submodule "apps/mkfs/libs/fatfs"]
 	path = apps/mkfs/libs/fatfs
 	url = https://github.com/abbrev/fatfs.git
+[submodule "apps/toybox"]
+	path = apps/toybox
+	url = https://github.com/landley/toybox.git

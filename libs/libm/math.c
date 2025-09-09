@@ -30,3 +30,52 @@ double ldexp(double x, int exp) {
     return x * (1 << exp);
   return x * (1 << exp);
 }
+
+double fabs(double x) {
+  return (x < 0) ? -x : x;
+}
+double sin(double x) {
+  // Simple sine approximation using Taylor series
+  double term = x; // First term is x
+  double sum = term;
+  int n = 1;
+
+  while (fabs(term) > 1e-10) { // Continue until the term is small enough
+    term *= -x * x / ((2 * n) * (2 * n + 1)); // Calculate next term
+    sum += term;                              // Add to sum
+    n++;
+  }
+  return sum;
+}
+
+float sinf(float x) {
+  // Simple sine approximation using Taylor series
+  float term = x; // First term is x
+  float sum = term;
+  int n = 1;
+
+  while (fabs(term) > 1e-6f) { // Continue until the term is small enough
+    term *= -x * x / ((2 * n) * (2 * n + 1)); // Calculate next term
+    sum += term;                              // Add to sum
+    n++;
+  }
+  return sum;
+}
+
+long double sinl(long double x) {
+  // Simple sine approximation using Taylor series
+  long double term = x; // First term is x
+  long double sum = term;
+  int n = 1;
+
+  while (fabsl(term) > 1e-10L) { // Continue until the term is small enough
+    term *= -x * x / ((2 * n) * (2 * n + 1)); // Calculate next term
+    sum += term;                              // Add to sum
+    n++;
+  }
+  return sum;
+}
+
+long double fabsl(long double x) {
+  return (x < 0) ? -x : x;
+}

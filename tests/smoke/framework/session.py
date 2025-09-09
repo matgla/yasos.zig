@@ -20,7 +20,7 @@
  """
 
 import os
-import time 
+import time
 import datetime
 import subprocess
 import re
@@ -32,12 +32,12 @@ from .detect_serial_port import detect_probe_serial_port
 current_dir = os.path.dirname(os.path.abspath(__file__)) + "/.."
 
 class Session:
-    serial_port = None 
+    serial_port = None
     file = None
-    def __init__(self, name): 
+    def __init__(self, name):
         if Session.serial_port is None:
             serial_device = os.environ.get("SERIAL_DEVICE")
-            
+
             if serial_device != None and len(serial_device.strip()) > 0:
                 print("Setting serialport to:", serial_device)
                 Session.serial_port = serial_device
@@ -52,22 +52,28 @@ class Session:
         log_file = name.split(':')[-1].split(' ')[0]
         date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         log_file = f"logs/{log_file}_{date}.txt"
-        self.file = open(log_file, 'w') 
+        self.file = open(log_file, 'w')
         self.reset_target()
         self.wait_for_prompt()
         while self.serial.inWaiting() > 0:
             self.wait_for_prompt()
 
     def wait_for_prompt(self):
-        return self.wait_for_data("$ ") 
-        
+        return self.wait_for_data("$ ")
+
     def wait_for_data(self, data):
         line = self.serial.read_until(data.encode('utf-8')).decode('utf-8')
         self.file.write(line)
         line = line.strip()
         if not line.endswith(data.strip()):
-            raise RuntimeError("Prompt not found on serial port: '" + data + "'")       
+            raise RuntimeError("Prompt not found on serial port: '" + data + "'")
         return line
+
+    def read_until(self, data):
+        return self.wait_for_data(data)
+
+    def read_until_prompt(self):
+        return self.read_until("$")
 
     def write_command(self, command):
         self.serial.write((command + '\n').encode('utf-8'))
@@ -77,14 +83,15 @@ class Session:
 
     def read_line(self):
         line = self.serial.readline().decode('utf-8')
-        self.file.write(line) 
+        self.file.write(line)
         line = line.strip()
         return line
+
 
     def read_line_except(self, regex):
         while True:
             line = self.serial.readline().decode('utf-8')
-            self.file.write(line) 
+            self.file.write(line)
             line = line.strip()
             if not re.search(regex, line):
                 return line
@@ -93,18 +100,18 @@ class Session:
     def read_line_except_logs(self):
          while True:
             line = self.serial.readline().decode('utf-8')
-            self.file.write(line) 
+            self.file.write(line)
             if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
                 continue
             return line.strip()
-    
+
     def reset_target(self):
         self.file.write("Resetting target with command: " + current_dir + "/reset_target.sh\n")
         output = subprocess.run("./reset_target.sh", shell=True, cwd=current_dir, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
         if (output.returncode != 0):
             output = subprocess.run("./reset_target.sh", shell=True, cwd=current_dir, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
         self.file.write(output.stdout.decode('utf-8'))
-        
+
 
     def close(self):
         self.serial.close()

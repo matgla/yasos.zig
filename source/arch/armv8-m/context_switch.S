@@ -28,6 +28,7 @@
 .thumb_func
 switch_to_next_task:
   // call scheduler to configure next task for the execution 
+  push {r4, lr} 
   bl get_next_task
   push {r0-r1} 
   bl get_stack_bottom
@@ -35,24 +36,30 @@ switch_to_next_task:
   pop {r0-r1}
 
   // load task context
-  b load_context
+  bl load_context
+  pop {r4, pc}
 
 .global reload_current_task
 .thumb_func
 reload_current_task:
+  push {lr}
   // call scheduler to configure next task for the execution 
   bl get_current_task
   // load task context
-  b load_context
-
-.global load_context
-.thumb_func
-load_context: 
   ldmia r0!, {r1, r4-r12}
   vldmia r0!, {s16-s31}
   msr psp, r0
+  pop {pc}
+
+.global load_context
+.thumb_func
+load_context:
+  mov r1, r0
+  ldmia r1!, {r0, r4-r12}
+  vldmia r1!, {s16-s31}
+  msr psp, r1
   cpsie i
-  bx r1
+  bx lr 
 
 .global switch_to_main_task
 .thumb_func:
@@ -67,10 +74,22 @@ switch_no_fpu:
 return_to_main_task:
   bx r0
 
+.global push_registers_on_stack
+.thumb_func
+push_registers_on_stack:
+  push {lr}
+  vstmdb r0!, {s16-s31}
+  stmdb r0!, {r1, r4-r12}
+  push {r0, r4}
+  bl update_stack_pointer
+  pop {r0, r4} 
+  pop {pc} 
+  
 
 .global store_and_switch_to_next_task
 .thumb_func
 store_and_switch_to_next_task:
+  push {r4, lr}
   cpsid i // better to not interrupt that operation from nested IRQ
   mov r1, r0 
   mrs r0, psp 
@@ -78,45 +97,31 @@ store_and_switch_to_next_task:
   stmdb r0!, {r1, r4-r12}
   
   bl update_stack_pointer
-  b switch_to_next_task
+  bl switch_to_next_task
+  pop {r4, pc}
 
-.global context_switch_push_registers_to_stack
+.global switch_to_the_next_task
 .thumb_func
-context_switch_push_registers_to_stack:
-  push {r4}
-  mrs r4, psp 
-  stmdb r4!, {r0, r1, r2, r3}
-  mov r0, r4
-  pop {r4} 
-  vstmdb r0!, {s16-s31}
-  stmdb r0!, {r3, r4-r12}
-  bx lr
-
-.global context_switch_get_psp
-.thumb_func
-context_switch_get_psp:
-  mrs r0, psp 
-  bx lr
-
-.global get_lr
-.thumb_func 
-get_lr:
-  mov r0, lr
-
-.global context_switch_return_pop_single
-.thumb_func
-context_switch_return_pop_single:
-  mrs r1, psp 
-  push {r4}
-  ldmia r1!, {r0, r2, r3, r4}
-  pop {r4}
-  str r2, [r0]
-  msr psp, r1
-  bx r3 
+switch_to_the_next_task:
+  push {r4, lr}
+  cpsid i // better to not interrupt that operation from nested IRQ
+  bl switch_to_next_task
+  pop {r4, pc}
 
 .global irq_svcall
 .thumb_func
 irq_svcall:
+  cmp r0, #16
+  bne check_if_start_root
+  push {r0, r1, r2, lr}
+  mrs r0, psp 
+  mov r1, lr
+  vstmdb r0!, {s16-s31}
+  stmdb r0!, {r1, r4-r12}
+  bl update_stack_pointer
+  pop {r0, r1, r2, lr}
+  b call_svcall 
+check_if_start_root:
   cmp r0, #1
   bne call_svcall
   ldr r0, =sp_call
@@ -134,3 +139,16 @@ call_svcall:
   push {r0, lr}
   bl _irq_svcall 
   pop {r0, pc}  
+
+.global irq_pendsv 
+.thumb_func 
+irq_pendsv:
+  mov r0, lr 
+  bl do_context_switch
+  bx r0
+
+.global switch_to_the_first_task
+.thumb_func 
+switch_to_the_first_task:
+  bl switch_to_next_task
+  bx r0

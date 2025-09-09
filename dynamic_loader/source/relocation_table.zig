@@ -23,7 +23,8 @@ const Section = @import("section.zig").Section;
 pub const SymbolTableRelocation = packed struct {
     is_exported_symbol: u1,
     index: u31,
-    symbol_index: u32,
+    function_pointer: u1,
+    symbol_index: u31,
 
     pub fn next(self: SymbolTableRelocation) *const SymbolTableRelocation {
         return @ptrFromInt(@intFromPtr(self) + @sizeOf(SymbolTableRelocation));
