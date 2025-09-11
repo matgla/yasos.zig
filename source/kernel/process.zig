@@ -75,7 +75,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         state: State,
         priority: u8,
         impl: ImplType,
-        pid: u32,
+        pid: c.pid_t,
         _kernel_allocator: std.mem.Allocator,
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
@@ -98,11 +98,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             Terminated,
         };
 
-        pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: anytype, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType, parent: ?*Self) !*Self {
-            pid_counter += 1;
+        pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: anytype, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType, parent: ?*Self, pid: c.pid_t) !*Self {
             const process = try kernel_allocator.create(Self);
-            kernel.log.debug("initializing memory allocator for pid: {d}", .{pid_counter});
-            var process_memory_allocator = ProcessMemoryAllocator.init(pid_counter, process_memory_pool);
+            kernel.log.debug("initializing memory allocator for pid: {d}", .{pid});
+            var process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool);
             const cwd_handle = try kernel_allocator.alloc(u8, cwd.len);
             @memcpy(cwd_handle[0..cwd.len], cwd);
             cwd_handle[cwd.len] = 0;
@@ -113,7 +112,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .state = State.Ready,
                 .priority = 0,
                 .impl = try ImplType.init(process_memory_allocator.allocator(), stack_size, process_entry, exit_handler_impl, args[0..]),
-                .pid = pid_counter,
+                .pid = pid,
                 ._kernel_allocator = kernel_allocator,
                 .current_core = 0,
                 .fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
@@ -172,12 +171,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
-        pub fn vfork(self: *Self, process_memory_pool: *ProcessMemoryPoolType, context: *const volatile c.vfork_context) !*Self {
+        pub fn vfork(self: *Self, process_memory_pool: *ProcessMemoryPoolType, context: *const volatile c.vfork_context, pid: c.pid_t) !*Self {
             // allocate stack copy
             const process = try self._kernel_allocator.create(Self);
-            pid_counter += 1;
-            var memory_pool = ProcessMemoryAllocator.init(pid_counter, process_memory_pool);
-            log.debug("vfork process memory allocator created for pid {d}", .{pid_counter});
+            var memory_pool = ProcessMemoryAllocator.init(pid, process_memory_pool);
+            log.debug("vfork process memory allocator created for pid {d}", .{pid});
             const cwd_handle = try self._kernel_allocator.alloc(u8, self.cwd.len);
             @memcpy(cwd_handle, self.cwd);
             self._vfork_context = context;
@@ -186,7 +184,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .state = State.Ready,
                 .priority = self.priority,
                 .impl = try self.impl.vfork(memory_pool.allocator()),
-                .pid = pid_counter,
+                .pid = pid,
                 ._kernel_allocator = self._kernel_allocator,
                 .current_core = 0,
                 .fds = try self.dupe_fds(),

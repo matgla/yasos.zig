@@ -134,3 +134,18 @@ pub const ReadOnlyFile = interface.DeriveFromBase(IFile, struct {
         return -1;
     }
 });
+
+pub const IDirectory = interface.DeriveFromBase(IFile, struct {
+    pub const Self = @This();
+
+    pub fn write(self: *Self, buf: []const u8) isize {
+        _ = self;
+        _ = buf;
+        return -1;
+    }
+
+    pub fn sync(self: *Self) i32 {
+        _ = self;
+        return -1;
+    }
+});

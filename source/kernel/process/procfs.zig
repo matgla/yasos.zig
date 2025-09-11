@@ -40,15 +40,15 @@ const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
 
-pub const ProcDirectory = interface.DeriveFromBase(ReadOnlyFile, struct {
+pub const ProcFsNode = interface.DeriveFromBase(ReadOnlyFile, struct {
     const Self = @This();
 
     base: ReadOnlyFile,
     _allocator: std.mem.Allocator,
     _files: std.DoublyLinkedList,
 
-    pub fn create(allocator: std.mem.Allocator) ProcDirectory {
-        return ProcDirectory.init(.{
+    pub fn create(allocator: std.mem.Allocator) ProcFsNode {
+        return ProcFsNode.init(.{
             .base = ReadOnlyFile.init(.{}),
             ._allocator = allocator,
             ._files = std.DoublyLinkedList{},
@@ -131,20 +131,6 @@ pub const ProcDirectory = interface.DeriveFromBase(ReadOnlyFile, struct {
         return 0;
     }
 
-    pub fn stat(self: *Self, buf: *c.struct_stat) void {
-        buf.st_dev = 0;
-        buf.st_ino = 0;
-        buf.st_mode = 0;
-        buf.st_nlink = 0;
-        buf.st_uid = 0;
-        buf.st_gid = 0;
-        buf.st_rdev = 0;
-        buf.st_size = 0;
-        buf.st_blksize = 1;
-        buf.st_blocks = 1;
-        _ = self;
-    }
-
     pub fn filetype(self: *Self) FileType {
         _ = self;
         return FileType.Directory;
@@ -159,14 +145,14 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     const Self = @This();
     base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
-    _root: ProcDirectory,
+    _root: ProcFsNode,
 
     pub fn init(allocator: std.mem.Allocator) !ProcFs {
         log.info("created", .{});
         var procfs = ProcFs.init(.{
             .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
-            ._root = ProcDirectory.InstanceType.create(allocator),
+            ._root = ProcFsNode.InstanceType.create(allocator),
         });
         var meminfo = try allocator.create(ProcInfo);
         meminfo.node = .{};
@@ -219,16 +205,12 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            self._root.data().stat(data);
-            return 0;
+        var it = std.fs.path.componentIterator(path) catch return -1;
+        var file: *ProcFsNode = &self._root;
+        while (it.next()) |component| {
+            file = file.get(component.name) orelse return -1;
         }
-        const maybe_file = self._root.data().get(path, self._allocator);
-        if (maybe_file) |file| {
-            _ = file;
-            self._root.data().stat(data);
-            return 0;
-        }
-        return -1;
+        file.stat(data);
+        return 0;
     }
 });

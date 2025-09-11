@@ -91,6 +91,8 @@ pwd
 cd ..
 mkdir -p rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
+cp $SCRIPT_DIR/hello_script.sh rootfs/usr
+
 mkdir -p rootfs/dev
 pwd
 cd libs

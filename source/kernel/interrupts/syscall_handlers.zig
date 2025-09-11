@@ -321,33 +321,46 @@ pub fn sys_link(arg: *const volatile anyopaque) !i32 {
     _ = arg;
     return -1;
 }
+
 pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.stat_context = @ptrCast(@alignCast(arg));
-    if (context.pathname == null or context.statbuf == null) {
+    if (context.statbuf == null) {
         return errno(c.EFAULT);
     }
-    const path = std.mem.span(@as([*:0]const u8, @ptrCast(context.pathname.?)));
-    if (path.len > 0 and path[0] != '/') {
+
+    if (context.pathname) |pathname| {
+        const path = std.mem.span(@as([*:0]const u8, @ptrCast(pathname)));
+        if (path.len > 0 and path[0] != '/') {
+            if (process_manager.instance.get_current_process()) |current_process| {
+                const pwd = current_process.get_current_directory();
+                const full_path = std.fmt.allocPrint(kernel_allocator, "{s}/{s}", .{ pwd, path }) catch {
+                    return -1;
+                };
+                defer kernel_allocator.free(full_path);
+                const real = std.fs.path.resolve(kernel_allocator, &.{full_path}) catch {
+                    return -1;
+                };
+                defer kernel_allocator.free(real);
+                return fs.get_ivfs().interface.stat(
+                    real,
+                    context.statbuf,
+                );
+            }
+        }
+        return fs.get_ivfs().interface.stat(
+            path,
+            context.statbuf,
+        );
+    } else {
         if (process_manager.instance.get_current_process()) |current_process| {
-            const pwd = current_process.get_current_directory();
-            const full_path = std.fmt.allocPrint(kernel_allocator, "{s}/{s}", .{ pwd, path }) catch {
-                return -1;
-            };
-            defer kernel_allocator.free(full_path);
-            const real = std.fs.path.resolve(kernel_allocator, &.{full_path}) catch {
-                return -1;
-            };
-            defer kernel_allocator.free(real);
-            return fs.get_ivfs().interface.stat(
-                real,
-                context.statbuf,
-            );
+            var maybe_file = current_process.fds.get(@intCast(context.fd));
+            if (maybe_file) |*file| {
+                kernel.log.err("stat: fd {d} path {s}\n", .{ context.fd, file.path });
+                return fs.get_ivfs().interface.stat(file.path[0..], context.statbuf);
+            }
         }
     }
-    return fs.get_ivfs().interface.stat(
-        path,
-        context.statbuf,
-    );
+    return -1;
 }
 pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
     _ = arg;

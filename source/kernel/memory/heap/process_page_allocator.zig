@@ -19,10 +19,7 @@
 //
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-});
+const c = @import("libc_imports").c;
 
 const kernel = @import("kernel");
 
@@ -30,12 +27,12 @@ const log = kernel.log;
 
 pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
     return struct {
-        _pid: u32,
+        _pid: c.pid_t,
         _pool: *MemoryPoolType,
 
         pub const Self = @This();
 
-        pub fn init(pid: u32, pool: *MemoryPoolType) Self {
+        pub fn init(pid: c.pid_t, pool: *MemoryPoolType) Self {
             return .{
                 ._pid = pid,
                 ._pool = pool,
