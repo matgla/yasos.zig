@@ -180,7 +180,7 @@ pub fn MallocAllocator(comptime options: anytype) type {
                 tracker_object.data[0] = @intFromPtr(ptr);
                 tracker.push(tracker_object);
                 var index: usize = 1;
-                var stack = std.debug.StackIterator.init(return_address, null);
+                var stack = std.debug.StackIterator.init(return_address, @frameAddress());
                 while (stack.next()) |ret| {
                     if (@hasField(@TypeOf(options), "verbose") and options.verbose) {
                         log.debug("{d}: 0x{x}", .{ index - 1, ret });
@@ -234,7 +234,7 @@ pub fn MallocAllocator(comptime options: anytype) type {
             if (comptime is_leaks_detection_enabled()) {
                 tracker.remove(buf.ptr);
                 var index: usize = 1;
-                var stack = std.debug.StackIterator.init(return_address, null);
+                var stack = std.debug.StackIterator.init(return_address, @frameAddress());
                 while (stack.next()) |ret| {
                     if (@hasField(@TypeOf(options), "verbose") and options.verbose) {
                         log.debug("{d}: 0x{x}", .{ index - 1, ret });

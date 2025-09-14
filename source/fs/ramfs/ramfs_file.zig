@@ -62,11 +62,11 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
 
     pub fn write(self: *Self, data: []const u8) isize {
         if (self._data.data.items.len < data.len + self._position) {
-            self._data.data.resize(self._position + data.len) catch {
+            self._data.data.resize(self._allocator, self._position + data.len) catch {
                 return 0;
             };
         }
-        self._data.data.replaceRange(self._position, data.len, data) catch {
+        self._data.data.replaceRange(self._allocator, self._position, data.len, data) catch {
             return 0;
         };
         self._position += data.len;
@@ -98,7 +98,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
                 }
                 const outside_of_buffer = @as(isize, @intCast(new_position)) - @as(isize, @intCast(self._data.data.items.len));
                 if (outside_of_buffer > 0) {
-                    _ = self._data.data.appendNTimes(' ', @as(usize, @intCast(outside_of_buffer))) catch {
+                    _ = self._data.data.appendNTimes(self._allocator, ' ', @as(usize, @intCast(outside_of_buffer))) catch {
                         // set errno
                         return -1;
                     };

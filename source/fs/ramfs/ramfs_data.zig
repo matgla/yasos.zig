@@ -39,7 +39,7 @@ pub const RamFsData = struct {
     type: kernel.fs.FileType,
     /// File contents
     data: std.ArrayListAligned(u8, .@"8"),
-
+    _allocator: std.mem.Allocator,
     /// Buffer for filename, do not use it except of this module, instead please use: `RamFsData.name`
     _name_buffer: [config.ramfs.max_filename]u8,
     pub fn create(allocator: std.mem.Allocator, filename: []const u8, filetype: FileType) !RamFsData {
@@ -48,7 +48,8 @@ pub const RamFsData = struct {
         }
         var obj = RamFsData{
             .type = filetype,
-            .data = std.ArrayListAligned(u8, .@"8").init(allocator),
+            .data = std.ArrayListAligned(u8, .@"8").initCapacity(allocator, 0) catch return error.OutOfMemory,
+            ._allocator = allocator,
             ._name_buffer = undefined,
         };
 
@@ -58,7 +59,7 @@ pub const RamFsData = struct {
     }
 
     pub fn deinit(self: *RamFsData) void {
-        self.data.deinit();
+        self.data.deinit(self._allocator);
     }
 
     pub inline fn create_file(allocator: std.mem.Allocator, filename: []const u8) !RamFsData {

@@ -35,7 +35,6 @@ const FileType = kernel.fs.FileType;
 
 const log = std.log.scoped(.@"vfs/procfs");
 
-const ProcFsIterator = @import("procfs_iterator.zig").ProcFsIterator;
 const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
@@ -76,10 +75,11 @@ const ProcFsDirectory = struct {
         return null;
     }
 
-    pub fn stat(self: ProcFsDirectory, data: *c.struct_stat) void {
+    pub fn stat(self: ProcFsDirectory, data: *c.struct_stat) i32 {
+        log.err("Stating directory", .{});
         _ = self;
-        data.st_mode = c.S_IFDIR | 0o555;
-        data.st_nlink = 1;
+        data.st_mode = 0;
+        data.st_nlink = 0;
         data.st_size = 0;
         data.st_blksize = 4096;
         data.st_blocks = 0;
@@ -89,6 +89,7 @@ const ProcFsDirectory = struct {
         data.st_mtim.tv_nsec = 0;
         data.st_ctim.tv_sec = 0;
         data.st_ctim.tv_nsec = 0;
+        return -1;
     }
 };
 
@@ -154,6 +155,42 @@ const ProcFsNode = struct {
             .file => self._data.file,
         };
     }
+
+    fn stat_file(self: *ProcFsNode, data: *c.struct_stat) i32 {
+        log.err("Stating file: '{s}'", .{self._name.get_name()});
+        data.st_mode = 0;
+        data.st_nlink = 0;
+        data.st_size = 0;
+        data.st_blksize = 0;
+        data.st_blocks = 0;
+        data.st_atim.tv_sec = 0;
+        data.st_atim.tv_nsec = 0;
+        data.st_mtim.tv_sec = 0;
+        data.st_mtim.tv_nsec = 0;
+        data.st_ctim.tv_sec = 0;
+        data.st_ctim.tv_nsec = 0;
+        return 0;
+    }
+
+    pub fn stat(self: *ProcFsNode, data: *c.struct_stat) i32{
+        log.err("Stating node: '{s}', for 0x{x}", .{self._name.get_name(), @intFromPtr(data)});
+        data.st_mode = c.S_IFDIR;
+        data.st_nlink = 0;
+        data.st_size = 0;
+        data.st_blksize = 0;
+        data.st_blocks = 0;
+        data.st_atim.tv_sec = 0;
+        data.st_atim.tv_nsec = 0;
+        data.st_mtim.tv_sec = 0;
+        data.st_mtim.tv_nsec = 0;
+        data.st_ctim.tv_sec = 0;
+        data.st_ctim.tv_nsec = 0;
+        // return switch (self._data) {
+            // .directory => self._data.directory.stat(data),
+            // .file => self.stat_file(data),
+        // };
+        return -1;
+    }
 };
 
 pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
@@ -193,8 +230,26 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return -1;
     }
 
+    fn get_node(self: *Self, path: []const u8) ?*ProcFsNode {
+        if (path.len == 0 or std.mem.eql(u8, path, "/")) {
+            return &self._root;
+        }
+        var iter = std.fs.path.componentIterator(path) catch return null;
+        var node = &self._root;
+        while (iter.next()) |component| {
+            const maybe_dir = node.get_directory();
+            if (maybe_dir) |dir| {
+                node = dir.get(component.name) orelse return null;
+            } else {
+                return null;
+            }
+        }
+        return node;
+    }
+
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
-        log.debug("Getting file: {s}", .{path});
+        _ = allocator;
+        log.err("Getting file: {s}", .{path});
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
             return null;
         }
@@ -209,11 +264,11 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             }
         }
         // last node must be a file
-        if (node.filetype() != FileType.File) {
-            return null;
+        const maybe_file = node.get_file();
+        if (maybe_file) |file| {
+            return file.clone() catch return null;
         }
-
-        return node.get_file().?.interface.new(allocator) catch return null;
+        return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
@@ -224,7 +279,8 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
         log.debug("Getting iterator for: {s}", .{path});
-        return (ProcFsIterator.InstanceType.create(self._root.data()._files.first, self._allocator)).interface.new(self._allocator) catch return null;
+        const dir = self.get_node(path) orelse return null;
+        return ProcFsIterator.InstanceType.create(&dir._node, self._allocator).interface.new(self._allocator) catch return null;
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -234,12 +290,35 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        var it = std.fs.path.componentIterator(path) catch return -1;
-        var file: *ProcFsNode = &self._root;
-        while (it.next()) |component| {
-            file = file.get(component.name) orelse return -1;
+        log.err("Stating path: '{s}'", .{path});
+        var node = self.get_node(path) orelse return -1;
+        return node.stat(data);
+    }
+});
+
+
+pub const ProcFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
+    pub const Self = @This();
+    _node: ?*std.DoublyLinkedList.Node,
+    _allocator: std.mem.Allocator,
+
+    pub fn create(first_node: ?*std.DoublyLinkedList.Node, allocator: std.mem.Allocator) ProcFsIterator {
+        return ProcFsIterator.init(.{
+            ._node = first_node,
+            ._allocator = allocator,
+        });
+    }
+
+    pub fn next(self: *Self) ?kernel.fs.IFile {
+        if (self._node) |node| {
+            self._node = node.next;
+            const proc_node: *ProcFsNode = @fieldParentPtr("_node", node);
+            return proc_node.get_file();
         }
-        file.stat(data);
-        return 0;
+        return null;
+    }
+
+    pub fn delete(self: *Self) void {
+        _ = self;
     }
 });

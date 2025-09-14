@@ -22,18 +22,34 @@ const std = @import("std");
 
 const board = @import("board");
 
-var stdout: std.io.AnyWriter = undefined;
+var stdout: std.Io.Writer = undefined;
+var write_callback: ?WriteCallback = null;
+var write_context: ?*const anyopaque = null;
 
 pub const WriteCallback = *const fn (self: *const anyopaque, data: []const u8) anyerror!usize;
 
+fn drain_sink(io_w: *std.Io.Writer, data: []const[] const u8, splat: usize) std.Io.Writer.Error!usize {
+    _ = splat;
+    _ = io_w;
+    if (write_context == null) return error.WriteFailed;
+    if (write_callback) | callback | {
+        return callback(write_context.?, data[0]) catch return error.WriteFailed;
+    }
+    return error.WriteFailed;
+}
+
 pub fn set_output(context: *const anyopaque, writer: WriteCallback) void {
-    stdout = std.io.AnyWriter{
-        .context = context,
-        .writeFn = writer,
+    write_callback = writer;
+    write_context = context;
+    stdout = std.Io.Writer{
+        .vtable = &.{
+            .drain = drain_sink,
+        },
+        .buffer = &.{},
     };
 }
 
-pub fn get() *std.io.AnyWriter {
+pub fn get() *std.Io.Writer {
     return &stdout;
 }
 

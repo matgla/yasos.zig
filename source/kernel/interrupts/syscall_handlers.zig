@@ -327,7 +327,7 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     if (context.statbuf == null) {
         return errno(c.EFAULT);
     }
-
+    log.err("stat called buf: 0x{x}, fd: {x}, sizeof: {d}, timespec: {d}, long: {d}\n", .{ @intFromPtr(context.statbuf), context.fd, @sizeOf(c.struct_stat), @sizeOf(c.struct_timespec), @sizeOf(c_ulong) });
     if (context.pathname) |pathname| {
         const path = std.mem.span(@as([*:0]const u8, @ptrCast(pathname)));
         if (path.len > 0 and path[0] != '/') {
