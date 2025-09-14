@@ -6,12 +6,12 @@
         .yasos_hal = .{ .path = "hal" },
         .yasld = .{ .path = "dynamic_loader" },
         .@"modules/oop" = .{
-            .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#215e335cde64c4d788c80e259b26593754802fd4",
-            .hash = "oop_zig-0.0.1-SbIaG0VXAACbF6-VrzipIbv0_Fu4v3-K6AQtqYdu3U5Y",
+            .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#5f6cd4067660ddf052ac27e5b3c2e654c2a6a780",
+            .hash = "oop_zig-0.0.1-SbIaGzJfAABKPlK8nC0ltuR9-McBaeEHvWJ8eqAQ_q0X",
         },
         .@"modules/fatfs" = .{
-            .url = "git+https://github.com/matgla/zfat.git#7f30c4f4483e135613d700bc908d72b762bc6d9f",
-            .hash = "zfat-0.15.0-SNNK9WDCTQDVE9wgIpa6ja7psB97jxkOmNihy67IB7HW",
+            .url = "git+https://github.com/matgla/zfat.git/?ref=HEAD#56bbe0c66377695d0af54b11513c0772a065e92d",
+            .hash = "zfat-0.16.0-dev.233+a0ec4e270-SNNK9enCTQB88LKK-5muUtwYFKTatDSzWkfITH5dN6m1",
         },
     },
     .paths = .{
