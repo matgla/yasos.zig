@@ -23,7 +23,7 @@ const std = @import("std");
 const c = @import("libc_imports").c;
 
 const IFileSystem = @import("ifilesystem.zig").IFileSystem;
-const IDirectoryIterator = @import("ifilesystem.zig").IDirectoryIterator;
+const IDirectoryIterator = @import("idirectory.zig").IDirectoryIterator;
 const IFile = @import("ifile.zig").IFile;
 const MountPoints = @import("mount_points.zig").MountPoints;
 const MountPoint = @import("mount_points.zig").MountPoint;

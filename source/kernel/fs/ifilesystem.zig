@@ -26,17 +26,7 @@ const IFile = @import("ifile.zig").IFile;
 
 const interface = @import("interface");
 
-pub const IDirectoryIterator = interface.ConstructInterface(struct {
-    pub const Self = @This();
-
-    pub fn next(self: *Self) ?IFile {
-        return interface.VirtualCall(self, "next", .{}, ?IFile);
-    }
-
-    pub fn delete(self: *Self) void {
-        interface.DestructorCall(self);
-    }
-});
+const kernel = @import("../kernel.zig");
 
 pub const IFileSystem = interface.ConstructInterface(struct {
     pub const Self = @This();
@@ -81,8 +71,8 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         interface.DestructorCall(self);
     }
 
-    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
-        return interface.VirtualCall(self, "iterator", .{path}, ?IDirectoryIterator);
+    pub fn iterator(self: *Self, path: []const u8) ?kernel.fs.IDirectoryIterator {
+        return interface.VirtualCall(self, "iterator", .{path}, ?kernel.fs.IDirectoryIterator);
     }
 
     pub fn format(self: *Self) anyerror!void {

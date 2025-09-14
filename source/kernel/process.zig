@@ -31,7 +31,7 @@ const arch_process = @import("arch").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
 const IFile = kernel.fs.IFile;
-const IDirectoryIterator = @import("fs/ifilesystem.zig").IDirectoryIterator;
+const IDirectoryIterator = @import("fs/idirectory.zig").IDirectoryIterator;
 const system_call = @import("interrupts/system_call.zig");
 const systick = @import("interrupts/systick.zig");
 const arch = @import("arch");

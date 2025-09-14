@@ -21,7 +21,7 @@
 const std = @import("std");
 
 const ReadOnlyFileSystem = @import("../fs/ifilesystem.zig").ReadOnlyFileSystem;
-const IDirectoryIterator = @import("../fs/ifilesystem.zig").IDirectoryIterator;
+const IDirectoryIterator = @import("../fs/idirectory.zig").IDirectoryIterator;
 const IFile = @import("../fs/ifile.zig").IFile;
 
 const IDriver = @import("idriver.zig").IDriver;

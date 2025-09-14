@@ -188,11 +188,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.IFile {
         _ = self;
-        // const path_without_leading_slash: [:0]const u8 = std.mem.trimStart(u8, path, "\\/");
-        // const filepath = std.fmt.allocPrintZ(allocator, "0:/{s}", .{path_without_leading_slash}) catch {
-        // log.err("Failed to allocate memory for path: {s}", .{path_without_leading_slash});
-        // return null;
-        // };
         const filepath = allocator.dupeZ(u8, path) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return null;

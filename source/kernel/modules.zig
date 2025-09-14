@@ -37,17 +37,17 @@ const ModuleContext = struct {
 const kernel = @import("kernel");
 const log = std.log.scoped(.loader);
 
-fn file_resolver(name: []const u8) ?*const anyopaque {
-    var context: ModuleContext = .{
-        .path = name,
-        .address = null,
-    };
-    _ = fs.get_ivfs().interface.traverse("/lib", traverse_directory, &context);
-    if (context.address) |address| {
-        return address;
-    }
-    return null;
-}
+// fn file_resolver(name: []const u8) ?*const anyopaque {
+//     var context: ModuleContext = .{
+//         .path = name,
+//         .address = null,
+//     };
+//     _ = fs.get_ivfs().interface.traverse("/lib", traverse_directory, &context);
+//     if (context.address) |address| {
+//         return address;
+//     }
+//     return null;
+// }
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
@@ -73,7 +73,7 @@ var libraries_list: std.AutoHashMap(c.pid_t, std.DoublyLinkedList) = undefined;
 
 pub fn init(allocator: std.mem.Allocator) void {
     log.info("yasld initialization started", .{});
-    yasld.loader_init(&file_resolver, allocator);
+    // yasld.loader_init(&file_resolver, allocator);
     modules_list = std.AutoHashMap(c.pid_t, yasld.Executable).init(allocator);
     libraries_list = std.AutoHashMap(c.pid_t, std.DoublyLinkedList).init(allocator);
     kernel_allocator = allocator;

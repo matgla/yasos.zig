@@ -141,10 +141,6 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return self.header.filetype();
     }
 
-    pub fn dupe(self: *Self) ?IFile {
-        return self.new(self.allocator) catch return null;
-    }
-
     pub fn delete(self: *Self) void {
         _ = self.close();
     }

@@ -23,7 +23,7 @@ const std = @import("std");
 const c = @import("libc_imports").c;
 
 const ReadOnlyFileSystem = @import("../fs/ifilesystem.zig").ReadOnlyFileSystem;
-const IDirectoryIterator = @import("../fs/ifilesystem.zig").IDirectoryIterator;
+const IDirectoryIterator = @import("../fs/idirectory.zig").IDirectoryIterator;
 const IFile = @import("../fs/ifile.zig").IFile;
 const ReadOnlyFile = @import("../fs/ifile.zig").ReadOnlyFile;
 
@@ -40,106 +40,121 @@ const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
 
-pub const ProcFsNode = interface.DeriveFromBase(ReadOnlyFile, struct {
-    const Self = @This();
-
-    base: ReadOnlyFile,
+const ProcFsDirectory = struct {
+    _nodes: std.DoublyLinkedList,
     _allocator: std.mem.Allocator,
-    _files: std.DoublyLinkedList,
 
-    pub fn create(allocator: std.mem.Allocator) ProcFsNode {
-        return ProcFsNode.init(.{
-            .base = ReadOnlyFile.init(.{}),
+    pub fn create(allocator: std.mem.Allocator) ProcFsDirectory {
+        return ProcFsDirectory{
+            ._nodes = std.DoublyLinkedList{},
             ._allocator = allocator,
-            ._files = std.DoublyLinkedList{},
-        });
+        };
     }
 
-    pub fn delete(self: *Self) void {
-        var it = self._files.pop();
+    pub fn append(self: *ProcFsDirectory, node: *std.DoublyLinkedList.Node) void {
+        self._nodes.append(node);
+    }
+
+    pub fn delete(self: *ProcFsDirectory) void {
+        var next = self._nodes.pop();
+        while (next) |node| {
+            const proc_node: *ProcFsNode = @fieldParentPtr("_node", node);
+            proc_node.delete();
+            next = self._nodes.pop();
+        }
+    }
+
+    pub fn get(self: *ProcFsDirectory, name: []const u8) ?*ProcFsNode {
+        var it = self._nodes.first;
         while (it) |node| {
-            const procinfo: *ProcInfo = @fieldParentPtr("node", node);
-            self._allocator.destroy(procinfo);
-            it = self._files.pop();
-        }
-    }
-
-    pub fn add_file(self: *Self, file: *std.DoublyLinkedList.Node) void {
-        self._files.append(file);
-    }
-
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.IFile {
-        _ = self;
-        log.debug("getting file: {s}", .{path});
-        const maybe_filetype = std.meta.stringToEnum(ProcInfoType, path);
-        if (maybe_filetype) |f| {
-            switch (f) {
-                .meminfo => {
-                    return (MemInfoFile.InstanceType.create()).interface.new(allocator) catch return null;
-                },
+            const proc_node: *ProcFsNode = @fieldParentPtr("_node", node);
+            if (std.mem.eql(u8, proc_node._name.get_name(), name)) {
+                return proc_node;
             }
+            it = node.next;
         }
-
         return null;
     }
 
-    pub fn read(self: *Self, buffer: []u8) isize {
+    pub fn stat(self: ProcFsDirectory, data: *c.struct_stat) void {
         _ = self;
-        _ = buffer;
-        return 0;
+        data.st_mode = c.S_IFDIR | 0o555;
+        data.st_nlink = 1;
+        data.st_size = 0;
+        data.st_blksize = 4096;
+        data.st_blocks = 0;
+        data.st_atim.tv_sec = 0;
+        data.st_atim.tv_nsec = 0;
+        data.st_mtim.tv_sec = 0;
+        data.st_mtim.tv_nsec = 0;
+        data.st_ctim.tv_sec = 0;
+        data.st_ctim.tv_nsec = 0;
+    }
+};
+
+const ProcFsNode = struct {
+    const Type = union(enum) {
+        directory: ProcFsDirectory,
+        file: IFile,
+    };
+
+    _name: FileName,
+    _data: Type,
+    _node: std.DoublyLinkedList.Node,
+
+    pub fn delete(self: *ProcFsNode) void {
+        switch (self._data) {
+            .directory => {
+                self._data.directory.delete();
+            },
+            .file => {
+                self._data.file.interface.delete();
+            },
+        }
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
-        _ = self;
-        _ = offset;
-        _ = whence;
-        return 0;
+    pub fn create_file(name: FileName, file: IFile) ProcFsNode {
+        return ProcFsNode{
+            ._name = name,
+            ._data = .{ .file = file },
+            ._node = std.DoublyLinkedList.Node{},
+        };
     }
 
-    pub fn close(self: *Self) i32 {
-        _ = self;
-        return 0;
+    pub fn create_directory(name: FileName, allocator: std.mem.Allocator) ProcFsNode {
+        return ProcFsNode{
+            ._name = name,
+            ._data = .{ .directory = ProcFsDirectory.create(allocator) },
+            ._node = std.DoublyLinkedList.Node{},
+        };
     }
 
-    pub fn tell(self: *Self) c.off_t {
-        _ = self;
-        return @intCast(0);
-    }
-
-    pub fn size(self: *Self) isize {
-        _ = self;
-        return @intCast(0);
-    }
-
-    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-        _ = self;
+    pub fn get_name(self: ProcFsNode, allocator: std.mem.Allocator) FileName {
         _ = allocator;
-        return .{ ._allocator = null, ._name = "/" };
+        return FileName.init(self._name.get_name(), null);
     }
 
-    pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = data;
-        return 0;
+    pub fn filetype(self: *ProcFsNode) FileType {
+        return switch (self._data) {
+            .directory => FileType.Directory,
+            .file => self._data.file.interface.filetype(),
+        };
     }
 
-    pub fn fcntl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = data;
-        return 0;
+    pub fn get_directory(self: *ProcFsNode) ?*ProcFsDirectory {
+        return switch (self._data) {
+            .directory => &self._data.directory,
+            .file => null,
+        };
     }
 
-    pub fn filetype(self: *Self) FileType {
-        _ = self;
-        return FileType.Directory;
+    pub fn get_file(self: *ProcFsNode) ?IFile {
+        return switch (self._data) {
+            .directory => null,
+            .file => self._data.file,
+        };
     }
-
-    pub fn dupe(self: *Self) ?IFile {
-        return self.new(self.allocator) catch return null;
-    }
-});
+};
 
 pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     const Self = @This();
@@ -148,22 +163,21 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     _root: ProcFsNode,
 
     pub fn init(allocator: std.mem.Allocator) !ProcFs {
-        log.info("created", .{});
         var procfs = ProcFs.init(.{
             .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
-            ._root = ProcFsNode.InstanceType.create(allocator),
+            ._root = ProcFsNode.create_directory(FileName.init("/", null), allocator),
         });
-        var meminfo = try allocator.create(ProcInfo);
-        meminfo.node = .{};
-        meminfo.infotype = .meminfo;
-        procfs.data()._root.data().add_file(&meminfo.node);
+
+        var meminfo = ProcFsNode.create_file(FileName.init("meminfo", null), try MemInfoFile.InstanceType.create().interface.new(allocator));
+        procfs.data()._root.get_directory().?.append(&meminfo._node);
+
         return procfs;
     }
 
     pub fn delete(self: *Self) void {
         log.debug("deinitialization", .{});
-        self._root.data().delete();
+        self._root.delete();
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -182,9 +196,24 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         log.debug("Getting file: {s}", .{path});
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            return self._root.interface.new(self._allocator) catch return null;
+            return null;
         }
-        return self._root.data().get(path, allocator);
+        var iter = std.fs.path.componentIterator(path) catch return null;
+        var node = &self._root;
+        while (iter.next()) |component| {
+            const maybe_dir = node.get_directory();
+            if (maybe_dir) |dir| {
+                node = dir.get(component.name) orelse return null;
+            } else {
+                return null;
+            }
+        }
+        // last node must be a file
+        if (node.filetype() != FileType.File) {
+            return null;
+        }
+
+        return node.get_file().?.interface.new(allocator) catch return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
