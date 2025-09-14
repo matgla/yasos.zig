@@ -10,8 +10,8 @@
             .hash = "oop_zig-0.0.1-SbIaGzJfAABKPlK8nC0ltuR9-McBaeEHvWJ8eqAQ_q0X",
         },
         .@"modules/fatfs" = .{
-            .url = "git+https://github.com/matgla/zfat.git/?ref=HEAD#56bbe0c66377695d0af54b11513c0772a065e92d",
-            .hash = "zfat-0.16.0-dev.233+a0ec4e270-SNNK9enCTQB88LKK-5muUtwYFKTatDSzWkfITH5dN6m1",
+            .url = "git+https://github.com/matgla/zfat.git/?ref=HEAD#d532ab0af3067211557a1afa04cf0244b40e661f",
+            .hash = "zfat-0.16.0-SNNK9UHDTQA6s7SZuIuc1AnOm-DSwXrgPdffv-WC7IMY",
         },
     },
     .paths = .{
