@@ -35,7 +35,7 @@ pub fn MmcFile(comptime DriverType: type) type {
         _driver: *DriverType,
         _current_block: u32,
 
-        pub fn create(mmc: *hal.mmc.Mmc, allocator: std.mem.Allocator, filename: []const u8, driver: *DriverType) MmcFile(DriverType) {
+        pub fn create(allocator: std.mem.Allocator, mmc: *hal.mmc.Mmc, filename: []const u8, driver: *DriverType) MmcFile(DriverType) {
             return MmcFile(DriverType).init(.{
                 ._allocator = allocator,
                 ._mmc = mmc,

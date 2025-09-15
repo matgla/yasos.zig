@@ -23,7 +23,10 @@ const std = @import("std");
 const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const FlashFile = @import("flash_file.zig").FlashFile;
+const FlashNode = @import("flash_node.zig").FlashNode;
 const interface = @import("interface");
+
+const kernel = @import("../../kernel.zig");
 
 const hal = @import("hal");
 const board = @import("board");
@@ -42,8 +45,8 @@ pub const FlashDriver = interface.DeriveFromBase(IDriver, struct {
         });
     }
 
-    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-        const file = FlashFile(FlashType).InstanceType.create(allocator, &self._flash, self._name).interface.new(allocator) catch {
+    pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
+        const file = FlashNode(FlashType).InstanceType.create(allocator, &self._flash, self._name).interface.new(allocator) catch {
             return null;
         };
         return file;

@@ -21,8 +21,10 @@
 const std = @import("std");
 
 const IDriver = @import("../idriver.zig").IDriver;
-const IFile = @import("../../fs/fs.zig").IFile;
 const UartFile = @import("uart_file.zig").UartFile;
+const UartNode = @import("uart_node.zig").UartNode;
+
+const kernel = @import("../../kernel.zig");
 
 const interface = @import("interface");
 
@@ -54,8 +56,8 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 return true;
             }
 
-            pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-                return (UartFile(uart).InstanceType.create(
+            pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
+                return (UartNode(uart).InstanceType.create(
                     allocator,
                     self._name,
                 )).interface.new(allocator) catch {

@@ -152,6 +152,7 @@ pub const FileHeader = struct {
             FileType.CharDevice => return c.S_IFCHR,
             FileType.Socket => return c.S_IFSOCK,
             FileType.Fifo => return c.S_IFIFO,
+            FileType.Unknown => return 0,
         }
         return 0;
     }

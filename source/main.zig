@@ -206,7 +206,10 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
             driverfs.data().append(maybe_mmcdriver.?, name) catch {};
             kernel.log.info("adding mmc driver: {s}", .{m.name});
             i = i + 1;
-            maybe_mmcfile = maybe_mmcdriver.?.interface.ifile(allocator);
+            var maybe_mmcnode = maybe_mmcdriver.?.interface.inode(allocator);
+            if (maybe_mmcnode) |*node| {
+                maybe_mmcfile = node.interface.get_file();
+            }
         }
     } else {
         kernel.log.debug("Board has no mmc interfaces", .{});

@@ -18,6 +18,7 @@ const std = @import("std");
 const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const MmcPartitionFile = @import("mmc_partition_file.zig").MmcPartitionFile;
+const MmcPartitionNode = @import("mmc_partition_node.zig").MmcPartitionNode;
 
 const interface = @import("interface");
 
@@ -42,8 +43,8 @@ pub const MmcPartitionDriver = interface.DeriveFromBase(IDriver, struct {
         });
     }
 
-    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-        const file = MmcPartitionFile.InstanceType.create(allocator, self._name, &self._dev, self._start_lba, self._size_in_sectors).interface.new(allocator) catch return null;
+    pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
+        const file = MmcPartitionNode.InstanceType.create(allocator, self._name, &self._dev, self._start_lba, self._size_in_sectors).interface.new(allocator) catch return null;
         return file;
     }
 

@@ -13,17 +13,29 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+const std = @import("std");
+
 const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
 
-pub const IDirectory = interface.ConstructInterface(struct {});
+pub const INode = interface.ConstructInterface(struct {
+    const Self = @This();
 
-pub const IDirectoryIterator = interface.ConstructInterface(struct {
-    pub const Self = @This();
+    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
+        return interface.VirtualCall(self, "name", .{allocator}, kernel.fs.FileName);
+    }
 
-    pub fn next(self: *Self) ?kernel.fs.INode {
-        return interface.VirtualCall(self, "next", .{}, ?kernel.fs.INode);
+    pub fn filetype(self: *Self) kernel.fs.FileType {
+        return interface.VirtualCall(self, "filetype", .{}, kernel.fs.FileType);
+    }
+
+    pub fn get_file(self: *Self) ?kernel.fs.IFile {
+        return interface.VirtualCall(self, "get_file", .{}, ?kernel.fs.IFile);
+    }
+
+    pub fn get_directory(self: *Self) ?kernel.fs.IDirectory {
+        return interface.VirtualCall(self, "get_directory", .{}, ?kernel.fs.IDirectory);
     }
 
     pub fn delete(self: *Self) void {

@@ -25,7 +25,7 @@ const kernel = @import("kernel");
 const IDirectoryIterator = kernel.fs.IDirectoryIterator;
 const IFile = kernel.fs.IFile;
 const FileHeader = @import("file_header.zig").FileHeader;
-const RomFsFile = @import("romfs_file.zig").RomFsFile;
+const RomFsNode = @import("romfs_node.zig").RomFsNode;
 
 pub const RomFsDirectoryIterator = interface.DeriveFromBase(IDirectoryIterator, struct {
     pub const Self = @This();
@@ -39,9 +39,9 @@ pub const RomFsDirectoryIterator = interface.DeriveFromBase(IDirectoryIterator, 
         });
     }
 
-    pub fn next(self: *Self) ?IFile {
+    pub fn next(self: *Self) ?kernel.fs.INode {
         if (self._file) |*file| {
-            const ifile: IFile = RomFsFile.InstanceType.create(file.*, self._allocator).interface.new(self._allocator) catch {
+            const ifile: kernel.fs.INode = RomFsNode.InstanceType.create(self._allocator, file.*).interface.new(self._allocator) catch {
                 return null;
             };
             self._file = file.next();

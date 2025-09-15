@@ -13,20 +13,27 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+const std = @import("std");
+
 const interface = @import("interface");
+const fatfs = @import("zfat");
 
-const kernel = @import("../kernel.zig");
+const kernel = @import("kernel");
 
-pub const IDirectory = interface.ConstructInterface(struct {});
+pub const FatFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
+    _allocator: std.mem.Allocator,
+    _path: [:0]const u8,
 
-pub const IDirectoryIterator = interface.ConstructInterface(struct {
-    pub const Self = @This();
+    const Self = @This();
 
-    pub fn next(self: *Self) ?kernel.fs.INode {
-        return interface.VirtualCall(self, "next", .{}, ?kernel.fs.INode);
+    pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsDirectory {
+        return FatFsDirectory.init(.{
+            ._allocator = allocator,
+            ._path = path,
+        });
     }
 
     pub fn delete(self: *Self) void {
-        interface.DestructorCall(self);
+        self._allocator.free(self._path);
     }
 });

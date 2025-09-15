@@ -35,9 +35,9 @@ pub const DriverFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterat
         });
     }
 
-    pub fn next(self: *Self) ?kernel.fs.IFile {
+    pub fn next(self: *Self) ?kernel.fs.INode {
         while (self._iterator.next()) |driver| {
-            const n = driver.value_ptr.interface.ifile(self._allocator);
+            const n = driver.value_ptr.interface.inode(self._allocator);
             if (n == null) {
                 continue;
             }

@@ -33,6 +33,7 @@ pub const FileType = enum(u8) {
     CharDevice = 5,
     Socket = 6,
     Fifo = 7,
+    Unknown = 128,
 };
 
 pub const IoctlCommonCommands = enum(u32) {

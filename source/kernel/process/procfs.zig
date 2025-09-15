@@ -172,8 +172,8 @@ const ProcFsNode = struct {
         return 0;
     }
 
-    pub fn stat(self: *ProcFsNode, data: *c.struct_stat) i32{
-        log.err("Stating node: '{s}', for 0x{x}", .{self._name.get_name(), @intFromPtr(data)});
+    pub fn stat(self: *ProcFsNode, data: *c.struct_stat) i32 {
+        log.err("Stating node: '{s}', for 0x{x}", .{ self._name.get_name(), @intFromPtr(data) });
         data.st_mode = c.S_IFDIR;
         data.st_nlink = 0;
         data.st_size = 0;
@@ -186,8 +186,8 @@ const ProcFsNode = struct {
         data.st_ctim.tv_sec = 0;
         data.st_ctim.tv_nsec = 0;
         // return switch (self._data) {
-            // .directory => self._data.directory.stat(data),
-            // .file => self.stat_file(data),
+        // .directory => self._data.directory.stat(data),
+        // .file => self.stat_file(data),
         // };
         return -1;
     }
@@ -296,7 +296,6 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 });
 
-
 pub const ProcFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
     pub const Self = @This();
     _node: ?*std.DoublyLinkedList.Node,
@@ -309,11 +308,11 @@ pub const ProcFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator
         });
     }
 
-    pub fn next(self: *Self) ?kernel.fs.IFile {
+    pub fn next(self: *Self) ?kernel.fs.INode {
         if (self._node) |node| {
             self._node = node.next;
             const proc_node: *ProcFsNode = @fieldParentPtr("_node", node);
-            return proc_node.get_file();
+            return proc_node.get_node();
         }
         return null;
     }

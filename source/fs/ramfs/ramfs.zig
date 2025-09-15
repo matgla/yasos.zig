@@ -35,6 +35,7 @@ const interface = @import("interface");
 
 const RamFsFile = @import("ramfs_file.zig").RamFsFile;
 const RamFsData = @import("ramfs_data.zig").RamFsData;
+const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 
 const FilesNode = struct {
     node: RamFsData,
@@ -78,9 +79,9 @@ const RamFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, str
         });
     }
 
-    pub fn next(self: *Self) ?IFile {
+    pub fn next(self: *Self) ?kernel.fs.INode {
         if (self._current) |current| {
-            const file = RamFsFile.InstanceType.create(&(@as(*FilesNode, @fieldParentPtr("list_node", current))).node, self._allocator);
+            const file = RamFsNode.InstanceType.create(self._allocator, &(@as(*FilesNode, @fieldParentPtr("list_node", current))).node);
             self._current = current.next;
             return file.interface.new(self._allocator) catch |err| {
                 log.err("RamFs: Failed to create file from iterator: {s}", .{@errorName(err)});

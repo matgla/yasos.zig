@@ -54,7 +54,7 @@ pub fn init(allocator: std.mem.Allocator) void {
 }
 
 // most stupid way to keep track of the last file
-fn fill_dirent(file: *IFile, dirent_address: *anyopaque) isize {
+fn fill_dirent(file: *kernel.fs.INode, dirent_address: *anyopaque) isize {
     var filename = file.interface.name(kernel_allocator);
     defer filename.deinit();
     const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + filename.get_name().len, @alignOf(c.dirent));
@@ -405,9 +405,9 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
                 // still can be null if path not exists or is not a directory
                 if (entity.diriter) |*diriter| {
                     var maybe_file = diriter.interface.next();
-                    if (maybe_file) |*file| {
-                        defer file.interface.delete();
-                        context.result.* = fill_dirent(file, context.dirp);
+                    if (maybe_file) |*node| {
+                        defer node.interface.delete();
+                        context.result.* = fill_dirent(node, context.dirp);
                     } else {
                         diriter.interface.delete();
                         entity.diriter = null;

@@ -37,7 +37,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     _path: [:0]const u8,
     _is_open: bool,
 
-    pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) ?FatFsFile {
+    pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsFile {
         // try top open directory
         var dir: ?fatfs.Dir = fatfs.Dir.open(path) catch blk: {
             break :blk null;
@@ -51,7 +51,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
                 ._is_open = true,
             });
         } else {
-            const file = fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing }) catch return null;
+            const file = try fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing });
             return FatFsFile.init(.{
                 ._file = file,
                 ._allocator = allocator,
@@ -59,7 +59,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
                 ._is_open = true,
             });
         }
-        return null;
+        return error.UnknownError;
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
@@ -155,7 +155,6 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
         const s = fatfs.stat(self._path) catch return kernel.fs.FileName.init("", null);
         const s_dup = allocator.dupe(u8, s.name()) catch return kernel.fs.FileName.init("", null);
-
         return kernel.fs.FileName.init(s_dup, allocator);
     }
 

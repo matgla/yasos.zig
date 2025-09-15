@@ -58,7 +58,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             if (node.filetype() == FileType.Directory) {
                 var it: ?FileHeader = self.create_file_header(node.specinfo());
                 while (it) |*child| : (it = child.next()) {
-                    var file: RomFsFile = RomFsFile.InstanceType.create(child.*, self.allocator);
+                    var file: RomFsFile = RomFsFile.InstanceType.create(self.allocator, child.*);
                     var ifile = file.interface.new(self.allocator) catch return -1;
                     defer ifile.interface.delete();
                     if (!callback(&ifile, context)) {
@@ -92,7 +92,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
-            return RomFsFile.InstanceType.create(node, allocator).interface.new(allocator) catch return null;
+            return RomFsFile.InstanceType.create(allocator, node).interface.new(allocator) catch return null;
         }
         return null;
     }

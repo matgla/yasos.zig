@@ -46,7 +46,7 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     position: c.off_t,
 
     // RomFsFile interface
-    pub fn create(header: FileHeader, allocator: std.mem.Allocator) RomFsFile {
+    pub fn create(allocator: std.mem.Allocator, header: FileHeader) RomFsFile {
         return RomFsFile.init(.{
             .base = ReadOnlyFile.init(.{}),
             .header = header,
