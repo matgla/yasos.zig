@@ -37,3 +37,4 @@ pub const MBR = @import("mbr.zig").MBR;
 pub const MBRPartitionEntry = @import("mbr.zig").MBRPartitionEntry;
 pub const INode = @import("inode.zig").INode;
 pub const IDirectory = @import("idirectory.zig").IDirectory;
+pub const INodeBase = @import("inode.zig").INodeBase;

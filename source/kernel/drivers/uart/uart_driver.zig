@@ -33,11 +33,14 @@ pub fn UartDriver(comptime UartType: anytype) type {
         const UartDriverImpl = interface.DeriveFromBase(IDriver, struct {
             pub const Self = @This();
             const uart = UartType;
-            _name: []const u8,
+            _allocator: std.mem.Allocator,
+            _node: kernel.fs.INode,
 
-            pub fn create(driver_name: []const u8) UartDriverImpl {
+            pub fn create(allocator: std.mem.Allocator, driver_name: []const u8) !UartDriverImpl {
+                const uartnode = try (try UartNode(uart).InstanceType.create(allocator, driver_name)).interface.new(allocator);
                 return UartDriverImpl.init(.{
-                    ._name = driver_name,
+                    ._allocator = allocator,
+                    ._node = uartnode,
                 });
             }
 
@@ -56,13 +59,8 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 return true;
             }
 
-            pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
-                return (UartNode(uart).InstanceType.create(
-                    allocator,
-                    self._name,
-                )).interface.new(allocator) catch {
-                    return null;
-                };
+            pub fn inode(self: *Self) ?*kernel.fs.INode {
+                return &self._node;
             }
 
             pub fn delete(self: *Self) void {
@@ -71,7 +69,7 @@ pub fn UartDriver(comptime UartType: anytype) type {
             }
 
             pub fn name(self: *const Self) []const u8 {
-                return self._name;
+                return self._node.interface.name();
             }
         });
     };

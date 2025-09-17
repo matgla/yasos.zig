@@ -55,17 +55,31 @@ pub fn init(allocator: std.mem.Allocator) void {
 
 // most stupid way to keep track of the last file
 fn fill_dirent(file: *kernel.fs.INode, dirent_address: *anyopaque) isize {
-    var filename = file.interface.name(kernel_allocator);
-    defer filename.deinit();
-    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + filename.get_name().len, @alignOf(c.dirent));
+    const filename = file.interface.name();
+    const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + filename.len, @alignOf(c.dirent));
     // skip files that were already traversed
     const dirp: *c.dirent = @as(*c.dirent, @ptrCast(@alignCast(dirent_address)));
     dirp.d_ino = 0xdead;
     dirp.d_off = 0xbeef;
     dirp.d_reclen = @intCast(required_space);
-    std.mem.copyForwards(u8, dirp.d_name[0..], filename.get_name());
-    dirp.d_name[filename.get_name().len] = 0;
+    std.mem.copyForwards(u8, dirp.d_name[0..], filename);
+    dirp.d_name[filename.len] = 0;
     return @intCast(required_space);
+}
+
+fn get_file_from_process(fd: u16) !*kernel.fs.IFile {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        var maybe_node = process.fds.get(fd);
+        if (maybe_node) |*node| {
+            const maybe_file = node.file.interface.get_file();
+            if (maybe_file) |file| {
+                return file;
+            }
+            return errno(c.EISDIR);
+        }
+    }
+    return kernel.err.CurrentProcessNotFound;
 }
 
 const DirentTraverseTracker = struct {
@@ -267,10 +281,13 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         return errno(c.EFAULT);
     }
     if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |*file| {
-            context.result.* = file.file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
-            return 0;
+        var maybe_node = process.fds.get(@intCast(context.fd));
+        if (maybe_node) |*node| {
+            const maybe_file = node.file.interface.get_file();
+            if (maybe_file) |file| {
+                context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
+                return 0;
+            }
         }
     }
     return 0;
@@ -297,9 +314,12 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     }
 
     if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |*file| {
-            context.result.* = file.file.interface.write(@as([*]const u8, @ptrCast(context.buf.?))[0..context.count]);
+        var maybe_node = process.fds.get(@intCast(context.fd));
+        if (maybe_node) |*node| {
+            const maybe_file = node.file.interface.get_file();
+            if (maybe_file) |file| {
+                context.result.* = file.interface.write(@as([*]const u8, @ptrCast(context.buf.?))[0..context.count]);
+            }
             return 0;
         }
     }
@@ -327,7 +347,6 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     if (context.statbuf == null) {
         return errno(c.EFAULT);
     }
-    log.err("stat called buf: 0x{x}, fd: {x}, sizeof: {d}, timespec: {d}, long: {d}\n", .{ @intFromPtr(context.statbuf), context.fd, @sizeOf(c.struct_stat), @sizeOf(c.struct_timespec), @sizeOf(c_ulong) });
     if (context.pathname) |pathname| {
         const path = std.mem.span(@as([*:0]const u8, @ptrCast(pathname)));
         if (path.len > 0 and path[0] != '/') {
@@ -355,7 +374,6 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
         if (process_manager.instance.get_current_process()) |current_process| {
             var maybe_file = current_process.fds.get(@intCast(context.fd));
             if (maybe_file) |*file| {
-                kernel.log.err("stat: fd {d} path {s}\n", .{ context.fd, file.path });
                 return fs.get_ivfs().interface.stat(file.path[0..], context.statbuf);
             }
         }
@@ -366,19 +384,14 @@ pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
     _ = arg;
     return -1;
 }
+
 pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
-    const maybe_process = process_manager.instance.get_current_process();
-
-    if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |*file| {
-            context.result.* = file.file.interface.seek(context.offset, context.whence);
-            return 0;
-        }
-    }
-    return -1;
+    const file = try get_file_from_process(@intCast(context.fd));
+    context.result.* = file.interface.seek(context.offset, context.whence);
+    return 0;
 }
+
 pub fn sys_wait(arg: *const volatile anyopaque) !i32 {
     _ = arg;
     return -1;
@@ -423,14 +436,8 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |*file| {
-            return file.file.interface.ioctl(context.op, context.arg);
-        }
-    }
-    return -1;
+    const file = try get_file_from_process(@intCast(context.fd));
+    return file.interface.ioctl(context.op, context.arg);
 }
 
 pub fn sys_gettimeofday(arg: *const volatile anyopaque) !i32 {
@@ -545,14 +552,8 @@ pub fn sys_time(arg: *const volatile anyopaque) !i32 {
 }
 pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(context.fd));
-        if (maybe_file) |*file| {
-            return file.file.interface.fcntl(context.op, context.arg);
-        }
-    }
-    return -1;
+    const file = try get_file_from_process(@intCast(context.fd));
+    return file.interface.fcntl(context.op, context.arg);
 }
 pub fn sys_remove(arg: *const volatile anyopaque) !i32 {
     _ = arg;

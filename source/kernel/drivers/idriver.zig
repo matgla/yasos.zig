@@ -36,8 +36,8 @@ pub const IDriver = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "unload", .{}, bool);
     }
 
-    pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
-        return interface.VirtualCall(self, "inode", .{allocator}, ?kernel.fs.INode);
+    pub fn inode(self: *Self) ?*kernel.fs.INode {
+        return interface.VirtualCall(self, "inode", .{}, ?*kernel.fs.INode);
     }
 
     pub fn name(self: *const Self) []const u8 {

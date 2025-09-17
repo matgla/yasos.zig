@@ -95,9 +95,8 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return 0;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         _ = self;
-        return 0;
     }
 
     pub fn tell(self: *Self) c.off_t {

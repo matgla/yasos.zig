@@ -35,18 +35,20 @@ pub const FlashDriver = interface.DeriveFromBase(IDriver, struct {
     const Self = @This();
     const FlashType = @TypeOf(board.flash.flash0);
 
+    _allocator: std.mem.Allocator,
     _flash: FlashType,
     _name: []const u8,
 
-    pub fn create(flash: FlashType, driver_name: []const u8) FlashDriver {
+    pub fn create(allocator: std.mem.Allocator, flash: FlashType, driver_name: []const u8) FlashDriver {
         return FlashDriver.init(.{
+            ._allocator = allocator,
             ._flash = flash,
             ._name = driver_name,
         });
     }
 
-    pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
-        const file = FlashNode(FlashType).InstanceType.create(allocator, &self._flash, self._name).interface.new(allocator) catch {
+    pub fn inode(self: *Self) ?kernel.fs.INode {
+        const file = FlashNode(FlashType).InstanceType.create(self._allocator, &self._flash, self._name).interface.new(self._allocator) catch {
             return null;
         };
         return file;

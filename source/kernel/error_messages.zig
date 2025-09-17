@@ -15,31 +15,6 @@
 
 const std = @import("std");
 
-const interface = @import("interface");
-const fatfs = @import("zfat");
-
-const kernel = @import("kernel");
-
-pub const FatFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
-    _allocator: std.mem.Allocator,
-    _path: [:0]const u8,
-
-    const Self = @This();
-
-    pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsDirectory {
-        return FatFsDirectory.init(.{
-            ._allocator = allocator,
-            ._path = path,
-        });
-    }
-
-    pub fn get(self: *Self, name: []const u8) ?*kernel.fs.INode {
-        _ = name;
-        _ = self;
-        return null;
-    }
-
-    pub fn delete(self: *Self) void {
-        self._allocator.free(self._path);
-    }
-});
+pub const KernelError = error{
+    CurrentProcessNotFound,
+};

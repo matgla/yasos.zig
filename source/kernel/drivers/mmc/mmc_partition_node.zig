@@ -41,7 +41,7 @@ pub const MmcPartitionNode = interface.DeriveFromBase(kernel.fs.INode, struct {
         _ = self;
     }
 
-    pub fn create(allocator: std.mem.Allocator, filename: []const u8, dev: *kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
+    pub fn create(allocator: std.mem.Allocator, filename: []const u8, dev: *kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionNode {
         return MmcPartitionNode.init(.{
             ._allocator = allocator,
             ._name = filename,

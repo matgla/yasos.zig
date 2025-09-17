@@ -86,8 +86,12 @@ pub fn deinit() void {
 }
 
 pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Executable {
-    var maybe_file = fs.get_ivfs().interface.get(path, allocator);
-    if (maybe_file) |*f| {
+    var maybe_node = fs.get_ivfs().interface.get(path, allocator);
+    if (maybe_node == null) {
+        return std.posix.AccessError.FileNotFound;
+    }
+    const maybe_file = maybe_node.?.interface.get_file();
+    if (maybe_file) |f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
@@ -126,8 +130,12 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_a
 }
 
 pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Module {
-    var maybe_file = fs.get_ivfs().interface.get(path, allocator);
-    if (maybe_file) |*f| {
+    var maybe_node = fs.get_ivfs().interface.get(path, allocator);
+    if (maybe_node == null) {
+        return std.posix.AccessError.FileNotFound;
+    }
+    const maybe_file = maybe_node.?.interface.get_file();
+    if (maybe_file) |f| {
         defer f.interface.delete();
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,

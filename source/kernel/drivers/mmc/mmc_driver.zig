@@ -61,14 +61,16 @@ const R7 = R3;
 
 pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     const Self = @This();
+    _allocator: std.mem.Allocator,
     _mmc: hal.mmc.Mmc,
     _name: []const u8,
     _card_type: ?CardType,
     _size: u32,
     _initialized: bool,
 
-    pub fn create(mmc: hal.mmc.Mmc, driver_name: []const u8) MmcDriver {
+    pub fn create(allocator: std.mem.Allocator, mmc: hal.mmc.Mmc, driver_name: []const u8) MmcDriver {
         return MmcDriver.init(.{
+            ._allocator = allocator,
             ._mmc = mmc,
             ._name = driver_name,
             ._card_type = null,
@@ -77,8 +79,8 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         });
     }
 
-    pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
-        const file = MmcNode(Self).InstanceType.create(allocator, self._name, self._mmc, self).interface.new(allocator) catch return null;
+    pub fn inode(self: *Self) ?kernel.fs.INode {
+        const file = MmcNode(Self).InstanceType.create(self._allocator, self._name, self._mmc, self).interface.new(self._allocator) catch return null;
         return file;
     }
 

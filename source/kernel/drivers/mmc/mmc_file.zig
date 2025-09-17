@@ -85,9 +85,8 @@ pub fn MmcFile(comptime DriverType: type) type {
             return @as(c.off_t, @intCast(self._current_block)) << 9;
         }
 
-        pub fn close(self: *Self) i32 {
+        pub fn close(self: *Self) void {
             _ = self;
-            return 0;
         }
 
         pub fn sync(self: *Self) i32 {

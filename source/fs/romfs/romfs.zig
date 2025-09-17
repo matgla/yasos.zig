@@ -26,6 +26,7 @@ const IDirectoryIterator = kernel.fs.IDirectoryIterator;
 const FileType = kernel.fs.FileType;
 
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
+const RomFsNode = @import("romfs_node.zig").RomFsNode;
 
 const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
 const FileHeader = @import("file_header.zig").FileHeader;
@@ -89,10 +90,10 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return error.NotRomFsFileSystem;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
-            return RomFsFile.InstanceType.create(allocator, node).interface.new(allocator) catch return null;
+            return RomFsNode.InstanceType.create(allocator, node).interface.new(allocator) catch return null;
         }
         return null;
     }

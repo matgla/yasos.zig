@@ -76,9 +76,8 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn close(self: *Self) i32 {
+            pub fn close(self: *Self) void {
                 _ = self;
-                return 0;
             }
 
             pub fn sync(self: *Self) i32 {

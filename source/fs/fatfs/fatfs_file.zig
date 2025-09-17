@@ -112,7 +112,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         if (!self._is_open) {
             return 0;
         }
@@ -122,7 +122,6 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
             file.close();
             self._file = null;
         }
-        return 0;
     }
 
     pub fn dupe(self: *Self) ?kernel.fs.IFile {

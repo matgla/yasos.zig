@@ -39,8 +39,8 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "umount", .{}, i32);
     }
 
-    pub fn create(self: *Self, path: []const u8, flags: i32, allocator: std.mem.Allocator) ?IFile {
-        return interface.VirtualCall(self, "create", .{ path, flags, allocator }, ?IFile);
+    pub fn create(self: *Self, path: []const u8, flags: i32, allocator: std.mem.Allocator) ?kernel.fs.INode {
+        return interface.VirtualCall(self, "create", .{ path, flags, allocator }, ?kernel.fs.INode);
     }
 
     pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
@@ -59,8 +59,8 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "traverse", .{ path, callback, user_context }, i32);
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
-        return interface.VirtualCall(self, "get", .{ path, allocator }, ?IFile);
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
+        return interface.VirtualCall(self, "get", .{ path, allocator }, ?kernel.fs.INode);
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {

@@ -223,10 +223,10 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return -1;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
         const maybe_node = Self.get_node(*Self, self, path) catch return null;
         if (maybe_node) |node| {
-            return RamFsFile.InstanceType.create(&node.node, allocator).interface.new(allocator) catch |err| {
+            return RamFsNode.InstanceType.create(&node.node, allocator).interface.new(allocator) catch |err| {
                 kernel.log.err("RamFs: Failed to create file at path: {s}, with an error: {s}\n", .{ path, @errorName(err) });
                 return null;
             };

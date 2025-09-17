@@ -17,7 +17,17 @@ const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
 
-pub const IDirectory = interface.ConstructInterface(struct {});
+pub const IDirectory = interface.ConstructInterface(struct {
+    const Self = @This();
+
+    pub fn get(self: *Self, name: []const u8) ?*kernel.fs.INode {
+        return interface.VirtualCall(self, "get", .{name}, ?*kernel.fs.INode);
+    }
+
+    pub fn close(self: *Self) void {
+        interface.VirtualCall(self, "close", .{}, void);
+    }
+});
 
 pub const IDirectoryIterator = interface.ConstructInterface(struct {
     pub const Self = @This();

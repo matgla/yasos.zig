@@ -19,26 +19,68 @@ const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
 
-pub const INode = interface.ConstructInterface(struct {
+pub const INode = interface.ConstructCountingInterface(struct {
     const Self = @This();
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        return interface.VirtualCall(self, "name", .{allocator}, kernel.fs.FileName);
+    pub fn name(self: *const Self) []const u8 {
+        return interface.CountingInterfaceVirtualCall(self, "name", .{}, []const u8);
     }
 
     pub fn filetype(self: *Self) kernel.fs.FileType {
-        return interface.VirtualCall(self, "filetype", .{}, kernel.fs.FileType);
+        return interface.CountingInterfaceVirtualCall(self, "filetype", .{}, kernel.fs.FileType);
     }
 
-    pub fn get_file(self: *Self) ?kernel.fs.IFile {
-        return interface.VirtualCall(self, "get_file", .{}, ?kernel.fs.IFile);
+    pub fn get_file(self: *Self) ?*kernel.fs.IFile {
+        return interface.CountingInterfaceVirtualCall(self, "get_file", .{}, ?*kernel.fs.IFile);
     }
 
-    pub fn get_directory(self: *Self) ?kernel.fs.IDirectory {
-        return interface.VirtualCall(self, "get_directory", .{}, ?kernel.fs.IDirectory);
+    pub fn get_directory(self: *Self) ?*kernel.fs.IDirectory {
+        return interface.CountingInterfaceVirtualCall(self, "get_directory", .{}, ?*kernel.fs.IDirectory);
+    }
+
+    pub fn close(self: *Self) void {
+        interface.CountingInterfaceVirtualCall(self, "close", .{}, void);
     }
 
     pub fn delete(self: *Self) void {
-        interface.DestructorCall(self);
+        interface.CountingInterfaceDestructorCall(self);
+    }
+});
+
+pub const INodeBase = interface.DeriveFromBase(INode, struct {
+    pub const Self = @This();
+    pub const InstanceType = union(enum) {
+        file: kernel.fs.IFile,
+        directory: kernel.fs.IDirectory,
+    };
+    _instance: InstanceType,
+
+    pub fn create_file(file: kernel.fs.IFile) INodeBase {
+        return INodeBase.init(.{ ._instance = InstanceType{ .file = file } });
+    }
+
+    pub fn create_directory(directory: kernel.fs.IDirectory) INodeBase {
+        return INodeBase.init(.{ ._instance = InstanceType{ .directory = directory } });
+    }
+
+    pub fn get_file(self: *Self) ?*kernel.fs.IFile {
+        switch (self._instance) {
+            .file => |*file| return file,
+            .directory => |_| return null,
+        }
+    }
+
+    pub fn get_directory(self: *Self) ?*kernel.fs.IDirectory {
+        switch (self._instance) {
+            .file => |_| return null,
+            .directory => |*dir| return dir,
+        }
+    }
+
+    pub fn close(self: *Self) void {
+        switch (self._instance) {
+            .file => |*file| file.interface.close(),
+            .directory => |*dir| dir.interface.close(),
+        }
     }
 });

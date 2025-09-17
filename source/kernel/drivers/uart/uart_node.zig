@@ -29,37 +29,26 @@ const UartFile = @import("uart_file.zig").UartFile;
 
 pub fn UartNode(comptime UartType: anytype) type {
     const Internal = struct {
-        const UartNodeImpl = interface.DeriveFromBase(kernel.fs.INode, struct {
+        const UartNodeImpl = interface.DeriveFromBase(kernel.fs.INodeBase, struct {
             const Self = @This();
             const uart = UartType;
-            _allocator: std.mem.Allocator,
+            base: kernel.fs.INodeBase,
             _name: []const u8,
 
             pub fn delete(self: *Self) void {
                 _ = self;
             }
 
-            pub fn create(allocator: std.mem.Allocator, filename: []const u8) UartNodeImpl {
+            pub fn create(allocator: std.mem.Allocator, filename: []const u8) !UartNodeImpl {
+                const uartfile = try (UartFile(uart).InstanceType.create(allocator, filename)).interface.new(allocator);
                 return UartNodeImpl.init(.{
-                    ._allocator = allocator,
+                    .base = kernel.fs.INodeBase.InstanceType.create_file(uartfile),
                     ._name = filename,
                 });
             }
 
-            pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-                _ = allocator;
-                return kernel.fs.FileName.init(self._name, null);
-            }
-
-            pub fn get_file(self: *Self) ?kernel.fs.IFile {
-                return (UartFile(uart).InstanceType.create(self._allocator, self._name)).interface.new(self._allocator) catch {
-                    return null;
-                };
-            }
-
-            pub fn get_directory(self: *Self) ?kernel.fs.IDirectory {
-                _ = self;
-                return null;
+            pub fn name(self: *const Self) []const u8 {
+                return self._name;
             }
 
             pub fn filetype(self: *Self) kernel.fs.FileType {

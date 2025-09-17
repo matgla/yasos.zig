@@ -30,7 +30,6 @@ const log = std.log.scoped(.@"kernel/process");
 const arch_process = @import("arch").process;
 
 const Semaphore = @import("semaphore.zig").Semaphore;
-const IFile = kernel.fs.IFile;
 const IDirectoryIterator = @import("fs/idirectory.zig").IDirectoryIterator;
 const system_call = @import("interrupts/system_call.zig");
 const systick = @import("interrupts/systick.zig");
@@ -52,7 +51,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
     return struct {
         const Self = @This();
         const FileHandle = struct {
-            file: IFile,
+            file: kernel.fs.INode,
             path: [config.fs.max_path_length]u8,
             diriter: ?IDirectoryIterator,
         };

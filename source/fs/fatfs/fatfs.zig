@@ -186,14 +186,14 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return -1;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
         _ = self;
         const filepath = allocator.dupeZ(u8, path) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return null;
         };
         errdefer allocator.free(filepath);
-        return (FatFsFile.InstanceType.create(allocator, filepath) catch return null).interface.new(allocator) catch {
+        return (FatFsNode.InstanceType.create(allocator, filepath) catch return null).interface.new(allocator) catch {
             return null;
         };
     }

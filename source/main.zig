@@ -181,14 +181,14 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     kernel.fs.vfs_init(allocator);
     var driverfs = kernel.driver.fs.DriverFs.InstanceType.init(allocator);
     const uart0name = "uart0";
-    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(uart0name)).interface.new(allocator) catch |err| {
+    const uart_driver = (try kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(allocator, uart0name)).interface.new(allocator) catch |err| {
         kernel.log.err("Can't create uart driver instance: '{s}'", .{@errorName(err)});
         return err;
     };
     try driverfs.data().append(uart_driver, uart0name);
 
     const flash0name = "flash0";
-    var flash_driver = (kernel.driver.FlashDriver.InstanceType.create(board.flash.flash0, flash0name)).interface.new(allocator) catch |err| {
+    var flash_driver = (kernel.driver.FlashDriver.InstanceType.create(allocator, board.flash.flash0, flash0name)).interface.new(allocator) catch |err| {
         kernel.log.err("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
         return err;
     };
@@ -221,21 +221,24 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         mmcfile.interface.delete();
     }
 
-    var maybe_flash_file = flash_driver.interface.ifile(allocator);
-    if (maybe_flash_file) |*flash| {
-        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash.*, 0x80000)), "/");
-        var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
-        if (maybe_mmcpart0) |*mmcfile| {
-            const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, mmcfile.*)) catch null;
-            if (maybe_rootfs) |rootfs| {
-                mount_filesystem(rootfs, "/root") catch {};
-            }
+    var maybe_flash_node = flash_driver.interface.inode(allocator);
+    if (maybe_flash_node) |*node| {
+        var maybe_flashfile = node.interface.get_file();
+        if (maybe_flashfile) |*flash| {
+            try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash.*, 0x80000)), "/");
+            var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
+            if (maybe_mmcpart0) |*mmcfile| {
+                const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, mmcfile.*)) catch null;
+                if (maybe_rootfs) |rootfs| {
+                    mount_filesystem(rootfs, "/root") catch {};
+                }
 
-            mmcfile.interface.delete();
+                mmcfile.interface.delete();
+            }
+            try mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/tmp");
+            try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
+            try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
         }
-        try mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/tmp");
-        try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
-        try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
     } else {
         kernel.log.err("Can't get Flash Driver", .{});
     }
@@ -343,7 +346,7 @@ pub export fn main() void {
         defer kernel.fs.get_vfs().deinit();
 
         // we need to get real return address to get back from user mode successfully
-        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, &allocator, 1024 * 16 }) catch @panic("Can't spawn root process: ");
+        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, &allocator, 1024 * 16 }) catch {};
         kernel.log.warn("Root process died", .{});
     }
     @call(.never_inline, KernelAllocator.detect_leaks, .{});

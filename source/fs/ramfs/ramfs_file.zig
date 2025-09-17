@@ -111,9 +111,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return 0;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         _ = self;
-        return 0;
     }
 
     pub fn dupe(self: *Self) ?IFile {

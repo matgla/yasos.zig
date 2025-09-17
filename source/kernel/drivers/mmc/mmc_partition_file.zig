@@ -73,9 +73,8 @@ pub const MmcPartitionFile =
             return self._current_position;
         }
 
-        pub fn close(self: *Self) i32 {
+        pub fn close(self: *Self) void {
             _ = self;
-            return 0;
         }
 
         pub fn sync(self: *Self) i32 {
