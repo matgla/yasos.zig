@@ -64,8 +64,7 @@ pub fn UartDriver(comptime UartType: anytype) type {
             }
 
             pub fn delete(self: *Self) void {
-                // No specific cleanup needed for UART driver
-                _ = self;
+                self._node.interface.delete();
             }
 
             pub fn name(self: *const Self) []const u8 {

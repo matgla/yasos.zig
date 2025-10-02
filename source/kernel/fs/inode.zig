@@ -54,13 +54,14 @@ pub const INodeBase = interface.DeriveFromBase(INode, struct {
         directory: kernel.fs.IDirectory,
     };
     _instance: InstanceType,
+    _fs: *kernel.fs.IFileSystem,
 
-    pub fn create_file(file: kernel.fs.IFile) INodeBase {
-        return INodeBase.init(.{ ._instance = InstanceType{ .file = file } });
+    pub fn create_file(file: kernel.fs.IFile, fs: *kernel.fs.IFileSystem) INodeBase {
+        return INodeBase.init(.{ ._instance = InstanceType{ .file = file }, ._fs = fs });
     }
 
-    pub fn create_directory(directory: kernel.fs.IDirectory) INodeBase {
-        return INodeBase.init(.{ ._instance = InstanceType{ .directory = directory } });
+    pub fn create_directory(directory: kernel.fs.IDirectory, fs: *kernel.fs.IFileSystem) INodeBase {
+        return INodeBase.init(.{ ._instance = InstanceType{ .directory = directory }, ._fs = fs });
     }
 
     pub fn get_file(self: *Self) ?*kernel.fs.IFile {
@@ -81,6 +82,13 @@ pub const INodeBase = interface.DeriveFromBase(INode, struct {
         switch (self._instance) {
             .file => |*file| file.interface.close(),
             .directory => |*dir| dir.interface.close(),
+        }
+    }
+
+    pub fn delete(self: *Self) void {
+        switch (self._instance) {
+            .file => |*file| file.interface.delete(),
+            .directory => |*dir| dir.interface.delete(),
         }
     }
 });

@@ -36,13 +36,12 @@ pub fn FlashFile(comptime FlashType: anytype) type {
     const Internal = struct {
         const FlashFileImpl = interface.DeriveFromBase(IFile, struct {
             const Self = @This();
-            /// VTable for IFile interface
-            _flash: *FlashType,
+            _flash: FlashType,
             _allocator: std.mem.Allocator,
             _current_address: u32,
             _name: []const u8,
 
-            pub fn create(allocator: std.mem.Allocator, flash: *FlashType, filename: []const u8) FlashFileImpl {
+            pub fn create(allocator: std.mem.Allocator, flash: FlashType, filename: []const u8) FlashFileImpl {
                 return FlashFileImpl.init(.{
                     ._flash = flash,
                     ._allocator = allocator,

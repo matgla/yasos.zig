@@ -29,39 +29,28 @@ const FlashFile = @import("flash_file.zig").FlashFile;
 
 pub fn FlashNode(comptime FlashType: anytype) type {
     const Internal = struct {
-        const FlashNodeImpl = interface.DeriveFromBase(kernel.fs.INode, struct {
+        const FlashNodeImpl = interface.DeriveFromBase(kernel.fs.INodeBase, struct {
             const Self = @This();
             const flash = FlashType;
+            base: kernel.fs.INodeBase,
             _allocator: std.mem.Allocator,
             _name: []const u8,
-            _flash: *FlashType,
 
             pub fn delete(self: *Self) void {
                 _ = self;
             }
 
-            pub fn create(allocator: std.mem.Allocator, flashnode: *FlashType, filename: []const u8) FlashNodeImpl {
+            pub fn create(allocator: std.mem.Allocator, flashnode: FlashType, filename: []const u8) !FlashNodeImpl {
+                const flashfile = try (FlashFile(flash).InstanceType.create(allocator, flashnode, filename)).interface.new(allocator);
                 return FlashNodeImpl.init(.{
+                    .base = kernel.fs.INodeBase.InstanceType.create_file(flashfile),
                     ._allocator = allocator,
                     ._name = filename,
-                    ._flash = flashnode,
                 });
             }
 
-            pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-                _ = allocator;
-                return kernel.fs.FileName.init(self._name, null);
-            }
-
-            pub fn get_file(self: *Self) ?kernel.fs.IFile {
-                return (FlashFile(flash).InstanceType.create(self._allocator, self._flash, self._name)).interface.new(self._allocator) catch {
-                    return null;
-                };
-            }
-
-            pub fn get_directory(self: *Self) ?kernel.fs.IDirectory {
-                _ = self;
-                return null;
+            pub fn name(self: *const Self) []const u8 {
+                return self._name;
             }
 
             pub fn filetype(self: *Self) kernel.fs.FileType {

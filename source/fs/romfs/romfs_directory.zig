@@ -17,36 +17,29 @@
 // IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-const std = @import("std");
-
+const kernel = @import("kernel");
 const interface = @import("interface");
 
-const kernel = @import("kernel");
-const IDirectoryIterator = kernel.fs.IDirectoryIterator;
-const IFile = kernel.fs.IFile;
 const FileHeader = @import("file_header.zig").FileHeader;
-const RomFsNode = @import("romfs_node.zig").RomFsNode;
 
-pub const RomFsDirectoryIterator = interface.DeriveFromBase(IDirectoryIterator, struct {
-    pub const Self = @This();
-    _file: ?FileHeader,
-    _allocator: std.mem.Allocator,
+pub const RomFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
+    const Self = @This();
+    _header: FileHeader,
 
-    pub fn create(first_file: ?FileHeader, allocator: std.mem.Allocator) RomFsDirectoryIterator {
-        return RomFsDirectoryIterator.init(.{
-            ._file = first_file,
-            ._allocator = allocator,
+    pub fn create(header: FileHeader) RomFsDirectory {
+        return RomFsDirectory.init(.{
+            ._header = header,
         });
     }
 
-    pub fn next(self: *Self) ?kernel.fs.INode {
-        if (self._file) |*file| {
-            const romfs_node = RomFsNode.InstanceType.create(self._allocator, file.*) catch return null;
-            const inode = romfs_node.interface.new(self._allocator) catch return null;
-            self._file = file.next();
-            return inode;
-        }
-        return null; // End of iteration
+    pub fn get(self: *Self, name: []const u8) ?*kernel.fs.INode {
+        _ = self;
+        _ = name;
+        return null;
+    }
+
+    pub fn close(self: *Self) void {
+        _ = self;
     }
 
     pub fn delete(self: *Self) void {

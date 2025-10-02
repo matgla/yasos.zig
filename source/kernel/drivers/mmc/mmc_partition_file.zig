@@ -27,16 +27,14 @@ pub const MmcPartitionFile =
         const Self = @This();
 
         /// VTable for IFile interface
-        _allocator: std.mem.Allocator,
         _name: []const u8,
         _dev: *kernel.fs.IFile,
         _start_lba: u32,
         _size_in_sectors: u32,
         _current_position: c.off_t,
 
-        pub fn create(allocator: std.mem.Allocator, filename: []const u8, dev: *kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
+        pub fn create(filename: []const u8, dev: *kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
             return MmcPartitionFile.init(.{
-                ._allocator = allocator,
                 ._name = filename,
                 ._dev = dev,
                 ._start_lba = start_lba,
@@ -91,9 +89,8 @@ pub const MmcPartitionFile =
             return @intCast(self._size_in_sectors << 9);
         }
 
-        pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-            _ = allocator;
-            return kernel.fs.FileName.init(self._name, null);
+        pub fn name(self: *Self) kernel.fs.FileName {
+            return self._name;
         }
 
         pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {

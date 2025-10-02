@@ -93,7 +93,8 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
         const maybe_node = self.get_file_header(path);
         if (maybe_node) |node| {
-            return RomFsNode.InstanceType.create(allocator, node).interface.new(allocator) catch return null;
+            var nodeobj = RomFsNode.InstanceType.create(allocator, node) catch return null;
+            return nodeobj.interface.new(allocator) catch return null;
         }
         return null;
     }

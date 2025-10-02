@@ -30,7 +30,6 @@ const MmcPartitionFile = @import("mmc_partition_file.zig").MmcPartitionFile;
 
 pub const MmcPartitionNode = interface.DeriveFromBase(kernel.fs.INode, struct {
     const Self = @This();
-    _allocator: std.mem.Allocator,
     _name: []const u8,
     _dev: *kernel.fs.IFile,
     _start_lba: u32,
@@ -52,9 +51,8 @@ pub const MmcPartitionNode = interface.DeriveFromBase(kernel.fs.INode, struct {
         });
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        _ = allocator;
-        return kernel.fs.FileName.init(self._name, null);
+    pub fn name(self: *Self) kernel.fs.FileName {
+        return self._name;
     }
 
     pub fn get_file(self: *Self) ?kernel.fs.IFile {

@@ -27,6 +27,10 @@ pub const IDirectory = interface.ConstructInterface(struct {
     pub fn close(self: *Self) void {
         interface.VirtualCall(self, "close", .{}, void);
     }
+
+    pub fn delete(self: *Self) void {
+        interface.DestructorCall(self);
+    }
 });
 
 pub const IDirectoryIterator = interface.ConstructInterface(struct {

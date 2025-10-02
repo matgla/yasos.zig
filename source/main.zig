@@ -142,7 +142,7 @@ fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !voi
     };
 }
 
-fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) void {
+fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) !void {
     var buffer: [1024]u8 = [_]u8{0x00} ** 1024;
     _ = mmcfile.interface.read(buffer[0..]);
     const mbr = kernel.fs.MBR.create(buffer[0..]);
@@ -161,7 +161,7 @@ fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Alloc
                     part.size_in_sectors,
                 });
                 const partname = std.fmt.comptimePrint("mmc{d}p{d}", .{ 0, i });
-                const partition_driver = kernel.driver.MmcPartitionDriver.InstanceType.create(mmcfile.share(), partname, part.start_lba, part.size_in_sectors).interface.new(allocator) catch |err| {
+                const partition_driver = kernel.driver.MmcPartitionDriver.InstanceType.create(allocator, try mmcfile.clone(), partname, part.start_lba, part.size_in_sectors).interface.new(allocator) catch |err| {
                     kernel.log.err("Can't create partition driver: {s}", .{@errorName(err)});
                     return;
                 };
@@ -181,33 +181,26 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     kernel.fs.vfs_init(allocator);
     var driverfs = kernel.driver.fs.DriverFs.InstanceType.init(allocator);
     const uart0name = "uart0";
-    const uart_driver = (try kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(allocator, uart0name)).interface.new(allocator) catch |err| {
-        kernel.log.err("Can't create uart driver instance: '{s}'", .{@errorName(err)});
-        return err;
-    };
+    const uart_driver = try (try kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(allocator, uart0name)).interface.new(allocator);
     try driverfs.data().append(uart_driver, uart0name);
 
     const flash0name = "flash0";
-    var flash_driver = (kernel.driver.FlashDriver.InstanceType.create(allocator, board.flash.flash0, flash0name)).interface.new(allocator) catch |err| {
-        kernel.log.err("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
-        return err;
-    };
+    const flash_driver_base = try kernel.driver.FlashDriver.InstanceType.create(allocator, board.flash.flash0, flash0name);
+    var flash_driver = try flash_driver_base.interface.new(allocator);
     try driverfs.data().append(flash_driver, flash0name);
-    var maybe_mmcfile: ?kernel.fs.IFile = null;
+    var maybe_mmcfile: ?*kernel.fs.IFile = null;
     var maybe_mmcdriver: ?kernel.driver.IDriver = null;
     if (@hasDecl(board, "mmc")) {
         inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
-            maybe_mmcdriver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, name), name)).interface.new(allocator) catch |err| {
-                kernel.log.err("Can't create {s} driver instance: '{s}'", .{ name, @errorName(err) });
-                return err;
-            };
+
+            maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, @field(board.mmc, name), name)).interface.new(allocator);
             driverfs.data().append(maybe_mmcdriver.?, name) catch {};
             kernel.log.info("adding mmc driver: {s}", .{m.name});
             i = i + 1;
-            var maybe_mmcnode = maybe_mmcdriver.?.interface.inode(allocator);
-            if (maybe_mmcnode) |*node| {
+            const maybe_mmcnode = maybe_mmcdriver.?.interface.inode();
+            if (maybe_mmcnode) |node| {
                 maybe_mmcfile = node.interface.get_file();
             }
         }
@@ -216,15 +209,15 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     }
     try driverfs.data().load_all();
 
-    if (maybe_mmcfile) |*mmcfile| {
-        add_mmc_partition_drivers(mmcfile, allocator, &driverfs);
+    if (maybe_mmcfile) |mmcfile| {
+        try add_mmc_partition_drivers(mmcfile, allocator, &driverfs);
         mmcfile.interface.delete();
     }
 
-    var maybe_flash_node = flash_driver.interface.inode(allocator);
-    if (maybe_flash_node) |*node| {
-        var maybe_flashfile = node.interface.get_file();
-        if (maybe_flashfile) |*flash| {
+    const maybe_flash_node = flash_driver.interface.inode();
+    if (maybe_flash_node) |node| {
+        const maybe_flashfile = node.interface.get_file();
+        if (maybe_flashfile) |flash| {
             try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash.*, 0x80000)), "/");
             var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
             if (maybe_mmcpart0) |*mmcfile| {
@@ -246,10 +239,10 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     return;
 }
 
-fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, process: *kernel.process.Process) void {
+fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.INode, process: *kernel.process.Process) void {
     kernel.log.info("setting default streams", .{});
     process.fds.put(0, .{
-        .file = streamfile.share(),
+        .file = try streamfile.clone(),
         .path = blk: {
             var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
             const value = "/dev/stdin";
@@ -261,7 +254,7 @@ fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, 
         kernel.log.err("Can't register: stdin", .{});
     };
     process.fds.put(1, .{
-        .file = streamfile.share(),
+        .file = try streamfile.clone(),
         .path = blk: {
             var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
             const value = "/dev/stdout";
@@ -273,7 +266,7 @@ fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, 
         kernel.log.err("Can't register: stdout", .{});
     };
     process.fds.put(2, .{
-        .file = streamfile.share(),
+        .file = try streamfile.clone(),
         .path = blk: {
             var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
             const value = "/dev/stderr";
@@ -297,10 +290,9 @@ export fn kernel_process(argument: *KernelAllocator) void {
 
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_uartfile = kernel.fs.get_ivfs().interface.get("/dev/uart0", process.get_memory_allocator());
-        if (maybe_uartfile) |*uartfile| {
-            defer uartfile.interface.delete();
-            attach_default_filedescriptors_to_root_process(uartfile, process);
+        const maybe_uartnode = kernel.fs.get_ivfs().interface.get("/dev/uart0", process.get_memory_allocator());
+        if (maybe_uartnode) |uartnode| {
+            attach_default_filedescriptors_to_root_process(uartnode, process);
         } else {
             kernel.log.err("default streams were not assigned: /dev/uart0 do not exists", .{});
         }

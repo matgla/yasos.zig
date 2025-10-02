@@ -33,13 +33,44 @@ const c = @import("libc_imports").c;
 
 const log = std.log.scoped(.@"vfs/driverfs");
 
+const DriverNode = interface.DeriveFromBase(kernel.fs.INodeBase, struct {
+    const Self = @This();
+    base: kernel.fs.INodeBase,
+    _idriver: ?*const IDriver,
+
+    pub fn create(allocator: std.mem.Allocator, idriver: ?*IDriver) !DriverNode {
+        var baseinit: kernel.fs.INodeBase = undefined;
+        if (idriver == null) {
+            const dir = try DriverDirectory.InstanceType.create(allocator).interface.new(allocator);
+            baseinit = kernel.fs.INodeBase.InstanceType.create_directory(dir);
+        } else {
+            baseinit = idriver.?.interface.inode().?;
+        }
+        return DriverNode.init(.{
+            .base = baseinit.*,
+            ._idriver = idriver,
+        });
+    }
+
+    pub fn name(self: *const Self) []const u8 {
+        return self._idriver.interface.name();
+    }
+
+    pub fn filetype(self: *Self) kernel.fs.FileType {
+        if (self._idriver == null) {
+            return kernel.fs.FileType.Directory;
+        }
+        return kernel.fs.FileType.File;
+    }
+});
+
 const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
     base: kernel.fs.ReadOnlyFile,
     _allocator: std.mem.Allocator,
     _container: std.StringHashMap(IDriver),
 
-    pub fn init(allocator: std.mem.Allocator) DriverDirectory {
+    pub fn create(allocator: std.mem.Allocator) DriverDirectory {
         return DriverDirectory.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
             ._allocator = allocator,
@@ -47,7 +78,7 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
         });
     }
 
-    fn deinit(self: *Self) void {
+    pub fn delete(self: *Self) void {
         log.debug("deinitialization", .{});
         var it = self._container.iterator();
         while (it.next()) |driver| {
@@ -57,8 +88,8 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
         self._container.deinit();
     }
 
-    pub fn delete(self: *Self) void {
-        self.deinit();
+    pub fn close(self: *Self) void {
+        self.delete();
     }
 
     pub fn append(self: *Self, driver: IDriver, node_name: []const u8) !void {
@@ -82,7 +113,7 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
 
     pub fn get(self: *Self, path: []const u8) ?*kernel.fs.INode {
         if (self._container.getPtr(path)) |driver| {
-            return driver.interface.inode(self._allocator);
+            return driver.interface.inode();
         }
         return null;
     }
@@ -135,7 +166,8 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            return self._root.interface.new(self._allocator) catch return null;
+            const driverdata = DriverNode.InstanceType.create(allocator, null) catch return null;
+            return driverdata.interface.new(allocator) catch return null;
         }
         return self._root.data().get(path, allocator);
     }

@@ -22,46 +22,43 @@ const kernel = @import("kernel");
 
 const FileHeader = @import("file_header.zig").FileHeader;
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
+const RomFsDirectory = @import("romfs_directory.zig").RomFsDirectory;
 
-pub const RomFsNode = interface.DeriveFromBase(kernel.fs.INode, struct {
+pub const RomFsNode = interface.DeriveFromBase(kernel.fs.INodeBase, struct {
+    base: kernel.fs.INodeBase,
     _allocator: std.mem.Allocator,
     _header: FileHeader,
+    _name: kernel.fs.FileName,
 
     const Self = @This();
 
-    pub fn create(allocator: std.mem.Allocator, header: FileHeader) RomFsNode {
+    pub fn create(allocator: std.mem.Allocator, header: FileHeader) !RomFsNode {
+        var baseinit: kernel.fs.INodeBase = undefined;
+        var h = header;
+        if (h.filetype() == kernel.fs.FileType.Directory) {
+            const dir: kernel.fs.IDirectory = try RomFsDirectory.InstanceType.create(header).interface.new(allocator);
+            baseinit = kernel.fs.INodeBase.InstanceType.create_directory(dir);
+        } else {
+            const file: kernel.fs.IFile = try RomFsFile.InstanceType.create(allocator, header).interface.new(allocator);
+            baseinit = kernel.fs.INodeBase.InstanceType.create_file(file);
+        }
         return RomFsNode.init(.{
+            .base = baseinit,
             ._allocator = allocator,
             ._header = header,
+            ._name = h.name(allocator),
         });
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        return self._header.name(allocator);
+    pub fn name(self: *const Self) []const u8 {
+        return self._name.get_name();
     }
 
     pub fn filetype(self: *Self) kernel.fs.FileType {
         return self._header.filetype();
     }
 
-    pub fn get_file(self: *Self) ?kernel.fs.IFile {
-        if (self.filetype() == .Directory) {
-            return null;
-        }
-
-        return RomFsFile.InstanceType.create(self._allocator, self._header).interface.new(self._allocator) catch {
-            return null;
-        };
-    }
-
-    pub fn get_directory(self: *Self) ?kernel.fs.IDirectory {
-        if (self.filetype() != .Directory or self.filetype() != .HardLink or self.filetype() != .SymbolicLink) {
-            return null;
-        }
-        return null;
-    }
-
     pub fn delete(self: *Self) void {
-        _ = self;
+        self._name.deinit();
     }
 });

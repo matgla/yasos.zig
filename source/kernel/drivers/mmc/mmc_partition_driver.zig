@@ -33,19 +33,21 @@ pub const MmcPartitionDriver = interface.DeriveFromBase(IDriver, struct {
     _name: []const u8,
     _start_lba: u32,
     _size_in_sectors: u32,
+    _node: kernel.fs.INode,
 
-    pub fn create(dev: kernel.fs.IFile, driver_name: []const u8, start_lba: u32, size_in_sectors: u32) MmcPartitionDriver {
+    pub fn create(allocator: std.mem.Allocator, dev: kernel.fs.IFile, driver_name: []const u8, start_lba: u32, size_in_sectors: u32) MmcPartitionDriver {
+        const node = MmcPartitionNode.InstanceType.create(allocator, driver_name, dev, start_lba, size_in_sectors).interface.new(allocator) catch return null;
         return MmcPartitionDriver.init(.{
             ._dev = dev,
             ._name = driver_name,
             ._start_lba = start_lba,
             ._size_in_sectors = size_in_sectors,
+            ._node = node,
         });
     }
 
-    pub fn inode(self: *Self, allocator: std.mem.Allocator) ?kernel.fs.INode {
-        const file = MmcPartitionNode.InstanceType.create(allocator, self._name, &self._dev, self._start_lba, self._size_in_sectors).interface.new(allocator) catch return null;
-        return file;
+    pub fn inode(self: *Self) ?*kernel.fs.INode {
+        return self._node;
     }
 
     pub fn load(self: *Self) anyerror!void {
