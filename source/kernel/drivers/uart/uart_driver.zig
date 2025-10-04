@@ -22,7 +22,7 @@ const std = @import("std");
 
 const IDriver = @import("../idriver.zig").IDriver;
 const UartFile = @import("uart_file.zig").UartFile;
-const UartNode = @import("uart_node.zig").UartNode;
+// const UartNode = @import("uart_node.zig").UartNode;
 
 const kernel = @import("../../kernel.zig");
 
@@ -34,13 +34,14 @@ pub fn UartDriver(comptime UartType: anytype) type {
             pub const Self = @This();
             const uart = UartType;
             _allocator: std.mem.Allocator,
-            _node: kernel.fs.INode,
+            _node: kernel.fs.Node,
 
             pub fn create(allocator: std.mem.Allocator, driver_name: []const u8) !UartDriverImpl {
-                const uartnode = try (try UartNode(uart).InstanceType.create(allocator, driver_name)).interface.new(allocator);
+                // const uartnode = try (try UartNode(uart).InstanceType.create(allocator, driver_name)).interface.new(allocator);
+
                 return UartDriverImpl.init(.{
                     ._allocator = allocator,
-                    ._node = uartnode,
+                    ._node = try UartFile(uart).InstanceType.create_node(allocator, driver_name),
                 });
             }
 
@@ -59,8 +60,8 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 return true;
             }
 
-            pub fn inode(self: *Self) ?*kernel.fs.INode {
-                return &self._node;
+            pub fn node(self: *Self) ?kernel.fs.Node {
+                return self._node;
             }
 
             pub fn delete(self: *Self) void {

@@ -37,20 +37,18 @@ pub const FlashDriver = interface.DeriveFromBase(IDriver, struct {
 
     _allocator: std.mem.Allocator,
     _name: []const u8,
-    _node: kernel.fs.INode,
+    _node: kernel.fs.Node,
 
     pub fn create(allocator: std.mem.Allocator, flash: FlashType, driver_name: []const u8) !FlashDriver {
-        const node = try (try FlashNode(FlashType).InstanceType.create(allocator, flash, driver_name)).interface.new(allocator);
-
         return FlashDriver.init(.{
             ._allocator = allocator,
             ._name = driver_name,
-            ._node = node,
+            ._node = try FlashFile(FlashType).InstanceType.create_node(allocator, flash, driver_name),
         });
     }
 
-    pub fn inode(self: *Self) ?*kernel.fs.INode {
-        return &self._node;
+    pub fn node(self: *Self) ?kernel.fs.Node {
+        return self._node;
     }
 
     pub fn load(self: *Self) anyerror!void {

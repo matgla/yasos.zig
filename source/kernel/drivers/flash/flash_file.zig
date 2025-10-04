@@ -30,6 +30,8 @@ const FileType = @import("../../fs/ifile.zig").FileType;
 const IoctlCommonCommands = @import("../../fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("../../fs/ifile.zig").FileMemoryMapAttributes;
 
+const kernel = @import("../../kernel.zig");
+
 const log = std.log.scoped(.@"kernel/fs/driver/flash_file");
 
 pub fn FlashFile(comptime FlashType: anytype) type {
@@ -48,6 +50,11 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                     ._current_address = 0,
                     ._name = filename,
                 });
+            }
+
+            pub fn create_node(allocator: std.mem.Allocator, flash: FlashType, filename: []const u8) anyerror!kernel.fs.Node {
+                const file = try create(allocator, flash, filename).interface.new(allocator);
+                return kernel.fs.Node.create_file(file);
             }
 
             // IFile interface

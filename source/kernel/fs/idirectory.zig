@@ -20,8 +20,8 @@ const kernel = @import("../kernel.zig");
 pub const IDirectory = interface.ConstructInterface(struct {
     const Self = @This();
 
-    pub fn get(self: *Self, name: []const u8) ?*kernel.fs.INode {
-        return interface.VirtualCall(self, "get", .{name}, ?*kernel.fs.INode);
+    pub fn get(self: *Self, name: []const u8) ?kernel.fs.Node {
+        return interface.VirtualCall(self, "get", .{name}, ?kernel.fs.Node);
     }
 
     pub fn close(self: *Self) void {
@@ -36,8 +36,8 @@ pub const IDirectory = interface.ConstructInterface(struct {
 pub const IDirectoryIterator = interface.ConstructInterface(struct {
     pub const Self = @This();
 
-    pub fn next(self: *Self) ?kernel.fs.INode {
-        return interface.VirtualCall(self, "next", .{}, ?kernel.fs.INode);
+    pub fn next(self: *Self) ?kernel.fs.Node {
+        return interface.VirtualCall(self, "next", .{}, ?kernel.fs.Node);
     }
 
     pub fn delete(self: *Self) void {

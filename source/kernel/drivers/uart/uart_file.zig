@@ -21,6 +21,8 @@
 const std = @import("std");
 const c = @import("libc_imports").c;
 
+const kernel = @import("../../kernel.zig");
+
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
@@ -50,6 +52,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                     ._allocator = allocator,
                     ._name = filename,
                 });
+            }
+
+            pub fn create_node(allocator: std.mem.Allocator, filename: []const u8) anyerror!kernel.fs.Node {
+                const file = try create(allocator, filename).interface.new(allocator);
+                return kernel.fs.Node.create_file(file);
             }
 
             pub fn read(self: *Self, buffer: []u8) isize {

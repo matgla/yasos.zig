@@ -70,7 +70,7 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     _allocator: std.mem.Allocator,
     _container: std.StringHashMap(IDriver),
 
-    pub fn create(allocator: std.mem.Allocator) DriverDirectory {
+    pub fn init(allocator: std.mem.Allocator) DriverDirectory {
         return DriverDirectory.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
             ._allocator = allocator,
