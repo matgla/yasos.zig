@@ -18,7 +18,6 @@ const std = @import("std");
 const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const MmcFile = @import("mmc_file.zig").MmcFile;
-const MmcNode = @import("mmc_node.zig").MmcNode;
 const MmcIo = @import("mmc_io.zig").MmcIo;
 const MmcPartitionDriver = @import("mmc_partition_driver.zig").MmcPartitionDriver;
 const kernel = @import("../../kernel.zig");
@@ -68,12 +67,13 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     _card_type: ?CardType,
     _size: u32,
     _initialized: bool,
-    _node: kernel.fs.INode,
+    _node: kernel.fs.Node,
 
+    var refcounter: i16 = 0;
     pub fn create(allocator: std.mem.Allocator, mmc: hal.mmc.Mmc, driver_name: []const u8) !MmcDriver {
         const mmcio = try allocator.create(MmcIo);
         mmcio.* = MmcIo.create(mmc);
-        const mmcnode = try (try MmcNode.InstanceType.create(allocator, mmcio, driver_name)).interface.new(allocator);
+        refcounter += 1;
         return MmcDriver.init(.{
             ._allocator = allocator,
             ._mmcio = mmcio,
@@ -81,12 +81,12 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
             ._card_type = null,
             ._size = 0,
             ._initialized = false,
-            ._node = mmcnode,
+            ._node = try MmcFile.InstanceType.create_node(allocator, mmcio, driver_name),
         });
     }
 
-    pub fn inode(self: *Self) ?*kernel.fs.INode {
-        return &self._node;
+    pub fn node(self: *Self) anyerror!kernel.fs.Node {
+        return try self._node.clone();
     }
 
     pub fn partition_driver(self: *Self, allocator: std.mem.Allocator) ?IDriver {
@@ -104,7 +104,14 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     }
 
     pub fn delete(self: *Self) void {
+        // this cannot be removed before all copies are gone
+        refcounter -= 1;
+        if (refcounter > 0) {
+            return;
+        }
         self._mmcio.deinit();
+        self._allocator.destroy(self._mmcio);
+        self._node.delete();
     }
 
     pub fn name(self: *const Self) []const u8 {

@@ -48,7 +48,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return 0;
     }
 
-    pub fn create(self: *Self, path: []const u8, mode: i32, allocator: std.mem.Allocator) ?kernel.fs.INode {
+    pub fn create(self: *Self, path: []const u8, mode: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
             return node.point.filesystem.interface.create(node.left, mode, allocator);
@@ -85,15 +85,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return -1;
     }
 
-    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
-        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
-        if (maybe_node) |*node| {
-            return node.point.filesystem.interface.iterator(node.left);
-        }
-        return null;
-    }
-
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
             return node.point.filesystem.interface.get(node.left, allocator);

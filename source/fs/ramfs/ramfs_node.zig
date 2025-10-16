@@ -15,49 +15,11 @@
 
 const std = @import("std");
 
-const interface = @import("interface");
-const fatfs = @import("zfat");
-
 const kernel = @import("kernel");
 
-const RamFsFile = @import("ramfs_file.zig").RamFsFile;
 const RamFsData = @import("ramfs_data.zig").RamFsData;
 
-pub const RamFsNode = interface.DeriveFromBase(kernel.fs.INode, struct {
-    _allocator: std.mem.Allocator,
-    _node: *RamFsData,
-
-    const Self = @This();
-
-    pub fn create(allocator: std.mem.Allocator, node: *RamFsData) RamFsNode {
-        return RamFsNode.init(.{
-            ._allocator = allocator,
-            ._node = node,
-        });
-    }
-
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        _ = allocator;
-        return kernel.fs.FileName.init(self._node.name(), null);
-    }
-
-    pub fn filetype(self: *Self) kernel.fs.FileType {
-        _ = self;
-        return kernel.fs.FileType.File;
-    }
-
-    pub fn get_file(self: *Self) ?kernel.fs.IFile {
-        return RamFsFile.InstanceType.create(self._node, self._allocator).interface.new(self._allocator) catch {
-            return null;
-        };
-    }
-
-    pub fn get_directory(self: *Self) ?kernel.fs.IDirectory {
-        _ = self;
-        return null;
-    }
-
-    pub fn delete(self: *Self) void {
-        _ = self;
-    }
-});
+pub const RamFsNode = struct {
+    node: kernel.fs.Node,
+    list_node: std.DoublyLinkedList.Node,
+};

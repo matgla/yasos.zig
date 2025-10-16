@@ -22,18 +22,20 @@ const interface = @import("interface");
 
 const kernel = @import("../../kernel.zig");
 
+const log = std.log.scoped(.@"mmc/file");
+
 pub const MmcPartitionFile =
     interface.DeriveFromBase(kernel.fs.IFile, struct {
         const Self = @This();
 
         /// VTable for IFile interface
         _name: []const u8,
-        _dev: *kernel.fs.IFile,
+        _dev: kernel.fs.IFile,
         _start_lba: u32,
         _size_in_sectors: u32,
         _current_position: c.off_t,
 
-        pub fn create(filename: []const u8, dev: *kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
+        pub fn create(filename: []const u8, dev: kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
             return MmcPartitionFile.init(.{
                 ._name = filename,
                 ._dev = dev,
@@ -41,6 +43,11 @@ pub const MmcPartitionFile =
                 ._size_in_sectors = size_in_sectors,
                 ._current_position = @as(c.off_t, @intCast(start_lba)) << 9,
             });
+        }
+
+        pub fn create_node(allocator: std.mem.Allocator, dev: kernel.fs.IFile, filename: []const u8, start_lba: u32, size_in_sectors: u32) anyerror!kernel.fs.Node {
+            const file = try create(filename, dev, start_lba, size_in_sectors).interface.new(allocator);
+            return kernel.fs.Node.create_file(file);
         }
 
         pub fn read(self: *Self, buf: []u8) isize {
@@ -89,7 +96,7 @@ pub const MmcPartitionFile =
             return @intCast(self._size_in_sectors << 9);
         }
 
-        pub fn name(self: *Self) kernel.fs.FileName {
+        pub fn name(self: *const Self) []const u8 {
             return self._name;
         }
 
@@ -112,12 +119,13 @@ pub const MmcPartitionFile =
             _ = data;
         }
 
-        pub fn filetype(self: *Self) kernel.fs.FileType {
+        pub fn filetype(self: *const Self) kernel.fs.FileType {
             _ = self;
             return kernel.fs.FileType.BlockDevice;
         }
 
         pub fn delete(self: *Self) void {
             _ = self.close();
+            self._dev.interface.delete();
         }
     });

@@ -42,6 +42,11 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         });
     }
 
+    pub fn create_node(allocator: std.mem.Allocator, driver: *MmcIo, filename: []const u8) anyerror!kernel.fs.Node {
+        const file = try create(allocator, driver, filename).interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
+    }
+
     pub fn read(self: *Self, buf: []u8) isize {
         return self._driver.read(self._current_block << 9, buf);
     }
@@ -101,9 +106,8 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        _ = allocator;
-        return kernel.fs.FileName.init(self._name, null);
+    pub fn name(self: *const Self) []const u8 {
+        return self._name;
     }
 
     pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -125,7 +129,7 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         _ = data;
     }
 
-    pub fn filetype(self: *Self) kernel.fs.FileType {
+    pub fn filetype(self: *const Self) kernel.fs.FileType {
         _ = self;
         return kernel.fs.FileType.BlockDevice;
     }

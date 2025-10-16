@@ -100,8 +100,8 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "size", .{}, isize);
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-        return interface.CountingInterfaceVirtualCall(self, "name", .{allocator}, FileName);
+    pub fn name(self: *const Self) []const u8 {
+        return interface.CountingInterfaceVirtualCall(self, "name", .{}, []const u8);
     }
 
     pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -112,7 +112,7 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "fcntl", .{ cmd, arg }, i32);
     }
 
-    pub fn filetype(self: *Self) FileType {
+    pub fn filetype(self: *const Self) FileType {
         return interface.CountingInterfaceVirtualCall(self, "filetype", .{}, FileType);
     }
 

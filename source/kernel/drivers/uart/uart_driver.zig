@@ -45,6 +45,10 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 });
             }
 
+            pub fn delete(self: *Self) void {
+                self._node.delete();
+            }
+
             pub fn load(self: *Self) anyerror!void {
                 _ = self;
                 uart.flush();
@@ -60,16 +64,12 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 return true;
             }
 
-            pub fn node(self: *Self) ?kernel.fs.Node {
-                return self._node;
-            }
-
-            pub fn delete(self: *Self) void {
-                self._node.interface.delete();
+            pub fn node(self: *Self) anyerror!kernel.fs.Node {
+                return try self._node.clone();
             }
 
             pub fn name(self: *const Self) []const u8 {
-                return self._node.interface.name();
+                return self._node.name();
             }
         });
     };

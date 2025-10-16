@@ -15,18 +15,9 @@
 
 const std = @import("std");
 
-pub fn dump_stack_trace(log: anytype, address: usize) void {
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
+const kernel = @import("../kernel.zig");
 
-    while (stack.next()) |return_address| : (index += 1) {
-        log.err("  {d: >3}: 0x{X:0>8}", .{ index, if (return_address > 0) return_address - 1 else return_address });
-    }
-}
-
-pub fn get_stack_trace_depth(address: usize) usize {
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
-    while (stack.next()) |_| : (index += 1) {}
-    return index;
-}
+pub const ProcFsNode = struct {
+    node: kernel.fs.Node,
+    list_node: std.DoublyLinkedList.Node,
+};

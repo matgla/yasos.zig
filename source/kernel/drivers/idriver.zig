@@ -36,8 +36,8 @@ pub const IDriver = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "unload", .{}, bool);
     }
 
-    pub fn node(self: *Self) ?kernel.fs.Node {
-        return interface.VirtualCall(self, "node", .{}, ?kernel.fs.Node);
+    pub fn node(self: *Self) anyerror!kernel.fs.Node {
+        return interface.VirtualCall(self, "node", .{}, anyerror!kernel.fs.Node);
     }
 
     pub fn name(self: *const Self) []const u8 {

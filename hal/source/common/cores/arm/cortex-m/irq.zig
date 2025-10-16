@@ -37,12 +37,12 @@ pub const Irq = struct {
             .pendsv => irq_num = c.PendSV_IRQn,
             .supervisor_call => irq_num = c.SVCall_IRQn,
         }
-        c.NVIC_SetPriority(irq_num, priority);
+        cpu.nvic.set_priority(irq_num, priority);
     }
 
     pub fn trigger_supervisor_call(_: u32, _: *const volatile anyopaque, _: *volatile anyopaque) callconv(.naked) void {
         asm volatile (
-            \\ svc 0 
+            \\ svc 0
             \\ bx lr
         );
     }

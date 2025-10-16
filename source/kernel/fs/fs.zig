@@ -37,3 +37,4 @@ pub const MBR = @import("mbr.zig").MBR;
 pub const MBRPartitionEntry = @import("mbr.zig").MBRPartitionEntry;
 pub const Node = @import("inode.zig").Node;
 pub const IDirectory = @import("idirectory.zig").IDirectory;
+pub const DirectoryEntry = @import("idirectory.zig").DirectoryEntry;

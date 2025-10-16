@@ -51,9 +51,8 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    const filename = file.interface.name(kernel_allocator);
-    defer filename.deinit();
-    if (std.mem.eql(u8, module_context.path, filename.get_name())) {
+    const filename = file.interface.name();
+    if (std.mem.eql(u8, module_context.path, filename)) {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
@@ -90,15 +89,15 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_a
     if (maybe_node == null) {
         return std.posix.AccessError.FileNotFound;
     }
-    const maybe_file = maybe_node.?.interface.get_file();
-    if (maybe_file) |f| {
+    defer maybe_node.?.delete();
+    var maybe_file = maybe_node.?.as_file();
+    if (maybe_file) |*f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
         _ = f.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        f.interface.delete();
         var header_address: *const anyopaque = undefined;
 
         if (attr.mapped_address_r) |address| {
@@ -134,8 +133,8 @@ pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, proce
     if (maybe_node == null) {
         return std.posix.AccessError.FileNotFound;
     }
-    const maybe_file = maybe_node.?.interface.get_file();
-    if (maybe_file) |f| {
+    var maybe_file = maybe_node.?.as_file();
+    if (maybe_file) |*f| {
         defer f.interface.delete();
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,

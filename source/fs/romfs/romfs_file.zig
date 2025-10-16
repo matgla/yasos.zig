@@ -55,6 +55,11 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         });
     }
 
+    pub fn create_node(allocator: std.mem.Allocator, header: FileHeader) anyerror!kernel.fs.Node {
+        const file = try create(allocator, header).interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
+    }
+
     pub fn read(self: *Self, buffer: []u8) isize {
         const data_size: c.off_t = @intCast(self.header.size());
         if (self.position >= data_size) {
@@ -107,8 +112,8 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return @intCast(self.header.size());
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-        return self.header.name(allocator);
+    pub fn name(self: *const Self) []const u8 {
+        return self.header.name();
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
@@ -136,11 +141,12 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return 0;
     }
 
-    pub fn filetype(self: *Self) FileType {
+    pub fn filetype(self: *const Self) FileType {
         return self.header.filetype();
     }
 
     pub fn delete(self: *Self) void {
+        self.header.deinit();
         _ = self.close();
     }
 });

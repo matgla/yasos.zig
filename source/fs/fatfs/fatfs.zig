@@ -29,48 +29,11 @@ const kernel = @import("kernel");
 const log = std.log.scoped(.@"fs/fatfs");
 
 const FatFsFile = @import("fatfs_file.zig").FatFsFile;
-const FatFsNode = @import("fatfs_node.zig").FatFsNode;
+const FatFsDirectory = @import("fatfs_directory.zig").FatFsDirectory;
+const FatFsIterator = @import("fatfs_directory.zig").FatFsIterator;
 
 var global_fs: fatfs.FileSystem = undefined;
 var buffer: [4096]u8 = undefined;
-
-const FatFsIterator = oop.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
-    const Self = @This();
-    _dir: fatfs.Dir,
-    _allocator: std.mem.Allocator,
-    _path: [:0]const u8,
-
-    pub fn create(dir: fatfs.Dir, allocator: std.mem.Allocator, path: [:0]const u8) FatFsIterator {
-        return FatFsIterator.init(.{
-            ._dir = dir,
-            ._allocator = allocator,
-            ._path = path,
-        });
-    }
-
-    pub fn next(self: *Self) ?kernel.fs.INode {
-        const maybe_entry = self._dir.next() catch return null;
-        if (maybe_entry) |entry| {
-            const path = std.fmt.allocPrintSentinel(self._allocator, "{s}/{s}", .{ self._path, entry.name() }, 0) catch {
-                return null;
-            };
-            log.debug("Next entry: {s}", .{path});
-
-            errdefer self._allocator.free(path);
-            return FatFsNode.InstanceType.create(self._allocator, path).interface.new(self._allocator) catch {
-                log.err("Failed to create FatFsNode for path: {s}", .{path});
-                return null;
-            };
-        } else {
-            log.debug("No more entries in directory: {s}", .{self._path});
-        }
-        return null;
-    }
-
-    pub fn delete(self: *Self) void {
-        self._allocator.free(self._path);
-    }
-});
 
 pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     const Self = @This();
@@ -87,22 +50,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                 .device = d.share(),
             },
         });
-    }
-
-    pub fn iterator(self: *Self, path: []const u8) ?kernel.fs.IDirectoryIterator {
-        log.debug("Creating iterator for path: {s}", .{path});
-        const p: [:0]const u8 = self._allocator.dupeZ(u8, path) catch {
-            log.err("Failed to allocate memory for path: {s}", .{path});
-            return null;
-        };
-
-        return FatFsIterator.InstanceType.create(
-            fatfs.Dir.open(p) catch return null,
-            self._allocator,
-            p,
-        ).interface.new(self._allocator) catch {
-            return null;
-        };
     }
 
     pub fn mount(self: *Self) i32 {
@@ -130,7 +77,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return 0;
     }
 
-    pub fn create(self: *Self, path: []const u8, _: i32, allocator: std.mem.Allocator) ?kernel.fs.IFile {
+    pub fn create(self: *Self, path: []const u8, _: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
         log.info("Creating file at path: {s}", .{path});
         const filepath = allocator.dupeZ(u8, path) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
@@ -186,22 +133,30 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return -1;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
         _ = self;
         const filepath = allocator.dupeZ(u8, path) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return null;
         };
         errdefer allocator.free(filepath);
-        return (FatFsNode.InstanceType.create(allocator, filepath) catch return null).interface.new(allocator) catch {
-            return null;
+
+        var dir: ?fatfs.Dir = fatfs.Dir.open(filepath) catch blk: {
+            break :blk null;
         };
+
+        if (dir) |*d| {
+            d.close();
+            return FatFsDirectory.InstanceType.create_node(allocator, filepath) catch return null;
+            // nothing to close
+        }
+        return FatFsFile.InstanceType.create_node(allocator, filepath) catch return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
         var maybe_file = self.get(path, self._allocator);
         if (maybe_file) |*file| {
-            _ = file.interface.close();
+            _ = file.close();
             return true;
         }
         return false;

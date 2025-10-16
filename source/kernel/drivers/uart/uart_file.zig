@@ -139,9 +139,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return 0;
             }
 
-            pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-                _ = allocator;
-                return FileName.init(self._name, null);
+            pub fn name(self: *const Self) []const u8 {
+                return self._name;
             }
 
             pub fn ioctl(self: *Self, op: i32, arg: ?*anyopaque) i32 {
@@ -222,7 +221,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 buf.st_blocks = 1;
             }
 
-            pub fn filetype(self: *Self) FileType {
+            pub fn filetype(self: *const Self) FileType {
                 _ = self;
                 return FileType.CharDevice;
             }

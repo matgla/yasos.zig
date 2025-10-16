@@ -17,25 +17,43 @@
 // IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+const std = @import("std");
+
 const kernel = @import("kernel");
 const interface = @import("interface");
 
 const FileHeader = @import("file_header.zig").FileHeader;
+const RomFsDirectoryIterator = @import("romfs_directory_iterator.zig").RomFsDirectoryIterator;
 
 pub const RomFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
+    _allocator: std.mem.Allocator,
     _header: FileHeader,
 
-    pub fn create(header: FileHeader) RomFsDirectory {
+    pub fn create(allocator: std.mem.Allocator, header: FileHeader) RomFsDirectory {
         return RomFsDirectory.init(.{
+            ._allocator = allocator,
             ._header = header,
         });
     }
 
-    pub fn get(self: *Self, name: []const u8) ?*kernel.fs.INode {
+    pub fn create_node(allocator: std.mem.Allocator, header: FileHeader) anyerror!kernel.fs.Node {
+        const dir = try create(allocator, header).interface.new(allocator);
+        return kernel.fs.Node.create_directory(dir);
+    }
+
+    pub fn get(self: *Self, dirname: []const u8, node: *kernel.fs.Node) anyerror!void {
+        _ = node;
         _ = self;
-        _ = name;
-        return null;
+        _ = dirname;
+    }
+
+    pub fn iterator(self: *const Self) anyerror!kernel.fs.IDirectoryIterator {
+        return try (RomFsDirectoryIterator.InstanceType.create(self._header.dupe())).interface.new(self._allocator);
+    }
+
+    pub fn name(self: *const Self) []const u8 {
+        return self._header.name();
     }
 
     pub fn close(self: *Self) void {
@@ -43,6 +61,6 @@ pub const RomFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        self._header.deinit();
     }
 });

@@ -22,5 +22,31 @@ const std = @import("std");
 const interface = @import("interface");
 const kernel = @import("../kernel.zig");
 
-const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
+pub const ProcFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
+    pub const Self = @This();
+    _items: []kernel.fs.Node,
+    _index: usize,
 
+    pub fn create(items: []kernel.fs.Node) ProcFsIterator {
+        return ProcFsIterator.init(.{
+            ._items = items,
+            ._index = 0,
+        });
+    }
+
+    pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
+        if (self._index < self._items.len) {
+            const node = self._items[self._index];
+            self._index += 1;
+            return .{
+                .name = node.name(),
+                .kind = node.filetype(),
+            };
+        }
+        return null;
+    }
+
+    pub fn delete(self: *Self) void {
+        _ = self;
+    }
+});

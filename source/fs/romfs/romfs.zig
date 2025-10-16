@@ -26,11 +26,11 @@ const IDirectoryIterator = kernel.fs.IDirectoryIterator;
 const FileType = kernel.fs.FileType;
 
 const RomFsFile = @import("romfs_file.zig").RomFsFile;
-const RomFsNode = @import("romfs_node.zig").RomFsNode;
 
 const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
 const FileHeader = @import("file_header.zig").FileHeader;
 const RomFsDirectoryIterator = @import("romfs_directory_iterator.zig").RomFsDirectoryIterator;
+const RomFsDirectory = @import("romfs_directory.zig").RomFsDirectory;
 
 const interface = @import("interface");
 
@@ -56,6 +56,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, context: *anyopaque) i32 {
         var maybe_node = self.get_file_header(path);
         if (maybe_node) |*node| {
+            defer node.deinit();
             if (node.filetype() == FileType.Directory) {
                 var it: ?FileHeader = self.create_file_header(node.specinfo());
                 while (it) |*child| : (it = child.next()) {
@@ -90,33 +91,23 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return error.NotRomFsFileSystem;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.INode {
-        const maybe_node = self.get_file_header(path);
-        if (maybe_node) |node| {
-            var nodeobj = RomFsNode.InstanceType.create(allocator, node) catch return null;
-            return nodeobj.interface.new(allocator) catch return null;
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
+        var maybe_header = self.get_file_header(path);
+        if (maybe_header) |*header| {
+            defer header.deinit();
+            if (header.filetype() != FileType.Directory) {
+                return RomFsFile.InstanceType.create_node(allocator, header.dupe()) catch return null;
+            } else {
+                return RomFsDirectory.InstanceType.create_node(allocator, self.create_file_header(header.specinfo())) catch return null;
+            }
         }
         return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
-        const file = self.get_file_header(path);
+        var file = self.get_file_header(path);
+        defer if (file) |*f| f.deinit();
         return file != null;
-    }
-
-    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
-        var maybe_node = self.get_file_header(path);
-        if (maybe_node) |*node| {
-            if (node.filetype() == FileType.Directory) {
-                const maybe_child: ?FileHeader = self.create_file_header(node.specinfo());
-                if (maybe_child) |child| {
-                    return RomFsDirectoryIterator.InstanceType.create(child, self.allocator).interface.new(self.allocator) catch {
-                        return null;
-                    };
-                }
-            }
-        }
-        return null;
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -128,6 +119,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
         var maybe_node = self.get_file_header(path);
         if (maybe_node) |*node| {
+            defer node.deinit();
             node.stat(data);
             return 0;
         }
@@ -146,18 +138,19 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             return maybe_node;
         }
         while (component) |part| : (component = it.next()) {
-            var filename = maybe_node.?.name(self.allocator);
-            while (!std.mem.eql(u8, filename.get_name(), part.name)) {
-                maybe_node = maybe_node.?.next();
+            if (maybe_node == null) {
+                return null;
+            }
+            var filename = maybe_node.?.name();
+            while (!std.mem.eql(u8, filename, part.name)) {
+                const next = maybe_node.?.next();
+                maybe_node.?.deinit();
+                maybe_node = next;
                 if (maybe_node == null) {
-                    filename.deinit();
                     return null;
                 }
-
-                filename.deinit();
-                filename = maybe_node.?.name(self.allocator);
+                filename = maybe_node.?.name();
             }
-            filename.deinit();
             // if symbolic link then fetch target node
             if (maybe_node) |*node| {
                 if (node.filetype() == FileType.SymbolicLink) {
@@ -167,6 +160,8 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                         defer link_name.deinit();
                         const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", link_name.get_name() }) catch return null;
                         defer self.allocator.free(relative);
+                        maybe_node.?.deinit();
+                        maybe_node = null;
                         maybe_node = self.get_file_header(relative);
                     }
                 }
@@ -177,7 +172,10 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                 if (path_without_trailing_separator.len == part.path.len) {
                     if (node.filetype() == FileType.HardLink) {
                         // if hard link then get it
-                        return self.create_file_header(node.specinfo());
+                        const specinfo = node.specinfo();
+                        node.deinit();
+                        maybe_node = null;
+                        return self.create_file_header(specinfo);
                     }
                     return maybe_node;
                 }
@@ -185,7 +183,9 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
             if (maybe_node) |*node| {
                 if (node.filetype() == FileType.Directory) {
-                    maybe_node = self.create_file_header(node.specinfo());
+                    const specinfo = node.specinfo();
+                    node.deinit();
+                    maybe_node = self.create_file_header(specinfo);
                 }
             }
         }
@@ -193,13 +193,15 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         if (maybe_node) |*node| {
             if (node.filetype() == FileType.HardLink) {
                 // if hard link then get it
-                return self.create_file_header(node.specinfo());
+                const specinfo = node.specinfo();
+                node.deinit();
+                return self.create_file_header(specinfo);
             }
         }
         return maybe_node;
     }
 
-    fn create_file_header(self: *Self, offset: u32) FileHeader {
+    pub fn create_file_header(self: *Self, offset: u32) FileHeader {
         return self.root.create_file_header_with_offset(@intCast(offset));
     }
 });

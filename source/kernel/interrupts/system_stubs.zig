@@ -36,10 +36,10 @@ const handlers = @import("syscall_handlers.zig");
 fn get_file_from_process(fd: u16) ?*kernel.fs.IFile {
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_node = process.fds.get(fd);
-        if (maybe_node) |*node| {
-            const maybe_file = node.file.interface.get_file();
-            if (maybe_file) |file| {
+        var maybe_handle = process.fds.get(fd);
+        if (maybe_handle) |*handle| {
+            var maybe_file = handle.node.as_file();
+            if (maybe_file) |*file| {
                 return file;
             }
         }
@@ -82,9 +82,9 @@ pub export fn _isatty(fd: c_int) c_int {
 pub export fn _close(fd: c_int) c_int {
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(fd));
-        if (maybe_file) |*file| {
-            _ = file.file.interface.close();
+        var maybe_handle = process.fds.get(@intCast(fd));
+        if (maybe_handle) |*handle| {
+            _ = handle.node.close();
             _ = process.fds.remove(@intCast(fd));
             return 0;
         }

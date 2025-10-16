@@ -128,6 +128,7 @@ pub const Builder = struct {
             exe.link_function_sections = true;
             exe.link_data_sections = true;
             exe.link_gc_sections = true;
+
             if (config.cpu) |cpu| {
                 if (std.mem.eql(u8, cpu, "host")) {
                     exe.linkLibC();

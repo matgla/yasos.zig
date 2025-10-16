@@ -101,9 +101,8 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-                _ = allocator;
-                return FileName.init(self._name, null);
+            pub fn name(self: *const Self) []const u8 {
+                return self._name;
             }
 
             pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -140,7 +139,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 buf.st_blocks = self._flash.get_number_of_blocks();
             }
 
-            pub fn filetype(self: *Self) FileType {
+            pub fn filetype(self: *const Self) FileType {
                 _ = self;
                 return FileType.BlockDevice;
             }

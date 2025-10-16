@@ -44,20 +44,32 @@ pub const MemInfoFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct 
             ._position = 0,
             ._buffer = .{0} ** BufferSize,
         });
+        _ = meminfo.data().sync();
+        return meminfo;
+    }
 
+    pub fn delete(self: *Self) void {
+        _ = self.close();
+    }
+
+    pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
+        const file = try create().interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
+    }
+
+    pub fn sync(self: *Self) i32 {
         const memory_used: usize = kernel.memory.heap.malloc.get_usage();
         const memory_used_slow = kernel.process.process_manager.instance.get_process_memory_pool().get_used_size();
         const memory_used_combined = memory_used + memory_used_slow;
         var written_length: usize = 0;
         var sizebuf = [_]u8{0} ** 16;
-        var buf = std.fmt.bufPrint(&meminfo.data()._buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)}) catch
-            &meminfo.data()._buffer;
+        var buf = std.fmt.bufPrint(&self._buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)}) catch
+            &self._buffer;
         written_length += buf.len;
-        buf = std.fmt.bufPrint(meminfo.data()._buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
+        buf = std.fmt.bufPrint(self._buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
         written_length += buf.len;
-        _ = std.fmt.bufPrint(meminfo.data()._buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch {};
-
-        return meminfo;
+        _ = std.fmt.bufPrint(self._buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch {};
+        return 0;
     }
 
     fn format_size(memsize: u64, buffer: []u8) []const u8 {
@@ -104,10 +116,9 @@ pub const MemInfoFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct 
         return @intCast(std.mem.sliceTo(&self._buffer, 0).len);
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        _ = allocator;
+    pub fn name(self: *const Self) []const u8 {
         _ = self;
-        return .{ ._allocator = null, ._name = "meminfo" };
+        return "meminfo";
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
@@ -138,16 +149,12 @@ pub const MemInfoFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct 
         buf.st_blocks = 1;
     }
 
-    pub fn filetype(self: *Self) kernel.fs.FileType {
+    pub fn filetype(self: *const Self) kernel.fs.FileType {
         _ = self;
         return kernel.fs.FileType.File;
     }
 
     pub fn dupe(self: *Self) ?kernel.fs.IFile {
         return self.new(self.allocator) catch return null;
-    }
-
-    pub fn delete(self: *Self) void {
-        _ = self.close();
     }
 });

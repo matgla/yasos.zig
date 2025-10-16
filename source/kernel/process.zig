@@ -51,7 +51,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
     return struct {
         const Self = @This();
         const FileHandle = struct {
-            file: kernel.fs.INode,
+            node: kernel.fs.Node,
             path: [config.fs.max_path_length]u8,
             diriter: ?IDirectoryIterator,
         };
@@ -103,7 +103,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             var process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool);
             const cwd_handle = try kernel_allocator.alloc(u8, cwd.len);
             @memcpy(cwd_handle[0..cwd.len], cwd);
-            cwd_handle[cwd.len] = 0;
             const args = [_]usize{
                 @intFromPtr(arg),
             };
@@ -133,7 +132,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (n.value_ptr.diriter) |*d| {
                     d.interface.delete();
                 }
-                n.value_ptr.file.interface.delete();
+                n.value_ptr.node.delete();
             }
             self.fds.deinit();
         }
@@ -141,7 +140,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         fn dupe_filehandle(handle: *FileHandle) FileHandle {
             return .{
                 .diriter = handle.diriter,
-                .file = handle.file.share(),
+                .node = handle.node.share(),
                 .path = handle.path,
             };
         }

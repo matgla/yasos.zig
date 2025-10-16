@@ -38,6 +38,24 @@ pub const SysTick = extern struct {
     calib: mmio.Mmio(u32),
 };
 
+pub const NVIC = extern struct {
+    iser: mmio.Mmio([16]u32),
+    reserved0: mmio.Mmio([16]u32),
+    icer: mmio.Mmio([16]u32),
+    reserved1: mmio.Mmio([16]u32),
+    ispr: mmio.Mmio([16]u32),
+    reserved2: mmio.Mmio([16]u32),
+    icpr: mmio.Mmio([16]u32),
+    reserved3: mmio.Mmio([16]u32),
+    iabr: mmio.Mmio([16]u32),
+    reserved4: mmio.Mmio([16]u32),
+    itns: mmio.Mmio([16]u32),
+    reserved5: mmio.Mmio([16]u32),
+    ipr: mmio.Mmio([496]u8),
+    reserved6: mmio.Mmio([580]u32),
+    stir: mmio.Mmio(u32),
+};
+
 pub const Registers = struct {
     pub const ppb_base: u32 = 0xe0000000;
     pub const scb_base: u32 = ppb_base + 0xed00;
@@ -47,4 +65,7 @@ pub const Registers = struct {
 
     pub const systick_base: u32 = scs_base + 0x0010;
     pub const systick: *volatile SysTick = @ptrFromInt(systick_base);
+
+    pub const nvic_base: u32 = scs_base + 0x0100;
+    pub const nvic: *volatile NVIC = @ptrFromInt(nvic_base);
 };
