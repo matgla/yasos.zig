@@ -33,38 +33,38 @@ pub const RamFsDataError = error{
 };
 
 pub const RamFsData = struct {
-    var refcounter: i16 = 0;
-
     /// File contents
     _allocator: std.mem.Allocator,
     /// Buffer for filename, do not use it except of this module, instead please use: `RamFsData.name`
     name: []u8,
     data: std.ArrayListAligned(u8, .@"8"),
+    refcounter: *i16,
 
     pub fn create(allocator: std.mem.Allocator, filename: []const u8) !RamFsData {
         const obj = RamFsData{
             ._allocator = allocator,
             .name = try allocator.dupe(u8, filename),
             .data = try std.ArrayListAligned(u8, .@"8").initCapacity(allocator, 0),
+            .refcounter = try allocator.create(i16),
         };
+        obj.refcounter.* = 1;
         return obj;
     }
 
-    pub fn clone(self: *const RamFsData) RamFsData {
-        refcounter += 1;
-        return RamFsData{
-            ._allocator = self._allocator,
-            .name = self.name,
-            .data = self.data,
-        };
+    pub fn share(self: *RamFsData) *RamFsData {
+        self.refcounter.* += 1;
+        return self;
     }
 
-    pub fn deinit(self: *RamFsData) void {
-        refcounter -= 1;
-        if (refcounter == 0) {
+    pub fn deinit(self: *RamFsData) bool {
+        self.refcounter.* -= 1;
+        if (self.refcounter.* == 0) {
             self.data.deinit(self._allocator);
             self._allocator.free(self.name);
+            self._allocator.destroy(self.refcounter);
+            return true;
         }
+        return false;
     }
 };
 

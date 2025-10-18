@@ -57,7 +57,9 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         var root_directory = procfs.data()._root.as(ProcFsDirectory);
         const meminfo = try MemInfoFile.InstanceType.create_node(allocator);
 
+        const sys_directory = try ProcFsDirectory.InstanceType.create_node(allocator, "sys");
         try root_directory.data().append(meminfo);
+        try root_directory.data().append(sys_directory);
         return procfs;
     }
 

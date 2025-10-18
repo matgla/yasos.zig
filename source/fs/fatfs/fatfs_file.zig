@@ -40,23 +40,20 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
 
     pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsFile {
         log.err("Opening file: '{s}'", .{path});
-        // this will fail for root directory
-        const stat: fatfs.FileInfo = try fatfs.stat(path);
-        const s_dup = try allocator.dupe(u8, stat.name());
-
+        const filename = try allocator.dupe(u8, std.fs.path.basename(path));
+        errdefer allocator.free(filename);
         const file = try fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing });
         return FatFsFile.init(.{
             ._file = file,
             ._allocator = allocator,
             ._is_open = true,
-            ._name = s_dup,
+            ._name = filename,
             ._filetype = .File,
         });
     }
 
     pub fn create_node(allocator: std.mem.Allocator, path: [:0]const u8) anyerror!kernel.fs.Node {
         const file = try (try create(allocator, path)).interface.new(allocator);
-        allocator.free(path);
         return kernel.fs.Node.create_file(file);
     }
 
@@ -118,12 +115,6 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
             file.close();
             self._file = null;
         }
-    }
-
-    pub fn dupe(self: *Self) ?kernel.fs.IFile {
-        const new_file = self._allocator.create(Self) catch return null;
-        new_file.* = self.*;
-        return new_file.ifile();
     }
 
     pub fn sync(self: *Self) i32 {

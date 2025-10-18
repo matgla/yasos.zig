@@ -187,7 +187,6 @@ pub fn UartFile(comptime UartType: anytype) type {
             pub fn fcntl(self: *Self, op: i32, maybe_arg: ?*anyopaque) i32 {
                 var result: i32 = 0;
                 if (maybe_arg) |arg| {
-                    const flags: *c_int = @ptrCast(@alignCast(arg));
                     switch (op) {
                         c.F_GETFL => {
                             if (self._nonblock) {
@@ -196,6 +195,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                             return result;
                         },
                         c.F_SETFL => {
+                            const flags: *c_int = @ptrCast(@alignCast(arg));
                             self._nonblock = (flags.* & c.O_NONBLOCK) != 0;
                             return 0;
                         },

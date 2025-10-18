@@ -50,6 +50,12 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         });
     }
 
+    pub fn __clone(self: *Self, other: *Self) void {
+        self._data = other._data.share();
+        self._allocator = other._allocator;
+        self._position = 0;
+    }
+
     pub fn create_node(allocator: std.mem.Allocator, data: *RamFsData) anyerror!kernel.fs.Node {
         const file = try create(allocator, data).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
@@ -170,6 +176,9 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
 
     pub fn delete(self: *Self) void {
         _ = self.close();
+        if (self._data.deinit()) {
+            self._allocator.destroy(self._data);
+        }
     }
 });
 

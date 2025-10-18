@@ -45,6 +45,14 @@ pub const MmcPartitionFile =
             });
         }
 
+        pub fn __clone(self: *Self, other: *Self) void {
+            self._name = other._name;
+            self._dev = other._dev.share();
+            self._start_lba = other._start_lba;
+            self._size_in_sectors = other._size_in_sectors;
+            self._current_position = 0;
+        }
+
         pub fn create_node(allocator: std.mem.Allocator, dev: kernel.fs.IFile, filename: []const u8, start_lba: u32, size_in_sectors: u32) anyerror!kernel.fs.Node {
             const file = try create(filename, dev, start_lba, size_in_sectors).interface.new(allocator);
             return kernel.fs.Node.create_file(file);

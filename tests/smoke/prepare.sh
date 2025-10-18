@@ -9,19 +9,16 @@ if [ $? -ne 0 ]; then
 fi
 cd $ROOT_DIR
 
-zvm list 
 if [ $? -ne 0 ]; then
     curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
 fi
-$HOME/.zvm/self/zvm i 0.14.1
-$HOME/.zvm/self/zvm run 0.14.1 build defconfig -Ddefconfig_file=$SCRIPT_DIR/configs/pimoroni_pico_plus2_and_vga_defconfig
 zig build defconfig -Ddefconfig_file=$SCRIPT_DIR/configs/pimoroni_pico_plus2_and_vga_defconfig
 
 if [ $? -ne 0 ]; then
     echo "Failed to configure project. Please check configuration output."
     exit 1
 fi
-zig build -Doptimize=ReleaseFast 
+zig build -Doptimize=ReleaseFast
 if [ $? -ne 0 ]; then
     echo "Failed to build project. Please check build output."
     exit 1

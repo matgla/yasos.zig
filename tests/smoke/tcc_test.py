@@ -28,7 +28,7 @@ def parse_memory_stats(data):
         if line.strip():
             line = line.split(":", 1)
             value_str = line[1].split()
-            value = int(value_str[0])
+            value = int(value_str[0], base=16)
             unit = value_str[1] if len(value_str) > 1 else ""
             unit = unit.lower()
             if unit == "kb":

@@ -47,8 +47,6 @@ pub const MmcPartitionDriver = interface.DeriveFromBase(IDriver, struct {
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
         refcounter += 1;
-        @panic("Clone called");
-        // return self.*;
     }
 
     pub fn delete(self: *Self) void {

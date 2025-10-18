@@ -19,7 +19,6 @@ const kernel = @import("kernel");
 const interface = @import("interface");
 
 const RamFsDirectoryIterator = @import("ramfs_directory_iterator.zig").RamFsDirectoryIterator;
-const RamFsData = @import("ramfs_data.zig").RamFsData;
 const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 
 const log = std.log.scoped(.ramfsdirectory);
@@ -95,9 +94,9 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
                 const file_node: *RamFsNode = @fieldParentPtr("list_node", child);
                 file_node.node.delete();
                 self._allocator.destroy(file_node);
-                self._allocator.destroy(self._root);
             }
             self._allocator.free(self._name);
+            self._allocator.destroy(self._root);
         }
     }
 });

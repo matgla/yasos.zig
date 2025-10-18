@@ -91,7 +91,7 @@ pub const MmcIo = struct {
         }
     }
 
-    pub fn read(self: Self, address: usize, buf: []u8) isize {
+    pub fn read(self: *const Self, address: usize, buf: []u8) isize {
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;
@@ -112,7 +112,7 @@ pub const MmcIo = struct {
         return @intCast(buf.len);
     }
 
-    pub fn write(self: Self, address: usize, buf: []const u8) isize {
+    pub fn write(self: *const Self, address: usize, buf: []const u8) isize {
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;
@@ -224,7 +224,7 @@ pub const MmcIo = struct {
         return v;
     }
 
-    fn receive_data_packet(self: Self, comptime cmd: u6, output: []u8) !void {
+    fn receive_data_packet(self: *const Self, comptime cmd: u6, output: []u8) !void {
         const token = try get_data_token(cmd);
         var buffer: [2]u8 = [_]u8{ 0x00, 0x00 };
         var repeat: i32 = 1000;
@@ -252,7 +252,7 @@ pub const MmcIo = struct {
         }
     }
 
-    fn transmit_data_packet(self: Self, comptime cmd: u6, input: []const u8) !void {
+    fn transmit_data_packet(self: *const Self, comptime cmd: u6, input: []const u8) !void {
         const token = try get_data_token(cmd);
         var buffer: [1]u8 = [_]u8{token};
         const crc = std.hash.crc.Crc16Xmodem.hash(input);
@@ -281,7 +281,7 @@ pub const MmcIo = struct {
         }
     }
 
-    fn block_read_impl(self: Self, comptime cmd: u6, argument: u32, output: []u8) anyerror!void {
+    fn block_read_impl(self: *const Self, comptime cmd: u6, argument: u32, output: []u8) anyerror!void {
         const cmd_resp = self.send_command(cmd, argument, R1, false);
         errdefer self._mmc.chip_select(false);
         if (cmd_resp.r1 != 0x00) {
@@ -308,7 +308,7 @@ pub const MmcIo = struct {
         };
     }
 
-    fn block_write_impl(self: Self, comptime cmd: u6, argument: u32, input: []const u8) anyerror!void {
+    fn block_write_impl(self: *const Self, comptime cmd: u6, argument: u32, input: []const u8) anyerror!void {
         log.debug("Writing block with command: {d}, argument: {x}", .{ cmd, argument });
         const cmd_resp = self.send_command(cmd, argument, R1, false);
         errdefer self._mmc.chip_select(false);

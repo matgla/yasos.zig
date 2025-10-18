@@ -28,6 +28,7 @@ const arch = @import("arch");
 
 var memory_in_use: isize = 0;
 var surpressed_memory: isize = 0;
+var counter: isize = 0;
 
 pub fn get_usage() usize {
     return if (memory_in_use < 0) 0 else @intCast(memory_in_use);
@@ -39,6 +40,7 @@ const Tracker = extern struct {
     surpressed: bool = false,
     data_len: usize,
     data: [*]usize,
+    allocated_length: usize,
 
     pub fn push(self: *Tracker, next: *Tracker) void {
         var node: ?*Tracker = self;
@@ -54,7 +56,7 @@ const Tracker = extern struct {
         }
     }
 
-    pub fn remove(self: *Tracker, ptr: *anyopaque) void {
+    pub fn remove(self: *Tracker, ptr: *anyopaque, alloc_len: usize) void {
         var node: ?*Tracker = self;
         while (node != null) {
             if (node) |n| {
@@ -65,6 +67,9 @@ const Tracker = extern struct {
                     }
                     if (n.next) |ne| {
                         ne.prev = n.prev;
+                    }
+                    if (n.allocated_length != alloc_len) {
+                        log.err("Mismatched free size for pointer 0x{x}: allocated {d}B, freeing {d}B", .{ @intFromPtr(ptr), n.allocated_length, alloc_len });
                     }
                     c.free(n.data);
                     c.free(n);
@@ -112,6 +117,7 @@ pub fn MallocAllocator(comptime options: anytype) type {
             .prev = null,
             .data_len = 0,
             .data = &.{},
+            .allocated_length = 0,
         };
 
         pub const Self = @This();
@@ -167,17 +173,20 @@ pub fn MallocAllocator(comptime options: anytype) type {
             std.debug.assert(len > 0);
             const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
             memory_in_use += @as(isize, @intCast(len));
+            counter += 1;
             if (comptime is_leaks_detection_enabled()) {
                 log.debug("allocating {d}B at 0x{x}", .{ len, @intFromPtr(ptr) });
                 const stack_trace_depth = arch.panic.get_stack_trace_depth(return_address);
                 const stack_trace_size = @sizeOf(usize) * (stack_trace_depth);
                 log.debug("allocating tracker object with size: {d}", .{@sizeOf(Tracker)});
-                const tracker_object = @as(*Tracker, @alignCast(@ptrCast(c.malloc(@sizeOf(Tracker)) orelse return null)));
+                const tracker_object = @as(*Tracker, @ptrCast(@alignCast(c.malloc(@sizeOf(Tracker)) orelse return null)));
                 tracker_object.next = null;
                 tracker_object.prev = null;
                 tracker_object.data_len = stack_trace_depth;
-                tracker_object.data = @as([*]usize, @alignCast(@ptrCast(c.malloc(@sizeOf(usize) * (stack_trace_size + 1)) orelse return null)));
+                tracker_object.surpressed = false;
+                tracker_object.data = @as([*]usize, @ptrCast(@alignCast(c.malloc(@sizeOf(usize) * (stack_trace_size + 1)) orelse return null)));
                 tracker_object.data[0] = @intFromPtr(ptr);
+                tracker_object.allocated_length = len;
                 tracker.push(tracker_object);
                 var index: usize = 1;
                 var stack = std.debug.StackIterator.init(return_address, @frameAddress());
@@ -230,9 +239,10 @@ pub fn MallocAllocator(comptime options: anytype) type {
             _ = log2_buf_align;
             c.free(buf.ptr);
             memory_in_use -= @as(isize, @intCast(buf.len));
+            counter -= 1;
 
             if (comptime is_leaks_detection_enabled()) {
-                tracker.remove(buf.ptr);
+                tracker.remove(buf.ptr, buf.len);
                 var index: usize = 1;
                 var stack = std.debug.StackIterator.init(return_address, @frameAddress());
                 while (stack.next()) |ret| {

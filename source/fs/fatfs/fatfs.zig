@@ -47,7 +47,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             ._allocator = allocator,
             ._device = device,
             ._disk_wrapper = DiskWrapper{
-                .device = d.share(),
+                .device = try d.clone(),
             },
         });
     }
@@ -65,6 +65,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     pub fn delete(self: *Self) void {
         _ = self.umount();
         self._device.interface.delete();
+        self._disk_wrapper.device.interface.delete();
     }
 
     pub fn umount(self: *Self) i32 {
@@ -78,6 +79,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn create(self: *Self, path: []const u8, _: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
+        _ = self;
         log.info("Creating file at path: {s}", .{path});
         const filepath = allocator.dupeZ(u8, path) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
@@ -89,7 +91,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             return null;
         };
         file.close();
-        return self.get(path, allocator);
+        return FatFsFile.InstanceType.create_node(allocator, filepath) catch {
+            log.err("Failed to create FatFsFile node for path: {s}", .{path});
+            return null;
+        };
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) i32 {
@@ -139,7 +144,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return null;
         };
-        errdefer allocator.free(filepath);
+        defer allocator.free(filepath);
 
         var dir: ?fatfs.Dir = fatfs.Dir.open(filepath) catch blk: {
             break :blk null;
@@ -148,7 +153,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         if (dir) |*d| {
             d.close();
             return FatFsDirectory.InstanceType.create_node(allocator, filepath) catch return null;
-            // nothing to close
         }
         return FatFsFile.InstanceType.create_node(allocator, filepath) catch return null;
     }
@@ -174,6 +178,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             log.err("Failed to format FAT filesystem: {s}", .{@errorName(err)});
             return err;
         };
+        _ = self.umount();
+        _ = self.mount();
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
