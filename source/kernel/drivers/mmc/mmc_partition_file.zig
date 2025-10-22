@@ -22,27 +22,40 @@ const interface = @import("interface");
 
 const kernel = @import("../../kernel.zig");
 
+const log = std.log.scoped(.@"mmc/file");
+
 pub const MmcPartitionFile =
     interface.DeriveFromBase(kernel.fs.IFile, struct {
         const Self = @This();
 
         /// VTable for IFile interface
-        _allocator: std.mem.Allocator,
         _name: []const u8,
-        _dev: *kernel.fs.IFile,
+        _dev: kernel.fs.IFile,
         _start_lba: u32,
         _size_in_sectors: u32,
         _current_position: c.off_t,
 
-        pub fn create(allocator: std.mem.Allocator, filename: []const u8, dev: *kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
+        pub fn create(filename: []const u8, dev: kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
             return MmcPartitionFile.init(.{
-                ._allocator = allocator,
                 ._name = filename,
                 ._dev = dev,
                 ._start_lba = start_lba,
                 ._size_in_sectors = size_in_sectors,
                 ._current_position = @as(c.off_t, @intCast(start_lba)) << 9,
             });
+        }
+
+        pub fn __clone(self: *Self, other: *Self) void {
+            self._name = other._name;
+            self._dev = other._dev.share();
+            self._start_lba = other._start_lba;
+            self._size_in_sectors = other._size_in_sectors;
+            self._current_position = 0;
+        }
+
+        pub fn create_node(allocator: std.mem.Allocator, dev: kernel.fs.IFile, filename: []const u8, start_lba: u32, size_in_sectors: u32) anyerror!kernel.fs.Node {
+            const file = try create(filename, dev, start_lba, size_in_sectors).interface.new(allocator);
+            return kernel.fs.Node.create_file(file);
         }
 
         pub fn read(self: *Self, buf: []u8) isize {
@@ -73,9 +86,8 @@ pub const MmcPartitionFile =
             return self._current_position;
         }
 
-        pub fn close(self: *Self) i32 {
+        pub fn close(self: *Self) void {
             _ = self;
-            return 0;
         }
 
         pub fn sync(self: *Self) i32 {
@@ -88,13 +100,8 @@ pub const MmcPartitionFile =
             return 0;
         }
 
-        pub fn size(self: *Self) isize {
-            return @intCast(self._size_in_sectors << 9);
-        }
-
-        pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-            _ = allocator;
-            return kernel.fs.FileName.init(self._name, null);
+        pub fn name(self: *const Self) []const u8 {
+            return self._name;
         }
 
         pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -112,16 +119,16 @@ pub const MmcPartitionFile =
         }
 
         pub fn stat(self: *Self, data: *c.struct_stat) void {
-            _ = self;
-            _ = data;
+            data.st_size = @as(usize, @intCast(self._size_in_sectors)) << 9;
         }
 
-        pub fn filetype(self: *Self) kernel.fs.FileType {
+        pub fn filetype(self: *const Self) kernel.fs.FileType {
             _ = self;
             return kernel.fs.FileType.BlockDevice;
         }
 
         pub fn delete(self: *Self) void {
             _ = self.close();
+            self._dev.interface.delete();
         }
     });

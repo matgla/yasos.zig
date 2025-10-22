@@ -42,12 +42,23 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     /// Current position in file
     _position: usize,
 
-    pub fn create(data: *RamFsData, allocator: std.mem.Allocator) RamFsFile {
+    pub fn create(allocator: std.mem.Allocator, data: *RamFsData) RamFsFile {
         return RamFsFile.init(.{
             ._data = data,
             ._allocator = allocator,
             ._position = 0,
         });
+    }
+
+    pub fn __clone(self: *Self, other: *Self) void {
+        self._data = other._data.share();
+        self._allocator = other._allocator;
+        self._position = 0;
+    }
+
+    pub fn create_node(allocator: std.mem.Allocator, data: *RamFsData) anyerror!kernel.fs.Node {
+        const file = try create(allocator, data).interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
@@ -62,11 +73,11 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
 
     pub fn write(self: *Self, data: []const u8) isize {
         if (self._data.data.items.len < data.len + self._position) {
-            self._data.data.resize(self._position + data.len) catch {
+            self._data.data.resize(self._allocator, self._position + data.len) catch {
                 return 0;
             };
         }
-        self._data.data.replaceRange(self._position, data.len, data) catch {
+        self._data.data.replaceRange(self._allocator, self._position, data.len, data) catch {
             return 0;
         };
         self._position += data.len;
@@ -98,7 +109,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
                 }
                 const outside_of_buffer = @as(isize, @intCast(new_position)) - @as(isize, @intCast(self._data.data.items.len));
                 if (outside_of_buffer > 0) {
-                    _ = self._data.data.appendNTimes(' ', @as(usize, @intCast(outside_of_buffer))) catch {
+                    _ = self._data.data.appendNTimes(self._allocator, ' ', @as(usize, @intCast(outside_of_buffer))) catch {
                         // set errno
                         return -1;
                     };
@@ -111,9 +122,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return 0;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         _ = self;
-        return 0;
     }
 
     pub fn dupe(self: *Self) ?IFile {
@@ -132,13 +142,12 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return @intCast(self._position);
     }
 
-    pub fn size(self: *Self) isize {
-        return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        data.st_size = @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-        _ = allocator;
-        return FileName.init(self._data.name(), null);
+    pub fn name(self: *const Self) []const u8 {
+        return self._data.name;
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
@@ -160,12 +169,16 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return 0;
     }
 
-    pub fn filetype(self: *Self) FileType {
-        return self._data.type;
+    pub fn filetype(self: *const Self) FileType {
+        _ = self;
+        return .File;
     }
 
     pub fn delete(self: *Self) void {
         _ = self.close();
+        if (self._data.deinit()) {
+            self._allocator.destroy(self._data);
+        }
     }
 });
 

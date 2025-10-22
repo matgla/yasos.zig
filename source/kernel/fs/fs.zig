@@ -24,7 +24,7 @@ pub const get_vfs = @import("vfs.zig").get_vfs;
 pub const get_ivfs = @import("vfs.zig").get_ivfs;
 
 pub const ReadOnlyFileSystem = @import("ifilesystem.zig").ReadOnlyFileSystem;
-pub const IDirectoryIterator = @import("ifilesystem.zig").IDirectoryIterator;
+pub const IDirectoryIterator = @import("idirectory.zig").IDirectoryIterator;
 pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
 
 pub const FileMemoryMapAttributes = @import("ifile.zig").FileMemoryMapAttributes;
@@ -35,3 +35,7 @@ pub const IoctlCommonCommands = @import("ifile.zig").IoctlCommonCommands;
 pub const ReadOnlyFile = @import("ifile.zig").ReadOnlyFile;
 pub const MBR = @import("mbr.zig").MBR;
 pub const MBRPartitionEntry = @import("mbr.zig").MBRPartitionEntry;
+pub const Node = @import("inode.zig").Node;
+pub const IDirectory = @import("idirectory.zig").IDirectory;
+pub const DirectoryEntry = @import("idirectory.zig").DirectoryEntry;
+pub const BufferedFile = @import("buffered_file.zig").BufferedFile;

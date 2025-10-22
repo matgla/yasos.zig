@@ -150,6 +150,7 @@ test "FileSystemHeader.ShouldParseFilesystemHeader" {
         }
         {
             var fh = fs.first_file_header();
+            defer if (fh) |*file| file.deinit();
             try std.testing.expect(fh != null);
             var name = fh.?.name(std.testing.allocator);
             defer name.deinit();

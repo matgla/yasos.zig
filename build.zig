@@ -59,11 +59,13 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
     const file = try std.fs.cwd().openFile(config_file, .{ .mode = .read_only });
     defer file.close();
 
-    const data = try file.readToEndAlloc(b.allocator, 4096);
+    const endPosition = try file.getEndPos();
+    const buffer = b.allocator.alloc(u8, endPosition) catch return error.OutOfMemory;
+    const readed = try file.read(buffer);
     const parsed = try std.json.parseFromSlice(
         Config,
         b.allocator,
-        data,
+        buffer[0..readed],
         .{
             .ignore_unknown_fields = true,
         },
@@ -221,14 +223,17 @@ pub fn build(b: *std.Build) !void {
                 .target = kernel_exec.root_module.resolved_target,
                 .optimize = optimize,
             });
+            libc_imports_module.addIncludePath(b.path("."));
+            libc_imports_module.addIncludePath(b.path("libs/libc"));
+            libc_imports_module.addIncludePath(b.path("libs/tinycc/include"));
 
-            const cimports_module = b.addModule("libc_imports", .{
+            const cimports_module = b.addModule("cimports", .{
                 .root_source_file = b.path("source/cimports.zig"),
                 .target = kernel_exec.root_module.resolved_target,
                 .optimize = optimize,
             });
 
-            libc_imports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
+            // libc_imports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
             cimports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
 
             kernel_module.addImport("libc_imports", libc_imports_module);

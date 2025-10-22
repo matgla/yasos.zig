@@ -36,7 +36,7 @@ pub const KernelSemaphore = struct {
         // unblock waiting processes
         var next = process_manager.instance.processes.first;
         while (next) |node| {
-            const process: *Process = @fieldParentPtr("node", node);
+            const process: *Process = @alignCast(@fieldParentPtr("node", node));
             next = node.next;
             if (process.is_blocked_by(semaphore)) {
                 process.unblock_semaphore(semaphore);

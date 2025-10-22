@@ -20,7 +20,7 @@
 
 const std = @import("std");
 
-pub fn decorateModuleWithArmToolchain(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) ![]const u8 {
+pub fn decorateModuleWithArmToolchain(b: *std.Build, module: anytype, target: std.Build.ResolvedTarget) ![]const u8 {
     const arm_gcc_exe = b.findProgram(&.{"arm-none-eabi-gcc"}, &.{}) catch {
         std.log.err("Can't find arm-none-eabi-gcc in system path", .{});
         unreachable;

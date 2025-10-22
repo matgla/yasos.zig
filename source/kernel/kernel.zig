@@ -38,3 +38,6 @@ pub const irq = @import("interrupts/interrupts.zig");
 
 pub const driver = @import("drivers/drivers.zig");
 pub const benchmark = @import("benchmark.zig");
+
+pub const err = @import("error_messages.zig").KernelError;
+pub const errno = @import("errno.zig");

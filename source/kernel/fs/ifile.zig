@@ -33,6 +33,7 @@ pub const FileType = enum(u8) {
     CharDevice = 5,
     Socket = 6,
     Fifo = 7,
+    Unknown = 128,
 };
 
 pub const IoctlCommonCommands = enum(u32) {
@@ -83,8 +84,8 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "seek", .{ offset, base }, c.off_t);
     }
 
-    pub fn close(self: *Self) i32 {
-        return interface.CountingInterfaceVirtualCall(self, "close", .{}, i32);
+    pub fn close(self: *Self) void {
+        return interface.CountingInterfaceVirtualCall(self, "close", .{}, void);
     }
 
     pub fn sync(self: *Self) i32 {
@@ -95,12 +96,8 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "tell", .{}, c.off_t);
     }
 
-    pub fn size(self: *Self) isize {
-        return interface.CountingInterfaceVirtualCall(self, "size", .{}, isize);
-    }
-
-    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-        return interface.CountingInterfaceVirtualCall(self, "name", .{allocator}, FileName);
+    pub fn name(self: *const Self) []const u8 {
+        return interface.CountingInterfaceVirtualCall(self, "name", .{}, []const u8);
     }
 
     pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -111,8 +108,12 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "fcntl", .{ cmd, arg }, i32);
     }
 
-    pub fn filetype(self: *Self) FileType {
+    pub fn filetype(self: *const Self) FileType {
         return interface.CountingInterfaceVirtualCall(self, "filetype", .{}, FileType);
+    }
+
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        return interface.CountingInterfaceVirtualCall(self, "stat", .{data}, void);
     }
 
     pub fn delete(self: *Self) void {
@@ -121,6 +122,21 @@ pub const IFile = interface.ConstructCountingInterface(struct {
 });
 
 pub const ReadOnlyFile = interface.DeriveFromBase(IFile, struct {
+    pub const Self = @This();
+
+    pub fn write(self: *Self, buf: []const u8) isize {
+        _ = self;
+        _ = buf;
+        return -1;
+    }
+
+    pub fn sync(self: *Self) i32 {
+        _ = self;
+        return -1;
+    }
+});
+
+pub const IDirectory = interface.DeriveFromBase(IFile, struct {
     pub const Self = @This();
 
     pub fn write(self: *Self, buf: []const u8) isize {

@@ -23,7 +23,7 @@ const std = @import("std");
 const c = @import("libc_imports").c;
 
 const ReadOnlyFileSystem = @import("../fs/ifilesystem.zig").ReadOnlyFileSystem;
-const IDirectoryIterator = @import("../fs/ifilesystem.zig").IDirectoryIterator;
+const IDirectoryIterator = @import("../fs/idirectory.zig").IDirectoryIterator;
 const IFile = @import("../fs/ifile.zig").IFile;
 const ReadOnlyFile = @import("../fs/ifile.zig").ReadOnlyFile;
 
@@ -35,149 +35,51 @@ const FileType = kernel.fs.FileType;
 
 const log = std.log.scoped(.@"vfs/procfs");
 
-const ProcFsIterator = @import("procfs_iterator.zig").ProcFsIterator;
 const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
+const MaxProcFile = @import("maxproc_file.zig").MaxProcFile;
 
-pub const ProcDirectory = interface.DeriveFromBase(ReadOnlyFile, struct {
-    const Self = @This();
-
-    base: ReadOnlyFile,
-    _allocator: std.mem.Allocator,
-    _files: std.DoublyLinkedList,
-
-    pub fn create(allocator: std.mem.Allocator) ProcDirectory {
-        return ProcDirectory.init(.{
-            .base = ReadOnlyFile.init(.{}),
-            ._allocator = allocator,
-            ._files = std.DoublyLinkedList{},
-        });
-    }
-
-    pub fn delete(self: *Self) void {
-        var it = self._files.pop();
-        while (it) |node| {
-            const procinfo: *ProcInfo = @fieldParentPtr("node", node);
-            self._allocator.destroy(procinfo);
-            it = self._files.pop();
-        }
-    }
-
-    pub fn add_file(self: *Self, file: *std.DoublyLinkedList.Node) void {
-        self._files.append(file);
-    }
-
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.IFile {
-        _ = self;
-        log.debug("getting file: {s}", .{path});
-        const maybe_filetype = std.meta.stringToEnum(ProcInfoType, path);
-        if (maybe_filetype) |f| {
-            switch (f) {
-                .meminfo => {
-                    return (MemInfoFile.InstanceType.create()).interface.new(allocator) catch return null;
-                },
-            }
-        }
-
-        return null;
-    }
-
-    pub fn read(self: *Self, buffer: []u8) isize {
-        _ = self;
-        _ = buffer;
-        return 0;
-    }
-
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
-        _ = self;
-        _ = offset;
-        _ = whence;
-        return 0;
-    }
-
-    pub fn close(self: *Self) i32 {
-        _ = self;
-        return 0;
-    }
-
-    pub fn tell(self: *Self) c.off_t {
-        _ = self;
-        return @intCast(0);
-    }
-
-    pub fn size(self: *Self) isize {
-        _ = self;
-        return @intCast(0);
-    }
-
-    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-        _ = self;
-        _ = allocator;
-        return .{ ._allocator = null, ._name = "/" };
-    }
-
-    pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = data;
-        return 0;
-    }
-
-    pub fn fcntl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = data;
-        return 0;
-    }
-
-    pub fn stat(self: *Self, buf: *c.struct_stat) void {
-        buf.st_dev = 0;
-        buf.st_ino = 0;
-        buf.st_mode = 0;
-        buf.st_nlink = 0;
-        buf.st_uid = 0;
-        buf.st_gid = 0;
-        buf.st_rdev = 0;
-        buf.st_size = 0;
-        buf.st_blksize = 1;
-        buf.st_blocks = 1;
-        _ = self;
-    }
-
-    pub fn filetype(self: *Self) FileType {
-        _ = self;
-        return FileType.Directory;
-    }
-
-    pub fn dupe(self: *Self) ?IFile {
-        return self.new(self.allocator) catch return null;
-    }
-});
+const ProcFsDirectory = @import("procfs_directory.zig").ProcFsDirectory;
 
 pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     const Self = @This();
     base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
-    _root: ProcDirectory,
+    _root: kernel.fs.IDirectory,
 
     pub fn init(allocator: std.mem.Allocator) !ProcFs {
-        log.info("created", .{});
         var procfs = ProcFs.init(.{
             .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
-            ._root = ProcDirectory.InstanceType.create(allocator),
+            ._root = try (try ProcFsDirectory.InstanceType.create(allocator, "/", true)).interface.new(allocator),
         });
-        var meminfo = try allocator.create(ProcInfo);
-        meminfo.node = .{};
-        meminfo.infotype = .meminfo;
-        procfs.data()._root.data().add_file(&meminfo.node);
+
+        var root_directory = procfs.data()._root.as(ProcFsDirectory);
+        const meminfo = try MemInfoFile.InstanceType.create_node(allocator);
+
+        var sys_directory_node = try ProcFsDirectory.InstanceType.create_node(allocator, "sys", false);
+        var maybe_sys_directory = sys_directory_node.as_directory();
+        if (maybe_sys_directory) |*sys_dir| {
+            var sys_directory = sys_dir.as(ProcFsDirectory);
+            const kernel_directory_node = try ProcFsDirectory.InstanceType.create_node(allocator, "kernel", false);
+            var maybe_kernel_directory = kernel_directory_node.as_directory();
+            if (maybe_kernel_directory) |*kernel_dir| {
+                var kernel_directory = kernel_dir.as(ProcFsDirectory);
+                const maxpid_file = try MaxProcFile.InstanceType.create_node(allocator);
+                try kernel_directory.data().append(maxpid_file);
+            }
+            try sys_directory.data().append(kernel_directory_node);
+        }
+
+        try root_directory.data().append(meminfo);
+        try root_directory.data().append(sys_directory_node);
         return procfs;
     }
 
     pub fn delete(self: *Self) void {
         log.debug("deinitialization", .{});
-        self._root.data().delete();
+        self._root.interface.delete();
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -193,23 +95,71 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return -1;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
-        log.debug("Getting file: {s}", .{path});
-        if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            return self._root.interface.new(self._allocator) catch return null;
+    // fn sync(self: *Self) void {
+    //     const pidmap = kernel.process.process_manager.instance().get_pidmap();
+    //     var it = pidmap.iterator(.{
+    //         .kind = .unset,
+    //     });
+    //     while (it.next()) |pid| {
+    //         self._root.
+    //     }
+    // }
+
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
+        _ = allocator;
+
+        if (path.len == 0) {
+            return kernel.fs.Node.create_directory(self._root.share());
         }
-        return self._root.data().get(path, allocator);
+
+        const resolved_path = std.fs.path.resolve(self._allocator, &.{path}) catch return null;
+        defer self._allocator.free(resolved_path);
+        var it = try std.fs.path.componentIterator(resolved_path);
+        var current_directory = self._root;
+        var node_to_remove: ?kernel.fs.Node = null;
+        while (it.next()) |component| {
+            var next_node: kernel.fs.Node = undefined;
+            current_directory.interface.get(component.name, &next_node) catch {
+                if (node_to_remove) |*node| {
+                    node.delete();
+                }
+                return null;
+            };
+            if (it.peekNext() != null) {
+                // defer next_node.delete();
+                if (node_to_remove) |*node| {
+                    node.delete();
+                }
+                node_to_remove = next_node;
+                if (!next_node.is_directory()) {
+                    if (node_to_remove) |*node| {
+                        node.delete();
+                    }
+                    return null;
+                }
+
+                current_directory = next_node.as_directory().?;
+            } else {
+                if (node_to_remove) |*node| {
+                    node.delete();
+                }
+                return next_node;
+            }
+        }
+
+        if (node_to_remove) |*node| {
+            node.delete();
+        }
+        return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
-        _ = self;
-        _ = path;
+        var maybe_node = self.get(path, self._allocator);
+        if (maybe_node) |*node| {
+            node.delete();
+            return true;
+        }
         return false;
-    }
-
-    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
-        log.debug("Getting iterator for: {s}", .{path});
-        return (ProcFsIterator.InstanceType.create(self._root.data()._files.first, self._allocator)).interface.new(self._allocator) catch return null;
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -219,14 +169,14 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            self._root.data().stat(data);
-            return 0;
-        }
-        const maybe_file = self._root.data().get(path, self._allocator);
-        if (maybe_file) |file| {
-            _ = file;
-            self._root.data().stat(data);
+        var maybe_node = self.get(path, self._allocator);
+        if (maybe_node) |*node| {
+            defer node.delete();
+            if (node.is_directory()) {
+                data.st_mode = c.S_IFDIR;
+            } else {
+                data.st_mode = c.S_IFREG;
+            }
             return 0;
         }
         return -1;

@@ -142,7 +142,7 @@ fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !voi
     };
 }
 
-fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) void {
+fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) !void {
     var buffer: [1024]u8 = [_]u8{0x00} ** 1024;
     _ = mmcfile.interface.read(buffer[0..]);
     const mbr = kernel.fs.MBR.create(buffer[0..]);
@@ -161,7 +161,8 @@ fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Alloc
                     part.size_in_sectors,
                 });
                 const partname = std.fmt.comptimePrint("mmc{d}p{d}", .{ 0, i });
-                const partition_driver = kernel.driver.MmcPartitionDriver.InstanceType.create(mmcfile.share(), partname, part.start_lba, part.size_in_sectors).interface.new(allocator) catch |err| {
+                const partition_driver_data = try kernel.driver.MmcPartitionDriver.InstanceType.create(allocator, mmcfile.share(), partname, part.start_lba, part.size_in_sectors);
+                const partition_driver = partition_driver_data.interface.new(allocator) catch |err| {
                     kernel.log.err("Can't create partition driver: {s}", .{@errorName(err)});
                     return;
                 };
@@ -179,105 +180,84 @@ fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Alloc
 
 fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     kernel.fs.vfs_init(allocator);
-    var driverfs = kernel.driver.fs.DriverFs.InstanceType.init(allocator);
+    var driverfs = try kernel.driver.fs.DriverFs.InstanceType.init(allocator);
     const uart0name = "uart0";
-    const uart_driver = (kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(uart0name)).interface.new(allocator) catch |err| {
-        kernel.log.err("Can't create uart driver instance: '{s}'", .{@errorName(err)});
-        return err;
-    };
+    const uart_driver = try (try kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(allocator, uart0name)).interface.new(allocator);
     try driverfs.data().append(uart_driver, uart0name);
+    try driverfs.data().append(try uart_driver.clone(), "stdin");
+    try driverfs.data().append(try uart_driver.clone(), "stdout");
+    try driverfs.data().append(try uart_driver.clone(), "stderr");
 
     const flash0name = "flash0";
-    var flash_driver = (kernel.driver.FlashDriver.InstanceType.create(board.flash.flash0, flash0name)).interface.new(allocator) catch |err| {
-        kernel.log.err("Can't create flash driver instance: '{s}'\n", .{@errorName(err)});
-        return err;
-    };
+    const flash_driver_base = try kernel.driver.FlashDriver.InstanceType.create(allocator, board.flash.flash0, flash0name);
+    var flash_driver = try flash_driver_base.interface.new(allocator);
     try driverfs.data().append(flash_driver, flash0name);
-    var maybe_mmcfile: ?kernel.fs.IFile = null;
+    var maybe_mmcnode: ?kernel.fs.Node = null;
     var maybe_mmcdriver: ?kernel.driver.IDriver = null;
     if (@hasDecl(board, "mmc")) {
         inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
-            maybe_mmcdriver = (kernel.driver.MmcDriver.InstanceType.create(@field(board.mmc, name), name)).interface.new(allocator) catch |err| {
-                kernel.log.err("Can't create {s} driver instance: '{s}'", .{ name, @errorName(err) });
-                return err;
-            };
+
+            maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, @field(board.mmc, name), name)).interface.new(allocator);
             driverfs.data().append(maybe_mmcdriver.?, name) catch {};
             kernel.log.info("adding mmc driver: {s}", .{m.name});
             i = i + 1;
-            maybe_mmcfile = maybe_mmcdriver.?.interface.ifile(allocator);
+            maybe_mmcnode = try maybe_mmcdriver.?.interface.node();
         }
     } else {
         kernel.log.debug("Board has no mmc interfaces", .{});
     }
     try driverfs.data().load_all();
 
-    if (maybe_mmcfile) |*mmcfile| {
-        add_mmc_partition_drivers(mmcfile, allocator, &driverfs);
-        mmcfile.interface.delete();
+    if (maybe_mmcnode) |*mmcnode| {
+        var maybe_mmcfile = mmcnode.as_file();
+        if (maybe_mmcfile) |*file| {
+            try add_mmc_partition_drivers(file, allocator, &driverfs);
+        }
+        mmcnode.delete();
     }
 
-    var maybe_flash_file = flash_driver.interface.ifile(allocator);
-    if (maybe_flash_file) |*flash| {
-        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash.*, 0x80000)), "/");
+    var node = try flash_driver.interface.node();
+    const maybe_flashfile = node.as_file();
+    if (maybe_flashfile) |flash| {
+        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, 0x100000)), "/");
         var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
-        if (maybe_mmcpart0) |*mmcfile| {
-            const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, mmcfile.*)) catch null;
-            if (maybe_rootfs) |rootfs| {
-                mount_filesystem(rootfs, "/root") catch {};
-            }
+        if (maybe_mmcpart0) |*mmcnode| {
+            const maybe_file = mmcnode.as_file();
+            if (maybe_file) |file| {
+                const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file)) catch null;
+                if (maybe_rootfs) |rootfs| {
+                    mount_filesystem(rootfs, "/root") catch {};
+                }
 
-            mmcfile.interface.delete();
+                mmcnode.delete();
+            }
         }
         try mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
         try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
-    } else {
-        kernel.log.err("Can't get Flash Driver", .{});
     }
 
     return;
 }
 
-fn attach_default_filedescriptors_to_root_process(streamfile: *kernel.fs.IFile, process: *kernel.process.Process) void {
+fn attach_default_filedescriptors_to_root_process(process: *kernel.process.Process) !void {
     kernel.log.info("setting default streams", .{});
-    process.fds.put(0, .{
-        .file = streamfile.share(),
-        .path = blk: {
-            var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-            const value = "/dev/stdin";
-            std.mem.copyForwards(u8, path[0..value.len], value);
-            break :blk path;
-        },
-        .diriter = null,
-    }) catch {
-        kernel.log.err("Can't register: stdin", .{});
-    };
-    process.fds.put(1, .{
-        .file = streamfile.share(),
-        .path = blk: {
-            var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-            const value = "/dev/stdout";
-            std.mem.copyForwards(u8, path[0..value.len], value);
-            break :blk path;
-        },
-        .diriter = null,
-    }) catch {
-        kernel.log.err("Can't register: stdout", .{});
-    };
-    process.fds.put(2, .{
-        .file = streamfile.share(),
-        .path = blk: {
-            var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-            const value = "/dev/stderr";
-            std.mem.copyForwards(u8, path[0..value.len], value);
-            break :blk path;
-        },
-        .diriter = null,
-    }) catch {
-        kernel.log.err("Can't register: stderr", .{});
-    };
+    const maybe_stdin = kernel.fs.get_ivfs().interface.get("/dev/stdin", process.get_memory_allocator());
+    if (maybe_stdin) |stdin| {
+        _ = try process.attach_file_with_fd(0, "/dev/stdin", stdin);
+    }
+
+    const maybe_stdout = kernel.fs.get_ivfs().interface.get("/dev/stdout", process.get_memory_allocator());
+    if (maybe_stdout) |stdout| {
+        _ = try process.attach_file_with_fd(1, "/dev/stdout", stdout);
+    }
+
+    const maybe_stderr = kernel.fs.get_ivfs().interface.get("/dev/stderr", process.get_memory_allocator());
+    if (maybe_stderr) |stderr| {
+        _ = try process.attach_file_with_fd(2, "/dev/stderr", stderr);
+    }
 }
 const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
     .leak_detection = config.instrumentation.enable_memory_leak_detection,
@@ -291,13 +271,9 @@ export fn kernel_process(argument: *KernelAllocator) void {
 
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_uartfile = kernel.fs.get_ivfs().interface.get("/dev/uart0", process.get_memory_allocator());
-        if (maybe_uartfile) |*uartfile| {
-            defer uartfile.interface.delete();
-            attach_default_filedescriptors_to_root_process(uartfile, process);
-        } else {
-            kernel.log.err("default streams were not assigned: /dev/uart0 do not exists", .{});
-        }
+        attach_default_filedescriptors_to_root_process(process) catch {
+            kernel.log.err("Can't attach default streams to root process", .{});
+        };
         const pid = process.pid;
         // this loads executable replacing current image
         const sh = kernel.dynamic_loader.load_executable("/bin/sh", allocator, process.get_process_memory_allocator(), pid) catch |err| {
@@ -340,7 +316,7 @@ pub export fn main() void {
         defer kernel.fs.get_vfs().deinit();
 
         // we need to get real return address to get back from user mode successfully
-        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, &allocator, 1024 * 16 }) catch @panic("Can't spawn root process: ");
+        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, &allocator, 1024 * 16 }) catch {};
         kernel.log.warn("Root process died", .{});
     }
     @call(.never_inline, KernelAllocator.detect_leaks, .{});

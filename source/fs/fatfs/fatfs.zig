@@ -29,48 +29,11 @@ const kernel = @import("kernel");
 const log = std.log.scoped(.@"fs/fatfs");
 
 const FatFsFile = @import("fatfs_file.zig").FatFsFile;
+const FatFsDirectory = @import("fatfs_directory.zig").FatFsDirectory;
+const FatFsIterator = @import("fatfs_directory.zig").FatFsIterator;
 
 var global_fs: fatfs.FileSystem = undefined;
 var buffer: [4096]u8 = undefined;
-
-const FatFsIterator = oop.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
-    const Self = @This();
-    _dir: fatfs.Dir,
-    _allocator: std.mem.Allocator,
-    _path: [:0]const u8,
-
-    pub fn create(dir: fatfs.Dir, allocator: std.mem.Allocator, path: [:0]const u8) FatFsIterator {
-        return FatFsIterator.init(.{
-            ._dir = dir,
-            ._allocator = allocator,
-            ._path = path,
-        });
-    }
-
-    pub fn next(self: *Self) ?kernel.fs.IFile {
-        const maybe_entry = self._dir.next() catch return null;
-        if (maybe_entry) |entry| {
-            const path = std.fmt.allocPrintSentinel(self._allocator, "{s}/{s}", .{ self._path, entry.name() }, 0) catch {
-                return null;
-            };
-            log.debug("Next entry: {s}", .{path});
-            const maybe_file = FatFsFile.InstanceType.create(self._allocator, path);
-            if (maybe_file) |*file| {
-                return file.interface.new(self._allocator) catch {
-                    self._allocator.free(path);
-                    return null;
-                };
-            }
-        } else {
-            log.debug("No more entries in directory: {s}", .{self._path});
-        }
-        return null;
-    }
-
-    pub fn delete(self: *Self) void {
-        self._allocator.free(self._path);
-    }
-});
 
 pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     const Self = @This();
@@ -84,25 +47,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             ._allocator = allocator,
             ._device = device,
             ._disk_wrapper = DiskWrapper{
-                .device = d.share(),
+                .device = try d.clone(),
             },
         });
-    }
-
-    pub fn iterator(self: *Self, path: []const u8) ?kernel.fs.IDirectoryIterator {
-        log.debug("Creating iterator for path: {s}", .{path});
-        const p: [:0]const u8 = self._allocator.dupeZ(u8, path) catch {
-            log.err("Failed to allocate memory for path: {s}", .{path});
-            return null;
-        };
-
-        return FatFsIterator.InstanceType.create(
-            fatfs.Dir.open(p) catch return null,
-            self._allocator,
-            p,
-        ).interface.new(self._allocator) catch {
-            return null;
-        };
     }
 
     pub fn mount(self: *Self) i32 {
@@ -118,6 +65,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     pub fn delete(self: *Self) void {
         _ = self.umount();
         self._device.interface.delete();
+        self._disk_wrapper.device.interface.delete();
     }
 
     pub fn umount(self: *Self) i32 {
@@ -130,7 +78,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return 0;
     }
 
-    pub fn create(self: *Self, path: []const u8, _: i32, allocator: std.mem.Allocator) ?kernel.fs.IFile {
+    pub fn create(self: *Self, path: []const u8, _: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
+        _ = self;
         log.info("Creating file at path: {s}", .{path});
         const filepath = allocator.dupeZ(u8, path) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
@@ -142,7 +91,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             return null;
         };
         file.close();
-        return self.get(path, allocator);
+        return FatFsFile.InstanceType.create_node(allocator, filepath) catch {
+            log.err("Failed to create FatFsFile node for path: {s}", .{path});
+            return null;
+        };
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) i32 {
@@ -186,29 +138,29 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return -1;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
         _ = self;
-        // const path_without_leading_slash: [:0]const u8 = std.mem.trimStart(u8, path, "\\/");
-        // const filepath = std.fmt.allocPrintZ(allocator, "0:/{s}", .{path_without_leading_slash}) catch {
-        // log.err("Failed to allocate memory for path: {s}", .{path_without_leading_slash});
-        // return null;
-        // };
         const filepath = allocator.dupeZ(u8, path) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return null;
         };
-        const maybe_file = FatFsFile.InstanceType.create(allocator, filepath);
-        if (maybe_file) |file| {
-            return file.interface.new(allocator) catch return null;
+        defer allocator.free(filepath);
+
+        var dir: ?fatfs.Dir = fatfs.Dir.open(filepath) catch blk: {
+            break :blk null;
+        };
+
+        if (dir) |*d| {
+            d.close();
+            return FatFsDirectory.InstanceType.create_node(allocator, filepath) catch return null;
         }
-        allocator.free(filepath);
-        return null;
+        return FatFsFile.InstanceType.create_node(allocator, filepath) catch return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
         var maybe_file = self.get(path, self._allocator);
         if (maybe_file) |*file| {
-            _ = file.interface.close();
+            _ = file.close();
             return true;
         }
         return false;
@@ -226,6 +178,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             log.err("Failed to format FAT filesystem: {s}", .{@errorName(err)});
             return err;
         };
+        _ = self.umount();
+        _ = self.mount();
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
@@ -318,8 +272,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                     // }});
                 },
                 .get_sector_count => {
-                    log.debug("Getting sector count: {d}", .{@as(i32, @intCast(self.device.interface.size() >> 9))});
-                    @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(self.device.interface.size() >> 9);
+                    // log.debug("Getting sector count: {d}", .{@as(i32, @intCast(self.device.interface.size() >> 9))});
+                    var st: c.struct_stat = undefined;
+                    self.device.interface.stat(&st);
+                    @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(st.st_size >> 9);
                 },
                 else => {
                     log.err("invalid ioctl: {}", .{cmd});

@@ -21,8 +21,10 @@
 const std = @import("std");
 
 const IDriver = @import("../idriver.zig").IDriver;
-const IFile = @import("../../fs/fs.zig").IFile;
 const UartFile = @import("uart_file.zig").UartFile;
+// const UartNode = @import("uart_node.zig").UartNode;
+
+const kernel = @import("../../kernel.zig");
 
 const interface = @import("interface");
 
@@ -31,12 +33,20 @@ pub fn UartDriver(comptime UartType: anytype) type {
         const UartDriverImpl = interface.DeriveFromBase(IDriver, struct {
             pub const Self = @This();
             const uart = UartType;
-            _name: []const u8,
+            _allocator: std.mem.Allocator,
+            _node: kernel.fs.Node,
 
-            pub fn create(driver_name: []const u8) UartDriverImpl {
+            pub fn create(allocator: std.mem.Allocator, driver_name: []const u8) !UartDriverImpl {
+                // const uartnode = try (try UartNode(uart).InstanceType.create(allocator, driver_name)).interface.new(allocator);
+
                 return UartDriverImpl.init(.{
-                    ._name = driver_name,
+                    ._allocator = allocator,
+                    ._node = try UartFile(uart).InstanceType.create_node(allocator, driver_name),
                 });
+            }
+
+            pub fn delete(self: *Self) void {
+                self._node.delete();
             }
 
             pub fn load(self: *Self) anyerror!void {
@@ -54,22 +64,12 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 return true;
             }
 
-            pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-                return (UartFile(uart).InstanceType.create(
-                    allocator,
-                    self._name,
-                )).interface.new(allocator) catch {
-                    return null;
-                };
-            }
-
-            pub fn delete(self: *Self) void {
-                // No specific cleanup needed for UART driver
-                _ = self;
+            pub fn node(self: *Self) anyerror!kernel.fs.Node {
+                return try self._node.clone();
             }
 
             pub fn name(self: *const Self) []const u8 {
-                return self._name;
+                return self._node.name();
             }
         });
     };

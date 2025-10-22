@@ -60,16 +60,24 @@ pub const FileReader = struct {
 
     pub fn read_string(self: *FileReader, allocator: std.mem.Allocator, offset: c.off_t) ![]u8 {
         _ = self._device_file.interface.seek(self._offset + offset, c.SEEK_SET);
-        var name_buffer: []u8 = try allocator.alloc(u8, 16);
-        @memset(name_buffer, 0);
-
-        _ = self._device_file.interface.read(name_buffer[0..]);
-        while (std.mem.lastIndexOfScalar(u8, name_buffer, 0) == null) {
-            name_buffer = try allocator.realloc(name_buffer, name_buffer.len + 16);
-            _ = self._device_file.interface.read(name_buffer[name_buffer.len - 16 ..]);
+        var name_buffer: [16]u8 = undefined;
+        var output_buffer: []u8 = &.{};
+        var finished: bool = false;
+        @memset(name_buffer[0..], 0);
+        while (!finished) {
+            _ = self._device_file.interface.read(name_buffer[0..]);
+            const null_index = std.mem.indexOfScalar(u8, name_buffer[0..], 0);
+            if (null_index) |end| {
+                finished = true;
+                output_buffer = try allocator.realloc(output_buffer, (output_buffer.len + end));
+                @memcpy(output_buffer[output_buffer.len - end ..], name_buffer[0..end]);
+            } else {
+                output_buffer = try allocator.realloc(output_buffer, (output_buffer.len + name_buffer.len));
+                @memcpy(output_buffer[output_buffer.len - name_buffer.len ..], name_buffer[0..]);
+            }
         }
 
-        return name_buffer;
+        return output_buffer;
     }
 
     pub fn read_bytes(self: *FileReader, buffer: []u8, offset: c.off_t) void {

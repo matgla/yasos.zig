@@ -25,6 +25,8 @@ const fs = @import("fs/vfs.zig");
 const FileMemoryMapAttributes = @import("fs/ifile.zig").FileMemoryMapAttributes;
 const IoctlCommonCommands = @import("fs/ifile.zig").IoctlCommonCommands;
 
+const c = @import("libc_imports").c;
+
 var kernel_allocator: std.mem.Allocator = undefined;
 
 const ModuleContext = struct {
@@ -49,9 +51,8 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
 
 fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    const filename = file.interface.name(kernel_allocator);
-    defer filename.deinit();
-    if (std.mem.eql(u8, module_context.path, filename.get_name())) {
+    const filename = file.interface.name();
+    if (std.mem.eql(u8, module_context.path, filename)) {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
@@ -66,14 +67,14 @@ fn traverse_directory(file: *IFile, context: *anyopaque) bool {
     return true;
 }
 
-var modules_list: std.AutoHashMap(u32, yasld.Executable) = undefined;
-var libraries_list: std.AutoHashMap(u32, std.DoublyLinkedList) = undefined;
+var modules_list: std.AutoHashMap(c.pid_t, yasld.Executable) = undefined;
+var libraries_list: std.AutoHashMap(c.pid_t, std.DoublyLinkedList) = undefined;
 
 pub fn init(allocator: std.mem.Allocator) void {
     log.info("yasld initialization started", .{});
     yasld.loader_init(&file_resolver, allocator);
-    modules_list = std.AutoHashMap(u32, yasld.Executable).init(allocator);
-    libraries_list = std.AutoHashMap(u32, std.DoublyLinkedList).init(allocator);
+    modules_list = std.AutoHashMap(c.pid_t, yasld.Executable).init(allocator);
+    libraries_list = std.AutoHashMap(c.pid_t, std.DoublyLinkedList).init(allocator);
     kernel_allocator = allocator;
 }
 
@@ -83,8 +84,13 @@ pub fn deinit() void {
     yasld.loader_deinit();
 }
 
-pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: u32) !*yasld.Executable {
-    var maybe_file = fs.get_ivfs().interface.get(path, allocator);
+pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Executable {
+    var maybe_node = fs.get_ivfs().interface.get(path, allocator);
+    if (maybe_node == null) {
+        return std.posix.AccessError.FileNotFound;
+    }
+    defer maybe_node.?.delete();
+    var maybe_file = maybe_node.?.as_file();
     if (maybe_file) |*f| {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
@@ -92,7 +98,6 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_a
             .mapped_address_w = null,
         };
         _ = f.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
-        f.interface.delete();
         var header_address: *const anyopaque = undefined;
 
         if (attr.mapped_address_r) |address| {
@@ -123,8 +128,12 @@ pub fn load_executable(path: []const u8, allocator: std.mem.Allocator, process_a
     return std.posix.AccessError.FileNotFound;
 }
 
-pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: u32) !*yasld.Module {
-    var maybe_file = fs.get_ivfs().interface.get(path, allocator);
+pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Module {
+    var maybe_node = fs.get_ivfs().interface.get(path, allocator);
+    if (maybe_node == null) {
+        return std.posix.AccessError.FileNotFound;
+    }
+    var maybe_file = maybe_node.?.as_file();
     if (maybe_file) |*f| {
         defer f.interface.delete();
         var attr: FileMemoryMapAttributes = .{
@@ -162,7 +171,7 @@ pub fn load_shared_library(path: []const u8, allocator: std.mem.Allocator, proce
     return std.posix.AccessError.FileNotFound;
 }
 
-pub fn release_executable(pid: u32) void {
+pub fn release_executable(pid: c.pid_t) void {
     const maybe_executable = modules_list.getPtr(pid);
     if (maybe_executable) |executable| {
         executable.deinit();
@@ -180,7 +189,7 @@ pub fn release_executable(pid: u32) void {
     }
 }
 
-pub fn release_shared_library(pid: u32, library: *yasld.Module) void {
+pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
     const maybe_list = libraries_list.getPtr(pid);
     if (maybe_list) |*list| {
         list.*.remove(&library.list_node);
@@ -188,4 +197,8 @@ pub fn release_shared_library(pid: u32, library: *yasld.Module) void {
             loader.*.unload_module(library);
         }
     }
+}
+
+pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
+    return modules_list.getPtr(pid);
 }

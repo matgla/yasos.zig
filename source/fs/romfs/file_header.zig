@@ -28,6 +28,8 @@ const FileName = kernel.fs.FileName;
 
 const c = @import("libc_imports").c;
 
+const log = std.log.scoped(.fileheader);
+
 const FileReader = @import("file_reader.zig").FileReader;
 
 const alignment: u32 = 16;
@@ -49,15 +51,28 @@ pub const FileHeader = struct {
     _mapped_memory: ?*const anyopaque,
     _allocator: std.mem.Allocator,
     _filesystem_offset: c.off_t,
+    _filetype: kernel.fs.FileType,
+    _name: []const u8,
 
     pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) FileHeader {
+        var reader = FileReader.init(device_file, start_offset);
+        const fileheader = reader.read(u32, 0);
+        const ft = FileHeader.convert_filetype(@enumFromInt(fileheader & 0x7));
+        const name_buffer = reader.read_string(allocator, 16) catch "";
+
         return .{
-            ._reader = FileReader.init(device_file, start_offset),
+            ._reader = reader,
             ._device_file = device_file,
             ._mapped_memory = mapped_address,
             ._allocator = allocator,
             ._filesystem_offset = filesystem_offset,
+            ._filetype = ft,
+            ._name = name_buffer,
         };
+    }
+
+    pub fn deinit(self: *FileHeader) void {
+        self._allocator.free(self._name);
     }
 
     fn convert_filetype(ft: Type) FileType {
@@ -73,9 +88,8 @@ pub const FileHeader = struct {
         }
     }
 
-    pub fn filetype(self: *FileHeader) FileType {
-        const fileheader = self._reader.read(u32, 0);
-        return FileHeader.convert_filetype(@enumFromInt(fileheader & 0x7));
+    pub fn filetype(self: *const FileHeader) FileType {
+        return self._filetype;
     }
 
     pub fn specinfo(self: *FileHeader) u32 {
@@ -86,14 +100,8 @@ pub const FileHeader = struct {
         return self._reader.read(u32, 8);
     }
 
-    pub fn name(self: *FileHeader, allocator: std.mem.Allocator) FileName {
-        const name_buffer = self._reader.read_string(allocator, 16) catch {
-            return .{
-                ._name = "",
-                ._allocator = null,
-            };
-        };
-        return FileName.init(name_buffer, allocator);
+    pub fn name(self: *const FileHeader) []const u8 {
+        return self._name;
     }
 
     pub fn read(self: *FileHeader, comptime T: anytype, offset: c.off_t) T {
@@ -152,6 +160,7 @@ pub const FileHeader = struct {
             FileType.CharDevice => return c.S_IFCHR,
             FileType.Socket => return c.S_IFSOCK,
             FileType.Fifo => return c.S_IFIFO,
+            FileType.Unknown => return 0,
         }
         return 0;
     }
@@ -167,5 +176,9 @@ pub const FileHeader = struct {
         buf.st_size = @intCast(self.size());
         buf.st_blksize = 1;
         buf.st_blocks = 1;
+    }
+
+    pub fn dupe(self: *const FileHeader) FileHeader {
+        return FileHeader.init(self._device_file, self._reader.get_offset(), self._filesystem_offset, self._mapped_memory, self._allocator);
     }
 };

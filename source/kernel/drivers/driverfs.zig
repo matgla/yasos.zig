@@ -21,7 +21,7 @@
 const std = @import("std");
 
 const ReadOnlyFileSystem = @import("../fs/ifilesystem.zig").ReadOnlyFileSystem;
-const IDirectoryIterator = @import("../fs/ifilesystem.zig").IDirectoryIterator;
+const IDirectoryIterator = @import("../fs/idirectory.zig").IDirectoryIterator;
 const IFile = @import("../fs/ifile.zig").IFile;
 
 const IDriver = @import("idriver.zig").IDriver;
@@ -33,13 +33,47 @@ const c = @import("libc_imports").c;
 
 const log = std.log.scoped(.@"vfs/driverfs");
 
-const DriverDirectory = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct {
+// const DriverNode = interface.DeriveFromBase(kernel.fs.Node, struct {
+//     const Self = @This();
+//     base: kernel.fs.INodeBase,
+//     _idriver: ?*const IDriver,
+
+//     pub fn create(allocator: std.mem.Allocator, idriver: ?*IDriver) !DriverNode {
+//         var baseinit: kernel.fs.INodeBase = undefined;
+//         if (idriver == null) {
+//             const dir = try DriverDirectory.InstanceType.create(allocator).interface.new(allocator);
+//             baseinit = kernel.fs.INodeBase.InstanceType.create_directory(dir);
+//         } else {
+//             baseinit = idriver.?.interface.inode().?;
+//         }
+//         return DriverNode.init(.{
+//             .base = baseinit.*,
+//             ._idriver = idriver,
+//         });
+//     }
+
+//     pub fn name(self: *const Self) []const u8 {
+//         return self._idriver.interface.name();
+//     }
+
+//     pub fn filetype(self: *Self) kernel.fs.FileType {
+//         if (self._idriver == null) {
+//             return kernel.fs.FileType.Directory;
+//         }
+//         return kernel.fs.FileType.File;
+//     }
+// });
+
+const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
     base: kernel.fs.ReadOnlyFile,
     _allocator: std.mem.Allocator,
     _container: std.StringHashMap(IDriver),
 
+    var refcounter: i16 = 0;
+
     pub fn init(allocator: std.mem.Allocator) DriverDirectory {
+        refcounter += 1;
         return DriverDirectory.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
             ._allocator = allocator,
@@ -47,9 +81,19 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct 
         });
     }
 
-    pub fn deinit(self: *Self) void {
-        log.debug("deinitialization", .{});
+    pub fn __clone(self: *Self, other: *const Self) void {
+        _ = self;
+        _ = other;
+        @panic("DriverDirectory can't be cloned");
+    }
+
+    pub fn delete(self: *Self) void {
+        refcounter -= 1;
+        if (refcounter > 0) {
+            return;
+        }
         var it = self._container.iterator();
+
         while (it.next()) |driver| {
             log.debug("removing driver: {s}", .{driver.value_ptr.interface.name()});
             driver.value_ptr.interface.delete();
@@ -57,29 +101,8 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct 
         self._container.deinit();
     }
 
-    pub fn close(self: *Self) i32 {
-        _ = self;
-        return 0;
-    }
-
-    pub fn tell(self: *Self) c.off_t {
-        _ = self;
-        return 0;
-    }
-
-    pub fn size(self: *Self) isize {
-        _ = self;
-        return 0;
-    }
-
-    pub fn delete(self: *Self) void {
-        _ = self;
-    }
-
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        _ = allocator;
-        _ = self;
-        return kernel.fs.FileName.init("/", null);
+    pub fn close(self: *Self) void {
+        self.delete();
     }
 
     pub fn append(self: *Self, driver: IDriver, node_name: []const u8) !void {
@@ -101,68 +124,21 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct 
         }
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+    pub fn get(self: *Self, path: []const u8, result: *kernel.fs.Node) anyerror!void {
         if (self._container.getPtr(path)) |driver| {
-            return driver.interface.ifile(allocator);
+            result.* = try driver.interface.node();
+            return;
         }
-        return null;
+        return error.NoEntry;
     }
 
-    pub fn read(self: *Self, buffer: []u8) isize {
+    pub fn name(self: *const Self) []const u8 {
         _ = self;
-        _ = buffer;
-        return 0;
+        return "dev";
     }
 
-    pub fn write(self: *Self, buffer: []const u8) isize {
-        _ = self;
-        _ = buffer;
-        return 0;
-    }
-
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
-        _ = self;
-        _ = offset;
-        _ = whence;
-        return 0;
-    }
-
-    pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = data;
-        return 0;
-    }
-
-    pub fn fcntl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = data;
-        return 0;
-    }
-
-    pub fn stat(self: *Self, buf: *c.struct_stat) void {
-        _ = self;
-        buf.st_dev = 0;
-        buf.st_ino = 0;
-        buf.st_mode = 0;
-        buf.st_nlink = 0;
-        buf.st_uid = 0;
-        buf.st_gid = 0;
-        buf.st_rdev = 0;
-        buf.st_size = 0;
-        buf.st_blksize = 1;
-        buf.st_blocks = 1;
-    }
-
-    pub fn filetype(self: *Self) kernel.fs.FileType {
-        _ = self;
-        return kernel.fs.FileType.Directory;
-    }
-
-    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
-        _ = path;
-        return (kernel.driver.DriverFsIterator.InstanceType.create(self._container.iterator(), self._allocator)).interface.new(self._allocator) catch return null;
+    pub fn iterator(self: *const Self) anyerror!IDirectoryIterator {
+        return try (kernel.driver.DriverFsIterator.InstanceType.create(self._container.iterator(), self._allocator)).interface.new(self._allocator);
     }
 });
 
@@ -170,19 +146,23 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     const Self = @This();
     base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
-    _root: DriverDirectory,
+    _root: kernel.fs.IDirectory,
 
-    pub fn init(allocator: std.mem.Allocator) DriverFs {
+    fn get_root_directory(self: *Self) *DriverDirectory.InstanceType {
+        return self._root.as(DriverDirectory.InstanceType);
+    }
+
+    pub fn init(allocator: std.mem.Allocator) !DriverFs {
         log.info("created", .{});
         return DriverFs.init(.{
             .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
-            ._root = DriverDirectory.InstanceType.init(allocator),
+            ._root = try DriverDirectory.InstanceType.init(allocator).interface.new(allocator),
         });
     }
 
     pub fn delete(self: *Self) void {
-        self._root.data().deinit();
+        self._root.interface.delete();
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -191,11 +171,11 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn append(self: *Self, driver: IDriver, node_name: []const u8) !void {
-        try self._root.data().append(driver, node_name);
+        try self.get_root_directory().append(driver, node_name);
     }
 
     pub fn load_all(self: *Self) !void {
-        try self._root.data().load_all();
+        try self.get_root_directory().load_all();
     }
 
     pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
@@ -206,21 +186,24 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return -1;
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?IFile {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
+        _ = allocator;
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            return self._root.interface.new(self._allocator) catch return null;
+            const root_clone = self._root.share();
+            return kernel.fs.Node.create_directory(root_clone);
         }
-        return self._root.data().get(path, allocator);
+        var result: kernel.fs.Node = undefined;
+        self.get_root_directory().get(path, &result) catch return null;
+        return result;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
-        _ = self;
-        _ = path;
+        var maybe_node = self.get(path, self._allocator);
+        if (maybe_node) |*node| {
+            defer node.delete();
+            return true;
+        }
         return false;
-    }
-
-    pub fn iterator(self: *Self, path: []const u8) ?IDirectoryIterator {
-        return self._root.data().iterator(path);
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -229,9 +212,18 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        _ = self;
-        _ = path;
-        _ = data;
+        var maybe_node = self.get(path, self._allocator);
+        if (maybe_node) |*node| {
+            defer node.delete();
+            data.st_blksize = 1;
+            data.st_rdev = 1;
+            if (node.is_directory()) {
+                data.st_mode = c.S_IFDIR;
+            } else if (node.is_file()) {
+                data.st_mode = c.S_IFREG;
+            }
+            return 0;
+        }
         return -1; // Stat not supported for driverfs
     }
 });
