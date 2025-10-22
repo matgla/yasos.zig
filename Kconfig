@@ -26,25 +26,25 @@ menu "Process Options"
 
 config CONFIG_PROCESS_USE_MPU_STACK_PROTECTION
   bool "Use MPU Stack Protection"
-  help 
+  help
     Use hardware unit for stack protection of process
   depends on CPU_HAS_MPU
 
 config CONFIG_PROCESS_USE_STACK_OVERFLOW_DETECTION
   bool "Use stack overflow detection"
   default y
-  help 
-    Software stack overflow detection. 
+  help
+    Software stack overflow detection.
     This is detection, not prevention. If stack overflow occured memory may be corrupted!
     For prevention MPU must be used in hardware's that supports it.
 
 config CONFIG_PROCESS_CONTEXT_SWITCH_PERIOD
   int "Context switch period in milliseconds"
-  default 20 
-  help 
-    Context switch period in milliseconds, process may be interrupted earlier if blocked on IO 
+  default 20
+  help
+    Context switch period in milliseconds, process may be interrupted earlier if blocked on IO
 
-config CONFIG_PROCESS_ROOT_STACK_SIZE 
+config CONFIG_PROCESS_ROOT_STACK_SIZE
   int "Root process stack size"
   default 4096
   help
@@ -56,19 +56,25 @@ config CONFIG_PROCESS_HW_SPINLOCK_NUMBER
 
 config CONFIG_PROCESS_CONTEXT_SWITCH_HW_SPINLOCK_NUMBER
   int "HW spinlock number for context switch"
-  default 6 
+  default 6
 
 choice CONFIG_PROCESS_SCHEDULER
   prompt "Process Scheduler"
-  help 
-    Select process scheduler to use. 
+  help
+    Select process scheduler to use.
     Round Robin scheduler is a simple scheduler that allows processes to run for a fixed time slice.
     OSThread scheduler is a stub scheduler that uses OS thread to simulate processes
-config CONFIG_SCHEDULER_OSTHREAD 
+config CONFIG_SCHEDULER_OSTHREAD
   bool "OSThread"
 config CONFIG_SCHEDULER_ROUND_ROBIN
   bool "RoundRobinScheduler"
 endchoice
+
+config CONFIG_PROCESS_MAX_PID_VALUE
+  int "Max PID value"
+  default 2048
+  help
+    Maximum PID value, after reaching this value PID will wrap around to 1
 
 endmenu
 
@@ -79,21 +85,21 @@ menu "Logging & Instrumentation"
   config CONFIG_INSTRUMENTATION_VERBOSE_ALLOCATORS
     prompt "Enable verbose kernel allocator"
     def_bool "false"
-  config CONFIG_INSTRUMENTATION_PRINT_MEMORY_USAGE 
+  config CONFIG_INSTRUMENTATION_PRINT_MEMORY_USAGE
     prompt "Enable kernel allocator memory usage"
     def_bool "false"
- 
+
   choice "Log level"
     prompt "Log level"
     config CONFIG_INSTRUMENTATION_LOG_ERROR
-      bool "error" 
+      bool "error"
     config CONFIG_INSTRUMENTATION_LOG_WARNING
       bool "warning"
     config CONFIG_INSTRUMENTATION_LOG_INFO
       bool "info"
     config CONFIG_INSTRUMENTATION_LOG_DEBUG
       bool "debug"
- endchoice 
+ endchoice
 endmenu
 
 menu "Filesystem Options"

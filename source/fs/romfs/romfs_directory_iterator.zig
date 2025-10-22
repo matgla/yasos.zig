@@ -30,27 +30,39 @@ const RomFsFile = @import("romfs_file.zig").RomFsFile;
 pub const RomFsDirectoryIterator = interface.DeriveFromBase(IDirectoryIterator, struct {
     pub const Self = @This();
     _file: ?FileHeader,
-    _allocator: std.mem.Allocator,
+    _previous: ?FileHeader = null,
 
-    pub fn create(first_file: ?FileHeader, allocator: std.mem.Allocator) RomFsDirectoryIterator {
+    pub fn create(first_file: ?FileHeader) RomFsDirectoryIterator {
         return RomFsDirectoryIterator.init(.{
             ._file = first_file,
-            ._allocator = allocator,
+            ._previous = null,
         });
     }
 
-    pub fn next(self: *Self) ?IFile {
+    pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
         if (self._file) |*file| {
-            const ifile: IFile = RomFsFile.InstanceType.create(file.*, self._allocator).interface.new(self._allocator) catch {
-                return null;
+            if (self._previous) |*prev| {
+                prev.deinit();
+            }
+            self._previous = file.dupe();
+            file.deinit();
+            self._file = self._previous.?.next();
+            return .{
+                .name = self._previous.?.name(),
+                .kind = self._previous.?.filetype(),
             };
-            self._file = file.next();
-            return ifile;
         }
         return null; // End of iteration
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        if (self._previous) |*prev| {
+            prev.deinit();
+            self._previous = null;
+        }
+        if (self._file) |*file| {
+            file.deinit();
+            self._file = null;
+        }
     }
 });

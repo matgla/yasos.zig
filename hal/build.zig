@@ -30,14 +30,16 @@ const Config = struct {
 };
 
 fn load_config(b: *std.Build, config_file: []const u8) !Config {
-    const file = try std.fs.openFileAbsolute(config_file, .{ .mode = .read_only });
+    const file = try std.fs.cwd().openFile(config_file, .{ .mode = .read_only });
     defer file.close();
 
-    const data = try file.readToEndAlloc(b.allocator, 4096);
+    const endPosition = try file.getEndPos();
+    const buffer = b.allocator.alloc(u8, endPosition) catch return error.OutOfMemory;
+    const readed = try file.read(buffer);
     const parsed = try std.json.parseFromSlice(
         Config,
         b.allocator,
-        data,
+        buffer[0..readed],
         .{
             .ignore_unknown_fields = true,
         },
@@ -126,6 +128,7 @@ pub const Builder = struct {
             exe.link_function_sections = true;
             exe.link_data_sections = true;
             exe.link_gc_sections = true;
+
             if (config.cpu) |cpu| {
                 if (std.mem.eql(u8, cpu, "host")) {
                     exe.linkLibC();

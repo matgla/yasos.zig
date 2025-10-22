@@ -22,37 +22,60 @@ const std = @import("std");
 const interface = @import("interface");
 const kernel = @import("../kernel.zig");
 
-const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
-
-pub const ProcInfoType = enum {
-    meminfo,
-};
-
-pub const ProcInfo = struct {
-    infotype: ProcInfoType,
-    node: std.DoublyLinkedList.Node,
-};
-
 pub const ProcFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
     pub const Self = @This();
-    _node: ?*std.DoublyLinkedList.Node,
+    const PidMap = @TypeOf(kernel.process.process_manager.instance).PidMap;
     _allocator: std.mem.Allocator,
+    _items: []kernel.fs.Node,
+    _index: usize,
+    _pidmap: ?PidMap,
+    _prociter: ?@TypeOf(kernel.process.process_manager.instance).PidIterator,
+    _proc_name: ?[]const u8,
 
-    pub fn create(first_node: ?*std.DoublyLinkedList.Node, allocator: std.mem.Allocator) ProcFsIterator {
+    pub fn create(allocator: std.mem.Allocator, items: []kernel.fs.Node, pidmap: ?PidMap) ProcFsIterator {
         return ProcFsIterator.init(.{
-            ._node = first_node,
             ._allocator = allocator,
+            ._items = items,
+            ._index = 0,
+            ._pidmap = pidmap,
+            ._prociter = null,
+            ._proc_name = null,
         });
     }
 
-    pub fn next(self: *Self) ?kernel.fs.IFile {
-        if (self._node) |node| {
-            self._node = node.*.next;
-            const info: *ProcInfo = @fieldParentPtr("node", node);
-            switch (info.infotype) {
-                .meminfo => return (MemInfoFile.InstanceType.create()).interface.new(self._allocator) catch return null,
+    pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
+        if (self._prociter == null and self._pidmap != null) {
+            self._prociter = self._pidmap.?.iterator(.{
+                .kind = .unset,
+            });
+            // skip 0
+            _ = self._prociter.?.next();
+        }
+
+        if (self._prociter) |*it| {
+            if (it.next()) |pid| {
+                if (self._proc_name) |name| {
+                    self._allocator.free(name);
+                }
+                self._proc_name = std.fmt.allocPrint(self._allocator, "{d}", .{pid}) catch return null;
+
+                return .{
+                    .name = self._proc_name.?,
+                    .kind = .Directory,
+                };
             }
-            return null;
+        }
+        if (self._proc_name) |name| {
+            self._allocator.free(name);
+            self._proc_name = null;
+        }
+        if (self._index < self._items.len) {
+            const node = self._items[self._index];
+            self._index += 1;
+            return .{
+                .name = node.name(),
+                .kind = node.filetype(),
+            };
         }
         return null;
     }

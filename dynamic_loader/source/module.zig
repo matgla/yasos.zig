@@ -42,11 +42,34 @@ pub const SymbolEntry = struct {
 extern const indirect_call_thunk_template_size: usize;
 extern fn indirect_call_thunk_template_start() void;
 
+pub const ThunkHolderData = struct {
+    data: []u8,
+    refcount: usize,
+    generated: bool,
+
+    pub fn create(allocator: std.mem.Allocator, size: usize) !*ThunkHolderData {
+        const self = try allocator.create(ThunkHolderData);
+        self.* = .{
+            .data = try allocator.alloc(u8, size * indirect_call_thunk_template_size),
+            .refcount = 1,
+            .generated = false,
+        };
+        return self;
+    }
+
+    pub fn delete(self: *ThunkHolderData, allocator: std.mem.Allocator) void {
+        self.refcount -= 1;
+        if (self.refcount == 0) {
+            allocator.free(self.data);
+            allocator.destroy(self);
+        }
+    }
+};
+
 pub const LoadedSharedData = struct {
     text: ?[]const u8,
     init: ?[]const u8,
     plt: ?[]const u8,
-    thunks: []u8,
     xip: bool,
     exported_symbols: SymbolTable,
     allocator: std.mem.Allocator,
@@ -64,7 +87,6 @@ pub const LoadedSharedData = struct {
                 .text = parser.get_text(),
                 .init = parser.get_init(),
                 .plt = parser.get_plt(),
-                .thunks = undefined,
                 .xip = xip,
                 .exported_symbols = parser.exported_symbols,
                 .allocator = allocator,
@@ -77,29 +99,13 @@ pub const LoadedSharedData = struct {
     pub fn destroy(self: *LoadedSharedData) void {
         self.allocator.destroy(self);
     }
-
-    pub fn allocate_thunks(self: *LoadedSharedData, size: usize) !void {
-        self.thunks = try self.process_allocator.alloc(u8, size * indirect_call_thunk_template_size);
-    }
-
-    pub fn generate_thunk(self: *LoadedSharedData, index: usize, r9: usize, symbol: usize) !usize {
-        const position = index * indirect_call_thunk_template_size;
-        if (position + indirect_call_thunk_template_size > self.thunks.len) {
-            return error.IndexOutOfBounds;
-        }
-        const thunk_template: [*]const u8 = @ptrFromInt(@intFromPtr(&indirect_call_thunk_template_start) - 1);
-        const thunk_slice: []const u8 = thunk_template[0..indirect_call_thunk_template_size];
-        @memcpy(self.thunks[position .. position + indirect_call_thunk_template_size], thunk_slice[0..]);
-        @memcpy(self.thunks[position + 12 .. position + 12 + @sizeOf(usize)], std.mem.asBytes(&r9));
-        @memcpy(self.thunks[position + 16 .. position + 16 + @sizeOf(usize)], std.mem.asBytes(&symbol));
-        return @intFromPtr(&self.thunks[position]);
-    }
 };
 
 pub const LoadedUniqueData = struct {
     data: ?[]u8,
     bss: ?[]u8,
     got: ?[]GotEntry,
+    thunks: ?*ThunkHolderData,
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
     _underlaying_memory: []u8,
@@ -113,6 +119,7 @@ pub const LoadedUniqueData = struct {
             .data = null,
             .bss = null,
             .got = null,
+            .thunks = null,
             .allocator = allocator,
             .process_allocator = process_allocator,
             ._underlaying_memory = underlaying_memory,
@@ -135,6 +142,47 @@ pub const LoadedUniqueData = struct {
         // copy data
 
         return self;
+    }
+
+    pub fn allocate_thunks(self: *LoadedUniqueData, size: usize) !void {
+        if (self.thunks == null) {
+            self.thunks = try ThunkHolderData.create(self.process_allocator, size);
+        }
+    }
+
+    pub fn retain_thunks(self: *LoadedUniqueData) ?*ThunkHolderData {
+        if (self.thunks) |thunks| {
+            thunks.refcount += 1;
+            return thunks;
+        }
+        return null;
+    }
+
+    pub fn generate_thunk(self: *LoadedUniqueData, index: usize, r9: usize, symbol: usize) !usize {
+        if (self.thunks) |thunks| {
+            const position = index * indirect_call_thunk_template_size;
+            if (position + indirect_call_thunk_template_size > thunks.data.len) {
+                return error.IndexOutOfBounds;
+            }
+            const thunk_template: [*]const u8 = @ptrFromInt(@intFromPtr(&indirect_call_thunk_template_start) - 1);
+            const thunk_slice: []const u8 = thunk_template[0..indirect_call_thunk_template_size];
+            @memcpy(thunks.data[position .. position + indirect_call_thunk_template_size], thunk_slice[0..]);
+            @memcpy(thunks.data[position + 12 .. position + 12 + @sizeOf(usize)], std.mem.asBytes(&r9));
+            @memcpy(thunks.data[position + 16 .. position + 16 + @sizeOf(usize)], std.mem.asBytes(&symbol));
+            return @intFromPtr(&thunks.data[position]);
+        }
+        return error.ThunksNotAllocated;
+    }
+
+    pub fn get_thunk_address(self: *LoadedUniqueData, index: usize) !usize {
+        if (self.thunks) |thunks| {
+            const position = index * indirect_call_thunk_template_size;
+            if (position + indirect_call_thunk_template_size > thunks.data.len) {
+                return error.IndexOutOfBounds;
+            }
+            return @intFromPtr(&thunks.data[position]);
+        }
+        return error.ThunksNotAllocated;
     }
 
     pub fn destroy(self: *LoadedUniqueData) void {

@@ -30,25 +30,31 @@ const FileType = @import("../../fs/ifile.zig").FileType;
 const IoctlCommonCommands = @import("../../fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("../../fs/ifile.zig").FileMemoryMapAttributes;
 
+const kernel = @import("../../kernel.zig");
+
 const log = std.log.scoped(.@"kernel/fs/driver/flash_file");
 
 pub fn FlashFile(comptime FlashType: anytype) type {
     const Internal = struct {
         const FlashFileImpl = interface.DeriveFromBase(IFile, struct {
             const Self = @This();
-            /// VTable for IFile interface
-            _flash: *FlashType,
+            _flash: FlashType,
             _allocator: std.mem.Allocator,
             _current_address: u32,
             _name: []const u8,
 
-            pub fn create(allocator: std.mem.Allocator, flash: *FlashType, filename: []const u8) FlashFileImpl {
+            pub fn create(allocator: std.mem.Allocator, flash: FlashType, filename: []const u8) FlashFileImpl {
                 return FlashFileImpl.init(.{
                     ._flash = flash,
                     ._allocator = allocator,
                     ._current_address = 0,
                     ._name = filename,
                 });
+            }
+
+            pub fn create_node(allocator: std.mem.Allocator, flash: FlashType, filename: []const u8) anyerror!kernel.fs.Node {
+                const file = try create(allocator, flash, filename).interface.new(allocator);
+                return kernel.fs.Node.create_file(file);
             }
 
             // IFile interface
@@ -76,9 +82,8 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn close(self: *Self) i32 {
+            pub fn close(self: *Self) void {
                 _ = self;
-                return 0;
             }
 
             pub fn sync(self: *Self) i32 {
@@ -91,14 +96,8 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn size(self: *Self) isize {
-                _ = self;
-                return 0;
-            }
-
-            pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-                _ = allocator;
-                return FileName.init(self._name, null);
+            pub fn name(self: *const Self) []const u8 {
+                return self._name;
             }
 
             pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -135,7 +134,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 buf.st_blocks = self._flash.get_number_of_blocks();
             }
 
-            pub fn filetype(self: *Self) FileType {
+            pub fn filetype(self: *const Self) FileType {
                 _ = self;
                 return FileType.BlockDevice;
             }

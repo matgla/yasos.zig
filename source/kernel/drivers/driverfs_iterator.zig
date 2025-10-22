@@ -35,13 +35,12 @@ pub const DriverFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterat
         });
     }
 
-    pub fn next(self: *Self) ?kernel.fs.IFile {
-        while (self._iterator.next()) |driver| {
-            const n = driver.value_ptr.interface.ifile(self._allocator);
-            if (n == null) {
-                continue;
-            }
-            return n;
+    pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
+        if (self._iterator.next()) |driver| {
+            return .{
+                .name = driver.key_ptr.*,
+                .kind = .File,
+            };
         }
         return null;
     }

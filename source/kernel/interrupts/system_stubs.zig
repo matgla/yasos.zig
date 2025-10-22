@@ -19,8 +19,7 @@
 //
 
 const std = @import("std");
-const kernel = @import("kernel");
-const log = kernel.log;
+const kernel = @import("../kernel.zig");
 
 const c = @import("libc_imports").c;
 const fs = @import("../fs/vfs.zig");
@@ -33,6 +32,20 @@ const config = @import("config");
 const process_manager = @import("../process_manager.zig");
 const FileType = @import("../fs/ifile.zig").FileType;
 const handlers = @import("syscall_handlers.zig");
+
+fn get_file_from_process(fd: u16) ?*kernel.fs.IFile {
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_handle = process.get_file_handle(fd);
+        if (maybe_handle) |handle| {
+            var maybe_file = handle.node.as_file();
+            if (maybe_file) |*file| {
+                return file;
+            }
+        }
+    }
+    return null;
+}
 
 pub export fn _exit(code: c_int) void {
     const maybe_process = process_manager.instance.get_current_process();
@@ -69,12 +82,7 @@ pub export fn _isatty(fd: c_int) c_int {
 pub export fn _close(fd: c_int) c_int {
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(fd));
-        if (maybe_file) |*file| {
-            _ = file.file.interface.close();
-            _ = process.fds.remove(@intCast(fd));
-            return 0;
-        }
+        process.release_file(@intCast(fd));
     }
     return 0;
 }
@@ -84,45 +92,33 @@ export fn _lseek(_: c_int, _: c.off_t, _: c_int) c_int {
 }
 
 pub export fn _read(fd: c_int, data: *anyopaque, size: usize) isize {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(fd));
-        if (maybe_file) |*file| {
-            return file.file.interface.read(@as([*:0]u8, @ptrCast(data))[0..size]);
-        }
+    const maybe_file = get_file_from_process(@intCast(fd));
+    if (maybe_file) |file| {
+        return file.interface.read(@as([*:0]u8, @ptrCast(data))[0..size]);
     }
     return 0;
 }
 
 pub export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(fd));
-        if (maybe_file) |*file| {
-            return file.file.interface.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
-        }
+    const maybe_file = get_file_from_process(@intCast(fd));
+    if (maybe_file) |file| {
+        return file.interface.write(@as([*:0]const u8, @ptrCast(data))[0..size]);
     }
-    return -1;
+    return 0;
 }
 
 pub export fn _ioctl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(fd));
-        if (maybe_file) |*file| {
-            return file.file.interface.ioctl(request, data);
-        }
+    const maybe_file = get_file_from_process(@intCast(fd));
+    if (maybe_file) |file| {
+        return file.interface.ioctl(request, data);
     }
     return -1;
 }
 
 pub export fn _fcntl(fd: c_int, request: c_int, data: ?*anyopaque) c_int {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        var maybe_file = process.fds.get(@intCast(fd));
-        if (maybe_file) |*file| {
-            return file.file.interface.fcntl(request, data);
-        }
+    const maybe_file = get_file_from_process(@intCast(fd));
+    if (maybe_file) |file| {
+        return file.interface.fcntl(request, data);
     }
     return -1;
 }

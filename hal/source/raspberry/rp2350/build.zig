@@ -142,6 +142,7 @@ pub fn build(b: *std.Build) !void {
     });
     hal_armv8_m.addAssemblyFile(b.path("../../common/arch/arm/armv8-m/irq.S"));
     hal_armv8_m.addImport("hal", hal);
+    hal_armv8_m.addImport("cmsis", cmsis);
     hal.addImport("arch", hal_armv8_m);
     cortex_m.addImport("arch", hal_armv8_m);
     hal.addImport("cortex-m", cortex_m);

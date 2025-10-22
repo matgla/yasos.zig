@@ -53,10 +53,16 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         const Self = @This();
         const SchedulerType = SchedulerGeneratorType(Self);
 
+        pub const PidMap = std.StaticBitSet(config.process.max_pid_value);
+        pub const PidIterator = PidMap.Iterator(.{
+            .kind = .unset,
+        });
+
         processes: ContainerType,
         allocator: std.mem.Allocator,
         scheduler: SchedulerType,
         _process_memory_pool: kernel.memory.heap.ProcessMemoryPool,
+        _pid_map: std.StaticBitSet(config.process.max_pid_value),
 
         pub fn init(allocator: std.mem.Allocator) Self {
             log.debug("Using scheduler '{s}'", .{SchedulerGeneratorType(Self).Name});
@@ -70,6 +76,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                 .allocator = allocator,
                 .scheduler = SchedulerType{},
                 ._process_memory_pool = processes_memory_pool,
+                ._pid_map = std.StaticBitSet(config.process.max_pid_value).initFull(),
             };
         }
 
@@ -77,22 +84,47 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             self._process_memory_pool.deinit();
             var next = self.processes.first;
             while (next) |node| {
-                const p: *Process = @fieldParentPtr("node", node);
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 p.deinit();
                 next = node.next;
             }
         }
 
+        pub fn get_pidmap(self: *const Self) std.StaticBitSet(config.process.max_pid_value) {
+            return self._pid_map;
+        }
+
+        fn get_next_pid(self: *Self) ?c.pid_t {
+            const maybe_index = self._pid_map.findFirstSet();
+            if (maybe_index) |index| {
+                self._pid_map.unset(index);
+                return @intCast(index + 1);
+            }
+            log.err("No more PIDs available", .{});
+            return null;
+        }
+
+        fn release_pid(self: *Self, pid: c.pid_t) void {
+            if (pid > 0 and pid < config.process.max_pid_value) {
+                self._pid_map.set(@intCast(pid - 1));
+            }
+        }
+
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
-            var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null);
-            self.processes.append(&new_process.node);
+            const maybe_pid = self.get_next_pid();
+            if (maybe_pid) |pid| {
+                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid);
+                self.processes.append(&new_process.node);
+                return;
+            }
+            return error.TooManyProcesses;
         }
 
         pub fn get_process_memory_pool(self: Self) kernel.memory.heap.ProcessMemoryPool {
             return self._process_memory_pool;
         }
 
-        pub fn delete_process(self: *Self, pid: u32, return_code: i32) void {
+        pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
             var next = self.processes.first;
             var should_restore_parent = false;
             defer if (should_restore_parent) {
@@ -100,10 +132,11 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                 //reload_current_task();
             };
             while (next) |node| {
-                const p: *Process = @fieldParentPtr("node", node);
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 next = node.next;
                 if (p.pid == pid) {
                     const has_shared_stack = p.has_stack_shared_with_parent();
+                    self.release_pid(pid);
                     p.unblock_all(return_code);
                     if (has_shared_stack) {
                         _ = p.release_parent_after_getting_freedom();
@@ -166,7 +199,11 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
             const maybe_current_process = self.scheduler.get_current();
             if (maybe_current_process) |current_process| {
-                const new_process = current_process.vfork(&self._process_memory_pool, context) catch {
+                const maybe_pid = self.get_next_pid();
+                if (maybe_pid == null) {
+                    return error.TooManyProcesses;
+                }
+                const new_process = current_process.vfork(&self._process_memory_pool, context, maybe_pid.?) catch {
                     return -1;
                 };
 
@@ -235,7 +272,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
             var next = self.processes.first;
             while (next) |node| {
-                const p: *Process = @fieldParentPtr("node", node);
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 if (p.pid == pid) {
                     return p;
                 }

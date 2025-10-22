@@ -34,32 +34,26 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     const Self = @This();
     _file: ?fatfs.File,
     _allocator: std.mem.Allocator,
-    _path: [:0]const u8,
     _is_open: bool,
+    _name: []const u8,
+    _filetype: kernel.fs.FileType,
 
-    pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) ?FatFsFile {
-        // try top open directory
-        var dir: ?fatfs.Dir = fatfs.Dir.open(path) catch blk: {
-            break :blk null;
-        };
-        if (dir) |*d| {
-            d.close();
-            return FatFsFile.init(.{
-                ._file = null,
-                ._allocator = allocator,
-                ._path = path,
-                ._is_open = true,
-            });
-        } else {
-            const file = fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing }) catch return null;
-            return FatFsFile.init(.{
-                ._file = file,
-                ._allocator = allocator,
-                ._path = path,
-                ._is_open = true,
-            });
-        }
-        return null;
+    pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsFile {
+        const filename = try allocator.dupe(u8, std.fs.path.basename(path));
+        errdefer allocator.free(filename);
+        const file = try fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing });
+        return FatFsFile.init(.{
+            ._file = file,
+            ._allocator = allocator,
+            ._is_open = true,
+            ._name = filename,
+            ._filetype = .File,
+        });
+    }
+
+    pub fn create_node(allocator: std.mem.Allocator, path: [:0]const u8) anyerror!kernel.fs.Node {
+        const file = try (try create(allocator, path)).interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
@@ -72,7 +66,6 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
 
     pub fn write(self: *Self, data: []const u8) isize {
         if (self._file) |*file| {
-            log.info("Writing {d} bytes to file: {s}", .{ data.len, self._path });
             const s = file.write(data) catch return -1;
             return @as(isize, @intCast(s));
         }
@@ -112,23 +105,15 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         if (!self._is_open) {
-            return 0;
+            return;
         }
         self._is_open = false;
-        self._allocator.free(self._path);
         if (self._file) |*file| {
             file.close();
             self._file = null;
         }
-        return 0;
-    }
-
-    pub fn dupe(self: *Self) ?kernel.fs.IFile {
-        const new_file = self._allocator.create(Self) catch return null;
-        new_file.* = self.*;
-        return new_file.ifile();
     }
 
     pub fn sync(self: *Self) i32 {
@@ -145,18 +130,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn size(self: *Self) isize {
-        if (self._file) |*file| {
-            return @intCast(file.size());
-        }
-        return 0;
-    }
-
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        const s = fatfs.stat(self._path) catch return kernel.fs.FileName.init("", null);
-        const s_dup = allocator.dupe(u8, s.name()) catch return kernel.fs.FileName.init("", null);
-
-        return kernel.fs.FileName.init(s_dup, allocator);
+    pub fn name(self: *const Self) []const u8 {
+        return self._name;
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
@@ -178,14 +153,18 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn filetype(self: *Self) kernel.fs.FileType {
-        if (self._file == null) {
-            return kernel.fs.FileType.Directory;
-        }
-        return kernel.fs.FileType.File;
+    pub fn filetype(self: *const Self) kernel.fs.FileType {
+        return self._filetype;
     }
 
     pub fn delete(self: *Self) void {
         _ = self.close();
+        self._allocator.free(self._name);
+    }
+
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        if (self._file) |*file| {
+            data.st_size = @as(usize, @intCast(file.size()));
+        }
     }
 });

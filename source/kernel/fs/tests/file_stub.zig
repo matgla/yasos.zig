@@ -49,9 +49,8 @@ pub const FileStub = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         _ = self;
-        return 0;
     }
 
     pub fn sync(self: *Self) i32 {
@@ -60,11 +59,6 @@ pub const FileStub = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn tell(self: *Self) c.off_t {
-        _ = self;
-        return 0;
-    }
-
-    pub fn size(self: *Self) isize {
         _ = self;
         return 0;
     }

@@ -23,7 +23,10 @@ const std = @import("std");
 const IDriver = @import("../idriver.zig").IDriver;
 const IFile = @import("../../fs/fs.zig").IFile;
 const FlashFile = @import("flash_file.zig").FlashFile;
+const FlashNode = @import("flash_node.zig").FlashNode;
 const interface = @import("interface");
+
+const kernel = @import("../../kernel.zig");
 
 const hal = @import("hal");
 const board = @import("board");
@@ -32,34 +35,33 @@ pub const FlashDriver = interface.DeriveFromBase(IDriver, struct {
     const Self = @This();
     const FlashType = @TypeOf(board.flash.flash0);
 
-    _flash: FlashType,
+    _allocator: std.mem.Allocator,
     _name: []const u8,
+    _node: kernel.fs.Node,
 
-    pub fn create(flash: FlashType, driver_name: []const u8) FlashDriver {
+    pub fn create(allocator: std.mem.Allocator, flash: FlashType, driver_name: []const u8) !FlashDriver {
         return FlashDriver.init(.{
-            ._flash = flash,
+            ._allocator = allocator,
             ._name = driver_name,
+            ._node = try FlashFile(FlashType).InstanceType.create_node(allocator, flash, driver_name),
         });
     }
 
-    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-        const file = FlashFile(FlashType).InstanceType.create(allocator, &self._flash, self._name).interface.new(allocator) catch {
-            return null;
-        };
-        return file;
+    pub fn delete(self: *Self) void {
+        self._node.delete();
+    }
+
+    pub fn node(self: *Self) anyerror!kernel.fs.Node {
+        return try self._node.clone();
     }
 
     pub fn load(self: *Self) anyerror!void {
-        try self._flash.init();
+        _ = self;
     }
 
     pub fn unload(self: *Self) bool {
         _ = self;
         return true;
-    }
-
-    pub fn delete(self: *Self) void {
-        _ = self;
     }
 
     pub fn name(self: *const Self) []const u8 {

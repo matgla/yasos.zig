@@ -16,6 +16,7 @@
 const std = @import("std");
 
 const memory = @import("hal").memory;
+const c = @import("libc_imports").c;
 
 const log = std.log.scoped(.@"kernel/memory_pool");
 // Only one process is owner of memory chunk
@@ -31,12 +32,12 @@ pub const ProcessMemoryPool = struct {
 
     const ProcessMemoryEntity = struct {
         address: []u8,
-        pid: u32,
+        pid: c.pid_t,
         access: AccessType,
         node: std.DoublyLinkedList.Node,
     };
     const ProcessMemoryList = std.DoublyLinkedList;
-    const ProcessMemoryMap = std.AutoHashMap(u32, ProcessMemoryList);
+    const ProcessMemoryMap = std.AutoHashMap(c.pid_t, ProcessMemoryList);
 
     memory_size: usize,
     page_count: usize,
@@ -107,7 +108,7 @@ pub const ProcessMemoryPool = struct {
         return ptr[0..len];
     }
 
-    pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: u32) ?[]u8 {
+    pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t) ?[]u8 {
         if (number_of_pages <= 0) {
             return null;
         }
@@ -148,7 +149,7 @@ pub const ProcessMemoryPool = struct {
         return null;
     }
 
-    pub fn release_pages_for(self: *ProcessMemoryPool, pid: u32) void {
+    pub fn release_pages_for(self: *ProcessMemoryPool, pid: c.pid_t) void {
         log.debug("Releasing pages for: {d}", .{pid});
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
@@ -174,7 +175,7 @@ pub const ProcessMemoryPool = struct {
         }
     }
 
-    pub fn free_pages(self: *ProcessMemoryPool, address: *anyopaque, number_of_pages: i32, pid: u32) void {
+    pub fn free_pages(self: *ProcessMemoryPool, address: *anyopaque, number_of_pages: i32, pid: c.pid_t) void {
         log.debug("Releasing pages {d} at 0x{x} for pid: {d}", .{ number_of_pages, @intFromPtr(address), pid });
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {

@@ -27,12 +27,24 @@ const std = @import("std");
 pub const SysTick = struct {
     pub const SysTickError = error{
         ConfigurationFailure,
+        ReloadValueImpossibleToReach,
     };
 
-    pub fn init(_: SysTick, ticks: u32) !void {
-        if (c.SysTick_Config(ticks) != 0) {
-            return SysTickError.ConfigurationFailure;
+    fn configure_ticks(ticks: u32) !void {
+        if ((ticks - 1) > c.SysTick_LOAD_RELOAD_Msk) {
+            return SysTickError.ReloadValueImpossibleToReach;
         }
+        cpu.systick.load.write(ticks - 1);
+        cpu.nvic.set_priority(c.SysTick_IRQn, (1 << c.__NVIC_PRIO_BITS) - 1);
+        cpu.systick.val.write(0);
+        cpu.systick.ctrl.write(c.SysTick_CTRL_CLKSOURCE_Msk | c.SysTick_CTRL_TICKINT_Msk | c.SysTick_CTRL_ENABLE_Msk);
+    }
+
+    pub fn init(_: SysTick, ticks: u32) !void {
+        try configure_ticks(ticks);
+        // if (c.SysTick_Config(ticks) != 0) {
+        //     return SysTickError.ConfigurationFailure;
+        // }
     }
 
     pub fn disable(_: SysTick) void {

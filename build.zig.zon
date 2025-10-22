@@ -1,17 +1,17 @@
 .{
     .name = .yasos,
     .version = "0.0.1",
-    .minimum_zig_version = "0.15.0-dev.1380+e98aeeb73",
+    .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .yasos_hal = .{ .path = "hal" },
         .yasld = .{ .path = "dynamic_loader" },
         .@"modules/oop" = .{
-            .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#215e335cde64c4d788c80e259b26593754802fd4",
-            .hash = "oop_zig-0.0.1-SbIaG0VXAACbF6-VrzipIbv0_Fu4v3-K6AQtqYdu3U5Y",
+            .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#ea06e261020e8eb275ae1945e295528173e63349",
+            .hash = "oop_zig-0.0.1-SbIaG4lfAACb0qj018T2mQEwzA0pOuhk1RXW1qpbMS2E",
         },
         .@"modules/fatfs" = .{
-            .url = "git+https://github.com/matgla/zfat.git#7f30c4f4483e135613d700bc908d72b762bc6d9f",
-            .hash = "zfat-0.15.0-SNNK9WDCTQDVE9wgIpa6ja7psB97jxkOmNihy67IB7HW",
+            .url = "git+https://github.com/matgla/zfat.git/?ref=HEAD#d532ab0af3067211557a1afa04cf0244b40e661f",
+            .hash = "zfat-0.16.0-SNNK9UHDTQA6s7SZuIuc1AnOm-DSwXrgPdffv-WC7IMY",
         },
     },
     .paths = .{

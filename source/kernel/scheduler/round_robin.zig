@@ -50,12 +50,12 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
 
             while (next) |node| {
                 // search for the next ready process
-                const process: *Process = @fieldParentPtr("node", node);
+                const process: *Process = @alignCast(@fieldParentPtr("node", node));
                 if (process.state == Process.State.Ready) {
                     process.set_core(@intCast(cpu.coreid()));
                     self.next = node;
                     if (self.current) |current_node| {
-                        const current_process: *Process = @fieldParentPtr("node", current_node);
+                        const current_process: *Process = @alignCast(@fieldParentPtr("node", current_node));
                         if (current_process.is_initialized()) {
                             return .StoreAndSwitch;
                         }
@@ -68,7 +68,7 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
             // if not found, try to search from beginning
             next = self.manager.processes.first;
             while (next) |node| {
-                const process: *Process = @fieldParentPtr("node", node);
+                const process: *Process = @alignCast(@fieldParentPtr("node", node));
 
                 if (node == self.current) {
                     // only already running process can be executed
@@ -81,7 +81,7 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
                     self.next = node;
 
                     if (self.current) |current_node| {
-                        const current_process: *Process = @fieldParentPtr("node", current_node);
+                        const current_process: *Process = @alignCast(@fieldParentPtr("node", current_node));
                         if (current_process.is_initialized()) {
                             return .StoreAndSwitch;
                         }
@@ -100,7 +100,7 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
 
         pub fn get_current(self: *const Self) ?*Process {
             if (self.current) |node| {
-                return @fieldParentPtr("node", node);
+                return @alignCast(@fieldParentPtr("node", node));
             }
             return null;
         }
@@ -112,19 +112,19 @@ pub fn RoundRobin(comptime ManagerType: anytype) type {
                         return null;
                     }
                 }
-                return @fieldParentPtr("node", node);
+                return @alignCast(@fieldParentPtr("node", node));
             }
             return null;
         }
 
         pub fn update_current(self: *Self) void {
             if (self.current) |current| {
-                const process: *Process = @fieldParentPtr("node", current);
+                const process: *Process = @alignCast(@fieldParentPtr("node", current));
                 process.reevaluate_state();
             }
 
             if (self.next) |next| {
-                const process: *Process = @fieldParentPtr("node", next);
+                const process: *Process = @alignCast(@fieldParentPtr("node", next));
                 process.state = Process.State.Running;
                 process._initialized = true;
             }

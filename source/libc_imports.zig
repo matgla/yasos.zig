@@ -16,10 +16,11 @@
 pub const c = @cImport({
     @cInclude("libs/libc/sys/syscall.h");
     @cInclude("libs/libc/unistd.h");
-    @cInclude("libs/libc/sys/stat.h");
     @cInclude("libs/libc/sys/ioctl.h");
     @cInclude("libs/libc/termios.h");
     @cInclude("libs/libc/dirent.h");
     @cInclude("libs/libc/fcntl.h");
     @cInclude("libs/libc/errno.h");
+    @cInclude("libs/libc/sys/stat.h");
+    @cInclude("libs/libc/sys/sysinfo.h");
 });

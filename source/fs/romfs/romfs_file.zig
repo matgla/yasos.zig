@@ -46,13 +46,18 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     position: c.off_t,
 
     // RomFsFile interface
-    pub fn create(header: FileHeader, allocator: std.mem.Allocator) RomFsFile {
+    pub fn create(allocator: std.mem.Allocator, header: FileHeader) RomFsFile {
         return RomFsFile.init(.{
             .base = ReadOnlyFile.init(.{}),
             .header = header,
             .allocator = allocator,
             .position = 0,
         });
+    }
+
+    pub fn create_node(allocator: std.mem.Allocator, header: FileHeader) anyerror!kernel.fs.Node {
+        const file = try create(allocator, header).interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
@@ -95,21 +100,16 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return 0;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         _ = self;
-        return 0;
     }
 
     pub fn tell(self: *Self) c.off_t {
         return @intCast(self.position);
     }
 
-    pub fn size(self: *Self) isize {
-        return @intCast(self.header.size());
-    }
-
-    pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-        return self.header.name(allocator);
+    pub fn name(self: *const Self) []const u8 {
+        return self.header.name();
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
@@ -137,15 +137,16 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return 0;
     }
 
-    pub fn filetype(self: *Self) FileType {
+    pub fn filetype(self: *const Self) FileType {
         return self.header.filetype();
     }
 
-    pub fn dupe(self: *Self) ?IFile {
-        return self.new(self.allocator) catch return null;
+    pub fn delete(self: *Self) void {
+        self.header.deinit();
+        _ = self.close();
     }
 
-    pub fn delete(self: *Self) void {
-        _ = self.close();
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        data.st_size = @as(usize, @intCast(self.header.size()));
     }
 });

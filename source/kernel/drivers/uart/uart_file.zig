@@ -21,6 +21,8 @@
 const std = @import("std");
 const c = @import("libc_imports").c;
 
+const kernel = @import("../../kernel.zig");
+
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
@@ -50,6 +52,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                     ._allocator = allocator,
                     ._name = filename,
                 });
+            }
+
+            pub fn create_node(allocator: std.mem.Allocator, filename: []const u8) anyerror!kernel.fs.Node {
+                const file = try create(allocator, filename).interface.new(allocator);
+                return kernel.fs.Node.create_file(file);
             }
 
             pub fn read(self: *Self, buffer: []u8) isize {
@@ -113,9 +120,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return 0;
             }
 
-            pub fn close(self: *Self) i32 {
+            pub fn close(self: *Self) void {
                 _ = self;
-                return 0;
             }
 
             pub fn sync(self: *Self) i32 {
@@ -128,14 +134,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return 0;
             }
 
-            pub fn size(self: *Self) isize {
-                _ = self;
-                return 0;
-            }
-
-            pub fn name(self: *Self, allocator: std.mem.Allocator) FileName {
-                _ = allocator;
-                return FileName.init(self._name, null);
+            pub fn name(self: *const Self) []const u8 {
+                return self._name;
             }
 
             pub fn ioctl(self: *Self, op: i32, arg: ?*anyopaque) i32 {
@@ -171,6 +171,12 @@ pub fn UartFile(comptime UartType: anytype) type {
                             }
                             return 0;
                         },
+                        c.TIOCGWINSZ => {
+                            const ws: *c.struct_winsize = @ptrCast(@alignCast(termios_arg));
+                            ws.*.ws_row = 24;
+                            ws.*.ws_col = 80;
+                            return 0;
+                        },
                         else => {
                             return -1;
                         },
@@ -182,7 +188,6 @@ pub fn UartFile(comptime UartType: anytype) type {
             pub fn fcntl(self: *Self, op: i32, maybe_arg: ?*anyopaque) i32 {
                 var result: i32 = 0;
                 if (maybe_arg) |arg| {
-                    const flags: *c_int = @ptrCast(@alignCast(arg));
                     switch (op) {
                         c.F_GETFL => {
                             if (self._nonblock) {
@@ -191,6 +196,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                             return result;
                         },
                         c.F_SETFL => {
+                            const flags: *c_int = @ptrCast(@alignCast(arg));
                             self._nonblock = (flags.* & c.O_NONBLOCK) != 0;
                             return 0;
                         },
@@ -210,13 +216,13 @@ pub fn UartFile(comptime UartType: anytype) type {
                 buf.st_nlink = 0;
                 buf.st_uid = 0;
                 buf.st_gid = 0;
-                buf.st_rdev = 0;
+                buf.st_rdev = 1;
                 buf.st_size = 0;
                 buf.st_blksize = 1;
                 buf.st_blocks = 1;
             }
 
-            pub fn filetype(self: *Self) FileType {
+            pub fn filetype(self: *const Self) FileType {
                 _ = self;
                 return FileType.CharDevice;
             }

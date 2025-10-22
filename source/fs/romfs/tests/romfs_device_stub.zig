@@ -57,9 +57,8 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         return offset;
     }
 
-    pub fn close(self: *Self) i32 {
+    pub fn close(self: *Self) void {
         self.file.?.close();
-        return 0;
     }
 
     pub fn tell(self: *Self) c.off_t {
