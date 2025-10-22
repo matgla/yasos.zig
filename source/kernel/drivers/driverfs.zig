@@ -216,6 +216,7 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         if (maybe_node) |*node| {
             defer node.delete();
             data.st_blksize = 1;
+            data.st_rdev = 1;
             if (node.is_directory()) {
                 data.st_mode = c.S_IFDIR;
             } else if (node.is_file()) {

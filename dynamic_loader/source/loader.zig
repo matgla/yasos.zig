@@ -279,9 +279,9 @@ pub const Loader = struct {
                 number_of_function_pointer_relocations += 1;
             }
         }
-        const maybe_shared_data = module.shared_data;
-        if (maybe_shared_data) |shared| {
-            try shared.allocate_thunks(number_of_function_pointer_relocations);
+        const maybe_unique_data = module.unique_data;
+        if (maybe_unique_data) |unique| {
+            try unique.allocate_thunks(number_of_function_pointer_relocations);
         }
 
         for (parser.symbol_table_relocations.relocations) |rel| {
@@ -292,19 +292,21 @@ pub const Loader = struct {
                     log.err("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
                     return LoaderError.SymbolNotFound;
                 }
-                if (maybe_shared_data) |shared| {
-                    if (!shared.thunks_are_generated) {
-                        const maybe_symbol_entry = self.find_symbol(module, maybe_symbol.?.name());
-                        if (maybe_symbol_entry) |symbol_entry| {
-                            const address = shared.generate_thunk(current_function_pointer_relocation_index, @intFromPtr(got.ptr), symbol_entry.address) catch |err| {
-                                log.err("[yasld] Can't generate thunk for symbol: '{s}': {s}", .{ maybe_symbol.?.name(), @errorName(err) });
-                                return err;
-                            };
-                            current_function_pointer_relocation_index += 1;
-                            got[rel.index].symbol_offset = address;
+                if (maybe_unique_data) |unique| {
+                    if (unique.thunks) |thunks| {
+                        if (!thunks.generated) {
+                            const maybe_symbol_entry = self.find_symbol(module, maybe_symbol.?.name());
+                            if (maybe_symbol_entry) |symbol_entry| {
+                                const address = unique.generate_thunk(current_function_pointer_relocation_index, @intFromPtr(got.ptr), symbol_entry.address) catch |err| {
+                                    log.err("[yasld] Can't generate thunk for symbol: '{s}': {s}", .{ maybe_symbol.?.name(), @errorName(err) });
+                                    return err;
+                                };
+                                current_function_pointer_relocation_index += 1;
+                                got[rel.index].symbol_offset = address;
+                            }
                         }
                     } else {
-                        const address = shared.get_thunk_address(current_function_pointer_relocation_index) catch |err| {
+                        const address = unique.get_thunk_address(current_function_pointer_relocation_index) catch |err| {
                             log.err("[yasld] Can't get thunk for symbol: '{s}': {s}", .{ maybe_symbol.?.name(), @errorName(err) });
                             return err;
                         };
@@ -336,8 +338,8 @@ pub const Loader = struct {
             }
         }
 
-        if (maybe_shared_data) |shared| {
-            shared.thunks_are_generated = true;
+        if (maybe_unique_data) |shared| {
+            shared.thunks.?.generated = true;
         }
     }
 

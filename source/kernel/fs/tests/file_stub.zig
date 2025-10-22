@@ -63,11 +63,6 @@ pub const FileStub = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn size(self: *Self) isize {
-        _ = self;
-        return 0;
-    }
-
     pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
         _ = allocator;
         return kernel.fs.FileName.init(self._name, null);

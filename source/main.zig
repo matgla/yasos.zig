@@ -184,6 +184,9 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     const uart0name = "uart0";
     const uart_driver = try (try kernel.driver.UartDriver(board.uart.uart0).InstanceType.create(allocator, uart0name)).interface.new(allocator);
     try driverfs.data().append(uart_driver, uart0name);
+    try driverfs.data().append(try uart_driver.clone(), "stdin");
+    try driverfs.data().append(try uart_driver.clone(), "stdout");
+    try driverfs.data().append(try uart_driver.clone(), "stderr");
 
     const flash0name = "flash0";
     const flash_driver_base = try kernel.driver.FlashDriver.InstanceType.create(allocator, board.flash.flash0, flash0name);
@@ -218,7 +221,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     var node = try flash_driver.interface.node();
     const maybe_flashfile = node.as_file();
     if (maybe_flashfile) |flash| {
-        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, 0x80000)), "/");
+        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, 0x100000)), "/");
         var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
         if (maybe_mmcpart0) |*mmcnode| {
             const maybe_file = mmcnode.as_file();
@@ -239,44 +242,22 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     return;
 }
 
-fn attach_default_filedescriptors_to_root_process(streamfile: kernel.fs.Node, process: *kernel.process.Process) !void {
+fn attach_default_filedescriptors_to_root_process(process: *kernel.process.Process) !void {
     kernel.log.info("setting default streams", .{});
-    process.fds.put(0, .{
-        .node = try streamfile.clone(),
-        .path = blk: {
-            var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-            const value = "/dev/stdin";
-            std.mem.copyForwards(u8, path[0..value.len], value);
-            break :blk path;
-        },
-        .diriter = null,
-    }) catch {
-        kernel.log.err("Can't register: stdin", .{});
-    };
-    process.fds.put(1, .{
-        .node = try streamfile.clone(),
-        .path = blk: {
-            var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-            const value = "/dev/stdout";
-            std.mem.copyForwards(u8, path[0..value.len], value);
-            break :blk path;
-        },
-        .diriter = null,
-    }) catch {
-        kernel.log.err("Can't register: stdout", .{});
-    };
-    process.fds.put(2, .{
-        .node = try streamfile.clone(),
-        .path = blk: {
-            var path: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-            const value = "/dev/stderr";
-            std.mem.copyForwards(u8, path[0..value.len], value);
-            break :blk path;
-        },
-        .diriter = null,
-    }) catch {
-        kernel.log.err("Can't register: stderr", .{});
-    };
+    const maybe_stdin = kernel.fs.get_ivfs().interface.get("/dev/stdin", process.get_memory_allocator());
+    if (maybe_stdin) |stdin| {
+        _ = try process.attach_file_with_fd(0, "/dev/stdin", stdin);
+    }
+
+    const maybe_stdout = kernel.fs.get_ivfs().interface.get("/dev/stdout", process.get_memory_allocator());
+    if (maybe_stdout) |stdout| {
+        _ = try process.attach_file_with_fd(1, "/dev/stdout", stdout);
+    }
+
+    const maybe_stderr = kernel.fs.get_ivfs().interface.get("/dev/stderr", process.get_memory_allocator());
+    if (maybe_stderr) |stderr| {
+        _ = try process.attach_file_with_fd(2, "/dev/stderr", stderr);
+    }
 }
 const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
     .leak_detection = config.instrumentation.enable_memory_leak_detection,
@@ -290,15 +271,9 @@ export fn kernel_process(argument: *KernelAllocator) void {
 
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_uartnode = kernel.fs.get_ivfs().interface.get("/dev/uart0", process.get_memory_allocator());
-        if (maybe_uartnode) |*uartnode| {
-            defer uartnode.delete();
-            attach_default_filedescriptors_to_root_process(uartnode.*, process) catch {
-                kernel.log.err("Can't attach default streams to root process", .{});
-            };
-        } else {
-            kernel.log.err("default streams were not assigned: /dev/uart0 do not exists", .{});
-        }
+        attach_default_filedescriptors_to_root_process(process) catch {
+            kernel.log.err("Can't attach default streams to root process", .{});
+        };
         const pid = process.pid;
         // this loads executable replacing current image
         const sh = kernel.dynamic_loader.load_executable("/bin/sh", allocator, process.get_process_memory_allocator(), pid) catch |err| {

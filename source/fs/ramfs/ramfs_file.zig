@@ -142,8 +142,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return @intCast(self._position);
     }
 
-    pub fn size(self: *Self) isize {
-        return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        data.st_size = @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
     pub fn name(self: *const Self) []const u8 {

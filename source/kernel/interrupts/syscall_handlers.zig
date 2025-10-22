@@ -61,9 +61,8 @@ fn fill_dirent(entry: kernel.fs.DirectoryEntry, dirent_address: *anyopaque) isiz
 fn get_file_from_process(fd: u16) !kernel.fs.IFile {
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_handle = process.fds.get(fd);
-
-        if (maybe_handle) |*handle| {
+        const maybe_handle = process.get_file_handle(fd);
+        if (maybe_handle) |handle| {
             const maybe_file = handle.node.as_file();
             if (maybe_file) |file| {
                 return file;
@@ -171,8 +170,8 @@ pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_handle = process.fds.get(@intCast(fd.*));
-        if (maybe_handle) |*handle| {
+        const maybe_handle = process.get_file_handle(@intCast(fd.*));
+        if (maybe_handle) |handle| {
             if (handle.node.is_file()) {
                 const maybe_file = handle.node.as_file();
                 if (maybe_file) |file| {
@@ -186,62 +185,62 @@ pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_open(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
-
-    const maybe_process = process_manager.instance.get_current_process();
-    var path_slice: []const u8 = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
-    if (maybe_process) |process| {
-        var relative_path = false;
-        if (!std.mem.startsWith(u8, path_slice, "/")) {
-            path_slice = std.fmt.allocPrint(kernel_allocator, "{s}/{s}", .{ process.cwd, path_slice }) catch {
-                return -1;
-            };
-            relative_path = true;
+fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u8, fd: i32) ![]const u8 {
+    var prefix: []const u8 = "";
+    if (maybe_path) |cpath| {
+        if (fd >= 0) {
+            if (process_manager.instance.get_current_process()) |current_process| {
+                prefix = current_process.get_current_directory();
+                const maybe_handle = current_process.get_file_handle(@intCast(fd));
+                if (maybe_handle) |handle| {
+                    if (handle.node.is_directory()) {
+                        prefix = handle.path;
+                    }
+                } else {
+                    return error.CannotDeterminePathForFd;
+                }
+            }
         }
-
-        defer if (relative_path) kernel_allocator.free(path_slice);
-        const realpath = std.fs.path.resolve(kernel_allocator, &.{path_slice}) catch {
-            return -1;
-        };
-        defer kernel_allocator.free(realpath);
-
-        const maybe_file = fs.get_ivfs().interface.get(realpath, process.get_memory_allocator());
-        if (maybe_file) |file| {
-            const fd = process.get_free_fd();
-            process.fds.put(fd, .{
-                .node = file,
-                .path = blk: {
-                    var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                    std.mem.copyForwards(u8, path_buffer[0..realpath.len], realpath);
-                    break :blk path_buffer;
-                },
-                .diriter = null,
-            }) catch {
-                return -1;
-            };
-            return fd;
-            // }
-        } else if ((context.flags & c.O_CREAT) != 0) {
-            const fd = process.get_free_fd();
-            const maybe_ifile = fs.get_ivfs().interface.create(realpath, context.mode, process.get_memory_allocator());
-            if (maybe_ifile) |ifile| {
-                process.fds.put(fd, .{
-                    .node = ifile,
-                    .path = blk: {
-                        var path_buffer: [config.fs.max_path_length]u8 = [_]u8{0} ** config.fs.max_path_length;
-                        std.mem.copyForwards(u8, path_buffer[0..realpath.len], realpath);
-                        break :blk path_buffer;
-                    },
-                    .diriter = null,
-                }) catch {
-                    return -1;
-                };
-                return fd;
+        const path = std.mem.span(@as([*:0]const u8, @ptrCast(cpath)));
+        if (path.len > 0 and path[0] != '/') {
+            if (process_manager.instance.get_current_process()) |current_process| {
+                const pwd = current_process.get_current_directory();
+                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ pwd, prefix, path });
+                defer allocator.free(full_path);
+                const real = try std.fs.path.resolve(allocator, &.{full_path});
+                return real;
+            }
+        } else {
+            return try allocator.dupe(u8, path);
+        }
+    } else if (fd >= 0) {
+        if (process_manager.instance.get_current_process()) |current_process| {
+            const maybe_handle = current_process.get_file_handle(@intCast(fd));
+            if (maybe_handle) |handle| {
+                return try allocator.dupe(u8, handle.path);
             }
         }
     }
-    return -1;
+    return error.CannotDeterminePath;
+}
+
+pub fn sys_open(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
+    const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
+    defer kernel_allocator.free(path);
+    const maybe_process = process_manager.instance.get_current_process();
+    if (maybe_process) |process| {
+        const maybe_file = fs.get_ivfs().interface.get(path, process.get_memory_allocator());
+        if (maybe_file) |file| {
+            return try process.attach_file(path, file);
+        } else if ((context.flags & c.O_CREAT) != 0) {
+            const maybe_ifile = fs.get_ivfs().interface.create(path, context.mode, process.get_memory_allocator());
+            if (maybe_ifile) |ifile| {
+                return try process.attach_file(path, ifile);
+            }
+        }
+    }
+    return error.FileNotFound;
 }
 
 fn close_fd(fd: i32) i32 {
@@ -250,12 +249,8 @@ fn close_fd(fd: i32) i32 {
     }
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_handle = process.fds.get(@intCast(fd));
-        if (maybe_handle) |*handle| {
-            handle.node.delete();
-            _ = process.fds.remove(@intCast(fd));
-            return 0;
-        }
+        process.release_file(@intCast(fd));
+        return 0;
     }
     return -1;
 }
@@ -283,8 +278,8 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         return kernel.errno.ErrnoSet.InvalidArgument;
     }
     if (maybe_process) |process| {
-        var maybe_handle = process.fds.get(@intCast(context.fd));
-        if (maybe_handle) |*handle| {
+        const maybe_handle = process.get_file_handle(@intCast(context.fd));
+        if (maybe_handle) |handle| {
             var maybe_file = handle.node.as_file();
             if (maybe_file) |*file| {
                 context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
@@ -316,8 +311,8 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     }
 
     if (maybe_process) |process| {
-        var maybe_handle = process.fds.get(@intCast(context.fd));
-        if (maybe_handle) |*handle| {
+        const maybe_handle = process.get_file_handle(@intCast(context.fd));
+        if (maybe_handle) |handle| {
             var maybe_file = handle.node.as_file();
             if (maybe_file) |*file| {
                 context.result.* = file.interface.write(@as([*]const u8, @ptrCast(context.buf.?))[0..context.count]);
@@ -349,39 +344,11 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     if (context.statbuf == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
     }
-    if (context.pathname) |pathname| {
-        const path = std.mem.span(@as([*:0]const u8, @ptrCast(pathname)));
-        if (path.len > 0 and path[0] != '/') {
-            if (process_manager.instance.get_current_process()) |current_process| {
-                const pwd = current_process.get_current_directory();
-                const full_path = std.fmt.allocPrint(kernel_allocator, "{s}/{s}", .{ pwd, path }) catch {
-                    return -1;
-                };
-                defer kernel_allocator.free(full_path);
-                const real = std.fs.path.resolve(kernel_allocator, &.{full_path}) catch {
-                    return -1;
-                };
-                defer kernel_allocator.free(real);
-                return fs.get_ivfs().interface.stat(
-                    real,
-                    context.statbuf,
-                );
-            }
-        }
-        return fs.get_ivfs().interface.stat(
-            path,
-            context.statbuf,
-        );
-    } else {
-        if (process_manager.instance.get_current_process()) |current_process| {
-            var maybe_file = current_process.fds.get(@intCast(context.fd));
-            if (maybe_file) |*file| {
-                return fs.get_ivfs().interface.stat(file.path[0..], context.statbuf);
-            }
-        }
-    }
-    return -1;
+    const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
+    defer kernel_allocator.free(path);
+    return fs.get_ivfs().interface.stat(path, context.statbuf);
 }
+
 pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
     _ = arg;
     return -1;
@@ -410,30 +377,17 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
     if (context.dirp == null) {} else {
         const maybe_process = process_manager.instance.get_current_process();
         if (maybe_process) |process| {
-            const maybe_entity = process.fds.getPtr(@intCast(context.fd));
-            if (maybe_entity) |entity| {
+            const maybe_handle = process.get_file_handle(@intCast(context.fd));
+            if (maybe_handle) |handle| {
                 // if iterator not exists create one
-                if (entity.diriter == null) {
-                    var maybe_node = fs.get_ivfs().interface.get(std.mem.span(@as([*:0]const u8, @ptrCast(&entity.path))), process.get_memory_allocator());
-                    if (maybe_node) |*node| {
-                        defer node.delete();
-                        const maybe_dir = node.as_directory();
-                        if (maybe_dir) |*dir| {
-                            entity.diriter = try dir.interface.iterator();
-                        } else {
-                            return kernel.errno.ErrnoSet.NotADirectory;
-                        }
-                    }
-                }
-
+                const diriter: ?*kernel.fs.IDirectoryIterator = handle.get_iterator() catch null;
                 // still can be null if path not exists or is not a directory
-                if (entity.diriter) |*diriter| {
-                    const maybe_entry = diriter.interface.next();
+                if (diriter) |it| {
+                    const maybe_entry = it.interface.next();
                     if (maybe_entry) |entry| {
                         context.result.* = fill_dirent(entry, context.dirp);
                     } else {
-                        diriter.interface.delete();
-                        entity.diriter = null;
+                        handle.remove_iterator();
                     }
                 }
                 return 0;
@@ -631,8 +585,8 @@ pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.dup_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
-        var maybe_handle = process.fds.get(@intCast(context.fd));
-        if (maybe_handle) |*handle| {
+        const maybe_handle = process.get_file_handle(@intCast(context.fd));
+        if (maybe_handle) |handle| {
             var fd: i32 = 0;
             if (context.newfd >= 0) {
                 fd = context.newfd;
@@ -640,15 +594,34 @@ pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
             } else {
                 fd = process.get_free_fd();
             }
-            process.fds.put(@intCast(fd), .{
-                .node = handle.node.share(),
-                .path = handle.path,
-                .diriter = null,
-            }) catch {
-                return -1;
-            };
-            return fd;
+            return try process.attach_file_with_fd(@intCast(fd), handle.path, handle.node.share());
         }
     }
     return -1;
+}
+
+pub fn sys_sysinfo(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.sysinfo_context = @ptrCast(@alignCast(arg));
+    if (context.info == null) {
+        return kernel.errno.ErrnoSet.InvalidArgument;
+    }
+    const info = context.info.?;
+    info.*.uptime = @intCast(systick.get_system_ticks().*);
+    info.*.totalram = 1;
+    info.*.freeram = 0;
+    info.*.procs = @intCast(process_manager.instance.processes.len());
+    return 0;
+}
+
+pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.sysconf_context = @ptrCast(@alignCast(arg));
+    switch (context.name) {
+        c._SC_CLK_TCK => {
+            context.result.* = 1000;
+            return 0;
+        },
+        else => {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        },
+    }
 }

@@ -96,11 +96,6 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn size(self: *Self) isize {
-                _ = self;
-                return 0;
-            }
-
             pub fn name(self: *const Self) []const u8 {
                 return self._name;
             }

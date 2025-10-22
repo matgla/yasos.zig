@@ -24,17 +24,51 @@ const kernel = @import("../kernel.zig");
 
 pub const ProcFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
     pub const Self = @This();
+    const PidMap = @TypeOf(kernel.process.process_manager.instance).PidMap;
+    _allocator: std.mem.Allocator,
     _items: []kernel.fs.Node,
     _index: usize,
+    _pidmap: ?PidMap,
+    _prociter: ?@TypeOf(kernel.process.process_manager.instance).PidIterator,
+    _proc_name: ?[]const u8,
 
-    pub fn create(items: []kernel.fs.Node) ProcFsIterator {
+    pub fn create(allocator: std.mem.Allocator, items: []kernel.fs.Node, pidmap: ?PidMap) ProcFsIterator {
         return ProcFsIterator.init(.{
+            ._allocator = allocator,
             ._items = items,
             ._index = 0,
+            ._pidmap = pidmap,
+            ._prociter = null,
+            ._proc_name = null,
         });
     }
 
     pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
+        if (self._prociter == null and self._pidmap != null) {
+            self._prociter = self._pidmap.?.iterator(.{
+                .kind = .unset,
+            });
+            // skip 0
+            _ = self._prociter.?.next();
+        }
+
+        if (self._prociter) |*it| {
+            if (it.next()) |pid| {
+                if (self._proc_name) |name| {
+                    self._allocator.free(name);
+                }
+                self._proc_name = std.fmt.allocPrint(self._allocator, "{d}", .{pid}) catch return null;
+
+                return .{
+                    .name = self._proc_name.?,
+                    .kind = .Directory,
+                };
+            }
+        }
+        if (self._proc_name) |name| {
+            self._allocator.free(name);
+            self._proc_name = null;
+        }
         if (self._index < self._items.len) {
             const node = self._items[self._index];
             self._index += 1;

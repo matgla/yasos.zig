@@ -53,6 +53,11 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         const Self = @This();
         const SchedulerType = SchedulerGeneratorType(Self);
 
+        pub const PidMap = std.StaticBitSet(config.process.max_pid_value);
+        pub const PidIterator = PidMap.Iterator(.{
+            .kind = .unset,
+        });
+
         processes: ContainerType,
         allocator: std.mem.Allocator,
         scheduler: SchedulerType,
@@ -79,10 +84,14 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
             self._process_memory_pool.deinit();
             var next = self.processes.first;
             while (next) |node| {
-                const p: *Process = @fieldParentPtr("node", node);
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 p.deinit();
                 next = node.next;
             }
+        }
+
+        pub fn get_pidmap(self: *const Self) std.StaticBitSet(config.process.max_pid_value) {
+            return self._pid_map;
         }
 
         fn get_next_pid(self: *Self) ?c.pid_t {
@@ -123,7 +132,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
                 //reload_current_task();
             };
             while (next) |node| {
-                const p: *Process = @fieldParentPtr("node", node);
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 next = node.next;
                 if (p.pid == pid) {
                     const has_shared_stack = p.has_stack_shared_with_parent();
@@ -263,7 +272,7 @@ fn ProcessManagerGenerator(comptime SchedulerGeneratorType: anytype) type {
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
             var next = self.processes.first;
             while (next) |node| {
-                const p: *Process = @fieldParentPtr("node", node);
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 if (p.pid == pid) {
                     return p;
                 }

@@ -100,10 +100,6 @@ pub const MmcPartitionFile =
             return 0;
         }
 
-        pub fn size(self: *Self) isize {
-            return @intCast(self._size_in_sectors << 9);
-        }
-
         pub fn name(self: *const Self) []const u8 {
             return self._name;
         }
@@ -123,8 +119,7 @@ pub const MmcPartitionFile =
         }
 
         pub fn stat(self: *Self, data: *c.struct_stat) void {
-            _ = self;
-            _ = data;
+            data.st_size = @as(usize, @intCast(self._size_in_sectors)) << 9;
         }
 
         pub fn filetype(self: *const Self) kernel.fs.FileType {

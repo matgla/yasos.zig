@@ -96,10 +96,6 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "tell", .{}, c.off_t);
     }
 
-    pub fn size(self: *Self) isize {
-        return interface.CountingInterfaceVirtualCall(self, "size", .{}, isize);
-    }
-
     pub fn name(self: *const Self) []const u8 {
         return interface.CountingInterfaceVirtualCall(self, "name", .{}, []const u8);
     }
@@ -114,6 +110,10 @@ pub const IFile = interface.ConstructCountingInterface(struct {
 
     pub fn filetype(self: *const Self) FileType {
         return interface.CountingInterfaceVirtualCall(self, "filetype", .{}, FileType);
+    }
+
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        return interface.CountingInterfaceVirtualCall(self, "stat", .{data}, void);
     }
 
     pub fn delete(self: *Self) void {

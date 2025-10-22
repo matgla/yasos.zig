@@ -51,9 +51,49 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
     return struct {
         const Self = @This();
         const FileHandle = struct {
+            allocator: std.mem.Allocator,
             node: kernel.fs.Node,
-            path: [config.fs.max_path_length]u8,
+            path: []u8,
             diriter: ?IDirectoryIterator,
+
+            pub fn create(allocator: std.mem.Allocator, path: []const u8, node: kernel.fs.Node) !FileHandle {
+                return FileHandle{
+                    .allocator = allocator,
+                    .node = node,
+                    .path = try allocator.dupe(u8, path),
+                    .diriter = null,
+                };
+            }
+
+            pub fn close(self: *FileHandle) void {
+                if (self.diriter) |*d| {
+                    d.interface.delete();
+                    self.diriter = null;
+                }
+                self.allocator.free(self.path);
+                self.node.delete();
+            }
+
+            pub fn get_iterator(self: *FileHandle) !*IDirectoryIterator {
+                if (self.diriter) |*d| {
+                    return d;
+                } else {
+                    const maybe_directory = self.node.as_directory();
+                    if (maybe_directory) |*dir| {
+                        self.diriter = try dir.interface.iterator();
+                        return &self.diriter.?;
+                    }
+                }
+
+                return error.NotADirectory;
+            }
+
+            pub fn remove_iterator(self: *FileHandle) void {
+                if (self.diriter) |*d| {
+                    d.interface.delete();
+                    self.diriter = null;
+                }
+            }
         };
         pub const ImplType = ProcessType;
         pub const UnblockAction = *const fn (context: ?*anyopaque, rc: i32) void;
@@ -78,7 +118,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _kernel_allocator: std.mem.Allocator,
         current_core: u8,
         waiting_for: ?*const Semaphore = null,
-        fds: std.AutoHashMap(u16, FileHandle),
+        _fds: std.AutoHashMap(u16, FileHandle),
         cwd: []u8,
         node: std.DoublyLinkedList.Node,
         _process_memory_allocator: ProcessMemoryAllocator,
@@ -88,6 +128,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _stack_shared_with_parent: bool,
         _vfork_context: ?*const volatile c.vfork_context = null,
         _initialized: bool = false,
+        _start_time: u64,
 
         pub const State = enum(u3) {
             Initialized,
@@ -113,7 +154,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .pid = pid,
                 ._kernel_allocator = kernel_allocator,
                 .current_core = 0,
-                .fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
+                ._fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
                 .cwd = cwd_handle,
                 .node = .{},
                 ._process_memory_allocator = process_memory_allocator,
@@ -122,33 +163,32 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._blocks = std.DoublyLinkedList{},
                 ._stack_shared_with_parent = false,
                 ._vfork_context = null,
+                ._start_time = hal.time.get_time_us(),
             };
             return process;
         }
 
         pub fn clear_fds(self: *Self) void {
-            var it = self.fds.iterator();
+            var it = self._fds.iterator();
             while (it.next()) |*n| {
-                if (n.value_ptr.diriter) |*d| {
-                    d.interface.delete();
-                }
-                n.value_ptr.node.delete();
+                n.value_ptr.close();
             }
-            self.fds.deinit();
+            self._fds.deinit();
         }
 
-        fn dupe_filehandle(handle: *FileHandle) FileHandle {
+        fn dupe_filehandle(handle: *FileHandle) !FileHandle {
             return .{
+                .allocator = handle.allocator,
                 .diriter = handle.diriter,
-                .node = handle.node.share(),
-                .path = handle.path,
+                .node = try handle.node.clone(),
+                .path = try handle.allocator.dupe(u8, handle.path),
             };
         }
         fn dupe_fds(self: *Self) !std.AutoHashMap(u16, FileHandle) {
             var fds = std.AutoHashMap(u16, FileHandle).init(self._kernel_allocator);
-            var it = self.fds.iterator();
+            var it = self._fds.iterator();
             while (it.next()) |*n| {
-                try fds.put(n.key_ptr.*, dupe_filehandle(n.value_ptr));
+                try fds.put(n.key_ptr.*, try dupe_filehandle(n.value_ptr));
             }
             return fds;
         }
@@ -185,7 +225,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .pid = pid,
                 ._kernel_allocator = self._kernel_allocator,
                 .current_core = 0,
-                .fds = try self.dupe_fds(),
+                ._fds = try self.dupe_fds(),
                 .cwd = cwd_handle,
                 .node = .{},
                 ._process_memory_allocator = memory_pool,
@@ -195,6 +235,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._stack_shared_with_parent = true,
                 ._vfork_context = context,
                 ._initialized = false,
+                ._start_time = hal.time.get_time_us(),
             };
 
             return process;
@@ -394,7 +435,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn get_free_fd(self: *Self) u16 {
             var fd: u16 = 0;
             while (true) {
-                if (self.fds.get(fd) == null) {
+                if (self._fds.get(fd) == null) {
                     break;
                 }
                 fd += 1;
@@ -429,6 +470,37 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn is_initialized(self: *const Self) bool {
             return self._initialized;
+        }
+
+        pub fn get_uptime(self: *const Self) u64 {
+            return hal.time.get_time_us() - self._start_time;
+        }
+
+        pub fn attach_file(self: *Self, path: []const u8, node: kernel.fs.Node) !i32 {
+            const fd = self.get_free_fd();
+            return try self.attach_file_with_fd(@intCast(fd), path, node);
+        }
+
+        pub fn attach_file_with_fd(self: *Self, fd: i16, path: []const u8, node: kernel.fs.Node) !i32 {
+            const handle = try FileHandle.create(self._kernel_allocator, path, node);
+            try self._fds.put(@intCast(fd), handle);
+            return @intCast(fd);
+        }
+
+        pub fn release_file(self: *Self, fd: i32) void {
+            const maybe_handle = self._fds.getPtr(@intCast(fd));
+            if (maybe_handle) |handle| {
+                handle.close();
+                _ = self._fds.remove(@intCast(fd));
+            }
+        }
+
+        pub fn get_file_handle(self: *Self, fd: i32) ?*FileHandle {
+            const maybe_handle = self._fds.getPtr(@intCast(fd));
+            if (maybe_handle) |handle| {
+                return handle;
+            }
+            return null;
         }
     };
 }

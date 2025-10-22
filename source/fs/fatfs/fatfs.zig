@@ -272,8 +272,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                     // }});
                 },
                 .get_sector_count => {
-                    log.debug("Getting sector count: {d}", .{@as(i32, @intCast(self.device.interface.size() >> 9))});
-                    @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(self.device.interface.size() >> 9);
+                    // log.debug("Getting sector count: {d}", .{@as(i32, @intCast(self.device.interface.size() >> 9))});
+                    var st: c.struct_stat = undefined;
+                    self.device.interface.stat(&st);
+                    @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(st.st_size >> 9);
                 },
                 else => {
                     log.err("invalid ioctl: {}", .{cmd});

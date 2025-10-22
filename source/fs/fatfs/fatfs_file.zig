@@ -39,7 +39,6 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     _filetype: kernel.fs.FileType,
 
     pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsFile {
-        log.err("Opening file: '{s}'", .{path});
         const filename = try allocator.dupe(u8, std.fs.path.basename(path));
         errdefer allocator.free(filename);
         const file = try fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing });
@@ -131,13 +130,6 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn size(self: *Self) isize {
-        if (self._file) |*file| {
-            return @intCast(file.size());
-        }
-        return 0;
-    }
-
     pub fn name(self: *const Self) []const u8 {
         return self._name;
     }
@@ -168,5 +160,11 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn delete(self: *Self) void {
         _ = self.close();
         self._allocator.free(self._name);
+    }
+
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        if (self._file) |*file| {
+            data.st_size = @as(usize, @intCast(file.size()));
+        }
     }
 });

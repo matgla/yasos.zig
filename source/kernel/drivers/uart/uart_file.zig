@@ -134,11 +134,6 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return 0;
             }
 
-            pub fn size(self: *Self) isize {
-                _ = self;
-                return 0;
-            }
-
             pub fn name(self: *const Self) []const u8 {
                 return self._name;
             }
@@ -174,6 +169,12 @@ pub fn UartFile(comptime UartType: anytype) type {
                             if (self._echo) {
                                 termios.c_lflag |= c.ECHO;
                             }
+                            return 0;
+                        },
+                        c.TIOCGWINSZ => {
+                            const ws: *c.struct_winsize = @ptrCast(@alignCast(termios_arg));
+                            ws.*.ws_row = 24;
+                            ws.*.ws_col = 80;
                             return 0;
                         },
                         else => {
@@ -215,7 +216,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 buf.st_nlink = 0;
                 buf.st_uid = 0;
                 buf.st_gid = 0;
-                buf.st_rdev = 0;
+                buf.st_rdev = 1;
                 buf.st_size = 0;
                 buf.st_blksize = 1;
                 buf.st_blocks = 1;

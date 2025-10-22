@@ -198,3 +198,7 @@ pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
         }
     }
 }
+
+pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
+    return modules_list.getPtr(pid);
+}

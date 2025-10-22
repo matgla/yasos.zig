@@ -38,6 +38,7 @@ const log = std.log.scoped(.@"vfs/procfs");
 const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
+const MaxProcFile = @import("maxproc_file.zig").MaxProcFile;
 
 const ProcFsDirectory = @import("procfs_directory.zig").ProcFsDirectory;
 
@@ -51,15 +52,28 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         var procfs = ProcFs.init(.{
             .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
-            ._root = try (try ProcFsDirectory.InstanceType.create(allocator, "/")).interface.new(allocator),
+            ._root = try (try ProcFsDirectory.InstanceType.create(allocator, "/", true)).interface.new(allocator),
         });
 
         var root_directory = procfs.data()._root.as(ProcFsDirectory);
         const meminfo = try MemInfoFile.InstanceType.create_node(allocator);
 
-        const sys_directory = try ProcFsDirectory.InstanceType.create_node(allocator, "sys");
+        var sys_directory_node = try ProcFsDirectory.InstanceType.create_node(allocator, "sys", false);
+        var maybe_sys_directory = sys_directory_node.as_directory();
+        if (maybe_sys_directory) |*sys_dir| {
+            var sys_directory = sys_dir.as(ProcFsDirectory);
+            const kernel_directory_node = try ProcFsDirectory.InstanceType.create_node(allocator, "kernel", false);
+            var maybe_kernel_directory = kernel_directory_node.as_directory();
+            if (maybe_kernel_directory) |*kernel_dir| {
+                var kernel_directory = kernel_dir.as(ProcFsDirectory);
+                const maxpid_file = try MaxProcFile.InstanceType.create_node(allocator);
+                try kernel_directory.data().append(maxpid_file);
+            }
+            try sys_directory.data().append(kernel_directory_node);
+        }
+
         try root_directory.data().append(meminfo);
-        try root_directory.data().append(sys_directory);
+        try root_directory.data().append(sys_directory_node);
         return procfs;
     }
 
@@ -81,14 +95,62 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return -1;
     }
 
+    // fn sync(self: *Self) void {
+    //     const pidmap = kernel.process.process_manager.instance().get_pidmap();
+    //     var it = pidmap.iterator(.{
+    //         .kind = .unset,
+    //     });
+    //     while (it.next()) |pid| {
+    //         self._root.
+    //     }
+    // }
+
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
         _ = allocator;
-        if (path.len == 0 or std.mem.eql(u8, path, "/")) {
+
+        if (path.len == 0) {
             return kernel.fs.Node.create_directory(self._root.share());
         }
-        var result: kernel.fs.Node = undefined;
-        self._root.interface.get(path, &result) catch return null;
-        return result;
+
+        const resolved_path = std.fs.path.resolve(self._allocator, &.{path}) catch return null;
+        defer self._allocator.free(resolved_path);
+        var it = try std.fs.path.componentIterator(resolved_path);
+        var current_directory = self._root;
+        var node_to_remove: ?kernel.fs.Node = null;
+        while (it.next()) |component| {
+            var next_node: kernel.fs.Node = undefined;
+            current_directory.interface.get(component.name, &next_node) catch {
+                if (node_to_remove) |*node| {
+                    node.delete();
+                }
+                return null;
+            };
+            if (it.peekNext() != null) {
+                // defer next_node.delete();
+                if (node_to_remove) |*node| {
+                    node.delete();
+                }
+                node_to_remove = next_node;
+                if (!next_node.is_directory()) {
+                    if (node_to_remove) |*node| {
+                        node.delete();
+                    }
+                    return null;
+                }
+
+                current_directory = next_node.as_directory().?;
+            } else {
+                if (node_to_remove) |*node| {
+                    node.delete();
+                }
+                return next_node;
+            }
+        }
+
+        if (node_to_remove) |*node| {
+            node.delete();
+        }
+        return null;
     }
 
     pub fn has_path(self: *Self, path: []const u8) bool {
@@ -115,7 +177,8 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             } else {
                 data.st_mode = c.S_IFREG;
             }
+            return 0;
         }
-        return 0;
+        return -1;
     }
 });

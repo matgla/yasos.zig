@@ -101,11 +101,6 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn size(self: *Self) isize {
-        _ = self;
-        return 0;
-    }
-
     pub fn name(self: *const Self) []const u8 {
         return self._name;
     }

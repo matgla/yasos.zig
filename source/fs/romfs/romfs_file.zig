@@ -108,10 +108,6 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return @intCast(self.position);
     }
 
-    pub fn size(self: *Self) isize {
-        return @intCast(self.header.size());
-    }
-
     pub fn name(self: *const Self) []const u8 {
         return self.header.name();
     }
@@ -148,5 +144,9 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     pub fn delete(self: *Self) void {
         self.header.deinit();
         _ = self.close();
+    }
+
+    pub fn stat(self: *Self, data: *c.struct_stat) void {
+        data.st_size = @as(usize, @intCast(self.header.size()));
     }
 });
