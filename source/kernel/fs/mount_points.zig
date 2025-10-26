@@ -427,7 +427,7 @@ test "MountPoints.HandleNotExistingPath" {
         .withArgs(.{ interface.mock.any{}, interface.mock.any{} })
         .willReturn(kernel.errno.ErrnoSet.NoEntry);
 
-    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c", fs));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.mount_filesystem("/a/c", fs));
 
     var filemock = try FileMock.create(std.testing.allocator);
     const file = filemock.get_interface();
@@ -451,7 +451,7 @@ test "MountPoints.HandleNotExistingPath" {
         .expectCall("get")
         .withArgs(.{ interface.mock.any{}, interface.mock.any{} })
         .willReturn(kernel.errno.ErrnoSet.NoEntry);
-    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c/d", fs2));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.mount_filesystem("/a/c/d", fs2));
 }
 
 test "MountPoints.RemoveChilds" {

@@ -310,14 +310,11 @@ test "RamFsFile.ShouldCreateAndRemoveFiles" {
 
     // reject non empty directory removal
     try std.testing.expectError(kernel.errno.ErrnoSet.DeviceOrResourceBusy, sut.interface.unlink("/test"));
-    var maybe_node = sut.interface.get("/test/file.txt", std.testing.allocator);
-    try std.testing.expect(maybe_node != null);
-    if (maybe_node) |*node| {
-        defer node.delete();
-        var file = node.as_file();
-        try std.testing.expect(file != null);
-        try std.testing.expectEqual(18, file.?.interface.write("Some data for file"));
-    }
+    var node = try sut.interface.get("/test/file.txt");
+    var file = node.as_file();
+    try std.testing.expect(file != null);
+    try std.testing.expectEqual(18, file.?.interface.write("Some data for file"));
+    node.delete();
 
     try sut.interface.unlink("/test/file.txt");
     try std.testing.expect(!has_path(&sut, "/test/file.txt"));
@@ -337,6 +334,7 @@ test "RamFs.ShouldCreateLink" {
 
     try sut.interface.create("/dir/file.txt", 0);
     var node = try sut.interface.get("/dir/file.txt");
+    defer node.delete();
     var file = node.as_file();
     try std.testing.expect(file != null);
     try std.testing.expectEqual(18, file.?.interface.write("Some data for file"));

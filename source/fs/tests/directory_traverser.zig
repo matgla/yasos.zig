@@ -80,17 +80,14 @@ pub const TestDirectoryTraverser = struct {
 };
 
 pub fn verify_directory_content(sut: *kernel.fs.IFileSystem, path: []const u8, expected: []const kernel.fs.DirectoryEntry) !void {
-    var maybe_node = sut.interface.get(path, std.testing.allocator);
-    if (maybe_node) |*node| {
-        try std.testing.expect(node.is_directory());
-        if (node.filetype() != .Directory) {
-            node.delete();
-        }
-        var dirit = try TestDirectoryTraverser.create(std.testing.allocator, node.*);
-        defer dirit.deinit();
-        try dirit.appendSlice(expected);
-        try dirit.verify();
-        return;
+    var node = try sut.interface.get(path);
+    try std.testing.expect(node.is_directory());
+    if (node.filetype() != .Directory) {
+        node.delete();
     }
-    return error.NodeNotFound;
+    var dirit = try TestDirectoryTraverser.create(std.testing.allocator, node);
+    defer dirit.deinit();
+    try dirit.appendSlice(expected);
+    try dirit.verify();
+    return;
 }

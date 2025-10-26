@@ -40,8 +40,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     _allocator: std.mem.Allocator,
 
     /// Current position in file
-    _position: usize,
-    _endposition: usize,
+    _position: isize,
     _name: []const u8,
 
     pub fn create(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) RamFsFile {
@@ -49,7 +48,6 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
             ._data = data,
             ._allocator = allocator,
             ._position = 0,
-            ._endposition = 0,
             ._name = filename,
         });
     }
@@ -58,6 +56,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         self._data = other._data.share();
         self._allocator = other._allocator;
         self._position = 0;
+        self._name = other._name;
     }
 
     pub fn create_node(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) anyerror!kernel.fs.Node {
@@ -69,25 +68,22 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         if (self._position >= self._data.data.items.len) {
             return 0;
         }
-        const length = @min(self._data.data.items.len - self._position, buffer.len);
-        @memcpy(buffer[0..length], self._data.data.items[self._position .. self._position + length]);
+        const length = @min(@as(isize, @intCast(self._data.data.items.len)) - self._position, @as(isize, @intCast(buffer.len)));
+        @memcpy(buffer[0..@as(usize, @intCast(length))], self._data.data.items[@as(usize, @intCast(self._position))..@as(usize, @intCast(self._position + length))]);
         self._position += length;
         return @intCast(length);
     }
 
     pub fn write(self: *Self, data: []const u8) isize {
-        if (self._data.data.items.len < data.len + self._position) {
-            self._data.data.resize(self._allocator, self._position + data.len) catch {
+        if (@as(isize, @intCast(self._data.data.items.len)) < @as(isize, @intCast(data.len)) + self._position) {
+            self._data.data.resize(self._allocator, @as(usize, @intCast(self._position)) + data.len) catch {
                 return 0;
             };
         }
-        self._data.data.replaceRange(self._allocator, self._position, data.len, data) catch {
+        self._data.data.replaceRange(self._allocator, @as(usize, @intCast(self._position)), data.len, data) catch {
             return 0;
         };
-        self._position += data.len;
-        if (self._position > self._endposition) {
-            self._endposition = self._position;
-        }
+        self._position += @as(isize, @intCast(data.len));
         return @intCast(data.len);
     }
 
@@ -95,37 +91,36 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0) {
-                    return -1;
+                    return kernel.errno.ErrnoSet.InvalidArgument;
                 }
                 self._position = @intCast(offset);
-                return @intCast(self._position);
             },
             c.SEEK_END => {
-                const new_position: isize = @as(isize, @intCast(self._endposition)) + @as(isize, @intCast(offset));
+                const new_position: isize = @as(isize, @intCast(self._data.data.items.len)) + offset;
                 if (new_position < 0) {
                     return kernel.errno.ErrnoSet.InvalidArgument;
                 }
-                self._position = @as(usize, @intCast(new_position));
-                return @intCast(self._position);
+                self._position = @as(isize, @intCast(new_position));
             },
             c.SEEK_CUR => {
                 const new_position = @as(c.off_t, @intCast(self._position)) + offset;
                 if (new_position < 0) {
-                    return -1;
+                    return kernel.errno.ErrnoSet.InvalidArgument;
                 }
-                const outside_of_buffer = @as(isize, @intCast(new_position)) - @as(isize, @intCast(self._data.data.items.len));
-                if (outside_of_buffer > 0) {
-                    _ = self._data.data.appendNTimes(self._allocator, ' ', @as(usize, @intCast(outside_of_buffer))) catch {
-                        // set errno
-                        return -1;
-                    };
-                }
+
                 self._position = @intCast(new_position);
-                return @intCast(self._position);
             },
-            else => return -1,
+            else => return kernel.errno.ErrnoSet.InvalidArgument,
         }
-        return 0;
+        const outside_of_buffer = @as(isize, @intCast(self._position)) - @as(isize, @intCast(self._data.data.items.len));
+        if (outside_of_buffer > 0) {
+            _ = self._data.data.appendNTimes(self._allocator, ' ', @as(usize, @intCast(outside_of_buffer))) catch {
+                // set errno
+                return kernel.errno.ErrnoSet.OutOfMemory;
+            };
+        }
+
+        return self._position;
     }
 
     pub fn close(self: *Self) void {
@@ -222,30 +217,30 @@ test "RamFsFile.ShouldSeekFile" {
     var file = try sut.interface.new(std.testing.allocator);
     defer _ = file.interface.close();
     defer file.interface.delete();
-    try std.testing.expectEqual(10, file.interface.seek(10, c.SEEK_CUR));
+    try std.testing.expectEqual(10, try file.interface.seek(10, c.SEEK_CUR));
     try std.testing.expectEqual(22, file.interface.write("Some data inside file\n"));
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqual(-1, file.interface.seek(-40, c.SEEK_CUR));
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, file.interface.seek(-40, c.SEEK_CUR));
     try std.testing.expectEqual(32, file.interface.tell());
 
-    try std.testing.expectEqual(0, file.interface.seek(-32, c.SEEK_CUR));
+    try std.testing.expectEqual(0, try file.interface.seek(-32, c.SEEK_CUR));
     try std.testing.expectEqual(16, file.interface.read(&buf));
     try std.testing.expectEqualStrings(" " ** 10 ++ "Some d", &buf);
 
-    try std.testing.expectEqual(32, file.interface.seek(0, c.SEEK_END));
+    try std.testing.expectEqual(32, try file.interface.seek(0, c.SEEK_END));
     try std.testing.expectEqual(32, file.interface.tell());
 
-    try std.testing.expectEqual(-1, file.interface.seek(33, c.SEEK_END));
-    try std.testing.expectEqual(0, file.interface.seek(32, c.SEEK_END));
-    try std.testing.expectEqual(0, file.interface.tell());
+    try std.testing.expectEqual(65, try file.interface.seek(33, c.SEEK_END));
+    try std.testing.expectEqual(97, try file.interface.seek(32, c.SEEK_END));
+    try std.testing.expectEqual(97, file.interface.tell());
 
-    try std.testing.expectEqual(-1, file.interface.seek(-2, c.SEEK_SET));
-    try std.testing.expectEqual(0, file.interface.seek(0, c.SEEK_SET));
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, file.interface.seek(-2, c.SEEK_SET));
+    try std.testing.expectEqual(0, try file.interface.seek(0, c.SEEK_SET));
     try std.testing.expectEqual(0, file.interface.tell());
-    try std.testing.expectEqual(132, file.interface.seek(132, c.SEEK_SET));
+    try std.testing.expectEqual(132, try file.interface.seek(132, c.SEEK_SET));
     try std.testing.expectEqual(132, file.interface.tell());
 
     var stat: c.struct_stat = undefined;
     file.interface.stat(&stat);
-    try std.testing.expectEqual(32 + @sizeOf(RamFsData), stat.st_size);
+    try std.testing.expectEqual(132 + @sizeOf(RamFsData), stat.st_size);
 }

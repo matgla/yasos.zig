@@ -108,7 +108,7 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         _ = self;
         _ = path;
         _ = mode;
-        return -1; // Read-only filesystem does not allow directory creation
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem does not allow directory creation
     }
 
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {

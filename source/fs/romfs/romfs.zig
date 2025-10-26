@@ -194,25 +194,20 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
 fn test_file(fs: kernel.fs.IFileSystem, path: []const u8, size: c_ulong, content: []const u8, filetype: kernel.fs.FileType) !void {
     var ifs = fs;
-    var maybe_node = ifs.interface.get(
-        path,
-        std.testing.allocator,
-    );
-    errdefer if (maybe_node) |*n| n.delete();
-    if (maybe_node) |*node| {
-        try std.testing.expectEqual(filetype, node.filetype());
-        var file = node.as_file().?;
-        defer _ = file.interface.close();
-        defer _ = file.interface.delete();
-        var stat: c.struct_stat = undefined;
-        file.interface.stat(&stat);
-        try std.testing.expectEqual(size, stat.st_size);
-        const buffer = try std.testing.allocator.alloc(u8, stat.st_size);
-        try std.testing.expectEqual(@as(isize, @intCast(stat.st_size)), file.interface.read(buffer));
-        try std.testing.expectEqual(filetype, file.interface.filetype());
-        try std.testing.expectEqualStrings(content, buffer);
-        std.testing.allocator.free(buffer);
-    }
+    var node = try ifs.interface.get(path);
+    errdefer node.delete();
+    try std.testing.expectEqual(filetype, node.filetype());
+    var file = node.as_file().?;
+    defer _ = file.interface.close();
+    defer _ = file.interface.delete();
+    var stat: c.struct_stat = undefined;
+    file.interface.stat(&stat);
+    try std.testing.expectEqual(size, stat.st_size);
+    const buffer = try std.testing.allocator.alloc(u8, stat.st_size);
+    try std.testing.expectEqual(@as(isize, @intCast(stat.st_size)), file.interface.read(buffer));
+    try std.testing.expectEqual(filetype, file.interface.filetype());
+    try std.testing.expectEqualStrings(content, buffer);
+    std.testing.allocator.free(buffer);
 }
 
 test "Romfs.ShouldParseFilesystem" {

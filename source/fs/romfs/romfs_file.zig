@@ -66,7 +66,7 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
             return 0;
         }
         const length = @min(data_size - self.position, buffer.len);
-        try self.header.read_bytes(buffer, self.position);
+        self.header.read_bytes(buffer, self.position) catch return 0;
         self.position += length;
         return @intCast(length);
     }
