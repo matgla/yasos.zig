@@ -23,33 +23,52 @@ const kernel = @import("kernel");
 const interface = @import("interface");
 
 const FileHeader = @import("file_header.zig").FileHeader;
+const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
 const RomFsDirectoryIterator = @import("romfs_directory_iterator.zig").RomFsDirectoryIterator;
+const RomFsFile = @import("romfs_file.zig").RomFsFile;
 
 pub const RomFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
     _allocator: std.mem.Allocator,
     _header: FileHeader,
+    _fs: *FileSystemHeader,
 
-    pub fn create(allocator: std.mem.Allocator, header: FileHeader) RomFsDirectory {
+    pub fn create(allocator: std.mem.Allocator, header: FileHeader, fs: *FileSystemHeader) RomFsDirectory {
         return RomFsDirectory.init(.{
             ._allocator = allocator,
             ._header = header,
+            ._fs = fs,
         });
     }
 
-    pub fn create_node(allocator: std.mem.Allocator, header: FileHeader) anyerror!kernel.fs.Node {
-        const dir = try create(allocator, header).interface.new(allocator);
+    pub fn create_node(allocator: std.mem.Allocator, header: FileHeader, fs: *FileSystemHeader) anyerror!kernel.fs.Node {
+        const dir = try create(allocator, header, fs).interface.new(allocator);
         return kernel.fs.Node.create_directory(dir);
     }
 
-    pub fn get(self: *Self, dirname: []const u8, node: *kernel.fs.Node) anyerror!void {
-        _ = node;
-        _ = self;
-        _ = dirname;
+    pub fn get(self: *Self, filename: []const u8, node: *kernel.fs.Node) anyerror!void {
+        var next: ?FileHeader = try self._fs.create_file_header_with_offset(@intCast(self._header.specinfo()));
+        while (next) |*file| {
+            if (std.mem.eql(u8, file.name(), filename)) {
+                defer file.deinit();
+                if (file.filetype() == .Directory) {
+                    const dir = try create_node(self._allocator, try file.dupe(), self._fs);
+                    node.* = dir;
+                    return;
+                } else {
+                    const f = try RomFsFile.InstanceType.create_node(self._allocator, try file.dupe());
+                    node.* = f;
+                    return;
+                }
+            }
+            file.deinit();
+            next = try file.next();
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn iterator(self: *const Self) anyerror!kernel.fs.IDirectoryIterator {
-        return try (RomFsDirectoryIterator.InstanceType.create(self._header.dupe())).interface.new(self._allocator);
+        return try (RomFsDirectoryIterator.InstanceType.create(try self._fs.create_file_header_with_offset(@intCast(self._header.specinfo())))).interface.new(self._allocator);
     }
 
     pub fn name(self: *const Self) []const u8 {

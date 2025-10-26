@@ -1,6 +1,7 @@
-// Taken from: https://gist.github.com/karlseguin/c6bea5b35e4e8d26af6f81c22cb5d76b
-
-// Changed Jan 29, 2025 to accomodate latest Zig changes
+// Taken from: https://gist.github.com/jonathanderque/c8dbeafc68c1d45e53f629d3c78331a1
+// This is for the stable version of Zig (0.15.1)
+// Adapted from (0.14.1 version): https://gist.github.com/karlseguin/c6bea5b35e4e8d26af6f81c22cb5d76b
+// Changed Sep 04, 2025 to accomodate latest Zig changes
 // See history if you're using an older version of Zig.
 
 // in your build.zig, you can specify a custom test runner:
@@ -38,7 +39,7 @@ pub fn main() !void {
     var skip: usize = 0;
     var leak: usize = 0;
 
-    const printer = Printer.init();
+    var printer = Printer.init();
     printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
 
     for (builtin.test_functions) |t| {
@@ -136,7 +137,7 @@ pub fn main() !void {
         printer.status(.fail, "{d} test{s} leaked\n", .{ leak, if (leak != 1) "s" else "" });
     }
     printer.fmt("\n", .{});
-    try slowest.display(printer);
+    try slowest.display(&printer);
     printer.fmt("\n", .{});
     std.posix.exit(if (fail == 0) 0 else 1);
 }
@@ -146,24 +147,24 @@ const Printer = struct {
 
     fn init() Printer {
         return .{
-            .out = std.io.getStdErr().writer(),
+            .out = std.fs.File.stderr().writer(&.{}),
         };
     }
 
-    fn fmt(self: Printer, comptime format: []const u8, args: anytype) void {
-        std.fmt.format(self.out, format, args) catch unreachable;
+    fn fmt(self: *Printer, comptime format: []const u8, args: anytype) void {
+        self.out.interface.print(format, args) catch unreachable;
+        self.out.interface.flush() catch unreachable;
     }
 
-    fn status(self: Printer, s: Status, comptime format: []const u8, args: anytype) void {
+    fn status(self: *Printer, s: Status, comptime format: []const u8, args: anytype) void {
         const color = switch (s) {
             .pass => "\x1b[32m",
             .fail => "\x1b[31m",
             .skip => "\x1b[33m",
             else => "",
         };
-        const out = self.out;
-        out.writeAll(color) catch @panic("writeAll failed?!");
-        std.fmt.format(out, format, args) catch @panic("std.fmt.format failed?!");
+        self.out.interface.writeAll(color) catch @panic("writeAll failed?!");
+        self.out.interface.print(format, args) catch @panic("std.fmt.format failed?!");
         self.fmt("\x1b[0m", .{});
     }
 };
@@ -234,7 +235,7 @@ const SlowTracker = struct {
         return ns;
     }
 
-    fn display(self: *SlowTracker, printer: Printer) !void {
+    fn display(self: *SlowTracker, printer: *Printer) !void {
         var slowest = self.slowest;
         const count = slowest.count();
         printer.fmt("Slowest {d} test{s}: \n", .{ count, if (count != 1) "s" else "" });

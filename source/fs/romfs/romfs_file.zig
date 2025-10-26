@@ -66,12 +66,12 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
             return 0;
         }
         const length = @min(data_size - self.position, buffer.len);
-        self.header.read_bytes(buffer, self.position);
+        try self.header.read_bytes(buffer, self.position);
         self.position += length;
         return @intCast(length);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0) {

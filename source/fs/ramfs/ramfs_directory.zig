@@ -24,26 +24,28 @@ const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 const log = std.log.scoped(.ramfsdirectory);
 
 pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
-    var refcounter: i16 = 0;
     const Self = @This();
     _allocator: std.mem.Allocator,
     _root: *std.DoublyLinkedList,
+    _refcounter: *i16,
     _name: []const u8,
 
     pub fn create(allocator: std.mem.Allocator, nodename: []const u8) !RamFsDirectory {
-        refcounter += 1;
         const list = try allocator.create(std.DoublyLinkedList);
+        const refcounter = try allocator.create(i16);
+        refcounter.* = 1;
         list.* = std.DoublyLinkedList{};
         return RamFsDirectory.init(.{
             ._allocator = allocator,
             ._root = list,
-            ._name = try allocator.dupe(u8, nodename),
+            ._name = nodename,
+            ._refcounter = refcounter,
         });
     }
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        refcounter += 1;
+        self._refcounter.* += 1;
     }
 
     pub fn create_node(allocator: std.mem.Allocator, nodename: []const u8) anyerror!kernel.fs.Node {
@@ -64,13 +66,36 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
-    pub fn append(self: *Self, node: kernel.fs.Node) !void {
-        const file_node = try self._allocator.create(RamFsNode);
-        file_node.* = RamFsNode{
-            .node = node,
-            .list_node = std.DoublyLinkedList.Node{},
-        };
-        self._root.append(&file_node.list_node);
+    fn get_node(self: *Self, nodename: []const u8) ?*RamFsNode {
+        var it = self._root.first;
+        while (it) |child| : (it = child.next) {
+            const file_node: *RamFsNode = @fieldParentPtr("list_node", child);
+            if (std.mem.eql(u8, file_node.node.name(), nodename)) {
+                return file_node;
+            }
+        }
+        return null;
+    }
+
+    pub fn append(self: *Self, node: *RamFsNode) !void {
+        self._root.append(&node.list_node);
+    }
+
+    pub fn unlink(self: *Self, nodename: []const u8) anyerror!void {
+        const maybe_node = self.get_node(nodename);
+        if (maybe_node) |node| {
+            if (node.node.as_directory()) |*dir| {
+                var dir_it = try dir.interface.iterator();
+                defer dir_it.interface.delete();
+                if (dir_it.interface.next() != null) {
+                    return kernel.errno.ErrnoSet.DeviceOrResourceBusy;
+                }
+            }
+            node.delete(self._allocator);
+            self._root.remove(&node.list_node);
+            return;
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn iterator(self: *const Self) anyerror!kernel.fs.IDirectoryIterator {
@@ -86,17 +111,16 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     }
 
     pub fn delete(self: *Self) void {
-        refcounter -= 1;
-        if (refcounter == 0) {
-            log.err("Deleting directory: {s}", .{self._name});
-            var it = self._root.first;
-            while (it) |child| : (it = child.next) {
+        self._refcounter.* -= 1;
+        if (self._refcounter.* == 0) {
+            var next = self._root.pop();
+            while (next) |child| {
                 const file_node: *RamFsNode = @fieldParentPtr("list_node", child);
-                file_node.node.delete();
-                self._allocator.destroy(file_node);
+                file_node.delete(self._allocator);
+                next = self._root.pop();
             }
-            self._allocator.free(self._name);
             self._allocator.destroy(self._root);
+            self._allocator.destroy(self._refcounter);
         }
     }
 });

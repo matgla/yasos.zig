@@ -48,12 +48,11 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return 0;
     }
 
-    pub fn create(self: *Self, path: []const u8, mode: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
+    pub fn create(self: *Self, path: []const u8, mode: i32) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.interface.create(node.left, mode, allocator);
+            return try node.point.filesystem.interface.create(node.left, mode);
         }
-        return null;
     }
 
     pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
@@ -64,25 +63,17 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return -1;
     }
 
-    pub fn remove(self: *Self, path: []const u8) i32 {
+    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
-            return node.point.filesystem.interface.remove(node.left);
+            return node.point.filesystem.interface.unlink(node.left);
         }
-        return -1;
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn name(self: *const Self) []const u8 {
         _ = self;
         return "vfs";
-    }
-
-    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
-        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
-        if (maybe_node) |*node| {
-            return node.point.filesystem.interface.traverse(node.left, callback, user_context);
-        }
-        return -1;
     }
 
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
@@ -91,15 +82,6 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
             return node.point.filesystem.interface.get(node.left, allocator);
         }
         return null;
-    }
-
-    pub fn has_path(self: *Self, path: []const u8) bool {
-        var maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
-        if (maybe_node) |*node| {
-            // Check if the filesystem has the path
-            return node.point.filesystem.interface.has_path(node.left);
-        }
-        return false;
     }
 
     pub fn delete(self: *Self) void {
@@ -135,6 +117,21 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
 
     pub fn mount_filesystem(self: *Self, path: []const u8, fs: IFileSystem) !void {
         try self.mount_points.mount_filesystem(path, fs);
+    }
+
+    pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        _ = self;
+        _ = old_path;
+        _ = new_path;
+        return error.NotSupported;
+    }
+
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!i32 {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            return node.point.filesystem.interface.access(node.left, mode, flags);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 });
 

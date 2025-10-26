@@ -53,12 +53,16 @@ pub const FileHeader = struct {
     _filesystem_offset: c.off_t,
     _filetype: kernel.fs.FileType,
     _name: []const u8,
+    _size: u32,
+    _specinfo: u32,
 
-    pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) FileHeader {
-        var reader = FileReader.init(device_file, start_offset);
-        const fileheader = reader.read(u32, 0);
+    pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) !FileHeader {
+        var reader = try FileReader.init(device_file, start_offset);
+        const fileheader = try reader.read(u32, 0);
         const ft = FileHeader.convert_filetype(@enumFromInt(fileheader & 0x7));
         const name_buffer = reader.read_string(allocator, 16) catch "";
+        const specinfo_data = try reader.read(u32, 4);
+        const size_data = try reader.read(u32, 8);
 
         return .{
             ._reader = reader,
@@ -68,6 +72,8 @@ pub const FileHeader = struct {
             ._filesystem_offset = filesystem_offset,
             ._filetype = ft,
             ._name = name_buffer,
+            ._size = size_data,
+            ._specinfo = specinfo_data,
         };
     }
 
@@ -92,23 +98,23 @@ pub const FileHeader = struct {
         return self._filetype;
     }
 
-    pub fn specinfo(self: *FileHeader) u32 {
-        return self._reader.read(u32, 4);
+    pub fn specinfo(self: *const FileHeader) u32 {
+        return self._specinfo;
     }
 
-    pub fn size(self: *FileHeader) u32 {
-        return self._reader.read(u32, 8);
+    pub fn size(self: *const FileHeader) u32 {
+        return self._size;
     }
 
     pub fn name(self: *const FileHeader) []const u8 {
         return self._name;
     }
 
-    pub fn read(self: *FileHeader, comptime T: anytype, offset: c.off_t) T {
-        return self._reader.read(T, self._reader.get_data_offset() + offset);
+    pub fn read(self: *FileHeader, comptime T: anytype, offset: c.off_t) !T {
+        return try self._reader.read(T, self._reader.get_data_offset() + offset);
     }
-    pub fn read_bytes(self: *FileHeader, buffer: []u8, offset: c.off_t) void {
-        self._reader.read_bytes(buffer, self._reader.get_data_offset() + offset);
+    pub fn read_bytes(self: *FileHeader, buffer: []u8, offset: c.off_t) !void {
+        try self._reader.read_bytes(buffer, self._reader.get_data_offset() + offset);
     }
 
     pub fn read_string(self: *FileHeader, allocator: std.mem.Allocator, offset: u32) ?[]u8 {
@@ -130,24 +136,24 @@ pub const FileHeader = struct {
 
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result
     // if result is equal to 0, then checksum is correct
-    pub fn validate_checksum(self: *FileHeader) bool {
+    pub fn validate_checksum(self: *FileHeader) !bool {
         const length = std.mem.alignBackward(u32, @min(self.size(), 512), 4);
         var i: u32 = 0;
         var checksum_value: u32 = 0;
         while (i < length) {
-            const word = self._reader.read(u32, i);
+            const word = try self._reader.read(u32, i);
             checksum_value +%= word;
             i += 4;
         }
         return checksum_value == 0;
     }
 
-    pub fn next(self: *FileHeader) ?FileHeader {
-        const next_file_header: c.off_t = @intCast(self._reader.read(u32, 0) & 0xfffffff0);
+    pub fn next(self: *FileHeader) !?FileHeader {
+        const next_file_header: c.off_t = @intCast(try self._reader.read(u32, 0) & 0xfffffff0);
         if (next_file_header == 0) {
             return null;
         }
-        return FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, self._mapped_memory, self._allocator);
+        return try FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, self._mapped_memory, self._allocator);
     }
 
     fn filetype_to_mode(ftype: FileType) c.mode_t {
@@ -178,7 +184,7 @@ pub const FileHeader = struct {
         buf.st_blocks = 1;
     }
 
-    pub fn dupe(self: *const FileHeader) FileHeader {
-        return FileHeader.init(self._device_file, self._reader.get_offset(), self._filesystem_offset, self._mapped_memory, self._allocator);
+    pub fn dupe(self: *const FileHeader) !FileHeader {
+        return try FileHeader.init(self._device_file, self._reader.get_offset(), self._filesystem_offset, self._mapped_memory, self._allocator);
     }
 };

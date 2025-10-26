@@ -39,32 +39,32 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "umount", .{}, i32);
     }
 
-    pub fn create(self: *Self, path: []const u8, flags: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
-        return interface.VirtualCall(self, "create", .{ path, flags, allocator }, ?kernel.fs.Node);
+    pub fn create(self: *Self, path: []const u8, flags: i32) anyerror!void {
+        return interface.VirtualCall(self, "create", .{ path, flags }, anyerror!void);
     }
 
-    pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
-        return interface.VirtualCall(self, "mkdir", .{ path, mode }, i32);
+    pub fn mkdir(self: *Self, path: []const u8, mode: i32) anyerror!void {
+        return interface.VirtualCall(self, "mkdir", .{ path, mode }, anyerror!void);
     }
 
-    pub fn remove(self: *Self, path: []const u8) i32 {
-        return interface.VirtualCall(self, "remove", .{path}, i32);
+    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
+        return interface.VirtualCall(self, "unlink", .{path}, anyerror!void);
     }
 
     pub fn name(self: *const Self) []const u8 {
         return interface.VirtualCall(self, "name", .{}, []const u8);
     }
 
-    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
-        return interface.VirtualCall(self, "traverse", .{ path, callback, user_context }, i32);
+    pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
+        return interface.VirtualCall(self, "get", .{path}, anyerror!kernel.fs.Node);
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
-        return interface.VirtualCall(self, "get", .{ path, allocator }, ?kernel.fs.Node);
+    pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        return interface.VirtualCall(self, "link", .{ old_path, new_path }, anyerror!void);
     }
 
-    pub fn has_path(self: *Self, path: []const u8) bool {
-        return interface.VirtualCall(self, "has_path", .{path}, bool);
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
+        return interface.VirtualCall(self, "access", .{ path, mode, flags }, anyerror!void);
     }
 
     pub fn delete(self: *Self) void {
@@ -79,8 +79,8 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         try interface.VirtualCall(self, "format", .{}, anyerror!void);
     }
 
-    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        return interface.VirtualCall(self, "stat", .{ path, data }, i32);
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) anyerror!void {
+        return interface.VirtualCall(self, "stat", .{ path, data }, anyerror!void);
     }
 });
 
@@ -97,24 +97,30 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return 0; // Read-only filesystem does not need to do anything on unmount
     }
 
-    pub fn create(self: *Self, path: []const u8, flags: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
+    pub fn create(self: *Self, path: []const u8, flags: i32) anyerror!void {
         _ = self;
         _ = path;
         _ = flags;
-        _ = allocator;
-        return null; // Read-only filesystem does not allow file creation
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
     }
 
-    pub fn mkdir(self: *Self, path: []const u8, mode: i32) i32 {
+    pub fn mkdir(self: *Self, path: []const u8, mode: i32) anyerror!void {
         _ = self;
         _ = path;
         _ = mode;
         return -1; // Read-only filesystem does not allow directory creation
     }
 
-    pub fn remove(self: *Self, path: []const u8) i32 {
+    pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        _ = self;
+        _ = old_path;
+        _ = new_path;
+        return error.ReadOnlyFileSystem; // Read-only filesystem does not allow linking
+    }
+
+    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         _ = self;
         _ = path;
-        return -1; // Read-only filesystem does not allow file removal
+        return error.ReadOnlyFileSystem; // Read-only filesystem does not allow unlinking
     }
 });

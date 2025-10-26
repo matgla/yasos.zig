@@ -30,41 +30,62 @@ const c = @import("libc_imports").c;
 var kernel_allocator: std.mem.Allocator = undefined;
 
 const ModuleContext = struct {
-    path: []const u8,
+    name: []const u8,
     address: ?*const anyopaque,
 };
 
-const kernel = @import("kernel");
+const kernel = @import("kernel.zig");
+
 const log = std.log.scoped(.loader);
 
 fn file_resolver(name: []const u8) ?*const anyopaque {
     var context: ModuleContext = .{
-        .path = name,
+        .name = name,
         .address = null,
     };
-    _ = fs.get_ivfs().interface.traverse("/lib", traverse_directory, &context);
+
+    var maybe_node = fs.get_ivfs().interface.get("/lib", kernel_allocator);
+    if (maybe_node) |*node| {
+        defer node.delete();
+        var maybe_dir = node.as_directory();
+        if (maybe_dir) |*dir| {
+            var it = dir.interface.iterator() catch return null;
+            defer it.interface.delete();
+            while (it.interface.next()) |*entry| {
+                var filenode: kernel.fs.Node = undefined;
+                dir.interface.get(entry.name, &filenode) catch continue;
+                defer filenode.delete();
+                if (filenode.as_file()) |f| {
+                    if (is_requested_file(f, &context)) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     if (context.address) |address| {
         return address;
     }
     return null;
 }
 
-fn traverse_directory(file: *IFile, context: *anyopaque) bool {
-    var module_context: *ModuleContext = @ptrCast(@alignCast(context));
-    const filename = file.interface.name();
-    if (std.mem.eql(u8, module_context.path, filename)) {
+fn is_requested_file(file: kernel.fs.IFile, context: *ModuleContext) bool {
+    if (std.mem.eql(u8, context.name, file.interface.name())) {
         var attr: FileMemoryMapAttributes = .{
             .is_memory_mapped = false,
             .mapped_address_r = null,
             .mapped_address_w = null,
         };
-        _ = file.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
+
+        var fc: kernel.fs.IFile = file;
+        _ = fc.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
         if (attr.mapped_address_r) |address| {
-            module_context.address = address;
-            return false;
+            context.address = address;
+            return true;
         }
     }
-    return true;
+    return false;
 }
 
 var modules_list: std.AutoHashMap(c.pid_t, yasld.Executable) = undefined;

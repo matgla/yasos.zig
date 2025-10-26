@@ -114,6 +114,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_dup => return handlers.sys_dup,
             c.sys_sysinfo => return handlers.sys_sysinfo,
             c.sys_sysconf => return handlers.sys_sysconf,
+            c.sys_access => return handlers.sys_access,
             else => return sys_unhandled_factory(index).handler,
         }
     }

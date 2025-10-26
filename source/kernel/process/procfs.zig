@@ -87,12 +87,24 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return "procfs";
     }
 
-    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
-        _ = self;
-        _ = path;
-        _ = callback;
-        _ = user_context;
-        return -1;
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!i32 {
+        _ = flags;
+        var maybe_node = self.get(path, self._allocator);
+        defer if (maybe_node) |*n| n.delete();
+        if ((mode & c.F_OK) != 0) {
+            if (maybe_node == null) {
+                return kernel.errno.ErrnoSet.NoEntry;
+            }
+        }
+
+        if ((mode & c.X_OK) != 0) {
+            return kernel.errno.ErrnoSet.PermissionDenied;
+        }
+
+        if ((mode & c.W_OK) != 0) {
+            return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+        }
+        return 0;
     }
 
     // fn sync(self: *Self) void {
@@ -151,15 +163,6 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             node.delete();
         }
         return null;
-    }
-
-    pub fn has_path(self: *Self, path: []const u8) bool {
-        var maybe_node = self.get(path, self._allocator);
-        if (maybe_node) |*node| {
-            node.delete();
-            return true;
-        }
-        return false;
     }
 
     pub fn format(self: *Self) anyerror!void {

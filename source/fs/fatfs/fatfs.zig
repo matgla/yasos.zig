@@ -78,23 +78,12 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return 0;
     }
 
-    pub fn create(self: *Self, path: []const u8, _: i32, allocator: std.mem.Allocator) ?kernel.fs.Node {
-        _ = self;
+    pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
         log.info("Creating file at path: {s}", .{path});
-        const filepath = allocator.dupeZ(u8, path) catch {
-            log.err("Failed to allocate memory for path: {s}", .{path});
-            return null;
-        };
-        defer allocator.free(filepath);
-        var file = fatfs.File.create(filepath) catch |err| {
-            log.err("Failed to create file: {s}", .{@errorName(err)});
-            return null;
-        };
+        const filepath = try self._allocator.dupeZ(u8, path);
+        defer self._allocator.free(filepath);
+        var file = try fatfs.File.create(filepath);
         file.close();
-        return FatFsFile.InstanceType.create_node(allocator, filepath) catch {
-            log.err("Failed to create FatFsFile node for path: {s}", .{path});
-            return null;
-        };
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) i32 {
@@ -111,18 +100,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return -1;
     }
 
-    pub fn remove(self: *Self, path: []const u8) i32 {
+    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         log.info("Removing file or directory at path: {s}", .{path});
-        const filepath = self._allocator.dupeZ(u8, path) catch {
-            log.err("Failed to allocate memory for path: {s}", .{path});
-            return -1;
-        };
+        const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
-        fatfs.unlink(filepath) catch |err| {
-            log.err("Failed to remove file or directory: {s}", .{@errorName(err)});
-            return -1;
-        };
-        return -1;
+        try fatfs.unlink(filepath);
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -130,20 +112,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return "fatfs";
     }
 
-    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *kernel.fs.IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
+    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
         _ = self;
-        _ = path;
-        _ = callback;
-        _ = user_context;
-        return -1;
-    }
-
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
-        _ = self;
-        const filepath = allocator.dupeZ(u8, path) catch {
-            log.err("Failed to allocate memory for path: {s}", .{path});
-            return null;
-        };
+        const filepath = try allocator.dupeZ(u8, path);
         defer allocator.free(filepath);
 
         var dir: ?fatfs.Dir = fatfs.Dir.open(filepath) catch blk: {
@@ -152,18 +123,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
         if (dir) |*d| {
             d.close();
-            return FatFsDirectory.InstanceType.create_node(allocator, filepath) catch return null;
+            return try FatFsDirectory.InstanceType.create_node(allocator, filepath);
         }
-        return FatFsFile.InstanceType.create_node(allocator, filepath) catch return null;
-    }
-
-    pub fn has_path(self: *Self, path: []const u8) bool {
-        var maybe_file = self.get(path, self._allocator);
-        if (maybe_file) |*file| {
-            _ = file.close();
-            return true;
-        }
-        return false;
+        return try FatFsFile.InstanceType.create_node(allocator, filepath);
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -196,7 +158,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             data.st_blocks = 0;
             return 0;
         }
-        var path_c = std.fmt.allocPrintSentinel(self._allocator, "{s} ", .{path}, 0) catch {
+        var path_c = std.fmt.allocPrintSentinel(self._allocator, "0:/{s} ", .{path}, 0) catch {
             log.err("Failed to allocate memory for path: {s}", .{path});
             return -1;
         };
@@ -216,6 +178,33 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         data.st_ino = 0; // Inode number
         data.st_rdev = 0; // Device type (for special files)
         data.st_blocks = @intCast((finfo.size + 511) / 512);
+        return 0;
+    }
+
+    pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        _ = self;
+        _ = old_path;
+        _ = new_path;
+        return error.NotSupported;
+    }
+
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!i32 {
+        _ = flags;
+        var maybe_node = self.get(path, self._allocator);
+        defer if (maybe_node) |*n| n.delete();
+        if ((mode & c.F_OK) != 0) {
+            if (maybe_node == null) {
+                return kernel.errno.ErrnoSet.NoEntry;
+            }
+        }
+
+        if (maybe_node) |*node| {
+            if ((mode & c.W_OK) != 0 or (mode & c.X_OK) != 0) {
+                if (node.filetype() == kernel.fs.FileType.Directory) {
+                    return kernel.errno.ErrnoSet.IsADirectory;
+                }
+            }
+        }
         return 0;
     }
 

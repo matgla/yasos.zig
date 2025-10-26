@@ -73,7 +73,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
         if (self._file) |*file| {
             switch (whence) {
                 c.SEEK_SET => {

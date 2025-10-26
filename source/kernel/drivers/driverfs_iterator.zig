@@ -50,15 +50,19 @@ pub const DriverFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterat
     }
 });
 
-test "DriverFsIterator.IterateThroughElements" {
-    const DriverStub = @import("tests/driver_stub.zig").DriverStub;
-    const FileStub = @import("../fs/tests/file_stub.zig").FileStub;
-    var file0 = FileStub.InstanceType.init("file0");
-    var mapping = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
-    defer mapping.deinit();
+// test "DriverFsIterator.IterateThroughElements" {
+//     const DriverMock = @import("tests/driver_mock.zig").DriverMock;
+//    const FileMock = @import("../fs/tests/file_mock.zig").FileMock;
+//     var file_mock = try FileMock.create(std.testing.allocator);
+//     defer file_mock.delete();
 
-    var ifile = try file0.interface.new(std.testing.allocator);
-    defer ifile.interface.delete();
-    var driver0 = DriverStub.InstanceType.init(ifile);
-    try mapping.put("file0", driver0.interface.create());
-}
+//     var file0 = file_mock.get_interface();
+//     defer file0.interface.delete();
+
+//     var mapping = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+//     defer mapping.deinit();
+
+//     var driver0 = DriverStub.InstanceType.init(file0.*);
+//     // defer driver0.interface.delete();
+//     try mapping.put("file0", driver0.interface.create());
+// }

@@ -41,12 +41,16 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
 
     /// Current position in file
     _position: usize,
+    _endposition: usize,
+    _name: []const u8,
 
-    pub fn create(allocator: std.mem.Allocator, data: *RamFsData) RamFsFile {
+    pub fn create(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) RamFsFile {
         return RamFsFile.init(.{
             ._data = data,
             ._allocator = allocator,
             ._position = 0,
+            ._endposition = 0,
+            ._name = filename,
         });
     }
 
@@ -56,8 +60,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         self._position = 0;
     }
 
-    pub fn create_node(allocator: std.mem.Allocator, data: *RamFsData) anyerror!kernel.fs.Node {
-        const file = try create(allocator, data).interface.new(allocator);
+    pub fn create_node(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) anyerror!kernel.fs.Node {
+        const file = try create(allocator, data, filename).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
@@ -81,10 +85,13 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
             return 0;
         };
         self._position += data.len;
+        if (self._position > self._endposition) {
+            self._endposition = self._position;
+        }
         return @intCast(data.len);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0) {
@@ -94,13 +101,12 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
                 return @intCast(self._position);
             },
             c.SEEK_END => {
-                if (self._data.data.items.len >= offset) {
-                    self._position = self._data.data.items.len - @as(usize, @intCast(offset));
-                    return @intCast(self._position);
-                } else {
-                    // set errno
-                    return -1;
+                const new_position: isize = @as(isize, @intCast(self._endposition)) + @as(isize, @intCast(offset));
+                if (new_position < 0) {
+                    return kernel.errno.ErrnoSet.InvalidArgument;
                 }
+                self._position = @as(usize, @intCast(new_position));
+                return @intCast(self._position);
             },
             c.SEEK_CUR => {
                 const new_position = @as(c.off_t, @intCast(self._position)) + offset;
@@ -147,7 +153,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     }
 
     pub fn name(self: *const Self) []const u8 {
-        return self._data.name;
+        return self._name;
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
@@ -183,14 +189,13 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
 });
 
 test "RamFsFile.ShouldReadAndWriteFile" {
-    var data = try RamFsData.create_file(std.testing.allocator, "test_file");
-    defer data.deinit();
+    const data = std.testing.allocator.create(RamFsData) catch unreachable;
+    data.* = try RamFsData.create(std.testing.allocator);
 
-    var sut = RamFsFile.InstanceType.create(&data, std.testing.allocator);
-    var file = try sut.interface.new(std.testing.allocator);
+    var file = try RamFsFile.InstanceType.create(std.testing.allocator, data, "test_file").interface.new(std.testing.allocator);
     defer file.interface.delete();
 
-    try std.testing.expectEqualStrings("test_file", file.interface.name(std.testing.allocator).get_name());
+    try std.testing.expectEqualStrings("test_file", file.interface.name());
     try std.testing.expectEqual(22, file.interface.write("Some data inside file\n"));
     try std.testing.expectEqual(4, file.interface.write("test"));
     var buf: [8]u8 = undefined;
@@ -211,10 +216,9 @@ test "RamFsFile.ShouldReadAndWriteFile" {
 }
 
 test "RamFsFile.ShouldSeekFile" {
-    var data = try RamFsData.create_file(std.testing.allocator, "test_file");
-    defer data.deinit();
-
-    var sut = RamFsFile.InstanceType.create(&data, std.testing.allocator);
+    const data = std.testing.allocator.create(RamFsData) catch unreachable;
+    data.* = try RamFsData.create(std.testing.allocator);
+    var sut = RamFsFile.InstanceType.create(std.testing.allocator, data, "other_file");
     var file = try sut.interface.new(std.testing.allocator);
     defer _ = file.interface.close();
     defer file.interface.delete();
@@ -241,5 +245,7 @@ test "RamFsFile.ShouldSeekFile" {
     try std.testing.expectEqual(132, file.interface.seek(132, c.SEEK_SET));
     try std.testing.expectEqual(132, file.interface.tell());
 
-    try std.testing.expectEqual(32 + @sizeOf(RamFsData), file.interface.size());
+    var stat: c.struct_stat = undefined;
+    file.interface.stat(&stat);
+    try std.testing.expectEqual(32 + @sizeOf(RamFsData), stat.st_size);
 }

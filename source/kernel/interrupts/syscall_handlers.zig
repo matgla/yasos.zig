@@ -157,8 +157,10 @@ pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    const context: *const volatile c.mkdir_context = @ptrCast(@alignCast(arg));
+    const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
+    defer kernel_allocator.free(path);
+    return fs.get_ivfs().interface.mkdir(path, context.mode);
 }
 
 pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
@@ -188,6 +190,7 @@ pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
 fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u8, fd: i32) ![]const u8 {
     var prefix: []const u8 = "";
     if (maybe_path) |cpath| {
+        const path = std.mem.span(@as([*:0]const u8, @ptrCast(cpath)));
         if (fd >= 0) {
             if (process_manager.instance.get_current_process()) |current_process| {
                 prefix = current_process.get_current_directory();
@@ -199,19 +202,23 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
                 } else {
                     return error.CannotDeterminePathForFd;
                 }
-            }
-        }
-        const path = std.mem.span(@as([*:0]const u8, @ptrCast(cpath)));
-        if (path.len > 0 and path[0] != '/') {
-            if (process_manager.instance.get_current_process()) |current_process| {
-                const pwd = current_process.get_current_directory();
-                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ pwd, prefix, path });
+                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, path });
                 defer allocator.free(full_path);
                 const real = try std.fs.path.resolve(allocator, &.{full_path});
                 return real;
             }
         } else {
-            return try allocator.dupe(u8, path);
+            if (path.len > 0 and path[0] != '/') {
+                if (process_manager.instance.get_current_process()) |current_process| {
+                    const pwd = current_process.get_current_directory();
+                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ pwd, prefix, path });
+                    defer allocator.free(full_path);
+                    const real = try std.fs.path.resolve(allocator, &.{full_path});
+                    return real;
+                }
+            } else {
+                return try allocator.dupe(u8, path);
+            }
         }
     } else if (fd >= 0) {
         if (process_manager.instance.get_current_process()) |current_process| {
@@ -234,7 +241,8 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
         if (maybe_file) |file| {
             return try process.attach_file(path, file);
         } else if ((context.flags & c.O_CREAT) != 0) {
-            const maybe_ifile = fs.get_ivfs().interface.create(path, context.mode, process.get_memory_allocator());
+            try fs.get_ivfs().interface.create(path, context.mode);
+            const maybe_ifile = fs.get_ivfs().interface.get(path, process.get_memory_allocator());
             if (maybe_ifile) |ifile| {
                 return try process.attach_file(path, ifile);
             }
@@ -331,12 +339,20 @@ pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    const context: *const volatile c.unlink_context = @ptrCast(@alignCast(arg));
+    const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
+    defer kernel_allocator.free(path);
+    try fs.get_ivfs().interface.unlink(path);
+    return 0;
 }
 pub fn sys_link(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    const context: *const volatile c.link_context = @ptrCast(@alignCast(arg));
+    const old_path = try determine_path_for_file(kernel_allocator, context.oldpath, context.olddirfd);
+    defer kernel_allocator.free(old_path);
+    const new_path = try determine_path_for_file(kernel_allocator, context.newpath, context.newdirfd);
+    defer kernel_allocator.free(new_path);
+    try fs.get_ivfs().interface.link(old_path, new_path);
+    return 0;
 }
 
 pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
@@ -624,4 +640,11 @@ pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
             return kernel.errno.ErrnoSet.InvalidArgument;
         },
     }
+}
+
+pub fn sys_access(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.access_context = @ptrCast(@alignCast(arg));
+    const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
+    defer kernel_allocator.free(path);
+    return try fs.get_ivfs().interface.access(path, context.mode, context.flags);
 }

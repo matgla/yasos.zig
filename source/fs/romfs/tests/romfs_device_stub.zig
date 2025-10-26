@@ -29,7 +29,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
     file: ?std.fs.File,
     path: []const u8,
 
-    pub fn init(path: []const u8) RomfsDeviceStubFile {
+    pub fn create(path: []const u8) RomfsDeviceStubFile {
         return RomfsDeviceStubFile.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
             .file = null,
@@ -37,11 +37,16 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         });
     }
 
+    pub fn create_node(allocator: std.mem.Allocator, path: []const u8) !kernel.fs.Node {
+        const file_instance = try create(path).interface.new(allocator);
+        return kernel.fs.Node.create_file(file_instance);
+    }
+
     pub fn read(self: *Self, buffer: []u8) isize {
         return @intCast(self.file.?.read(buffer) catch return -1);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
         switch (whence) {
             c.SEEK_SET => {
                 self.file.?.seekTo(@intCast(offset)) catch return -1;
@@ -69,9 +74,8 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         return @intCast(self.file.?.getEndPos() catch return 0);
     }
 
-    pub fn name(self: *Self, allocator: std.mem.Allocator) kernel.fs.FileName {
-        _ = allocator;
-        return kernel.fs.FileName.init(std.fs.path.basename(self.path), null);
+    pub fn name(self: *const Self) []const u8 {
+        return std.fs.path.basename(self.path);
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
@@ -102,7 +106,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         buf.st_blocks = 1;
     }
 
-    pub fn filetype(self: *Self) kernel.fs.FileType {
+    pub fn filetype(self: *const Self) kernel.fs.FileType {
         _ = self;
         return kernel.fs.FileType.File;
     }
@@ -123,13 +127,13 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
 
 pub const RomfsDeviceStub = interface.DeriveFromBase(IDriver, struct {
     const Self = @This();
-    allocator: *const std.mem.Allocator,
-    file: RomfsDeviceStubFile,
+    allocator: std.mem.Allocator,
+    _node: kernel.fs.Node,
 
-    pub fn init(allocator: *const std.mem.Allocator, path: [:0]const u8) RomfsDeviceStub {
+    pub fn init(allocator: std.mem.Allocator, path: [:0]const u8) !RomfsDeviceStub {
         return RomfsDeviceStub.init(.{
             .allocator = allocator,
-            .file = RomfsDeviceStubFile.InstanceType.init(path),
+            ._node = try RomfsDeviceStubFile.InstanceType.create_node(allocator, path),
         });
     }
 
@@ -140,7 +144,8 @@ pub const RomfsDeviceStub = interface.DeriveFromBase(IDriver, struct {
     }
 
     pub fn load(self: *Self) anyerror!void {
-        try self.file.data().load();
+        var file = self._node.as_file().?;
+        try file.as(RomfsDeviceStubFile).data().load();
     }
 
     pub fn unload(self: *Self) bool {
@@ -148,8 +153,8 @@ pub const RomfsDeviceStub = interface.DeriveFromBase(IDriver, struct {
         return true;
     }
 
-    pub fn ifile(self: *Self, allocator: std.mem.Allocator) ?IFile {
-        return self.file.interface.new(allocator) catch return null;
+    pub fn node(self: *Self) anyerror!kernel.fs.Node {
+        return self._node;
     }
 
     pub fn delete(self: *Self) void {

@@ -13,20 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-const std = @import("std");
+const interface = @import("interface");
 
-const kernel = @import("kernel");
+const kernel = @import("../../kernel.zig");
 
-const RamFsData = @import("ramfs_data.zig").RamFsData;
-
-pub const RamFsNode = struct {
-    node: kernel.fs.Node,
-    list_node: std.DoublyLinkedList.Node,
-    name: []const u8,
-
-    pub fn delete(self: *RamFsNode, allocator: std.mem.Allocator) void {
-        self.node.delete();
-        allocator.free(self.name);
-        allocator.destroy(self);
-    }
-};
+pub const FileSystemMock = interface.mock.MockInterface(kernel.fs.IFileSystem);

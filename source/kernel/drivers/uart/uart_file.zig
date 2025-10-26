@@ -115,7 +115,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return @intCast(result);
             }
 
-            pub fn seek(self: *Self, _: c.off_t, _: i32) c.off_t {
+            pub fn seek(self: *Self, _: c.off_t, _: i32) anyerror!c.off_t {
                 _ = self;
                 return 0;
             }

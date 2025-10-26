@@ -178,14 +178,6 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try self.get_root_directory().load_all();
     }
 
-    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, user_context: *anyopaque) i32 {
-        _ = self;
-        _ = path;
-        _ = callback;
-        _ = user_context;
-        return -1;
-    }
-
     pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
         _ = allocator;
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
@@ -195,15 +187,6 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         var result: kernel.fs.Node = undefined;
         self.get_root_directory().get(path, &result) catch return null;
         return result;
-    }
-
-    pub fn has_path(self: *Self, path: []const u8) bool {
-        var maybe_node = self.get(path, self._allocator);
-        if (maybe_node) |*node| {
-            defer node.delete();
-            return true;
-        }
-        return false;
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -225,5 +208,38 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             return 0;
         }
         return -1; // Stat not supported for driverfs
+    }
+
+    pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        _ = self;
+        _ = old_path;
+        _ = new_path;
+        return error.NotSupported;
+    }
+
+    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
+        _ = self;
+        _ = path;
+        return error.NotSupported;
+    }
+
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!i32 {
+        _ = flags;
+        var maybe_node = self.get(path, self._allocator);
+        defer if (maybe_node) |*n| n.delete();
+        if ((mode & c.F_OK) != 0) {
+            if (maybe_node == null) {
+                return kernel.errno.ErrnoSet.NoEntry;
+            }
+        }
+
+        if ((mode & c.X_OK) != 0) {
+            return kernel.errno.ErrnoSet.PermissionDenied;
+        }
+
+        if ((mode & c.W_OK) != 0) {
+            return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+        }
+        return 0;
     }
 });

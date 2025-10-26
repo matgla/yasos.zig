@@ -53,7 +53,7 @@ pub fn BufferedFile(comptime BufferSize: usize) type {
                 return @intCast(read_length);
             }
 
-            pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+            pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
                 switch (whence) {
                     c.SEEK_SET => {
                         if (offset < 0) {
