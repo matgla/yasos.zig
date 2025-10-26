@@ -15,4 +15,5 @@
 
 comptime {
     _ = @import("mount_points.zig");
+    _ = @import("vfs.zig");
 }
