@@ -59,35 +59,31 @@ pub const MmcPartitionFile =
         }
 
         pub fn read(self: *Self, buf: []u8) isize {
-            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET);
+            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET) catch return 0;
             const readed = self._dev.interface.read(buf);
             self._current_position += readed;
             return readed;
         }
 
         pub fn write(self: *Self, buf: []const u8) isize {
-            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET);
+            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET) catch return 0;
             const written = self._dev.interface.write(buf);
             self._current_position += written;
             return written;
         }
 
-        pub fn seek(self: *Self, offset: c.off_t, base: i32) c.off_t {
+        pub fn seek(self: *Self, offset: c.off_t, base: i32) anyerror!c.off_t {
             if (offset > (self._start_lba + self._size_in_sectors) << 9) {
                 kernel.log.err("Seek offset {d} is out of bounds for MMC partition file", .{offset});
-                return -1;
+                return kernel.errno.ErrnoSet.InvalidArgument;
             }
             if (@as(c.off_t, @intCast(self._start_lba)) + (offset >> 9) < @as(c.off_t, @intCast(self._start_lba))) {
                 kernel.log.err("Seek offset {d} is before the start of MMC partition file", .{offset});
-                return -1;
+                return kernel.errno.ErrnoSet.InvalidArgument;
             }
             const seek_offset = (@as(c.off_t, @intCast(self._start_lba)) << 9) + offset;
-            self._current_position = self._dev.interface.seek(seek_offset, base);
+            self._current_position = try self._dev.interface.seek(seek_offset, base);
             return self._current_position;
-        }
-
-        pub fn close(self: *Self) void {
-            _ = self;
         }
 
         pub fn sync(self: *Self) i32 {
@@ -118,8 +114,8 @@ pub const MmcPartitionFile =
             return 0;
         }
 
-        pub fn stat(self: *Self, data: *c.struct_stat) void {
-            data.st_size = @as(usize, @intCast(self._size_in_sectors)) << 9;
+        pub fn size(self: *const Self) usize {
+            return @as(usize, @intCast(self._size_in_sectors)) << 9;
         }
 
         pub fn filetype(self: *const Self) kernel.fs.FileType {
@@ -128,7 +124,6 @@ pub const MmcPartitionFile =
         }
 
         pub fn delete(self: *Self) void {
-            _ = self.close();
             self._dev.interface.delete();
         }
     });

@@ -106,10 +106,6 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         return self._name;
     }
 
-    pub fn close(self: *Self) void {
-        _ = self;
-    }
-
     pub fn delete(self: *Self) void {
         self._refcounter.* -= 1;
         if (self._refcounter.* == 0) {

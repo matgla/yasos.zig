@@ -26,7 +26,7 @@ const c = @import("libc_imports").c;
 
 const syscall = @import("arch").syscall;
 
-const kernel = @import("kernel");
+const kernel = @import("../kernel.zig");
 const log = std.log.scoped(.syscall);
 
 const process_manager = @import("../process_manager.zig");
@@ -47,7 +47,7 @@ extern fn switch_to_the_next_task(lr: usize) usize;
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
 
 fn context_switch_handler(lr: usize) linksection(".time_critical") usize {
-    switch (process_manager.instance.scheduler.schedule_next()) {
+    switch (process_manager.instance.schedule_next()) {
         .Switch => return switch_to_the_next_task(lr),
         .StoreAndSwitch => return store_and_switch_to_next_task(lr),
         else => return lr,
@@ -133,7 +133,7 @@ const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") void {
     const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
     const result: i32 = result_or_error catch |err| {
-        c_result.*.err = @intFromError(err);
+        c_result.*.err = kernel.errno.to_errno(err);
         c_result.*.result = -1;
         return;
     };

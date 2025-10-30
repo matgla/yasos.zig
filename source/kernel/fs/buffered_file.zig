@@ -101,18 +101,8 @@ pub fn BufferedFile(comptime BufferSize: usize) type {
                 return 0;
             }
 
-            pub fn stat(self: *Self, buf: *c.struct_stat) void {
-                _ = self;
-                buf.st_dev = 0;
-                buf.st_ino = 0;
-                buf.st_mode = c.S_IFREG;
-                buf.st_nlink = 0;
-                buf.st_uid = 0;
-                buf.st_gid = 0;
-                buf.st_rdev = 0;
-                buf.st_size = 0;
-                buf.st_blksize = 1;
-                buf.st_blocks = 1;
+            pub fn size(self: *const Self) usize {
+                return self._end;
             }
 
             pub fn filetype(self: *const Self) kernel.fs.FileType {

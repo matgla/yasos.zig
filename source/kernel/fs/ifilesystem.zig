@@ -71,16 +71,12 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         interface.DestructorCall(self);
     }
 
-    // pub fn iterator(self: *Self, path: []const u8) ?kernel.fs.IDirectoryIterator {
-    //     return interface.VirtualCall(self, "iterator", .{path}, ?kernel.fs.IDirectoryIterator);
-    // }
-
     pub fn format(self: *Self) anyerror!void {
         try interface.VirtualCall(self, "format", .{}, anyerror!void);
     }
 
-    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) anyerror!void {
-        return interface.VirtualCall(self, "stat", .{ path, data }, anyerror!void);
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
+        return interface.VirtualCall(self, "stat", .{ path, data, follow_links }, anyerror!void);
     }
 });
 
@@ -115,12 +111,17 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         _ = self;
         _ = old_path;
         _ = new_path;
-        return error.ReadOnlyFileSystem; // Read-only filesystem does not allow linking
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem does not allow linking
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         _ = self;
         _ = path;
-        return error.ReadOnlyFileSystem; // Read-only filesystem does not allow unlinking
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem does not allow unlinking
+    }
+
+    pub fn format(self: *Self) anyerror!void {
+        _ = self;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem cannot be formatted
     }
 });

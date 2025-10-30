@@ -110,17 +110,8 @@ pub const FileHeader = struct {
         return self._name;
     }
 
-    pub fn read(self: *FileHeader, comptime T: anytype, offset: c.off_t) !T {
-        return try self._reader.read(T, self._reader.get_data_offset() + offset);
-    }
     pub fn read_bytes(self: *FileHeader, buffer: []u8, offset: c.off_t) !void {
         try self._reader.read_bytes(buffer, self._reader.get_data_offset() + offset);
-    }
-
-    pub fn read_string(self: *FileHeader, allocator: std.mem.Allocator, offset: u32) ?[]u8 {
-        return self._reader.read_string(allocator, self._reader.get_data_offset() + offset) catch {
-            return null;
-        };
     }
 
     pub fn read_name_at_offset(self: *FileHeader, allocator: std.mem.Allocator, offset: c.off_t) ?FileName {

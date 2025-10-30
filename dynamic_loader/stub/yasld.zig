@@ -29,3 +29,7 @@ pub const SymbolEntry = @import("module.zig").SymbolEntry;
 pub fn loader_init(file_resolver: anytype, allocator: std.mem.Allocator) void {
     loader.init(file_resolver, allocator);
 }
+
+pub fn loader_deinit() void {
+    loader.deinit();
+}

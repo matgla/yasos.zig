@@ -41,7 +41,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             _name: []const u8,
 
             pub fn delete(self: *Self) void {
-                _ = self.close();
+                _ = self;
             }
 
             pub fn create(allocator: std.mem.Allocator, filename: []const u8) UartFileImpl {
@@ -118,10 +118,6 @@ pub fn UartFile(comptime UartType: anytype) type {
             pub fn seek(self: *Self, _: c.off_t, _: i32) anyerror!c.off_t {
                 _ = self;
                 return 0;
-            }
-
-            pub fn close(self: *Self) void {
-                _ = self;
             }
 
             pub fn sync(self: *Self) i32 {
@@ -208,18 +204,9 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return -1;
             }
 
-            pub fn stat(self: *Self, buf: *c.struct_stat) void {
+            pub fn size(self: *const Self) usize {
                 _ = self;
-                buf.st_dev = 0;
-                buf.st_ino = 0;
-                buf.st_mode = 0;
-                buf.st_nlink = 0;
-                buf.st_uid = 0;
-                buf.st_gid = 0;
-                buf.st_rdev = 1;
-                buf.st_size = 0;
-                buf.st_blksize = 1;
-                buf.st_blocks = 1;
+                return 0;
             }
 
             pub fn filetype(self: *const Self) FileType {

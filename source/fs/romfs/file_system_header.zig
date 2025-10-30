@@ -39,14 +39,14 @@ pub const FileSystemHeader = struct {
     _offset: c.off_t,
     _size: u32,
 
-    pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: c.off_t) !?FileSystemHeader {
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: c.off_t) !FileSystemHeader {
         var marker: [8]u8 = undefined;
         var df = device_file;
 
         _ = try df.interface.seek(offset, c.SEEK_SET);
         _ = df.interface.read(marker[0..]);
         if (!std.mem.eql(u8, marker[0..], "-rom1fs-")) {
-            return null;
+            return kernel.errno.ErrnoSet.InvalidArgument;
         }
 
         var attr: FileMemoryMapAttributes = .{
@@ -71,29 +71,8 @@ pub const FileSystemHeader = struct {
         };
     }
 
-    pub fn deinit(self: FileSystemHeader) void {
-        _ = self;
-    }
-
-    fn get_name(allocator: std.mem.Allocator, file: IFile, offset: u32) ![]u8 {
-        _ = file.seek(offset, c.SEEK_SET);
-        var name_buffer: []u8 = try allocator.alloc(u8, 16);
-
-        _ = file.read(name_buffer[0..]);
-        while (std.mem.lastIndexOfScalar(u8, name_buffer, 0) == null) {
-            name_buffer = try allocator.realloc(name_buffer, name_buffer.len + 16);
-            _ = file.read(name_buffer[name_buffer.len - 16 ..]);
-        }
-
-        return name_buffer;
-    }
-
     pub fn size(self: *const FileSystemHeader) u32 {
         return self._size;
-    }
-
-    pub fn checksum(self: FileSystemHeader) u32 {
-        return self._reader.read(u32, 12);
     }
 
     fn read(self: *FileSystemHeader, comptime T: type) T {
@@ -107,9 +86,8 @@ pub const FileSystemHeader = struct {
     pub fn validate_checksum(self: *FileSystemHeader) !bool {
         const current = self._device_file.interface.tell();
         _ = try self._device_file.interface.seek(0, c.SEEK_SET);
-        var stat: c.struct_stat = undefined;
-        self._device_file.interface.stat(&stat);
-        const length = @min(stat.st_size, 512);
+        const dsize = self._device_file.interface.size();
+        const length = @min(dsize, 512);
         var i: u32 = 0;
         var checksum_value: u32 = 0;
         while (i < length) {
@@ -137,55 +115,63 @@ pub const FileSystemHeader = struct {
 
 test "FileSystemHeader.ShouldParseFilesystemHeader" {
     const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
-    var device = try RomfsDeviceStub.InstanceType.init(std.testing.allocator, "source/fs/romfs/tests/test.romfs");
+    var device = try RomfsDeviceStub.InstanceType.init(std.testing.allocator, "source/fs/romfs/tests/test.romfs", null);
     var idevice = device.interface.create();
     try idevice.interface.load();
     var device_node = try idevice.interface.node();
     defer device_node.delete();
     try std.testing.expect(device_node.filetype() == kernel.fs.FileType.File);
-    var maybe_fs = try FileSystemHeader.init(std.testing.allocator, device_node.as_file().?, 0);
-    try std.testing.expect(maybe_fs != null);
-    if (maybe_fs) |*fs| {
-        try std.testing.expectEqual(fs.size(), 1040);
-        try std.testing.expect(try fs.validate_checksum());
-        {
-            const name = fs.name().?;
-            defer name.deinit();
-            try std.testing.expectEqualStrings("ROMFS_TEST", name.get_name());
-        }
-        {
-            var fh = try fs.first_file_header();
-            defer if (fh) |*file| file.deinit();
-            try std.testing.expect(fh != null);
-            const name = fh.?.name();
-            try std.testing.expectEqualStrings(name, ".");
-            try std.testing.expectEqual(fh.?.filetype(), FileType.Directory);
+    var fs = try FileSystemHeader.init(std.testing.allocator, device_node.as_file().?, 0);
+    try std.testing.expectEqual(fs.size(), 1040);
+    try std.testing.expect(try fs.validate_checksum());
+    {
+        const name = fs.name().?;
+        defer name.deinit();
+        try std.testing.expectEqualStrings("ROMFS_TEST", name.get_name());
+    }
+    {
+        var fh = try fs.first_file_header();
+        defer if (fh) |*file| file.deinit();
+        try std.testing.expect(fh != null);
+        const name = fh.?.name();
+        try std.testing.expectEqualStrings(name, ".");
+        try std.testing.expectEqual(fh.?.filetype(), FileType.Directory);
 
+        {
+            var next_fh = try fh.?.next();
+            try std.testing.expect(next_fh != null);
+            defer next_fh.?.deinit();
+            const next_name = next_fh.?.name();
+            try std.testing.expectEqualStrings(next_name, "..");
             {
-                var next_fh = try fh.?.next();
-                try std.testing.expect(next_fh != null);
-                defer next_fh.?.deinit();
-                const next_name = next_fh.?.name();
-                try std.testing.expectEqualStrings(next_name, "..");
-                {
-                    var fh2 = try next_fh.?.next();
-                    defer fh2.?.deinit();
-                    var fh3 = try fh2.?.next();
-                    defer fh3.?.deinit();
-                    var fh4 = try fh3.?.next();
-                    try std.testing.expect(fh4 != null);
-                    if (fh4) |*file| {
-                        defer file.deinit();
-                        const nextnext_name = file.name();
-                        try std.testing.expectEqualStrings(nextnext_name, "file.txt");
-                        try std.testing.expect(try file.validate_checksum());
-                        var data: [20]u8 = undefined;
-                        try file.read_bytes(data[0..20], 0);
-                        try std.testing.expectEqualStrings(data[0..], "THis is testing file");
-                        try std.testing.expectEqual(file.filetype(), FileType.File);
-                    }
+                var fh2 = try next_fh.?.next();
+                defer fh2.?.deinit();
+                var fh3 = try fh2.?.next();
+                defer fh3.?.deinit();
+                var fh4 = try fh3.?.next();
+                try std.testing.expect(fh4 != null);
+                if (fh4) |*file| {
+                    defer file.deinit();
+                    const nextnext_name = file.name();
+                    try std.testing.expectEqualStrings(nextnext_name, "file.txt");
+                    try std.testing.expect(try file.validate_checksum());
+                    var data: [20]u8 = undefined;
+                    try file.read_bytes(data[0..20], 0);
+                    try std.testing.expectEqualStrings(data[0..], "THis is testing file");
+                    try std.testing.expectEqual(file.filetype(), FileType.File);
                 }
             }
         }
     }
+}
+
+test "FileSystemHeader.ShouldRejectInvalidFilesystemHeader" {
+    const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
+    var device = try RomfsDeviceStub.InstanceType.init(std.testing.allocator, "source/fs/romfs/file_system_header.zig", null);
+    var idevice = device.interface.create();
+    try idevice.interface.load();
+    var device_node = try idevice.interface.node();
+    defer device_node.delete();
+    try std.testing.expect(device_node.filetype() == kernel.fs.FileType.File);
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, FileSystemHeader.init(std.testing.allocator, device_node.as_file().?, 0));
 }

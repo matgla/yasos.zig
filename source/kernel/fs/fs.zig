@@ -20,6 +20,7 @@
 
 pub const VirtualFileSystem = @import("vfs.zig").VirtualFileSystem;
 pub const vfs_init = @import("vfs.zig").vfs_init;
+pub const vfs_deinit = @import("vfs.zig").vfs_deinit;
 pub const get_vfs = @import("vfs.zig").get_vfs;
 pub const get_ivfs = @import("vfs.zig").get_ivfs;
 

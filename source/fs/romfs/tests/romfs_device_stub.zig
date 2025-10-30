@@ -28,17 +28,22 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
     base: kernel.fs.ReadOnlyFile,
     file: ?std.fs.File,
     path: []const u8,
+    mapped_memory: ?usize,
 
-    pub fn create(path: []const u8) RomfsDeviceStubFile {
+    pub fn create(path: []const u8, mapped_address: ?usize) !RomfsDeviceStubFile {
+        const cwd = std.fs.cwd();
+        const file = try cwd.openFile(path, .{ .mode = .read_only });
+
         return RomfsDeviceStubFile.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
-            .file = null,
+            .file = file,
             .path = path,
+            .mapped_memory = mapped_address,
         });
     }
 
-    pub fn create_node(allocator: std.mem.Allocator, path: []const u8) !kernel.fs.Node {
-        const file_instance = try create(path).interface.new(allocator);
+    pub fn create_node(allocator: std.mem.Allocator, path: []const u8, mapped_address: ?usize) !kernel.fs.Node {
+        const file_instance = try (try create(path, mapped_address)).interface.new(allocator);
         return kernel.fs.Node.create_file(file_instance);
     }
 
@@ -70,7 +75,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         return @intCast(self.file.?.getPos() catch return 0);
     }
 
-    pub fn size(self: *Self) isize {
+    pub fn size(self: *const Self) usize {
         return @intCast(self.file.?.getEndPos() catch return 0);
     }
 
@@ -79,9 +84,25 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = data;
+        switch (cmd) {
+            @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => {
+                if (data) |ptr| {
+                    const status: *kernel.fs.FileMemoryMapAttributes = @ptrCast(@alignCast(ptr));
+                    if (self.mapped_memory) |addr| {
+                        status.* = .{
+                            .is_memory_mapped = true,
+                            .mapped_address_r = @ptrFromInt(addr),
+                            .mapped_address_w = @ptrFromInt(addr),
+                        };
+                        return 0;
+                    }
+                    return 0;
+                }
+            },
+            else => {
+                return 0;
+            },
+        }
         return 0;
     }
 
@@ -90,20 +111,6 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         _ = cmd;
         _ = data;
         return 0;
-    }
-
-    pub fn stat(self: *Self, buf: *c.struct_stat) void {
-        _ = self;
-        buf.st_dev = 0;
-        buf.st_ino = 0;
-        buf.st_mode = 0;
-        buf.st_nlink = 0;
-        buf.st_uid = 0;
-        buf.st_gid = 0;
-        buf.st_rdev = 0;
-        buf.st_size = 0;
-        buf.st_blksize = 1;
-        buf.st_blocks = 1;
     }
 
     pub fn filetype(self: *const Self) kernel.fs.FileType {
@@ -120,8 +127,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
     }
 
     pub fn load(self: *Self) !void {
-        const cwd = std.fs.cwd();
-        self.file = try cwd.openFile(self.path, .{ .mode = .read_only });
+        _ = self;
     }
 });
 
@@ -130,10 +136,10 @@ pub const RomfsDeviceStub = interface.DeriveFromBase(IDriver, struct {
     allocator: std.mem.Allocator,
     _node: kernel.fs.Node,
 
-    pub fn init(allocator: std.mem.Allocator, path: [:0]const u8) !RomfsDeviceStub {
+    pub fn init(allocator: std.mem.Allocator, path: [:0]const u8, mapped_address: ?usize) !RomfsDeviceStub {
         return RomfsDeviceStub.init(.{
             .allocator = allocator,
-            ._node = try RomfsDeviceStubFile.InstanceType.create_node(allocator, path),
+            ._node = try RomfsDeviceStubFile.InstanceType.create_node(allocator, path, mapped_address),
         });
     }
 

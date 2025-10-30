@@ -17,4 +17,4 @@ const interface = @import("interface");
 
 const IDriver = @import("../idriver.zig").IDriver;
 
-const DriverMock = interface.mock.MockInterface(IDriver);
+pub const DriverMock = interface.mock.MockInterface(IDriver);

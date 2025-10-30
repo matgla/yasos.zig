@@ -31,6 +31,7 @@ pub const Module = struct {
     xip: bool,
     list_node: std.DoublyLinkedList.Node,
     entry: ?SymbolEntry,
+    name: ?[]const u8,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -40,8 +41,13 @@ pub const Module = struct {
             .xip = xip,
             .list_node = .{},
             .entry = null,
+            .name = "dummy_module",
         };
         return module;
+    }
+
+    pub fn destroy(self: *Module) void {
+        self.allocator.destroy(self);
     }
 
     pub fn find_symbol(self: *Module, name: []const u8) ?SymbolEntry {

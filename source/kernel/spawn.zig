@@ -27,27 +27,25 @@ const process_manager = @import("process_manager.zig");
 
 const c = @import("libc_imports").c;
 
-pub fn spawn(allocator: std.mem.Allocator, entry: anytype, arg: ?*const anyopaque, stack_size: u32) error{ProcessCreationFailed}!void {
-    const context = system_call.CreateProcessCall{
-        .allocator = allocator,
-        .entry = @ptrCast(entry),
-        .stack_size = stack_size,
-        .arg = arg,
-    };
-
-    var result: bool = false;
-    system_call.trigger(.create_process, &context, &result);
-    if (!result) {
-        return error.ProcessCreationFailed;
-    }
-}
-
 pub fn root_process(entry: anytype, arg: ?*const anyopaque, stack_size: u32) !void {
     try process_manager.instance.create_process(stack_size, entry, arg, "/");
 
-    if (process_manager.instance.scheduler.schedule_next() != .NoAction) {
+    if (process_manager.instance.schedule_next() != .NoAction) {
         process_manager.instance.initialize_context_switching();
         hal.time.systick.enable();
         system_call.trigger(c.sys_start_root_process, arg, null);
     }
+}
+
+const kernel = @import("kernel.zig");
+const arch_process = &@import("arch").process;
+
+fn test_main() void {}
+
+test "Spawn.ShouldStartRootProcess" {
+    kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
+    defer kernel.process.process_manager.deinitialize_process_manager();
+    try root_process(&test_main, null, 0x4000);
+    try std.testing.expectEqual(true, arch_process.context_switch_initialized);
+    try std.testing.expectEqual(1, hal.irq.impl().calls[c.sys_start_root_process]);
 }

@@ -19,7 +19,7 @@
 //
 
 const std = @import("std");
-const kernel = @import("kernel");
+const kernel = @import("../kernel.zig");
 const Process = kernel.process.Process;
 
 const cpu = @import("hal").cpu;
@@ -32,9 +32,6 @@ pub fn OSThread(comptime ManagerType: anytype) type {
 
         pub fn schedule_next(self: *Self) bool {
             _ = self;
-            // std.Thread.yield() catch {
-            // return false;
-            // };
             return true;
         }
 

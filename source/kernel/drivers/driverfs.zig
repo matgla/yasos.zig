@@ -33,37 +33,6 @@ const c = @import("libc_imports").c;
 
 const log = std.log.scoped(.@"vfs/driverfs");
 
-// const DriverNode = interface.DeriveFromBase(kernel.fs.Node, struct {
-//     const Self = @This();
-//     base: kernel.fs.INodeBase,
-//     _idriver: ?*const IDriver,
-
-//     pub fn create(allocator: std.mem.Allocator, idriver: ?*IDriver) !DriverNode {
-//         var baseinit: kernel.fs.INodeBase = undefined;
-//         if (idriver == null) {
-//             const dir = try DriverDirectory.InstanceType.create(allocator).interface.new(allocator);
-//             baseinit = kernel.fs.INodeBase.InstanceType.create_directory(dir);
-//         } else {
-//             baseinit = idriver.?.interface.inode().?;
-//         }
-//         return DriverNode.init(.{
-//             .base = baseinit.*,
-//             ._idriver = idriver,
-//         });
-//     }
-
-//     pub fn name(self: *const Self) []const u8 {
-//         return self._idriver.interface.name();
-//     }
-
-//     pub fn filetype(self: *Self) kernel.fs.FileType {
-//         if (self._idriver == null) {
-//             return kernel.fs.FileType.Directory;
-//         }
-//         return kernel.fs.FileType.File;
-//     }
-// });
-
 const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
     base: kernel.fs.ReadOnlyFile,
@@ -101,10 +70,6 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
         self._container.deinit();
     }
 
-    pub fn close(self: *Self) void {
-        self.delete();
-    }
-
     pub fn append(self: *Self, driver: IDriver, node_name: []const u8) !void {
         log.debug("mapping driver '{s}' to '{s}' ", .{ driver.interface.name(), node_name });
         self._container.put(node_name, driver) catch |err| {
@@ -119,7 +84,6 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
         while (it.next()) |driver| {
             driver.value_ptr.interface.load() catch |err| {
                 log.err("Loading driver {s} failed with an error: {s}", .{ driver.value_ptr.interface.name(), @errorName(err) });
-                return err;
             };
         }
     }
@@ -129,7 +93,7 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
             result.* = try driver.interface.node();
             return;
         }
-        return error.NoEntry;
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -178,60 +142,34 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try self.get_root_directory().load_all();
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
-        _ = allocator;
+    pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
             const root_clone = self._root.share();
             return kernel.fs.Node.create_directory(root_clone);
         }
         var result: kernel.fs.Node = undefined;
-        self.get_root_directory().get(path, &result) catch return null;
+        const trimmed_path = std.mem.trim(u8, path, "/ ");
+        try self.get_root_directory().get(trimmed_path, &result);
         return result;
     }
 
-    pub fn format(self: *Self) anyerror!void {
-        _ = self;
-        return error.NotSupported; // Driver directory cannot be formatted
-    }
-
-    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        var maybe_node = self.get(path, self._allocator);
-        if (maybe_node) |*node| {
-            defer node.delete();
-            data.st_blksize = 1;
-            data.st_rdev = 1;
-            if (node.is_directory()) {
-                data.st_mode = c.S_IFDIR;
-            } else if (node.is_file()) {
-                data.st_mode = c.S_IFREG;
-            }
-            return 0;
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
+        _ = follow_links;
+        var node = try self.get(path);
+        defer node.delete();
+        data.st_blksize = 1;
+        data.st_rdev = 1;
+        if (node.is_directory()) {
+            data.st_mode = c.S_IFDIR;
+        } else if (node.is_file()) {
+            data.st_mode = c.S_IFREG;
         }
-        return -1; // Stat not supported for driverfs
     }
 
-    pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
-        _ = self;
-        _ = old_path;
-        _ = new_path;
-        return error.NotSupported;
-    }
-
-    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        _ = self;
-        _ = path;
-        return error.NotSupported;
-    }
-
-    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!i32 {
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
-        var maybe_node = self.get(path, self._allocator);
-        defer if (maybe_node) |*n| n.delete();
-        if ((mode & c.F_OK) != 0) {
-            if (maybe_node == null) {
-                return kernel.errno.ErrnoSet.NoEntry;
-            }
-        }
+        var node = try self.get(path);
+        defer node.delete();
 
         if ((mode & c.X_OK) != 0) {
             return kernel.errno.ErrnoSet.PermissionDenied;
@@ -240,6 +178,253 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         if ((mode & c.W_OK) != 0) {
             return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
         }
-        return 0;
     }
 });
+
+const DriverMock = @import("tests/driver_mock.zig").DriverMock;
+const FileMock = @import("../fs/tests/file_mock.zig").FileMock;
+
+test "DriverFs.ShouldInitializeAndDeinitialize" {
+    var driverfs = try (try DriverFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer driverfs.interface.delete();
+
+    try std.testing.expectEqualStrings("dev", driverfs.interface.name());
+}
+
+test "DriverFs.ShouldGetRootDirectory" {
+    var driverfs = try (try DriverFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer driverfs.interface.delete();
+
+    var node = try driverfs.interface.get("/");
+    defer node.delete();
+
+    try std.testing.expect(node.is_directory());
+    try std.testing.expectEqualStrings("dev", node.as_directory().?.interface.name());
+}
+
+test "DriverFs.ShouldGetRootDirectoryWithEmptyPath" {
+    var driverfs = try (try DriverFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer driverfs.interface.delete();
+
+    var node = try driverfs.interface.get("");
+    defer node.delete();
+
+    try std.testing.expect(node.is_directory());
+}
+
+test "DriverFs.ShouldAppendDriver" {
+    var sut = try DriverFs.InstanceType.init(std.testing.allocator);
+    var driverfs = sut.interface.create();
+    defer driverfs.interface.delete();
+
+    var mock_driver = try DriverMock.create(std.testing.allocator);
+    const driver_interface = mock_driver.get_interface();
+
+    const file_mock = try FileMock.create(std.testing.allocator);
+
+    _ = mock_driver
+        .expectCall("name")
+        .willReturn("test_device")
+        .times(2);
+
+    try sut.data().append(driver_interface, "test_device");
+
+    const node = kernel.fs.Node.create_file(file_mock.interface);
+    _ = mock_driver
+        .expectCall("node")
+        .willReturn(node);
+
+    var devnode = try driverfs.interface.get("test_device");
+
+    defer devnode.delete();
+    try std.testing.expect(devnode.is_file());
+
+    _ = file_mock
+        .expectCall("name")
+        .willReturn("yyy");
+    try std.testing.expectEqualStrings("yyy", devnode.as_file().?.interface.name());
+}
+
+test "DriverFs.ShouldReturnErrorForNonExistentDriver" {
+    var sut = try (try DriverFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.get("nonexistent"));
+}
+
+test "DriverFs.ShouldLoadAllDrivers" {
+    var sut = try DriverFs.InstanceType.init(std.testing.allocator);
+    var driverfs = try sut.interface.new(std.testing.allocator);
+    defer driverfs.interface.delete();
+
+    var mock_driver1 = try DriverMock.create(std.testing.allocator);
+    defer mock_driver1.delete();
+    var mock_driver2 = try DriverMock.create(std.testing.allocator);
+    defer mock_driver2.delete();
+    var mock_driver3 = try DriverMock.create(std.testing.allocator);
+    defer mock_driver3.delete();
+
+    _ = mock_driver1
+        .expectCall("name")
+        .willReturn("driver1")
+        .times(2);
+
+    _ = mock_driver2
+        .expectCall("name")
+        .willReturn("driver2")
+        .times(3);
+
+    _ = mock_driver3
+        .expectCall("name")
+        .willReturn("driver3")
+        .times(2);
+
+    try sut.data().append(mock_driver1.get_interface(), "device1");
+    try sut.data().append(mock_driver2.get_interface(), "device2");
+    try sut.data().append(mock_driver3.get_interface(), "device3");
+
+    _ = mock_driver1
+        .expectCall("load")
+        .times(1);
+
+    _ = mock_driver2
+        .expectCall("load")
+        .times(1)
+        .willReturn(kernel.errno.ErrnoSet.FileTooLarge);
+
+    _ = mock_driver3
+        .expectCall("load")
+        .times(1);
+
+    try sut.data().load_all();
+}
+
+test "DriverFs.ShouldStatRootDirectory" {
+    var driverfs = try (try DriverFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer driverfs.interface.delete();
+
+    var stat_buf: c.struct_stat = undefined;
+    try driverfs.interface.stat("/", &stat_buf, true);
+
+    try std.testing.expectEqual(@as(c_uint, c.S_IFDIR), stat_buf.st_mode);
+}
+
+test "DriverFs.ShouldStatDevice" {
+    var sut = try DriverFs.InstanceType.init(std.testing.allocator);
+    var driverfs = sut.interface.create();
+    defer driverfs.interface.delete();
+
+    var mock_driver = try DriverMock.create(std.testing.allocator);
+    const driver_interface = mock_driver.get_interface();
+
+    const file_mock = try FileMock.create(std.testing.allocator);
+
+    _ = mock_driver
+        .expectCall("name")
+        .willReturn("test_device")
+        .times(2);
+
+    try sut.data().append(driver_interface, "test_device");
+
+    const node = kernel.fs.Node.create_file(file_mock.interface);
+
+    _ = mock_driver
+        .expectCall("node")
+        .willReturn(node);
+
+    var stat_buf: c.struct_stat = undefined;
+    try driverfs.interface.stat("/test_device", &stat_buf, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFREG), stat_buf.st_mode);
+}
+
+test "DriverFs.ShouldIterateDrivers" {
+    var sut = try DriverFs.InstanceType.init(std.testing.allocator);
+    var driverfs = sut.interface.create();
+    defer driverfs.interface.delete();
+
+    var mock_driver1 = try DriverMock.create(std.testing.allocator);
+    defer mock_driver1.delete();
+    var mock_driver2 = try DriverMock.create(std.testing.allocator);
+    defer mock_driver2.delete();
+
+    _ = mock_driver1
+        .expectCall("name")
+        .willReturn("driver1")
+        .times(2);
+
+    _ = mock_driver2
+        .expectCall("name")
+        .willReturn("driver2")
+        .times(2);
+
+    try sut.data().append(mock_driver1.get_interface(), "device1");
+    try sut.data().append(mock_driver2.get_interface(), "device2");
+
+    var root = try driverfs.interface.get("/");
+    defer root.delete();
+
+    var maybe_dir = root.as_directory();
+    try std.testing.expect(maybe_dir != null);
+
+    if (maybe_dir) |*dir| {
+        var iterator = try dir.interface.iterator();
+        defer iterator.interface.delete();
+
+        var count: usize = 0;
+        var found_device1 = false;
+        var found_device2 = false;
+
+        while (iterator.interface.next()) |entry| {
+            count += 1;
+            if (std.mem.eql(u8, entry.name, "device1")) {
+                found_device1 = true;
+            }
+            if (std.mem.eql(u8, entry.name, "device2")) {
+                found_device2 = true;
+            }
+        }
+
+        try std.testing.expectEqual(@as(usize, 2), count);
+        try std.testing.expect(found_device1);
+        try std.testing.expect(found_device2);
+    }
+}
+
+test "DriverFs.ShouldHandleAccessPermissions" {
+    var sut = try DriverFs.InstanceType.init(std.testing.allocator);
+    var driverfs = try sut.interface.new(std.testing.allocator);
+    defer driverfs.interface.delete();
+
+    var mock_driver = try DriverMock.create(std.testing.allocator);
+    defer mock_driver.delete();
+
+    const file_mock = try FileMock.create(std.testing.allocator);
+    const node = kernel.fs.Node.create_file(file_mock.interface);
+
+    _ = mock_driver
+        .expectCall("name")
+        .willReturn("test_device")
+        .times(interface.mock.any{});
+
+    _ = mock_driver
+        .expectCall("node")
+        .willReturn(node)
+        .times(interface.mock.any{});
+
+    try sut.data().append(mock_driver.get_interface(), "test_device");
+
+    // Should reject write access
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, driverfs.interface.access("test_device", c.W_OK, 0));
+
+    // Should reject execute access
+    try std.testing.expectError(kernel.errno.ErrnoSet.PermissionDenied, driverfs.interface.access("test_device", c.X_OK, 0));
+
+    // Should allow read access
+    try driverfs.interface.access("test_device", c.R_OK, 0);
+
+    // Should allow file existence check
+    try driverfs.interface.access("test_device", c.F_OK, 0);
+
+    // Should reject access to non-existent device
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, driverfs.interface.access("nonexistent", c.F_OK, 0));
+}

@@ -118,3 +118,69 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
         }
     };
 }
+
+test "ProcessPageAllocator.ShouldAllocateAndFreePages" {
+    const PagePool = @import("process_memory_pool.zig").ProcessMemoryPool;
+    var pool = try PagePool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const allocator_type = ProcessPageAllocator(PagePool);
+    var allocator = allocator_type.init(42, &pool);
+    defer allocator.deinit();
+
+    const alloc = allocator.allocator();
+
+    const mem1 = try alloc.alloc(u8, 8192);
+    try std.testing.expect(mem1.len == 8192);
+    const mem2 = try alloc.alloc(u8, 4096);
+    try std.testing.expect(mem2.len == 4096);
+    try std.testing.expect(mem1.ptr != mem2.ptr);
+}
+
+test "ProcessPageAllocator.ResizeAndRemapShouldFail" {
+    const PagePool = @import("process_memory_pool.zig").ProcessMemoryPool;
+    var pool = try PagePool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const allocator_type = ProcessPageAllocator(PagePool);
+    var allocator = allocator_type.init(42, &pool);
+    defer allocator.deinit();
+
+    const alloc = allocator.allocator();
+
+    const mem1 = try alloc.alloc(u8, 8192);
+    try std.testing.expect(mem1.len == 8192);
+    const resized = alloc.resize(mem1, 1024);
+    try std.testing.expect(!resized);
+    try std.testing.expect(alloc.remap(mem1, 1024) == null);
+
+    alloc.free(mem1);
+    const mem2 = try alloc.alloc(u8, 4096);
+    try std.testing.expect(mem2.len == 4096);
+    try std.testing.expect(mem1.ptr == mem2.ptr);
+}
+
+test "ProcessPageAllocator.AllocateAndReleasePages" {
+    const PagePool = @import("process_memory_pool.zig").ProcessMemoryPool;
+    var pool = try PagePool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const allocator_type = ProcessPageAllocator(PagePool);
+    var allocator = allocator_type.init(42, &pool);
+    defer allocator.deinit();
+
+    const mem1 = allocator.allocate_pages(4);
+    try std.testing.expect(mem1 != null);
+    try std.testing.expect(mem1.?.len == 4096 * 4);
+    const mem2 = allocator.allocate_pages(2);
+    try std.testing.expect(mem2 != null);
+    try std.testing.expect(mem2.?.len == 4096 * 2);
+    try std.testing.expect(mem1.?.ptr != mem2.?.ptr);
+    allocator.release_pages(mem1.?.ptr, 4);
+    const mem3 = allocator.allocate_pages(2);
+    try std.testing.expect(mem3 != null);
+    try std.testing.expect(mem3.?.len == 4096 * 2);
+    try std.testing.expect(mem3.?.ptr == mem1.?.ptr);
+
+    allocator.release_pages(mem2.?.ptr, 2);
+}

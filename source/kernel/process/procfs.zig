@@ -87,15 +87,10 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return "procfs";
     }
 
-    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!i32 {
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
-        var maybe_node = self.get(path, self._allocator);
-        defer if (maybe_node) |*n| n.delete();
-        if ((mode & c.F_OK) != 0) {
-            if (maybe_node == null) {
-                return kernel.errno.ErrnoSet.NoEntry;
-            }
-        }
+        var node = try self.get(path);
+        defer node.delete();
 
         if ((mode & c.X_OK) != 0) {
             return kernel.errno.ErrnoSet.PermissionDenied;
@@ -104,41 +99,25 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         if ((mode & c.W_OK) != 0) {
             return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
         }
-        return 0;
     }
 
-    // fn sync(self: *Self) void {
-    //     const pidmap = kernel.process.process_manager.instance().get_pidmap();
-    //     var it = pidmap.iterator(.{
-    //         .kind = .unset,
-    //     });
-    //     while (it.next()) |pid| {
-    //         self._root.
-    //     }
-    // }
-
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
-        _ = allocator;
-
+    pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         if (path.len == 0) {
             return kernel.fs.Node.create_directory(self._root.share());
         }
 
-        const resolved_path = std.fs.path.resolve(self._allocator, &.{path}) catch return null;
+        const resolved_path = try std.fs.path.resolve(self._allocator, &.{path});
         defer self._allocator.free(resolved_path);
         var it = try std.fs.path.componentIterator(resolved_path);
         var current_directory = self._root;
         var node_to_remove: ?kernel.fs.Node = null;
         while (it.next()) |component| {
             var next_node: kernel.fs.Node = undefined;
-            current_directory.interface.get(component.name, &next_node) catch {
-                if (node_to_remove) |*node| {
-                    node.delete();
-                }
-                return null;
+            errdefer if (node_to_remove) |*node| {
+                node.delete();
             };
+            try current_directory.interface.get(component.name, &next_node);
             if (it.peekNext() != null) {
-                // defer next_node.delete();
                 if (node_to_remove) |*node| {
                     node.delete();
                 }
@@ -147,22 +126,22 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                     if (node_to_remove) |*node| {
                         node.delete();
                     }
-                    return null;
+                    return kernel.errno.ErrnoSet.NotADirectory;
                 }
 
                 current_directory = next_node.as_directory().?;
-            } else {
-                if (node_to_remove) |*node| {
-                    node.delete();
-                }
-                return next_node;
+                continue;
             }
+            if (node_to_remove) |*node| {
+                node.delete();
+            }
+            return next_node;
         }
 
         if (node_to_remove) |*node| {
             node.delete();
         }
-        return null;
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -171,17 +150,14 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return error.NotSupported;
     }
 
-    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        var maybe_node = self.get(path, self._allocator);
-        if (maybe_node) |*node| {
-            defer node.delete();
-            if (node.is_directory()) {
-                data.st_mode = c.S_IFDIR;
-            } else {
-                data.st_mode = c.S_IFREG;
-            }
-            return 0;
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
+        _ = follow_links;
+        var node = try self.get(path);
+        defer node.delete();
+        if (node.is_directory()) {
+            data.st_mode = c.S_IFDIR;
+        } else {
+            data.st_mode = c.S_IFREG;
         }
-        return -1;
     }
 });

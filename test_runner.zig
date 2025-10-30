@@ -21,7 +21,9 @@ const BORDER = "=" ** 80;
 
 // use in custom panic handler
 var current_test: ?[]const u8 = null;
-
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
 pub fn main() !void {
     var mem: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&mem);

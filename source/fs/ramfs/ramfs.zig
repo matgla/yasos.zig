@@ -170,7 +170,8 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         self._root = try RamFsDirectory.InstanceType.create_node(self._allocator, "/");
     }
 
-    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) anyerror!void {
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
+        _ = follow_symlinks;
         var node = try self.get(path);
         defer node.delete();
         data.st_mode = switch (node.filetype()) {
@@ -394,14 +395,14 @@ test "RamFs.StatShouldWork" {
 
     var stat_data: c.struct_stat = undefined;
 
-    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.stat("/nonexisting", &stat_data));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.stat("/nonexisting", &stat_data, true));
 
     try sut.interface.mkdir("/test", 0);
-    try sut.interface.stat("/test", &stat_data);
+    try sut.interface.stat("/test", &stat_data, true);
     try std.testing.expectEqual(c.S_IFDIR, stat_data.st_mode);
 
     try sut.interface.create("/test/file.txt", 0);
-    try sut.interface.stat("/test/file.txt", &stat_data);
+    try sut.interface.stat("/test/file.txt", &stat_data, true);
     try std.testing.expectEqual(c.S_IFREG, stat_data.st_mode);
 }
 
@@ -465,4 +466,58 @@ test "RamFsFile.ShouldHandleSeekCorrectly" {
     _ = try file.?.interface.seek(-11, c.SEEK_CUR);
     try std.testing.expectEqual(11, file.?.interface.read(buffer[0..11]));
     try std.testing.expectEqualStrings("Hello World", buffer[0..11]);
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, file.?.interface.seek(-1, 9999));
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, file.?.interface.seek(@as(isize, -2) * @as(isize, @intCast(file.?.interface.size())), c.SEEK_END));
+}
+
+test "RamFsFile.ShouldAlwaysReturnZeroForSync" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try sut.interface.create("/file.txt", 0);
+    var node = try sut.interface.get("/file.txt");
+    defer node.delete();
+    var file = node.as_file();
+    try std.testing.expect(file != null);
+
+    _ = file.?.interface.write("Some data");
+    try std.testing.expectEqual(0, file.?.interface.sync());
+}
+
+test "RamFsFile.ShouldReturnNotMemoryMappedForIoctl" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try sut.interface.create("/file.txt", 0);
+    var node = try sut.interface.get("/file.txt");
+    defer node.delete();
+    var file = node.as_file();
+    try std.testing.expect(file != null);
+
+    var status: kernel.fs.FileMemoryMapAttributes = undefined;
+    try std.testing.expectEqual(-1, file.?.interface.ioctl(-1, &status));
+    try std.testing.expectEqual(0, file.?.interface.ioctl(@intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus), &status));
+    try std.testing.expectEqual(true, status.is_memory_mapped);
+}
+
+test "RamFsFile.ShouldAlwaysReturnZeroForFcntl" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try sut.interface.create("/file.txt", 0);
+    var node = try sut.interface.get("/file.txt");
+    defer node.delete();
+    var file = node.as_file();
+    try std.testing.expect(file != null);
+
+    var data: i32 = 0;
+    try std.testing.expectEqual(0, file.?.interface.fcntl(-1, &data));
+    try std.testing.expectEqual(0, data);
+    try std.testing.expectEqual(0, file.?.interface.fcntl(-123, null));
+    try std.testing.expectEqual(0, file.?.interface.fcntl(0, &data));
+    try std.testing.expectEqual(0, file.?.interface.fcntl(999, null));
 }

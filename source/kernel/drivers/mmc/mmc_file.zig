@@ -87,10 +87,6 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return @as(c.off_t, @intCast(self._current_block)) << 9;
     }
 
-    pub fn close(self: *Self) void {
-        _ = self;
-    }
-
     pub fn sync(self: *Self) i32 {
         _ = self;
         return 0;
@@ -119,9 +115,8 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn stat(self: *Self, data: *c.struct_stat) void {
-        _ = self;
-        _ = data;
+    pub fn size(self: *const Self) usize {
+        return @intCast(self._driver.size_in_sectors() << 9);
     }
 
     pub fn filetype(self: *const Self) kernel.fs.FileType {
@@ -130,6 +125,6 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
+        _ = self;
     }
 });

@@ -15,6 +15,12 @@
 
 const std = @import("std");
 
-pub const KernelError = error{
-    CurrentProcessNotFound,
+pub const CpuStub = struct {
+    var _coreid: u8 = 0;
+    pub fn set_coreid(id: u8) void {
+        _coreid = id;
+    }
+    pub fn coreid() u8 {
+        return _coreid;
+    }
 };

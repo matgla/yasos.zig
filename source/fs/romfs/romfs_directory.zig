@@ -75,10 +75,6 @@ pub const RomFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         return self._header.name();
     }
 
-    pub fn close(self: *Self) void {
-        _ = self;
-    }
-
     pub fn delete(self: *Self) void {
         self._header.deinit();
     }

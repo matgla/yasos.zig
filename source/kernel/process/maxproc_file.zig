@@ -60,10 +60,6 @@ pub const MaxProcFile = interface.DeriveFromBase(MaxProcBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
-    }
-
-    pub fn close(self: *Self) void {
         _ = self;
     }
 });

@@ -72,36 +72,25 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     }
 
     pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+        var new_position: c.off_t = 0;
+        const file_size: c.off_t = @intCast(self.header.size());
         switch (whence) {
             c.SEEK_SET => {
-                if (offset < 0) {
-                    return -1;
-                }
-                self.position = @intCast(offset);
+                new_position = offset;
             },
             c.SEEK_END => {
-                const file_size: c.off_t = @intCast(self.header.size());
-                if (file_size >= offset) {
-                    self.position = file_size - @as(c.off_t, @intCast(offset));
-                } else {
-                    // set errno
-                    return -1;
-                }
+                new_position = file_size + offset;
             },
             c.SEEK_CUR => {
-                const new_position = @as(c.off_t, @intCast(self.position)) + offset;
-                if (new_position < 0) {
-                    return -1;
-                }
-                self.position = @intCast(new_position);
+                new_position = @as(c.off_t, @intCast(self.position)) + offset;
             },
-            else => return -1,
+            else => return kernel.errno.ErrnoSet.InvalidArgument,
         }
-        return 0;
-    }
-
-    pub fn close(self: *Self) void {
-        _ = self;
+        if (new_position < 0 or new_position > file_size) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+        self.position = new_position;
+        return @intCast(self.position);
     }
 
     pub fn tell(self: *Self) c.off_t {
@@ -115,10 +104,11 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
-                var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
+                var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data.?));
                 if (self.header.get_mapped_address()) |address| {
                     attr.is_memory_mapped = true;
                     attr.mapped_address_r = address;
+                    attr.mapped_address_w = null;
                 } else {
                     attr.is_memory_mapped = false;
                 }
@@ -143,10 +133,9 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
 
     pub fn delete(self: *Self) void {
         self.header.deinit();
-        _ = self.close();
     }
 
-    pub fn stat(self: *Self, data: *c.struct_stat) void {
-        data.st_size = @as(usize, @intCast(self.header.size()));
+    pub fn size(self: *const Self) usize {
+        return @as(usize, @intCast(self.header.size()));
     }
 });

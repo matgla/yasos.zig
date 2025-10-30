@@ -123,10 +123,6 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return self._position;
     }
 
-    pub fn close(self: *Self) void {
-        _ = self;
-    }
-
     pub fn dupe(self: *Self) ?IFile {
         const new_file = self._allocator.create(Self) catch return null;
         new_file.* = self.*;
@@ -143,8 +139,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return @intCast(self._position);
     }
 
-    pub fn stat(self: *Self, data: *c.struct_stat) void {
-        data.st_size = @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
+    pub fn size(self: *const Self) usize {
+        return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -176,7 +172,6 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
         if (self._data.deinit()) {
             self._allocator.destroy(self._data);
         }
@@ -215,7 +210,6 @@ test "RamFsFile.ShouldSeekFile" {
     data.* = try RamFsData.create(std.testing.allocator);
     var sut = RamFsFile.InstanceType.create(std.testing.allocator, data, "other_file");
     var file = try sut.interface.new(std.testing.allocator);
-    defer _ = file.interface.close();
     defer file.interface.delete();
     try std.testing.expectEqual(10, try file.interface.seek(10, c.SEEK_CUR));
     try std.testing.expectEqual(22, file.interface.write("Some data inside file\n"));
@@ -240,7 +234,5 @@ test "RamFsFile.ShouldSeekFile" {
     try std.testing.expectEqual(132, try file.interface.seek(132, c.SEEK_SET));
     try std.testing.expectEqual(132, file.interface.tell());
 
-    var stat: c.struct_stat = undefined;
-    file.interface.stat(&stat);
-    try std.testing.expectEqual(132 + @sizeOf(RamFsData), stat.st_size);
+    try std.testing.expectEqual(132 + @sizeOf(RamFsData), file.interface.size());
 }

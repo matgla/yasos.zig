@@ -27,7 +27,7 @@ const process_manager = @import("../process_manager.zig");
 var tick_counter: u64 = 0;
 var last_time: u64 = 0;
 
-export fn irq_systick() void {
+pub export fn irq_systick() void {
     // hal.hw_atomic.lock(config.process.context_switch_hw_spinlock_number);
     // defer hal.hw_atomic.unlock(config.process.context_switch_hw_spinlock_number);
     // modify from core 0 only

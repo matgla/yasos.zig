@@ -216,10 +216,6 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
-    }
-
-    pub fn close(self: *Self) void {
         _ = self;
     }
 });

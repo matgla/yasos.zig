@@ -86,10 +86,6 @@ pub const PidDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
         return self._name;
     }
 
-    pub fn close(self: *Self) void {
-        _ = self;
-    }
-
     pub fn get(self: *Self, nodename: []const u8, result: *kernel.fs.Node) anyerror!void {
         if (std.mem.eql(u8, "stat", nodename)) {
             result.* = try PidStatFile.InstanceType.create_node(self._allocator, self._pid, false);

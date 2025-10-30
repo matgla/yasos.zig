@@ -82,10 +82,6 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn close(self: *Self) void {
-                _ = self;
-            }
-
             pub fn sync(self: *Self) i32 {
                 _ = self;
                 return 0;
@@ -121,17 +117,8 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return -1;
             }
 
-            pub fn stat(self: *Self, buf: *c.struct_stat) void {
-                buf.st_dev = 0;
-                buf.st_ino = 0;
-                buf.st_mode = 0;
-                buf.st_nlink = 0;
-                buf.st_uid = 0;
-                buf.st_gid = 0;
-                buf.st_rdev = 0;
-                buf.st_size = 0;
-                buf.st_blksize = FlashType.BlockSize;
-                buf.st_blocks = self._flash.get_number_of_blocks();
+            pub fn size(self: *const Self) usize {
+                return FlashType.BlockSize * self._flash.get_number_of_blocks();
             }
 
             pub fn filetype(self: *const Self) FileType {
@@ -141,7 +128,6 @@ pub fn FlashFile(comptime FlashType: anytype) type {
 
             pub fn delete(self: *Self) void {
                 log.debug("Flash file 0x{x} destruction", .{@intFromPtr(self)});
-                _ = self.close();
             }
         });
     };

@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 comptime {
+    _ = @import("driverfs.zig");
     _ = @import("driverfs_iterator.zig");
     _ = @import("mmc/card_parser.zig");
 }
