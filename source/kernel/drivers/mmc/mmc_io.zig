@@ -54,12 +54,12 @@ const R7 = R3;
 
 pub const MmcIo = struct {
     const Self = @This();
-    _mmc: hal.mmc.Mmc,
+    _mmc: *hal.mmc.Mmc,
     _card_type: ?CardType,
     _size: u32,
     _initialized: bool,
 
-    pub fn create(mmc: hal.mmc.Mmc) MmcIo {
+    pub fn create(mmc: *hal.mmc.Mmc) MmcIo {
         return .{
             ._mmc = mmc,
             ._card_type = null,
@@ -75,10 +75,12 @@ pub const MmcIo = struct {
             .SPI => {
                 self.initialize_spi_mmc() catch |err| {
                     log.info("initialization failed with an error: {s}", .{@errorName(err)});
+                    return err;
                 };
             },
             else => {
                 log.err("Unsupported mode in config", .{});
+                return kernel.errno.ErrnoSet.NotImplemented;
             },
         }
     }
@@ -106,7 +108,7 @@ pub const MmcIo = struct {
         const num_blocks = buf.len / 512;
         var i: usize = 0;
         while (i < num_blocks) : (i += 1) {
-            self.block_read_impl(17, block_address + i, buf[512 * i .. 512 * (i + 1)]) catch return -1;
+            self.block_read_impl(17, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch return -1;
         }
 
         return @intCast(buf.len);
@@ -127,7 +129,7 @@ pub const MmcIo = struct {
         const num_blocks = buf.len / 512;
         var i: usize = 0;
         while (i < num_blocks) : (i += 1) {
-            self.block_write_impl(24, block_address + i, buf[512 * i .. 512 * (i + 1)]) catch return -1;
+            self.block_write_impl(24, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch return -1;
         }
 
         return @intCast(buf.len);
@@ -135,6 +137,10 @@ pub const MmcIo = struct {
 
     pub fn size_in_sectors(self: *const Self) u32 {
         return self._size;
+    }
+
+    pub fn initialized(self: *const Self) bool {
+        return self._initialized;
     }
 
     fn reset(self: *const Self) error{MMCResetFailure}!void {
@@ -414,3 +420,223 @@ pub const MmcIo = struct {
         self._initialized = true;
     }
 };
+
+var mmc_stub = hal.mmc.Mmc.create(.{
+    .pins = .{
+        .clk = 0,
+        .cmd = 1,
+        .d0 = 2,
+    },
+    .mode = .SPI,
+});
+
+fn consume_frame(maybe_expected: ?[]const u8) !void {
+    // do nothing
+    const frame = mmc_stub.impl.get_transmit_data();
+    defer std.testing.allocator.free(frame);
+    if (maybe_expected) |expected| {
+        try std.testing.expectEqualSlices(u8, expected, frame);
+    }
+}
+
+test "MmcIo.ShouldInitializeInterface" {
+    var sut = MmcIo.create(&mmc_stub);
+    mmc_stub.impl.reset();
+    defer mmc_stub.impl.reset();
+
+    try mmc_stub.impl.init();
+    const R1_IDLE_RESP = [_]u8{0x01};
+    const R7_RESP = [_]u8{ 0x01, 0x00, 0x01, 0xaa };
+    const R1_RESP = [_]u8{0x00};
+    const R3_RESP = [_]u8{ 0x40, 0x00, 0x00, 0x00 };
+
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R7_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&R3_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    const TOKEN_READ: [1]u8 = [_]u8{0xfe};
+    try mmc_stub.impl.set_receive_data(&TOKEN_READ);
+    try mmc_stub.impl.set_receive_data(&[_]u8{0x00} ** 16);
+    try mmc_stub.impl.set_receive_data(&[_]u8{ 0x00, 0x00 }); // crc
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&TOKEN_READ);
+    const csd_bytes: [16]u8 = [_]u8{
+        0x40, 0x0E, 0x00, 0x32, 0x5B, 0x59, 0x00, 0x00,
+        0x74, 0xcb, 0x7f, 0x80, 0x0a, 0x40, 0x00, 0x3d,
+    };
+
+    try mmc_stub.impl.set_receive_data(csd_bytes[0..]);
+    try mmc_stub.impl.set_receive_data(&[_]u8{ 0xe1, 0xf8 }); // crc
+
+    try sut.init();
+
+    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x69, 0x40, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x7a, 0x00, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+
+    try mmc_stub.impl.verify();
+    try std.testing.expect(sut.initialized());
+
+    try std.testing.expectEqual(29900, sut.size_in_sectors());
+    try std.testing.expectEqual(sut._card_type.?, CardType.SDv2Block);
+}
+
+test "MmcIo.ShouldInitializeInterfaceWithSDV2Byte" {
+    var sut = MmcIo.create(&mmc_stub);
+    mmc_stub.impl.reset();
+    defer mmc_stub.impl.reset();
+
+    try mmc_stub.impl.init();
+    const R1_IDLE_RESP = [_]u8{0x01};
+    const R7_RESP = [_]u8{ 0x01, 0x00, 0x01, 0xaa };
+    const R1_RESP = [_]u8{0x00};
+    const R3_RESP = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
+
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R7_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&R3_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    const TOKEN_READ: [1]u8 = [_]u8{0xfe};
+    try mmc_stub.impl.set_receive_data(&TOKEN_READ);
+    try mmc_stub.impl.set_receive_data(&[_]u8{0x00} ** 16);
+    try mmc_stub.impl.set_receive_data(&[_]u8{ 0x00, 0x00 }); // crc
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&TOKEN_READ);
+    const csd_bytes: [16]u8 = [_]u8{
+        0x40, 0x0E, 0x00, 0x32, 0x5B, 0x59, 0x00, 0x00,
+        0x74, 0xcb, 0x7f, 0x80, 0x0a, 0x40, 0x00, 0x3d,
+    };
+
+    try mmc_stub.impl.set_receive_data(csd_bytes[0..]);
+    try mmc_stub.impl.set_receive_data(&[_]u8{ 0xe1, 0xf8 }); // crc
+
+    try sut.init();
+
+    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x69, 0x40, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x7a, 0x00, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+
+    try mmc_stub.impl.verify();
+    try std.testing.expect(sut.initialized());
+
+    try std.testing.expectEqual(29900, sut.size_in_sectors());
+    try std.testing.expectEqual(sut._card_type.?, CardType.SDv2Byte);
+}
+
+test "MmcIo.ShouldHandleIncorrectCMD8Response" {
+    var sut = MmcIo.create(&mmc_stub);
+    mmc_stub.impl.reset();
+    defer mmc_stub.impl.reset();
+
+    try mmc_stub.impl.init();
+    const R1_IDLE_RESP = [_]u8{0x01};
+    const R7_RESP = [_]u8{ 0x01, 0x00, 0x00, 0xaa };
+
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R7_RESP);
+
+    try std.testing.expectEqual(error.UnknownCard, sut.init());
+
+    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+
+    try mmc_stub.impl.verify();
+    try std.testing.expect(!sut.initialized());
+}
+
+test "MmcIo.ShouldInitializeWithACMD41" {
+    var sut = MmcIo.create(&mmc_stub);
+    mmc_stub.impl.reset();
+    defer mmc_stub.impl.reset();
+
+    try mmc_stub.impl.init();
+    const R1_IDLE_RESP = [_]u8{0x01};
+    const R7_RESP = [_]u8{ 0x01, 0x00, 0x01, 0xaa };
+    const R1_RESP = [_]u8{0x00};
+
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&R7_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_IDLE_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    const TOKEN_READ: [1]u8 = [_]u8{0xfe};
+    try mmc_stub.impl.set_receive_data(&TOKEN_READ);
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&[_]u8{ 0x00, 0x00 }); // crc
+    try mmc_stub.impl.set_receive_data(&R1_RESP);
+    try mmc_stub.impl.set_receive_data(&TOKEN_READ);
+    const csd_bytes: [16]u8 = [_]u8{
+        0x40, 0x0E, 0x00, 0x32, 0x5B, 0x59, 0x00, 0x00,
+        0x74, 0xcb, 0x7f, 0x80, 0x0a, 0x40, 0x00, 0x3d,
+    };
+
+    try mmc_stub.impl.set_receive_data(csd_bytes[0..]);
+    try mmc_stub.impl.set_receive_data(&[_]u8{ 0xe1, 0xf8 }); // crc
+
+    try sut.init();
+
+    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x69, 0x00, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+    try consume_frame(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 });
+    try consume_frame(null);
+    try consume_frame(null);
+
+    try mmc_stub.impl.verify();
+    try std.testing.expect(sut.initialized());
+
+    try std.testing.expectEqual(29900, sut.size_in_sectors());
+    try std.testing.expectEqual(sut._card_type.?, CardType.SDv1);
+}

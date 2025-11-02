@@ -14,6 +14,16 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 comptime {
+    _ = @import("driverfs.zig");
     _ = @import("driverfs_iterator.zig");
     _ = @import("mmc/card_parser.zig");
+    _ = @import("uart/uart_driver.zig");
+    _ = @import("uart/uart_file.zig");
+    _ = @import("mmc/mmc_file.zig");
+    _ = @import("mmc/mmc_partition_file.zig");
+    _ = @import("mmc/mmc_driver.zig");
+    _ = @import("mmc/mmc_partition_driver.zig");
+    _ = @import("mmc/mmc_io.zig");
+    _ = @import("flash/flash_file.zig");
+    _ = @import("flash/flash_driver.zig");
 }

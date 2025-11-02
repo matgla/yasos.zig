@@ -18,6 +18,21 @@ const std = @import("std");
 comptime {
     _ = @import("drivers/tests.zig");
     _ = @import("fs/tests.zig");
+    _ = @import("scheduler/tests.zig");
+
+    _ = @import("benchmark.zig");
+    _ = @import("mutex.zig");
+    _ = @import("modules.zig");
+    _ = @import("process_manager.zig");
+    _ = @import("memory/tests.zig");
+    _ = @import("errno.zig");
+    _ = @import("spawn.zig");
+    _ = @import("semaphore.zig");
+    _ = @import("dump_hardware.zig");
+    _ = @import("process.zig");
+    _ = @import("process/tests.zig");
+    _ = @import("time.zig");
+    _ = @import("interrupts/kernel_semaphore.zig");
 }
 
 test {

@@ -46,7 +46,7 @@ pub fn Flash(comptime FlashImpl: anytype) type {
             return self.impl.erase(address);
         }
 
-        pub fn get_number_of_blocks(self: *Self) u32 {
+        pub fn get_number_of_blocks(self: *const Self) u32 {
             return self.impl.get_number_of_blocks();
         }
 

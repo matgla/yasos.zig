@@ -99,12 +99,12 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub const UnblockAction = *const fn (context: ?*anyopaque, rc: i32) void;
         const ProcessMemoryAllocator = kernel.memory.heap.ProcessPageAllocator(ProcessMemoryPoolType);
 
-        const BlockedByProcess = struct {
+        pub const BlockedByProcess = struct {
             waiting_for: *const Self,
             node: std.DoublyLinkedList.Node,
         };
 
-        const BlockedProcessAction = struct {
+        pub const BlockedProcessAction = struct {
             blocked: *Self,
             context: ?*anyopaque = null,
             action: UnblockAction,
@@ -198,6 +198,20 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.clear_fds();
             self._kernel_allocator.free(self.cwd);
             self._process_memory_allocator.deinit();
+            var it = self._blocked_by.first;
+            while (it) |blocked| {
+                const blocker: *BlockedByProcess = @fieldParentPtr("node", blocked);
+                it = blocked.next;
+                self._kernel_allocator.destroy(blocker);
+            }
+
+            it = self._blocks.first;
+            while (it) |blocks| {
+                const action: *BlockedProcessAction = @fieldParentPtr("node", blocks);
+                it = blocks.next;
+                self._kernel_allocator.destroy(action);
+            }
+            self._kernel_allocator.destroy(self);
         }
 
         pub fn get_memory_allocator(self: *Self) std.mem.Allocator {
@@ -282,10 +296,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.impl.set_stack_pointer(ptr, blocked_by_process);
         }
 
-        pub fn stack_usage(self: Self) usize {
-            return @intFromPtr(&self.stack[self.stack.len - 1]) - @intFromPtr(self.stack_position);
-        }
-
         pub fn block_semaphore(self: *Self, semaphore: *const Semaphore) void {
             self.waiting_for = semaphore;
             self.reevaluate_state();
@@ -340,7 +350,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 return;
             }
 
-            if (self._blocked_by.len() != 0) {
+            if (self._blocked_by.first != null) {
                 self.state = Process.State.Blocked;
                 return;
             }
@@ -365,8 +375,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn unblock_parent(self: *Self) void {
             var it = self._blocks.first;
-            while (it) |blocks| : (it = blocks.next) {
+            while (it) |blocks| {
                 const action: *BlockedProcessAction = @fieldParentPtr("node", blocks);
+                it = blocks.next;
                 if (action.blocked == self._parent.?) {
                     action.action(action.context, 0);
                     self._blocks.remove(&action.node);
@@ -382,8 +393,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn unblock_from(self: *Self, blocking_process: *const Self) void {
             var it = self._blocked_by.first;
-            while (it) |blocks| : (it = blocks.next) {
+            while (it) |blocks| {
                 const blocker: *BlockedByProcess = @fieldParentPtr("node", blocks);
+                it = blocks.next;
                 if (blocker.waiting_for == blocking_process) {
                     self._blocked_by.remove(blocks);
                     self._kernel_allocator.destroy(blocker);
@@ -418,7 +430,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                     return address.ptr;
                 }
             }
-            return std.posix.MMapError.OutOfMemory;
+            return kernel.errno.ErrnoSet.OutOfMemory;
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
@@ -448,13 +460,13 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn sleep_for_us(self: *Self, us: u64) void {
-            const start = systick.get_system_ticks();
+            const start = systick.get_system_ticks().*;
             var elapsed: u64 = 0;
             const ptr: *volatile u64 = &elapsed;
             while (ptr.* < us / 1000) {
                 // context switch, we are waiting for condition
                 hal.irq.trigger(.pendsv);
-                ptr.* = systick.get_system_ticks() - start;
+                ptr.* = systick.get_system_ticks().* - start;
             }
             _ = self;
         }
@@ -513,41 +525,495 @@ pub const Process = ProcessInterface(arch.HardwareProcess, kernel.memory.heap.Pr
 
 fn process_init() void {}
 
-test "initialize process" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer {
-        const deinit_status = gpa.deinit();
-        if (deinit_status == .leak) std.testing.expect(false) catch @panic("Test Failed");
+const ProcessMemoryPoolForTests = struct {
+    const Self = @This();
+    pub const page_size = 4096;
+    buffer_to_return: ?[]u8 = null,
+    caller_pid: c.pid_t = 0,
+    caller_number_of_pages: i32 = 0,
+    release_address: ?*anyopaque = null,
+    release_pages: i32 = 0,
+    release_pid: c.pid_t = 0,
+
+    pub fn release_pages_for(self: *Self, pid: c.pid_t) void {
+        _ = self;
+        _ = pid;
     }
-    const stack_size = 1024;
-    const process = try Process.create(allocator, stack_size, process_init);
-    try std.testing.expectEqual(process.pid, 1);
-    try std.testing.expectEqual(process.state, Process.State.Ready);
-    try std.testing.expectEqual(process.priority, 0);
-    try std.testing.expectEqual(process.stack.len, stack_size);
-    defer process.deinit();
 
-    const second_process = try Process.create(allocator, stack_size, process_init);
-    try std.testing.expectEqual(second_process.pid, 2);
-    try std.testing.expectEqual(second_process.state, Process.State.Ready);
-    try std.testing.expectEqual(second_process.priority, 0);
-    try std.testing.expectEqual(second_process.stack.len, stack_size);
+    pub fn allocate_pages(self: *Self, number_of_pages: i32, pid: c.pid_t) ?[]u8 {
+        self.caller_pid = pid;
+        self.caller_number_of_pages = number_of_pages;
+        return self.buffer_to_return;
+    }
 
-    defer second_process.deinit();
+    pub fn free_pages(self: *Self, address: *anyopaque, number_of_pages: i32, pid: c.pid_t) void {
+        self.release_address = address;
+        self.release_pages = number_of_pages;
+        self.release_pid = pid;
+    }
+
+    pub fn will_return(self: *Self, buffer: []u8) void {
+        self.buffer_to_return = buffer;
+    }
+};
+const ProcessUnderTest = ProcessInterface(arch.HardwareProcess, ProcessMemoryPoolForTests);
+
+test "Process.ShouldBeCreated" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    const cwd_for_process = "/some/path";
+    const pid_for_process = 10;
+    hal.time.impl.set_time(1000);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, cwd_for_process, &pool, null, pid_for_process);
+    defer sut.deinit();
+
+    try std.testing.expectEqual(pid_for_process, sut.pid);
+    try std.testing.expectEqualStrings(cwd_for_process, sut.get_current_directory());
+    try std.testing.expectEqual(1000, sut._start_time);
 }
 
-test "detect stack overflow" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer {
-        const deinit_status = gpa.deinit();
-        if (deinit_status == .leak) std.testing.expect(false) catch @panic("Test Failed");
+const FileMock = @import("fs/tests/file_mock.zig").FileMock;
+
+test "Process.ShouldChangeDirectory" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 20);
+    defer sut.deinit();
+
+    try sut.change_directory("/home/user");
+    try std.testing.expectEqualStrings("/home/user", sut.get_current_directory());
+}
+
+test "Process.ShouldAttachAndReleaseFile" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 30);
+    defer sut.deinit();
+
+    var file_mock = try FileMock.create(std.testing.allocator);
+    defer file_mock.delete();
+    const node = kernel.fs.Node.create_file(file_mock.interface);
+
+    var file_mock2 = try FileMock.create(std.testing.allocator);
+    defer file_mock2.delete();
+    const node2 = kernel.fs.Node.create_file(file_mock2.interface);
+
+    const fd = try sut.attach_file("/tmp/test.txt", node);
+    try std.testing.expectEqual(@as(i32, 0), fd);
+
+    const fd2 = try sut.attach_file("/var/log/syslog", node2);
+    try std.testing.expectEqual(@as(i32, 1), fd2);
+
+    const handle = sut.get_file_handle(fd);
+    try std.testing.expect(handle != null);
+    try std.testing.expectEqualStrings("/tmp/test.txt", handle.?.path);
+
+    sut.release_file(fd);
+    try std.testing.expect(sut.get_file_handle(fd) == null);
+}
+
+test "Process.ShouldReuseReleasedFileDescriptor" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 40);
+    defer sut.deinit();
+
+    var file_mock1 = try FileMock.create(std.testing.allocator);
+    defer file_mock1.delete();
+    const node1 = kernel.fs.Node.create_file(file_mock1.interface);
+    const fd1 = try sut.attach_file("/tmp/file1", node1);
+    try std.testing.expectEqual(@as(i32, 0), fd1);
+
+    sut.release_file(fd1);
+
+    var file_mock2 = try FileMock.create(std.testing.allocator);
+    defer file_mock2.delete();
+    const node2 = kernel.fs.Node.create_file(file_mock2.interface);
+    const fd2 = try sut.attach_file("/tmp/file2", node2);
+
+    try std.testing.expectEqual(fd1, fd2);
+}
+
+test "Process.ShouldReturnUptime" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(500);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 50);
+    defer sut.deinit();
+
+    hal.time.impl.set_time(2500);
+    try std.testing.expectEqual(@as(u64, 2000), sut.get_uptime());
+}
+
+test "Process.ShouldSetCurrentCore" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 60);
+    defer sut.deinit();
+
+    sut.set_core(2);
+    try std.testing.expectEqual(@as(u8, 2), sut.current_core);
+}
+
+const irq_systick = @import("interrupts/systick.zig").irq_systick;
+test "Process.ShouldSleepForMilliseconds" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 70);
+    defer sut.deinit();
+
+    const PendSvAction = struct {
+        pub fn call() void {
+            hal.time.systick.set_ticks(hal.time.systick.get_system_tick() + 1000);
+            for (0..1000) |_| irq_systick();
+        }
+    };
+
+    hal.irq.impl().set_irq_action(.pendsv, &PendSvAction.call);
+    sut.sleep_for_ms(10);
+}
+
+test "Process.ShouldForkProcess" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 80);
+    try std.testing.expectEqual(null, parent._parent);
+    defer parent.deinit();
+
+    var pid: c.pid_t = -1;
+    const vfork_context = c.vfork_context{
+        .pid = &pid,
+    };
+
+    var child = try parent.vfork(&pool, &vfork_context, 81);
+    defer child.deinit();
+
+    try std.testing.expect(child.get_parent() == parent);
+    try std.testing.expectEqual(-1, pid);
+
+    child.set_vfork_pid(123);
+    try std.testing.expectEqual(123, pid);
+}
+
+const MultiProcessUnblock = struct {
+    pub const Context = struct {
+        count: usize = 0,
+        last_rc: i32 = 0,
+    };
+
+    pub fn action(ctx: ?*anyopaque, rc: i32) void {
+        const context_ptr = @as(*Context, @ptrCast(@alignCast(ctx.?)));
+        context_ptr.count += 1;
+        context_ptr.last_rc = rc;
     }
-    const stack_size = 1024;
-    const process = try Process.create(allocator, stack_size, process_init);
-    defer process.deinit();
-    try std.testing.expect(process.validate_stack());
-    process.stack[0] = 0x12;
-    try std.testing.expect(!process.validate_stack());
+};
+
+test "Process.ShouldWaitForMultipleProcessesAndUnblock" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+
+    hal.time.impl.set_time(0);
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 90);
+    defer parent.deinit();
+
+    var child1 = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 91);
+    defer child1.deinit();
+
+    var child2 = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 92);
+    defer child2.deinit();
+
+    var context = MultiProcessUnblock.Context{};
+    const ctx_ptr: ?*anyopaque = &context;
+
+    try parent.wait_for_process(child1, &MultiProcessUnblock.action, ctx_ptr);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, parent.state);
+
+    try parent.wait_for_process(child2, &MultiProcessUnblock.action, ctx_ptr);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, parent.state);
+
+    {
+        var count: usize = 0;
+        var it = parent._blocked_by.first;
+        while (it) |node| {
+            count += 1;
+            it = node.next;
+        }
+        try std.testing.expectEqual(@as(usize, 2), count);
+    }
+
+    {
+        var count: usize = 0;
+        var it = child1._blocks.first;
+        while (it) |node| {
+            count += 1;
+            it = node.next;
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
+
+    child1.unblock_all(11);
+
+    try std.testing.expectEqual(@as(usize, 1), context.count);
+    try std.testing.expectEqual(@as(i32, 11), context.last_rc);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, parent.state);
+
+    {
+        var count: usize = 0;
+        var it = parent._blocked_by.first;
+        while (it) |node| {
+            count += 1;
+            it = node.next;
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
+
+    {
+        const it = child1._blocks.first;
+        try std.testing.expect(it == null);
+    }
+
+    child2.unblock_all(22);
+
+    try std.testing.expectEqual(@as(usize, 2), context.count);
+    try std.testing.expectEqual(@as(i32, 22), context.last_rc);
+    try std.testing.expectEqual(ProcessUnderTest.State.Ready, parent.state);
+
+    {
+        const it = parent._blocked_by.first;
+        try std.testing.expect(it == null);
+    }
+
+    {
+        const it = child2._blocks.first;
+        try std.testing.expect(it == null);
+    }
+}
+
+test "Process.ShouldBlockOnSemaphore" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 100);
+    defer sut.deinit();
+
+    var sem = Semaphore.create(1);
+
+    sut.block_semaphore(&sem);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, sut.state);
+    try std.testing.expect(sut.is_blocked_by(&sem));
+}
+
+test "Process.ShouldUnblockSemaphoreAndUpdateState" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 110);
+    defer sut.deinit();
+
+    var sem = Semaphore.create(1);
+
+    sut.block_semaphore(&sem);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, sut.state);
+
+    sut.unblock_semaphore(&sem);
+    try std.testing.expectEqual(ProcessUnderTest.State.Ready, sut.state);
+    try std.testing.expect(!sut.is_blocked_by(&sem));
+}
+
+test "Process.ShouldRestoreParentStack" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 120);
+    defer parent.deinit();
+
+    const parent_stack_before = parent.stack_pointer();
+
+    var pid: c.pid_t = -1;
+    const vfork_ctx = c.vfork_context{ .pid = &pid };
+
+    var child = try parent.vfork(&pool, &vfork_ctx, 121);
+    defer child.deinit();
+
+    try std.testing.expect(child.has_stack_shared_with_parent());
+
+    try std.testing.expectEqual(parent_stack_before, child.stack_pointer());
+    const new_child_sp_addr = @intFromPtr(child.get_stack_bottom()) + 64;
+    const new_child_sp = @as(*u8, @ptrFromInt(new_child_sp_addr));
+    child.set_stack_pointer(new_child_sp);
+
+    // try std.testing.expect(parent.stack_pointer() != parent_stack_before);
+    try std.testing.expectEqual(new_child_sp, child.stack_pointer());
+
+    child.restore_parent_stack();
+
+    try std.testing.expect(!child.has_stack_shared_with_parent());
+    try std.testing.expectEqual(parent_stack_before, parent.stack_pointer());
+
+    child.restore_parent_stack();
+
+    try std.testing.expect(!child.has_stack_shared_with_parent());
+    try std.testing.expectEqual(parent_stack_before, parent.stack_pointer());
+}
+
+test "Process.ShouldMmapMemory" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 120);
+    defer sut.deinit();
+
+    var addr: usize = 0x10;
+    try std.testing.expectError(kernel.errno.ErrnoSet.OutOfMemory, sut.mmap(&addr, 8192 + 10, 0, 0, 0, 0));
+
+    var buffer: [4096 * 3]u8 = undefined;
+    pool.will_return(buffer[0..]);
+    const allocated = try sut.mmap(null, 8192 + 10, 0, 0, 0, 0);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&buffer)), allocated);
+
+    try std.testing.expectEqual(3, pool.caller_number_of_pages);
+    try std.testing.expectEqual(120, pool.caller_pid);
+
+    sut.munmap(allocated, 8192 + 10);
+    try std.testing.expectEqual(@as(*anyopaque, &buffer), pool.release_address);
+    try std.testing.expectEqual(3, pool.release_pages);
+    try std.testing.expectEqual(120, pool.release_pid);
+}
+
+test "Process.ShouldDeinitBlockedStructures" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 0;
+    hal.time.impl.set_time(0);
+
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 200);
+    var child = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 201);
+
+    var ctx = MultiProcessUnblock.Context{};
+    try parent.wait_for_process(child, &MultiProcessUnblock.action, &ctx);
+
+    try std.testing.expect(parent._blocked_by.first != null);
+    try std.testing.expect(child._blocks.first != null);
+
+    child.deinit();
+    parent.deinit();
+}
+
+test "Process.ShouldDuplicateFileHandlesOnVfork" {
+    var parent_pool = ProcessMemoryPoolForTests{};
+    var child_pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 0;
+    hal.time.impl.set_time(0);
+
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &parent_pool, null, 210);
+    defer parent.deinit();
+
+    const file_mock1 = try FileMock.create(std.testing.allocator);
+    defer file_mock1.delete();
+    const node1 = kernel.fs.Node.create_file(file_mock1.interface);
+
+    const file_mock2 = try FileMock.create(std.testing.allocator);
+    defer file_mock2.delete();
+    const node2 = kernel.fs.Node.create_file(file_mock2.interface);
+
+    const fd0 = try parent.attach_file("/dev/test0", node1);
+    const fd1 = try parent.attach_file("/dev/test1", node2);
+
+    var pid: c.pid_t = -1;
+    const vfork_ctx = c.vfork_context{ .pid = &pid };
+
+    var child = try parent.vfork(&child_pool, &vfork_ctx, 211);
+    defer child.deinit();
+
+    const parent_handle0 = parent.get_file_handle(fd0).?;
+    const parent_handle1 = parent.get_file_handle(fd1).?;
+    const child_handle0 = child.get_file_handle(fd0).?;
+    const child_handle1 = child.get_file_handle(fd1).?;
+
+    try std.testing.expectEqualStrings(parent_handle0.path, child_handle0.path);
+    try std.testing.expectEqualStrings(parent_handle1.path, child_handle1.path);
+
+    child.release_file(fd0);
+    try std.testing.expect(child.get_file_handle(fd0) == null);
+    try std.testing.expect(parent.get_file_handle(fd0) != null);
+
+    parent.release_file(fd1);
+    try std.testing.expect(parent.get_file_handle(fd1) == null);
+    try std.testing.expect(child.get_file_handle(fd1) != null);
+}
+
+const DirectoryMock = @import("fs/tests/directory_mock.zig").DirectoryMock;
+const DirectoryIteratorMock = @import("fs/tests/directory_mock.zig").DirectoryIteratorMock;
+
+test "FileHandle.ShouldCreateIterator" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+    defer handle.close();
+
+    var iterator_mock = try DirectoryIteratorMock.create(std.testing.allocator);
+    defer iterator_mock.delete();
+
+    const iterator = iterator_mock.get_interface();
+    _ = directory_mock
+        .expectCall("iterator")
+        .willReturn(iterator);
+
+    const sut_iterator = try handle.get_iterator();
+    _ = iterator_mock
+        .expectCall("next")
+        .willReturn(null);
+    _ = sut_iterator.interface.next();
+
+    // next call should return the same iterator
+    const sut_iterator2 = try handle.get_iterator();
+    _ = iterator_mock
+        .expectCall("next")
+        .willReturn(null);
+    _ = sut_iterator2.interface.next();
+}
+
+test "FileHandle.ShouldRemoveIterator" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+    defer handle.close();
+
+    var iterator_mock = try DirectoryIteratorMock.create(std.testing.allocator);
+    defer iterator_mock.delete();
+
+    const iterator = iterator_mock.get_interface();
+    _ = directory_mock
+        .expectCall("iterator")
+        .willReturn(iterator);
+
+    const sut_iterator = try handle.get_iterator();
+    _ = iterator_mock
+        .expectCall("next")
+        .willReturn(null);
+    _ = sut_iterator.interface.next();
+
+    try std.testing.expect(handle.diriter != null);
+    handle.remove_iterator();
+    try std.testing.expectEqual(null, handle.diriter);
+}
+
+test "FileHandle.ShouldRejectIteratorForFileDescriptor" {
+    var file_mock = try FileMock.create(std.testing.allocator);
+    defer file_mock.delete();
+    const file_node = kernel.fs.Node.create_file(file_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/file", file_node);
+    defer handle.close();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NotADirectory, handle.get_iterator());
 }

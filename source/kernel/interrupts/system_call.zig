@@ -26,7 +26,7 @@ const c = @import("libc_imports").c;
 
 const syscall = @import("arch").syscall;
 
-const kernel = @import("kernel");
+const kernel = @import("../kernel.zig");
 const log = std.log.scoped(.syscall);
 
 const process_manager = @import("../process_manager.zig");
@@ -47,7 +47,7 @@ extern fn switch_to_the_next_task(lr: usize) usize;
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
 
 fn context_switch_handler(lr: usize) linksection(".time_critical") usize {
-    switch (process_manager.instance.scheduler.schedule_next()) {
+    switch (process_manager.instance.schedule_next()) {
         .Switch => return switch_to_the_next_task(lr),
         .StoreAndSwitch => return store_and_switch_to_next_task(lr),
         else => return lr,
@@ -114,6 +114,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_dup => return handlers.sys_dup,
             c.sys_sysinfo => return handlers.sys_sysinfo,
             c.sys_sysconf => return handlers.sys_sysconf,
+            c.sys_access => return handlers.sys_access,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -129,10 +130,10 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
-pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") void {
+fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") void {
     const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
     const result: i32 = result_or_error catch |err| {
-        c_result.*.err = @intFromError(err);
+        c_result.*.err = kernel.errno.to_errno(err);
         c_result.*.result = -1;
         return;
     };
@@ -142,6 +143,10 @@ pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) lin
 }
 
 pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
+    if (number >= c.SYSCALL_COUNT) {
+        write_result(out, kernel.errno.ErrnoSet.NotImplemented);
+        return;
+    }
     write_result(out, syscall_lookup_table[number](arg));
 }
 
@@ -174,4 +179,96 @@ pub fn init(kernel_allocator: std.mem.Allocator) void {
     arch.irq_handlers.set_system_call_handler(system_call_handler);
     arch.irq_handlers.set_context_switch_handler(context_switch_handler);
     handlers.init(kernel_allocator);
+}
+
+test "SystemCall.ShouldTriggerSVC" {
+    trigger(c.sys_getpid, null, null);
+    try std.testing.expectEqual(1, hal.irq.impl().calls[c.sys_getpid]);
+    trigger(c.sys_getpid, null, null);
+    try std.testing.expectEqual(2, hal.irq.impl().calls[c.sys_getpid]);
+}
+
+test "SystemCall.VerifyLookupTable" {
+    try std.testing.expectEqual(handlers.sys_start_root_process, syscall_lookup_table[c.sys_start_root_process]);
+    try std.testing.expectEqual(handlers.sys_stop_root_process, syscall_lookup_table[c.sys_stop_root_process]);
+    try std.testing.expectEqual(handlers.sys_create_process, syscall_lookup_table[c.sys_create_process]);
+    try std.testing.expectEqual(handlers.sys_semaphore_acquire, syscall_lookup_table[c.sys_semaphore_acquire]);
+    try std.testing.expectEqual(handlers.sys_semaphore_release, syscall_lookup_table[c.sys_semaphore_release]);
+    try std.testing.expectEqual(handlers.sys_getpid, syscall_lookup_table[c.sys_getpid]);
+    try std.testing.expectEqual(handlers.sys_mkdir, syscall_lookup_table[c.sys_mkdir]);
+    try std.testing.expectEqual(handlers.sys_fstat, syscall_lookup_table[c.sys_fstat]);
+    try std.testing.expectEqual(handlers.sys_isatty, syscall_lookup_table[c.sys_isatty]);
+    try std.testing.expectEqual(handlers.sys_open, syscall_lookup_table[c.sys_open]);
+    try std.testing.expectEqual(handlers.sys_close, syscall_lookup_table[c.sys_close]);
+    try std.testing.expectEqual(handlers.sys_exit, syscall_lookup_table[c.sys_exit]);
+    try std.testing.expectEqual(handlers.sys_read, syscall_lookup_table[c.sys_read]);
+    try std.testing.expectEqual(handlers.sys_kill, syscall_lookup_table[c.sys_kill]);
+    try std.testing.expectEqual(handlers.sys_write, syscall_lookup_table[c.sys_write]);
+    try std.testing.expectEqual(handlers.sys_vfork, syscall_lookup_table[c.sys_vfork]);
+    try std.testing.expectEqual(handlers.sys_unlink, syscall_lookup_table[c.sys_unlink]);
+    try std.testing.expectEqual(handlers.sys_link, syscall_lookup_table[c.sys_link]);
+    try std.testing.expectEqual(handlers.sys_stat, syscall_lookup_table[c.sys_stat]);
+    try std.testing.expectEqual(handlers.sys_getentropy, syscall_lookup_table[c.sys_getentropy]);
+    try std.testing.expectEqual(handlers.sys_lseek, syscall_lookup_table[c.sys_lseek]);
+    try std.testing.expectEqual(handlers.sys_wait, syscall_lookup_table[c.sys_wait]);
+    try std.testing.expectEqual(handlers.sys_times, syscall_lookup_table[c.sys_times]);
+    try std.testing.expectEqual(handlers.sys_getdents, syscall_lookup_table[c.sys_getdents]);
+    try std.testing.expectEqual(handlers.sys_ioctl, syscall_lookup_table[c.sys_ioctl]);
+    try std.testing.expectEqual(handlers.sys_gettimeofday, syscall_lookup_table[c.sys_gettimeofday]);
+    try std.testing.expectEqual(handlers.sys_waitpid, syscall_lookup_table[c.sys_waitpid]);
+    try std.testing.expectEqual(handlers.sys_execve, syscall_lookup_table[c.sys_execve]);
+    try std.testing.expectEqual(handlers.sys_nanosleep, syscall_lookup_table[c.sys_nanosleep]);
+    try std.testing.expectEqual(handlers.sys_mmap, syscall_lookup_table[c.sys_mmap]);
+    try std.testing.expectEqual(handlers.sys_munmap, syscall_lookup_table[c.sys_munmap]);
+    try std.testing.expectEqual(handlers.sys_getcwd, syscall_lookup_table[c.sys_getcwd]);
+    try std.testing.expectEqual(handlers.sys_chdir, syscall_lookup_table[c.sys_chdir]);
+    try std.testing.expectEqual(handlers.sys_time, syscall_lookup_table[c.sys_time]);
+    try std.testing.expectEqual(handlers.sys_fcntl, syscall_lookup_table[c.sys_fcntl]);
+    try std.testing.expectEqual(handlers.sys_remove, syscall_lookup_table[c.sys_remove]);
+    try std.testing.expectEqual(handlers.sys_realpath, syscall_lookup_table[c.sys_realpath]);
+    try std.testing.expectEqual(handlers.sys_mprotect, syscall_lookup_table[c.sys_mprotect]);
+    try std.testing.expectEqual(handlers.sys_dlopen, syscall_lookup_table[c.sys_dlopen]);
+    try std.testing.expectEqual(handlers.sys_dlclose, syscall_lookup_table[c.sys_dlclose]);
+    try std.testing.expectEqual(handlers.sys_dlsym, syscall_lookup_table[c.sys_dlsym]);
+    try std.testing.expectEqual(handlers.sys_getuid, syscall_lookup_table[c.sys_getuid]);
+    try std.testing.expectEqual(handlers.sys_geteuid, syscall_lookup_table[c.sys_geteuid]);
+    try std.testing.expectEqual(handlers.sys_dup, syscall_lookup_table[c.sys_dup]);
+    try std.testing.expectEqual(handlers.sys_sysinfo, syscall_lookup_table[c.sys_sysinfo]);
+    try std.testing.expectEqual(handlers.sys_sysconf, syscall_lookup_table[c.sys_sysconf]);
+    try std.testing.expectEqual(handlers.sys_access, syscall_lookup_table[c.sys_access]);
+}
+
+test "SystemCall.UnhandledSyscallReturnsError" {
+    const sut = sys_unhandled_factory(0);
+    var data: i32 = 0;
+    try std.testing.expectEqual(-1, sut.handler(&data));
+}
+
+test "SystemCall.ShouldWriteResult" {
+    var result_data: c.syscall_result = .{
+        .result = 0,
+        .err = 0,
+    };
+    write_result(&result_data, 42);
+    try std.testing.expectEqual(42, result_data.result);
+    try std.testing.expectEqual(-1, result_data.err);
+
+    result_data = .{
+        .result = 0,
+        .err = 0,
+    };
+    write_result(&result_data, error.InvalidArgument);
+    try std.testing.expectEqual(-1, result_data.result);
+    try std.testing.expectEqual(kernel.errno.to_errno(error.InvalidArgument), result_data.err);
+}
+
+test "SystemCall.ShouldErrorOnUnhandledSyscall" {
+    var result_data: c.syscall_result = .{
+        .result = 0,
+        .err = 0,
+    };
+    var arg: i32 = 0;
+    system_call_handler(c.SYSCALL_COUNT, &arg, &result_data);
+    try std.testing.expectEqual(-1, result_data.result);
+    try std.testing.expectEqual(kernel.errno.to_errno(kernel.errno.ErrnoSet.NotImplemented), result_data.err);
 }

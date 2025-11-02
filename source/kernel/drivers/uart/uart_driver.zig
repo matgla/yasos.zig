@@ -22,7 +22,6 @@ const std = @import("std");
 
 const IDriver = @import("../idriver.zig").IDriver;
 const UartFile = @import("uart_file.zig").UartFile;
-// const UartNode = @import("uart_node.zig").UartNode;
 
 const kernel = @import("../../kernel.zig");
 
@@ -37,8 +36,6 @@ pub fn UartDriver(comptime UartType: anytype) type {
             _node: kernel.fs.Node,
 
             pub fn create(allocator: std.mem.Allocator, driver_name: []const u8) !UartDriverImpl {
-                // const uartnode = try (try UartNode(uart).InstanceType.create(allocator, driver_name)).interface.new(allocator);
-
                 return UartDriverImpl.init(.{
                     ._allocator = allocator,
                     ._node = try UartFile(uart).InstanceType.create_node(allocator, driver_name),
@@ -74,4 +71,23 @@ pub fn UartDriver(comptime UartType: anytype) type {
         });
     };
     return Internal.UartDriverImpl;
+}
+
+test "UartDriver.ShouldCreateAndDeleteDriver" {
+    const UartMock = @import("tests/uart_mock.zig").MockUart;
+    defer UartMock.reset();
+
+    var driver = try (try UartDriver(UartMock).InstanceType.create(std.testing.allocator, "uart0")).interface.new(std.testing.allocator);
+    defer driver.interface.delete();
+
+    try driver.interface.load();
+    try std.testing.expect(driver.interface.unload());
+    try std.testing.expectEqualStrings("uart0", driver.interface.name());
+
+    var node = try driver.interface.node();
+    defer node.delete();
+    try std.testing.expectEqualStrings("uart0", node.name());
+    try std.testing.expectEqual(kernel.fs.FileType.CharDevice, node.filetype());
+
+    try std.testing.expectEqual(UartMock.baudrate, 921600);
 }

@@ -68,8 +68,8 @@ pub const ProcessMemoryPool = struct {
             var next = process.value_ptr.pop();
             while (next) |node| {
                 const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
+                next = process.value_ptr.pop();
                 self.allocator.destroy(entity);
-                next = node.next;
             }
         }
         self.memory_map.deinit();
@@ -98,7 +98,7 @@ pub const ProcessMemoryPool = struct {
             end_index += 1;
             pages -= 1;
         }
-        if (self.page_bitmap.isSet(end_index)) {
+        if (end_index >= self.page_count or self.page_bitmap.isSet(end_index)) {
             return .{ start, end_index - 1 };
         }
         return .{ start, end_index };
@@ -177,14 +177,19 @@ pub const ProcessMemoryPool = struct {
 
     pub fn free_pages(self: *ProcessMemoryPool, address: *anyopaque, number_of_pages: i32, pid: c.pid_t) void {
         log.debug("Releasing pages {d} at 0x{x} for pid: {d}", .{ number_of_pages, @intFromPtr(address), pid });
+        if (@intFromPtr(address) < self.start_address or
+            @intFromPtr(address) >= self.start_address + self.memory_size)
+        {
+            return;
+        }
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
             var next = mapping.value_ptr.first;
             while (next) |entity_node| {
                 const entity: *ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
                 if (@as(*anyopaque, entity.address.ptr) == address) {
-                    self.allocator.destroy(entity);
                     _ = mapping.value_ptr.remove(entity_node);
+                    self.allocator.destroy(entity);
                     break;
                 }
                 next = entity_node.next;
@@ -201,3 +206,249 @@ pub const ProcessMemoryPool = struct {
         return self.page_bitmap.count() * page_size;
     }
 };
+
+test "ProcessMemoryPool.ShouldInitializeAndDeinitialize" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    try std.testing.expect(pool.page_count > 0);
+    try std.testing.expect(pool.memory_size > 0);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldAllocateSinglePage" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const pages = pool.allocate_pages(1, pid);
+
+    try std.testing.expect(pages != null);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size), pages.?.len);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldAllocateMultiplePages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const num_pages = 4;
+    const pages = pool.allocate_pages(num_pages, pid);
+
+    try std.testing.expect(pages != null);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * num_pages), pages.?.len);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * num_pages), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldReturnNullForZeroPages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const pages = pool.allocate_pages(0, pid);
+
+    try std.testing.expectEqual(null, pages);
+}
+
+test "ProcessMemoryPool.ShouldReturnNullForNegativePages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const pages = pool.allocate_pages(-5, pid);
+
+    try std.testing.expectEqual(null, pages);
+}
+
+test "ProcessMemoryPool.ShouldAllocateForDifferentProcesses" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid1: c.pid_t = 1;
+    const pid2: c.pid_t = 2;
+
+    const pages1 = pool.allocate_pages(2, pid1);
+    const pages2 = pool.allocate_pages(3, pid2);
+
+    try std.testing.expect(pages1 != null);
+    try std.testing.expect(pages2 != null);
+    try std.testing.expect(@intFromPtr(pages1.?.ptr) != @intFromPtr(pages2.?.ptr));
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 5), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldFreePages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const num_pages = 3;
+    const pages = pool.allocate_pages(num_pages, pid);
+
+    try std.testing.expect(pages != null);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * num_pages), pool.get_used_size());
+
+    pool.free_pages(pages.?.ptr, num_pages, pid);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldReleasePagesForProcess" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+
+    _ = pool.allocate_pages(2, pid);
+    _ = pool.allocate_pages(3, pid);
+    _ = pool.allocate_pages(1, pid);
+
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 6), pool.get_used_size());
+
+    pool.release_pages_for(pid);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldReleaseOnlySpecificProcessPages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid1: c.pid_t = 1;
+    const pid2: c.pid_t = 2;
+
+    _ = pool.allocate_pages(2, pid1);
+    _ = pool.allocate_pages(3, pid2);
+
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 5), pool.get_used_size());
+
+    pool.release_pages_for(pid1);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 3), pool.get_used_size());
+
+    pool.release_pages_for(pid2);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldReuseFreedPages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+
+    const pages1 = pool.allocate_pages(2, pid);
+    try std.testing.expect(pages1 != null);
+    const addr1 = @intFromPtr(pages1.?.ptr);
+
+    pool.free_pages(pages1.?.ptr, 2, pid);
+
+    const pages2 = pool.allocate_pages(2, pid);
+    try std.testing.expect(pages2 != null);
+    const addr2 = @intFromPtr(pages2.?.ptr);
+
+    try std.testing.expectEqual(addr1, addr2);
+}
+
+test "ProcessMemoryPool.ShouldAllocateContiguousPages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const num_pages = 5;
+    const pages = pool.allocate_pages(num_pages, pid);
+
+    try std.testing.expect(pages != null);
+
+    const start_addr = @intFromPtr(pages.?.ptr);
+    const expected_size = ProcessMemoryPool.page_size * num_pages;
+
+    try std.testing.expectEqual(expected_size, pages.?.len);
+
+    // Verify addresses are contiguous
+    for (0..num_pages) |i| {
+        const page_addr = start_addr + i * ProcessMemoryPool.page_size;
+        try std.testing.expect(page_addr >= pool.start_address);
+        try std.testing.expect(page_addr < pool.start_address + pool.memory_size);
+    }
+}
+
+test "ProcessMemoryPool.ShouldHandleFragmentation" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+
+    const pages1 = pool.allocate_pages(2, pid);
+    const pages2 = pool.allocate_pages(2, pid);
+    const pages3 = pool.allocate_pages(2, pid);
+
+    try std.testing.expect(pages1 != null);
+    try std.testing.expect(pages2 != null);
+    try std.testing.expect(pages3 != null);
+
+    // Free middle allocation
+    pool.free_pages(pages2.?.ptr, 2, pid);
+
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 4), pool.get_used_size());
+
+    // Should be able to allocate in the freed spot
+    const pages4 = pool.allocate_pages(2, pid);
+    try std.testing.expect(pages4 != null);
+    try std.testing.expectEqual(@intFromPtr(pages2.?.ptr), @intFromPtr(pages4.?.ptr));
+}
+
+test "ProcessMemoryPool.ShouldHandleMultipleAllocationsForSameProcess" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 100;
+    var allocations = try std.ArrayList([]u8).initCapacity(std.testing.allocator, 16);
+    defer allocations.deinit(std.testing.allocator);
+
+    for (0..5) |_| {
+        const pages = pool.allocate_pages(1, pid);
+        try std.testing.expect(pages != null);
+        try allocations.append(std.testing.allocator, pages.?);
+    }
+
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 5), pool.get_used_size());
+
+    pool.release_pages_for(pid);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldHandleNoAvailableMemory" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const total_pages = pool.page_count;
+
+    // Try to allocate more than available
+    const pages = pool.allocate_pages(@intCast(total_pages + 1), pid);
+    try std.testing.expectEqual(@as(?[]u8, null), pages);
+}
+
+test "ProcessMemoryPool.ShouldReleaseNonExistentProcessSafely" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 999;
+
+    // Should not crash
+    pool.release_pages_for(pid);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.ShouldFreeNonExistentPagesSafely" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 1;
+    const pages = pool.allocate_pages(2, pid);
+    try std.testing.expect(pages != null);
+
+    // Try to free with wrong address
+    const fake_addr: *anyopaque = @ptrFromInt(0xDEADBEEF);
+    pool.free_pages(fake_addr, 2, pid);
+
+    // Original allocation should still be tracked
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 2), pool.get_used_size());
+}

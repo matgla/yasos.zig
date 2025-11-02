@@ -44,9 +44,9 @@ pub const RomFsDirectoryIterator = interface.DeriveFromBase(IDirectoryIterator, 
             if (self._previous) |*prev| {
                 prev.deinit();
             }
-            self._previous = file.dupe();
+            self._previous = file.dupe() catch return null;
             file.deinit();
-            self._file = self._previous.?.next();
+            self._file = self._previous.?.next() catch return null;
             return .{
                 .name = self._previous.?.name(),
                 .kind = self._previous.?.filetype(),

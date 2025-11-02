@@ -29,3 +29,12 @@ pub fn timestamp(name: []const u8) void {
     log.debug("Timepoint '{s}' {d} us, diff: {d}", .{ name, time, time - previous });
     previous = time;
 }
+
+test "Benchmark.Timestamp" {
+    hal.time.impl.set_time(0);
+    timestamp("start");
+    hal.time.impl.set_time(10000);
+    timestamp("after 10ms sleep");
+    hal.time.impl.set_time(20000);
+    timestamp("after 20ms sleep");
+}

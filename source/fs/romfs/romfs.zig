@@ -53,61 +53,30 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return "romfs";
     }
 
-    pub fn traverse(self: *Self, path: []const u8, callback: *const fn (file: *IFile, context: *anyopaque) bool, context: *anyopaque) i32 {
-        var maybe_node = self.get_file_header(path);
-        if (maybe_node) |*node| {
-            defer node.deinit();
-            if (node.filetype() == FileType.Directory) {
-                var it: ?FileHeader = self.create_file_header(node.specinfo());
-                while (it) |*child| : (it = child.next()) {
-                    var file: RomFsFile = RomFsFile.InstanceType.create(self.allocator, child.*);
-                    var ifile = file.interface.new(self.allocator) catch return -1;
-                    defer ifile.interface.delete();
-                    if (!callback(&ifile, context)) {
-                        return 0;
-                    }
-                }
-                return 0;
-            }
-        }
-        return -1;
-    }
-
     pub fn delete(self: *Self) void {
         self.device_file.interface.delete();
     }
 
     // RomFs interface
-    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: c.off_t) error{NotRomFsFileSystem}!RomFs {
-        const fs = FileSystemHeader.init(allocator, device_file, start_offset);
-        if (fs) |root| {
-            return RomFs.init(.{
-                .base = ReadOnlyFileSystem.init(.{}),
-                .root = root,
-                .allocator = allocator,
-                .device_file = device_file,
-            });
-        }
-        return error.NotRomFsFileSystem;
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: c.off_t) !RomFs {
+        const fs = try FileSystemHeader.init(allocator, device_file, start_offset);
+        return RomFs.init(.{
+            .base = ReadOnlyFileSystem.init(.{}),
+            .root = fs,
+            .allocator = allocator,
+            .device_file = device_file,
+        });
     }
 
-    pub fn get(self: *Self, path: []const u8, allocator: std.mem.Allocator) ?kernel.fs.Node {
-        var maybe_header = self.get_file_header(path);
-        if (maybe_header) |*header| {
-            defer header.deinit();
-            if (header.filetype() != FileType.Directory) {
-                return RomFsFile.InstanceType.create_node(allocator, header.dupe()) catch return null;
-            } else {
-                return RomFsDirectory.InstanceType.create_node(allocator, self.create_file_header(header.specinfo())) catch return null;
-            }
+    pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
+        var header = try self.get_file_header(path, true);
+        defer header.deinit();
+        if (header.filetype() != FileType.Directory) {
+            return try RomFsFile.InstanceType.create_node(self.allocator, try header.dupe());
+        } else {
+            return try RomFsDirectory.InstanceType.create_node(self.allocator, try header.dupe(), &self.root);
         }
-        return null;
-    }
-
-    pub fn has_path(self: *Self, path: []const u8) bool {
-        var file = self.get_file_header(path);
-        defer if (file) |*f| f.deinit();
-        return file != null;
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -116,38 +85,32 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return error.NotSupported;
     }
 
-    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat) i32 {
-        var maybe_node = self.get_file_header(path);
-        if (maybe_node) |*node| {
-            defer node.deinit();
-            node.stat(data);
-            return 0;
-        }
-        return -1;
+    pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
+        var node = try self.get_file_header(path, follow_symlinks);
+        defer node.deinit();
+        node.stat(data);
     }
 
-    fn get_file_header(self: *Self, path: []const u8) ?FileHeader {
+    fn get_file_header(self: *Self, path: []const u8, resolve_link: bool) !FileHeader {
         const path_without_trailing_separator = std.mem.trimRight(u8, path, "/");
         var it = try std.fs.path.componentIterator(path);
         var component = it.first();
-        var maybe_node = self.root.first_file_header();
-        if (maybe_node == null) {
-            return null;
-        }
+        var maybe_node: ?FileHeader = try self.root.first_file_header();
         if (path_without_trailing_separator.len < 1) {
-            return maybe_node;
+            return maybe_node orelse kernel.errno.ErrnoSet.InvalidArgument;
         }
         while (component) |part| : (component = it.next()) {
             if (maybe_node == null) {
-                return null;
+                return kernel.errno.ErrnoSet.NoEntry;
             }
             var filename = maybe_node.?.name();
             while (!std.mem.eql(u8, filename, part.name)) {
-                const next = maybe_node.?.next();
+                errdefer if (maybe_node) |*n| n.deinit();
+                const next = try maybe_node.?.next();
                 maybe_node.?.deinit();
                 maybe_node = next;
                 if (maybe_node == null) {
-                    return null;
+                    return kernel.errno.ErrnoSet.NoEntry;
                 }
                 filename = maybe_node.?.name();
             }
@@ -155,14 +118,21 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             if (maybe_node) |*node| {
                 if (node.filetype() == FileType.SymbolicLink) {
                     // iterate through link
+                    if (!resolve_link) {
+                        return maybe_node orelse kernel.errno.ErrnoSet.NoEntry;
+                    }
                     const maybe_name = node.read_name_at_offset(self.allocator, 0);
                     if (maybe_name) |*link_name| {
                         defer link_name.deinit();
-                        const relative = std.fs.path.resolve(self.allocator, &.{ part.path, "..", link_name.get_name() }) catch return null;
+                        {
+                            errdefer maybe_node.?.deinit();
+                            maybe_node.?.deinit();
+                            maybe_node = null;
+                        }
+                        const relative = try std.fs.path.resolve(self.allocator, &.{ part.path, "..", link_name.get_name() });
                         defer self.allocator.free(relative);
-                        maybe_node.?.deinit();
-                        maybe_node = null;
-                        maybe_node = self.get_file_header(relative);
+
+                        maybe_node = try self.get_file_header(relative, resolve_link);
                     }
                 }
             }
@@ -177,7 +147,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                         maybe_node = null;
                         return self.create_file_header(specinfo);
                     }
-                    return maybe_node;
+                    return maybe_node orelse kernel.errno.ErrnoSet.NoEntry;
                 }
             }
 
@@ -185,7 +155,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                 if (node.filetype() == FileType.Directory) {
                     const specinfo = node.specinfo();
                     node.deinit();
-                    maybe_node = self.create_file_header(specinfo);
+                    maybe_node = try self.create_file_header(specinfo);
                 }
             }
         }
@@ -198,235 +168,450 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                 return self.create_file_header(specinfo);
             }
         }
-        return maybe_node;
+        return maybe_node orelse kernel.errno.ErrnoSet.NoEntry;
     }
 
-    pub fn create_file_header(self: *Self, offset: u32) FileHeader {
-        return self.root.create_file_header_with_offset(@intCast(offset));
+    pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
+        _ = flags;
+        var node = try self.get(path);
+        defer node.delete();
+
+        if ((mode & c.X_OK) != 0) {
+            if (node.filetype() == FileType.Directory) {
+                return kernel.errno.ErrnoSet.IsADirectory;
+            }
+        }
+
+        if ((mode & c.W_OK) != 0) {
+            return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+        }
+    }
+
+    pub fn create_file_header(self: *Self, offset: u32) !FileHeader {
+        return try self.root.create_file_header_with_offset(@intCast(offset));
     }
 });
 
-const ExpectationList = std.ArrayList([]const u8);
-var expected_directories: ExpectationList = undefined;
-var did_error: anyerror!void = {};
+fn test_file(fs: kernel.fs.IFileSystem, path: []const u8, size: c_ulong, content: []const u8, filetype: kernel.fs.FileType) !void {
+    var ifs = fs;
+    var node = try ifs.interface.get(path);
+    errdefer node.delete();
+    try std.testing.expectEqual(filetype, node.filetype());
+    var file = node.as_file().?;
+    defer _ = file.interface.delete();
+    const fsize = file.interface.size();
+    try std.testing.expectEqual(size, fsize);
+    const buffer = try std.testing.allocator.alloc(u8, fsize);
+    try std.testing.expectEqual(@as(isize, @intCast(fsize)), file.interface.read(buffer));
+    try std.testing.expectEqual(filetype, file.interface.filetype());
+    try std.testing.expectEqualStrings(content, buffer);
+    std.testing.allocator.free(buffer);
+}
 
-fn traverse_dir(file: *IFile, _: *anyopaque) bool {
-    did_error catch return false;
-    did_error = std.testing.expect(expected_directories.items.len != 0);
-    var filename = file.interface.name(std.testing.allocator);
-    defer filename.deinit();
-
-    did_error catch {
-        std.debug.print("Expectation not found for: '{s}'\n", .{filename.get_name()});
-        return false;
-    };
-    const expectation = expected_directories.items[0];
-    did_error = std.testing.expectEqualStrings(expectation, filename.get_name());
-    did_error catch {
-        std.debug.print("Expectation not matched, expected: '{s}', found: '{s}'\n", .{ expectation, filename.get_name() });
-        return false;
-    };
-    _ = expected_directories.orderedRemove(0);
-    return true;
+fn load_test_romfs() !kernel.fs.IFileSystem {
+    const RomfsDeviceStubFile = @import("tests/romfs_device_stub.zig").RomfsDeviceStubFile;
+    var device = try RomfsDeviceStubFile.InstanceType.create_node(std.testing.allocator, "source/fs/romfs/tests/test.romfs", null);
+    var romfs = try RomFs.InstanceType.init(std.testing.allocator, device.as_file().?, 0);
+    return try romfs.interface.new(std.testing.allocator);
 }
 
 test "Romfs.ShouldParseFilesystem" {
-    const RomfsDeviceStub = @import("tests/romfs_device_stub.zig").RomfsDeviceStub;
-    var device = RomfsDeviceStub.InstanceType.init(&std.testing.allocator, "source/fs/romfs/tests/test.romfs");
-    var idevice = device.interface.create();
-    try idevice.interface.load();
-    var device_file = idevice.interface.ifile(std.testing.allocator);
-    try std.testing.expect(device_file != null);
-    defer device_file.?.interface.delete();
-    expected_directories = std.ArrayList([]const u8).init(std.testing.allocator);
-    defer expected_directories.deinit();
-    var romfs = try RomFs.InstanceType.init(std.testing.allocator, device_file.?.share(), 0);
-    var ifs = romfs.interface.create();
+    const verify_directory_content = @import("../tests/directory_traverser.zig").verify_directory_content;
+    var ifs = try load_test_romfs();
     defer ifs.interface.delete();
     const fs_name = ifs.interface.name();
     try std.testing.expectEqual(fs_name, "romfs");
-    var maybe_root_directory = ifs.interface.get("/", std.testing.allocator);
-    try std.testing.expect(maybe_root_directory != null);
-    if (maybe_root_directory) |*root_directory| {
-        defer _ = root_directory.interface.delete();
-        var name = root_directory.interface.name(std.testing.allocator);
-        defer name.deinit();
-        try std.testing.expectEqualStrings(name.get_name(), ".");
+    var root_directory = try ifs.interface.get("/");
+    defer _ = root_directory.delete();
+    const name = root_directory.name();
+    try std.testing.expectEqualStrings(name, ".");
+
+    try verify_directory_content(&ifs, "/", &.{
+        .{ .name = ".", .kind = .Directory },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "dev", .kind = .Directory },
+        .{ .name = "subdir", .kind = .Directory },
+        .{ .name = "file.txt", .kind = .File },
+    });
+
+    try verify_directory_content(&ifs, "/dev", &.{
+        .{ .name = ".", .kind = .HardLink },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "test.socket", .kind = .Socket },
+        .{ .name = "pipe1", .kind = .Fifo },
+        .{ .name = "fc1", .kind = .CharDevice },
+        .{ .name = "fb1", .kind = .BlockDevice },
+    });
+
+    try verify_directory_content(&ifs, "/subdir", &.{
+        .{ .name = ".", .kind = .HardLink },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "f1.txt", .kind = .File },
+        .{ .name = "f2.txt", .kind = .File },
+        .{ .name = "other_dir", .kind = .Directory },
+        .{ .name = "dir", .kind = .Directory },
+    });
+
+    try verify_directory_content(&ifs, "/subdir/other_dir", &.{
+        .{ .name = ".", .kind = .HardLink },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "a.txt", .kind = .File },
+        .{ .name = "b.txt", .kind = .File },
+        .{ .name = "dir", .kind = .SymbolicLink },
+    });
+
+    try verify_directory_content(&ifs, "/subdir/dir", &.{
+        .{ .name = ".", .kind = .HardLink },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "test.txt", .kind = .File },
+        .{ .name = "f1.txt", .kind = .HardLink },
+    });
+
+    try test_file(ifs, "/file.txt", 34, "THis is testing file\nwith content\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/f1.txt", 10, "1 2 3 4 5\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/f2.txt", 9, "1\n2\n3\n4\n\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/other_dir/a.txt", 7, "abcdef\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/other_dir/b.txt", 10, "avadad\nww\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/dir/test.txt", 36, "This is test file\nWith some content\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/dir/f1.txt", 10, "1 2 3 4 5\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/other_dir/dir/test.txt", 36, "This is test file\nWith some content\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/dev/test.socket", 0, "", kernel.fs.FileType.Socket);
+    try test_file(ifs, "/dev/pipe1", 0, "", kernel.fs.FileType.Fifo);
+    try test_file(ifs, "/dev/fc1", 0, "", kernel.fs.FileType.CharDevice);
+    try test_file(ifs, "/dev/fb1", 0, "", kernel.fs.FileType.BlockDevice);
+}
+
+test "RomFs.ShouldGetFilesFromDirectory" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+    const fs_name = ifs.interface.name();
+    try std.testing.expectEqual(fs_name, "romfs");
+    var dev_node = try ifs.interface.get("/dev");
+    defer dev_node.delete();
+    var maybe_dev_directory = dev_node.as_directory();
+    try std.testing.expect(maybe_dev_directory != null);
+    if (maybe_dev_directory) |*dir| {
+        const name = dir.interface.name();
+        try std.testing.expectEqualStrings("dev", name);
+        var it = try dir.interface.iterator();
+        defer it.interface.delete();
+        while (it.interface.next()) |entry| {
+            var node: kernel.fs.Node = undefined;
+            try dir.interface.get(entry.name, &node);
+            defer node.delete();
+        }
     }
-    _ = try expected_directories.appendSlice(&.{ ".", "..", "dev", "subdir", "file.txt" });
-    try std.testing.expectEqual(0, ifs.interface.traverse(".", &traverse_dir, undefined));
-    try did_error;
+}
 
-    _ = try expected_directories.appendSlice(&.{ ".", "test.socket", "pipe1", "fc1", "..", "fb1" });
-    try std.testing.expectEqual(0, ifs.interface.traverse("/dev", &traverse_dir, undefined));
-    try did_error;
+test "RomFs.ShouldStatFile" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
 
-    _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "other_dir", "f2.txt", "dir", ".." });
-    try std.testing.expectEqual(0, ifs.interface.traverse("/subdir", &traverse_dir, undefined));
-    try did_error;
+    var stat_buf: c.struct_stat = undefined;
+    try ifs.interface.stat("/file.txt", &stat_buf, true);
 
-    _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
-    try std.testing.expectEqual(0, ifs.interface.traverse("/subdir/dir", &traverse_dir, undefined));
-    try did_error;
+    try std.testing.expectEqual(@as(c_uint, c.S_IFREG), stat_buf.st_mode);
+    try std.testing.expectEqual(34, stat_buf.st_size);
+}
 
-    _ = try expected_directories.appendSlice(&.{ ".", "dir", "..", "a.txt", "b.txt" });
-    try std.testing.expectEqual(0, ifs.interface.traverse("/subdir/other_dir", &traverse_dir, undefined));
-    try did_error;
+test "RomFs.ShouldStatDirectory" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
 
-    _ = try expected_directories.appendSlice(&.{ ".", "f1.txt", "test.txt", ".." });
-    try std.testing.expectEqual(0, ifs.interface.traverse("/subdir/other_dir/dir", &traverse_dir, undefined));
-    try did_error;
+    var stat_buf: c.struct_stat = undefined;
+    try ifs.interface.stat("/subdir", &stat_buf, true);
 
-    var maybe_file = ifs.interface.get(
-        "/file.txt",
-        std.testing.allocator,
-    );
-    try std.testing.expect(maybe_file != null);
-    if (maybe_file) |*file| {
-        defer _ = file.interface.close();
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(34, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.File, file.interface.filetype());
-        try std.testing.expectEqualStrings("THis is testing file\nwith content\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
+    try std.testing.expectEqual(@as(c_uint, c.S_IFDIR), stat_buf.st_mode);
+}
 
-    maybe_file = ifs.interface.get("/subdir/f1.txt", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
+test "RomFs.ShouldStatRootDirectory" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
 
-    if (maybe_file) |*file| {
-        defer _ = file.interface.close();
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(10, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.File, file.interface.filetype());
-        try std.testing.expectEqualStrings("1 2 3 4 5\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
+    var stat_buf: c.struct_stat = undefined;
+    try ifs.interface.stat("/", &stat_buf, true);
 
-    maybe_file = ifs.interface.get("/subdir/f2.txt", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFDIR), stat_buf.st_mode);
+}
 
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
+test "RomFs.ShouldStatNestedFile" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
 
-        try std.testing.expectEqual(9, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.File, file.interface.filetype());
-        try std.testing.expectEqualStrings("1\n2\n3\n4\n\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
+    var stat_buf: c.struct_stat = undefined;
+    try ifs.interface.stat("/subdir/dir/test.txt", &stat_buf, true);
 
-    maybe_file = ifs.interface.get("/subdir/other_dir/a.txt", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFREG), stat_buf.st_mode);
+    try std.testing.expectEqual(36, stat_buf.st_size);
+}
 
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(7, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.File, file.interface.filetype());
-        try std.testing.expectEqualStrings("abcdef\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
+test "RomFs.ShouldStatSpecialFiles" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
 
-    maybe_file = ifs.interface.get("/subdir/other_dir/b.txt", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
+    var stat_buf: c.struct_stat = undefined;
 
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(10, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.File, file.interface.filetype());
-        try std.testing.expectEqualStrings("avadad\nww\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
+    // Socket
+    try ifs.interface.stat("/dev/test.socket", &stat_buf, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFSOCK), stat_buf.st_mode);
 
-    maybe_file = ifs.interface.get("/subdir/dir/test.txt", std.testing.allocator);
+    // FIFO
+    try ifs.interface.stat("/dev/pipe1", &stat_buf, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFIFO), stat_buf.st_mode);
+
+    // Character device
+    try ifs.interface.stat("/dev/fc1", &stat_buf, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFCHR), stat_buf.st_mode);
+
+    // Block device
+    try ifs.interface.stat("/dev/fb1", &stat_buf, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFBLK), stat_buf.st_mode);
+
+    // Symlink
+    try ifs.interface.stat("/subdir/other_dir/dir", &stat_buf, false);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFLNK), stat_buf.st_mode);
+
+    try ifs.interface.stat("/subdir/other_dir/dir", &stat_buf, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFDIR), stat_buf.st_mode);
+}
+
+test "RomFs.ShouldRejectFormat" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+
+    try std.testing.expectError(error.NotSupported, ifs.interface.format());
+}
+
+test "RomFs.ShouldSeekAndTellInFile" {
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+
+    var node = try ifs.interface.get("/file.txt");
+    defer node.delete();
+
+    var maybe_file = node.as_file();
     try std.testing.expect(maybe_file != null);
 
-    if (maybe_file) |*file| {
-        const f = &file.interface;
-        defer _ = f.delete();
-        try std.testing.expectEqual(36, f.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(f.size()));
-        try std.testing.expectEqual(f.size(), f.read(buffer));
-        try std.testing.expectEqual(FileType.File, f.filetype());
-        try std.testing.expectEqualStrings("This is test file\nWith some content\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
-
-    maybe_file = ifs.interface.get("/subdir/dir/f1.txt", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
-
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(10, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.File, file.interface.filetype());
-        try std.testing.expectEqualStrings("1 2 3 4 5\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
-
-    maybe_file = ifs.interface.get("/subdir/other_dir/dir/test.txt", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(36, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.File, file.interface.filetype());
-        try std.testing.expectEqualStrings("This is test file\nWith some content\n", buffer);
-        std.testing.allocator.free(buffer);
-    }
-
-    maybe_file = ifs.interface.get("/dev/test.socket", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(0, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.Socket, file.interface.filetype());
-        std.testing.allocator.free(buffer);
-    }
-
-    maybe_file = ifs.interface.get("/dev/pipe1", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(0, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.Fifo, file.interface.filetype());
-        std.testing.allocator.free(buffer);
-    }
-
-    maybe_file = ifs.interface.get("/dev/fc1", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
-    if (maybe_file) |*file| {
-        defer _ = file.interface.delete();
-        try std.testing.expectEqual(0, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.CharDevice, file.interface.filetype());
-        std.testing.allocator.free(buffer);
-    }
-
-    maybe_file = ifs.interface.get("/dev/fb1", std.testing.allocator);
-    try std.testing.expect(maybe_file != null);
     if (maybe_file) |*file| {
         defer _ = file.interface.delete();
-        try std.testing.expectEqual(0, file.interface.size());
-        const buffer = try std.testing.allocator.alloc(u8, @intCast(file.interface.size()));
-        try std.testing.expectEqual(file.interface.size(), file.interface.read(buffer));
-        try std.testing.expectEqual(FileType.BlockDevice, file.interface.filetype());
-        std.testing.allocator.free(buffer);
+
+        // Get file size first
+        const file_size = file.interface.size();
+
+        // Test initial position (should be 0)
+        var pos = file.interface.tell();
+        try std.testing.expectEqual(@as(c.off_t, 0), pos);
+
+        // Test SEEK_SET - seek to position 5
+        pos = try file.interface.seek(5, c.SEEK_SET);
+        try std.testing.expectEqual(@as(c.off_t, 5), pos);
+        try std.testing.expectEqual(@as(c.off_t, 5), file.interface.tell());
+
+        // Test SEEK_CUR - seek forward 10 bytes from current position (5)
+        pos = try file.interface.seek(10, c.SEEK_CUR);
+        try std.testing.expectEqual(@as(c.off_t, 15), pos);
+        try std.testing.expectEqual(@as(c.off_t, 15), file.interface.tell());
+
+        // Test SEEK_CUR - seek backward 5 bytes from current position (15)
+        pos = try file.interface.seek(-5, c.SEEK_CUR);
+        try std.testing.expectEqual(@as(c.off_t, 10), pos);
+        try std.testing.expectEqual(@as(c.off_t, 10), file.interface.tell());
+
+        // Test SEEK_END - seek to end of file
+        pos = try file.interface.seek(0, c.SEEK_END);
+        try std.testing.expectEqual(@as(c.off_t, @intCast(file_size)), pos);
+        try std.testing.expectEqual(@as(c.off_t, @intCast(file_size)), file.interface.tell());
+
+        // Test SEEK_END - seek 10 bytes before end
+        pos = try file.interface.seek(-10, c.SEEK_END);
+        try std.testing.expectEqual(@as(c.off_t, @intCast(file_size - 10)), pos);
+        try std.testing.expectEqual(@as(c.off_t, @intCast(file_size - 10)), file.interface.tell());
+
+        // Test SEEK_SET - seek back to beginning
+        pos = try file.interface.seek(0, c.SEEK_SET);
+        try std.testing.expectEqual(@as(c.off_t, 0), pos);
+        try std.testing.expectEqual(@as(c.off_t, 0), file.interface.tell());
+
+        // Verify read updates position correctly
+        var buffer: [5]u8 = undefined;
+        const bytes_read = file.interface.read(&buffer);
+        try std.testing.expectEqual(@as(isize, 5), bytes_read);
+        try std.testing.expectEqual(@as(c.off_t, 5), file.interface.tell());
+
+        // Test SEEK_CUR with 0 offset (should return current position without moving)
+        pos = try file.interface.seek(0, c.SEEK_CUR);
+        try std.testing.expectEqual(@as(c.off_t, 5), pos);
+        try std.testing.expectEqual(@as(c.off_t, 5), file.interface.tell());
+
+        // Test invalid seek (negative position with SEEK_SET)
+        try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, file.interface.seek(-1, c.SEEK_SET));
+        try std.testing.expectEqual(@as(c.off_t, 5), file.interface.tell());
+
+        // Test invalid seek (beyond end of file with SEEK_SET)
+        try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, file.interface.seek(@as(c.off_t, @intCast(file_size)) + 1, c.SEEK_SET));
+        try std.testing.expectEqual(@as(c.off_t, 5), file.interface.tell());
+
+        // Test invalid seek whence
+        try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, file.interface.seek(10, -123));
+        try std.testing.expectEqual(@as(c.off_t, 5), file.interface.tell());
+    }
+}
+
+test "RomFs.ShouldReportMemoryMappedFiles" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    var node = try fs.interface.get("/subdir/dir/test.txt");
+    defer node.delete();
+
+    try std.testing.expect(node.is_file());
+
+    var maybe_file = node.as_file();
+    try std.testing.expect(maybe_file != null);
+
+    if (maybe_file) |*file| {
+        try std.testing.expectEqualStrings("test.txt", file.interface.name());
+        var status: kernel.fs.FileMemoryMapAttributes = undefined;
+        try std.testing.expectEqual(-1, file.interface.ioctl(-1, &status));
+        try std.testing.expectEqual(0, file.interface.ioctl(@intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus), &status));
+        try std.testing.expectEqual(true, status.is_memory_mapped);
+    }
+}
+
+test "RomFs.DoesNothingForFcntl" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    var node = try fs.interface.get("/subdir/dir/test.txt");
+    defer node.delete();
+
+    try std.testing.expect(node.is_file());
+
+    var maybe_file = node.as_file();
+    try std.testing.expect(maybe_file != null);
+
+    if (maybe_file) |*file| {
+        var data: i32 = 0;
+        try std.testing.expectEqual(0, file.interface.fcntl(-1, &data));
+        try std.testing.expectEqual(0, data);
+        try std.testing.expectEqual(0, file.interface.fcntl(-123, null));
+    }
+}
+
+test "RomFs.ShouldMountAndUnmount" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    const mount_result = fs.interface.mount();
+    try std.testing.expectEqual(@as(i32, 0), mount_result);
+
+    const umount_result = fs.interface.umount();
+    try std.testing.expectEqual(@as(i32, 0), umount_result);
+}
+
+test "RomFs.ShouldRejectCreate" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, fs.interface.create("/newfile.txt", 0o644));
+}
+
+test "RomFs.ShouldRejectMkdir" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, fs.interface.mkdir("/newdir", 0o755));
+}
+
+test "RomFs.ShouldRejectLink" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, fs.interface.link("/file.txt", "/link.txt"));
+}
+
+test "RomFs.ShouldRejectUnlink" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, fs.interface.unlink("/file.txt"));
+}
+
+test "RomFs.ShouldAccessFile" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    // Test read access on file
+    try fs.interface.access("/file.txt", c.R_OK, 0);
+
+    // Test file existence
+    try fs.interface.access("/file.txt", c.F_OK, 0);
+
+    // Test write access should fail (read-only filesystem)
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, fs.interface.access("/file.txt", c.W_OK, 0));
+}
+
+test "RomFs.ShouldAccessDirectory" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    // Test directory existence
+    try fs.interface.access("/subdir", c.F_OK, 0);
+
+    // Test execute access on directory should fail with IsADirectory
+    try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, fs.interface.access("/subdir", c.X_OK, 0));
+}
+
+test "RomFs.ShouldRejectAccessOnNonExistentPath" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, fs.interface.access("/nonexistent.txt", c.F_OK, 0));
+}
+
+test "RomFs.ShouldRejectGettingNonExistentPathFromDirectory" {
+    var fs = try load_test_romfs();
+    defer fs.interface.delete();
+
+    var dir = try fs.interface.get("/subdir");
+    defer dir.delete();
+    var maybe_directory = dir.as_directory();
+    try std.testing.expect(maybe_directory != null);
+    if (maybe_directory) |*d| {
+        var node: kernel.fs.Node = undefined;
+        try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, d.interface.get("nonexistent.txt", &node));
+        try d.interface.get("dir", &node);
+        defer node.delete();
+        try std.testing.expectEqualStrings("dir", node.name());
+    }
+}
+
+test "RomFs.ShouldReportMappedMemory" {
+    const RomfsDeviceStubFile = @import("tests/romfs_device_stub.zig").RomfsDeviceStubFile;
+    var device = try RomfsDeviceStubFile.InstanceType.create_node(std.testing.allocator, "source/fs/romfs/tests/test.romfs", 0xfeedface);
+    var romfs = try RomFs.InstanceType.init(std.testing.allocator, device.as_file().?, 0);
+    var sut = try romfs.interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var node = try sut.interface.get("/subdir/dir/test.txt");
+    defer node.delete();
+
+    try std.testing.expect(node.is_file());
+
+    var maybe_file = node.as_file();
+    try std.testing.expect(maybe_file != null);
+
+    if (maybe_file) |*file| {
+        try std.testing.expectEqualStrings("test.txt", file.interface.name());
+        var status: kernel.fs.FileMemoryMapAttributes = undefined;
+        try std.testing.expectEqual(0, file.interface.ioctl(@intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus), &status));
+        try std.testing.expectEqual(true, status.is_memory_mapped);
+        try std.testing.expect(status.mapped_address_r != null);
+        const file_offset = 0x350;
+        if (status.mapped_address_r) |addr| {
+            try std.testing.expectEqual(@as(*anyopaque, @ptrFromInt(0xfeedface + file_offset)), addr);
+        }
+
+        try std.testing.expectEqual(null, status.mapped_address_w);
     }
 }

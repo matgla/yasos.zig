@@ -80,12 +80,8 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "write", .{buf}, isize);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, base: i32) c.off_t {
-        return interface.CountingInterfaceVirtualCall(self, "seek", .{ offset, base }, c.off_t);
-    }
-
-    pub fn close(self: *Self) void {
-        return interface.CountingInterfaceVirtualCall(self, "close", .{}, void);
+    pub fn seek(self: *Self, offset: c.off_t, base: i32) anyerror!c.off_t {
+        return interface.CountingInterfaceVirtualCall(self, "seek", .{ offset, base }, anyerror!c.off_t);
     }
 
     pub fn sync(self: *Self) i32 {
@@ -112,8 +108,8 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "filetype", .{}, FileType);
     }
 
-    pub fn stat(self: *Self, data: *c.struct_stat) void {
-        return interface.CountingInterfaceVirtualCall(self, "stat", .{data}, void);
+    pub fn size(self: *const Self) usize {
+        return interface.CountingInterfaceVirtualCall(self, "size", .{}, usize);
     }
 
     pub fn delete(self: *Self) void {

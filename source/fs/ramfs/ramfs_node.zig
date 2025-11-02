@@ -22,4 +22,11 @@ const RamFsData = @import("ramfs_data.zig").RamFsData;
 pub const RamFsNode = struct {
     node: kernel.fs.Node,
     list_node: std.DoublyLinkedList.Node,
+    name: []const u8,
+
+    pub fn delete(self: *RamFsNode, allocator: std.mem.Allocator) void {
+        self.node.delete();
+        allocator.free(self.name);
+        allocator.destroy(self);
+    }
 };

@@ -23,6 +23,7 @@ const std = @import("std");
 comptime {
     _ = @import("romfs/tests.zig");
     _ = @import("ramfs/tests.zig");
+    _ = @import("fatfs/tests.zig");
 }
 
 test {

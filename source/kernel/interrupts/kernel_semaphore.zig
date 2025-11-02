@@ -60,3 +60,69 @@ pub const KernelSemaphore = struct {
         return 0;
     }
 };
+
+const kernel = @import("../kernel.zig");
+const irq_systick = @import("systick.zig").irq_systick;
+const c = @import("libc_imports").c;
+const syscall_handlers = @import("syscall_handlers.zig");
+
+fn test_entry() void {}
+
+var call_count: usize = 0;
+
+test "KernelSemaphore.ShouldBlockProcess" {
+    kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
+    defer kernel.process.process_manager.deinitialize_process_manager();
+    defer hal.irq.impl().clear();
+
+    var proc_arg: usize = 0;
+    try kernel.process.process_manager.instance.create_process(1024, &test_entry, &proc_arg, "test");
+    try kernel.process.process_manager.instance.create_process(1024, &test_entry, &proc_arg, "test2");
+    _ = kernel.process.process_manager.instance.schedule_next();
+    _ = kernel.process.process_manager.get_next_task();
+
+    const ActionCall = struct {
+        pub fn acquire(id: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void {
+            const event: *const volatile syscall_handlers.SemaphoreEvent = @ptrCast(@alignCast(arg));
+            event.object.counter.value -= 1;
+            hal.irq.impl().calls[id] += 1;
+            const result: *volatile bool = @ptrCast(@alignCast(out));
+            result.* = true;
+        }
+
+        pub fn release(id: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void {
+            const event: *const volatile syscall_handlers.SemaphoreEvent = @ptrCast(@alignCast(arg));
+            event.object.counter.value += 1;
+            hal.irq.impl().calls[id] += 1;
+            const result: *volatile bool = @ptrCast(@alignCast(out));
+            result.* = true;
+        }
+    };
+
+    hal.irq.impl().set_action(c.sys_semaphore_acquire, &ActionCall.acquire);
+    hal.irq.impl().set_action(c.sys_semaphore_release, &ActionCall.release);
+
+    var semaphore = Semaphore.create(1);
+    semaphore.acquire();
+
+    const PendSvAction = struct {
+        pub fn call() void {
+            hal.time.systick.set_ticks(hal.time.systick.get_system_tick() + 1000);
+            for (0..1000) |_| irq_systick();
+            call_count += 1;
+        }
+    };
+
+    hal.irq.impl().set_irq_action(.pendsv, &PendSvAction.call);
+    try std.testing.expectEqual(1, try KernelSemaphore.acquire(&semaphore));
+    try std.testing.expectEqual(0, semaphore.counter.value);
+    try std.testing.expectEqual(1, call_count);
+    const process = kernel.process.process_manager.instance.get_current_process().?;
+    try std.testing.expectEqual(Process.State.Blocked, process.state);
+    process.reevaluate_state();
+    try std.testing.expectEqual(Process.State.Blocked, process.state);
+    try std.testing.expectEqual(0, KernelSemaphore.release(&semaphore));
+    try std.testing.expectEqual(1, semaphore.counter.value);
+    process.reevaluate_state();
+    try std.testing.expectEqual(Process.State.Ready, process.state);
+}
