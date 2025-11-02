@@ -79,7 +79,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                         ch[0] = '\n';
                     }
 
-                    if (ch[0] == 8 or ch[0] == 127) {
+                    if (ch[0] == 8 or ch[0] == 127 and self._icanonical) {
                         if (index > 0) {
                             buffer[index] = 0;
                             index -= 1;
