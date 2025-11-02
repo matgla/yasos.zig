@@ -26,7 +26,7 @@ const hal = @import("hal");
 
 const kernel = @import("kernel");
 const yasld = @import("yasld");
-const DumpHardware = @import("hwinfo/dump_hardware.zig").DumpHardware;
+const DumpHardware = kernel.DumpHardware;
 
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
@@ -189,7 +189,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     try driverfs.data().append(try uart_driver.clone(), "stderr");
 
     const flash0name = "flash0";
-    const flash_driver_base = try kernel.driver.FlashDriver.InstanceType.create(allocator, board.flash.flash0, flash0name);
+    const flash_driver_base = try kernel.driver.FlashDriver(@TypeOf(board.flash.flash0)).InstanceType.create(allocator, board.flash.flash0, flash0name);
     var flash_driver = try flash_driver_base.interface.new(allocator);
     try driverfs.data().append(flash_driver, flash0name);
     var maybe_mmcnode: ?kernel.fs.Node = null;
@@ -199,7 +199,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
 
-            maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, @field(board.mmc, name), name)).interface.new(allocator);
+            maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, &@field(board.mmc, name), name)).interface.new(allocator);
             driverfs.data().append(maybe_mmcdriver.?, name) catch {};
             kernel.log.info("adding mmc driver: {s}", .{m.name});
             i = i + 1;
@@ -222,7 +222,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     const maybe_flashfile = node.as_file();
     if (maybe_flashfile) |flash| {
         try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, 0x100000)), "/");
-        var maybe_mmcpart0 = driverfs.data().get("mmc0p0", allocator);
+        var maybe_mmcpart0 = driverfs.data().get("mmc0p0") catch null;
         if (maybe_mmcpart0) |*mmcnode| {
             const maybe_file = mmcnode.as_file();
             if (maybe_file) |file| {
@@ -244,17 +244,17 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
 
 fn attach_default_filedescriptors_to_root_process(process: *kernel.process.Process) !void {
     kernel.log.info("setting default streams", .{});
-    const maybe_stdin = kernel.fs.get_ivfs().interface.get("/dev/stdin", process.get_memory_allocator());
+    const maybe_stdin = kernel.fs.get_ivfs().interface.get("/dev/stdin") catch null;
     if (maybe_stdin) |stdin| {
         _ = try process.attach_file_with_fd(0, "/dev/stdin", stdin);
     }
 
-    const maybe_stdout = kernel.fs.get_ivfs().interface.get("/dev/stdout", process.get_memory_allocator());
+    const maybe_stdout = kernel.fs.get_ivfs().interface.get("/dev/stdout") catch null;
     if (maybe_stdout) |stdout| {
         _ = try process.attach_file_with_fd(1, "/dev/stdout", stdout);
     }
 
-    const maybe_stderr = kernel.fs.get_ivfs().interface.get("/dev/stderr", process.get_memory_allocator());
+    const maybe_stderr = kernel.fs.get_ivfs().interface.get("/dev/stderr") catch null;
     if (maybe_stderr) |stderr| {
         _ = try process.attach_file_with_fd(2, "/dev/stderr", stderr);
     }
@@ -266,9 +266,7 @@ const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
 });
 
 export fn kernel_process(argument: *KernelAllocator) void {
-    var malloc_allocator = argument.*;
-    const allocator = malloc_allocator.allocator();
-
+    _ = argument;
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
         attach_default_filedescriptors_to_root_process(process) catch {
@@ -276,7 +274,7 @@ export fn kernel_process(argument: *KernelAllocator) void {
         };
         const pid = process.pid;
         // this loads executable replacing current image
-        const sh = kernel.dynamic_loader.load_executable("/bin/sh", allocator, process.get_process_memory_allocator(), pid) catch |err| {
+        const sh = kernel.dynamic_loader.load_executable("/bin/sh", process.get_process_memory_allocator(), pid) catch |err| {
             kernel.log.err("Executable loading failed with error: {s}", .{@errorName(err)});
             return;
         };
@@ -319,6 +317,6 @@ pub export fn main() void {
         @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, &allocator, 1024 * 16 }) catch {};
         kernel.log.warn("Root process died", .{});
     }
-    @call(.never_inline, KernelAllocator.detect_leaks, .{});
+    _ = @call(.never_inline, KernelAllocator.detect_leaks, .{});
     kernel.stdout.print("You can turn off your PC now!\n", .{});
 }

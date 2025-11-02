@@ -23,7 +23,7 @@ const std = @import("std");
 const cpu = @import("hal").cpu;
 const memory = @import("hal").memory;
 
-const kernel = @import("kernel");
+const kernel = @import("kernel.zig");
 
 pub const DumpHardware = struct {
     pub fn print_hardware() void {
@@ -56,7 +56,7 @@ pub const DumpHardware = struct {
 
     fn format_size(size: u64, buffer: []u8) []const u8 {
         if (size >= 1000000000000) {
-            return std.fmt.bufPrint(buffer, "---", .{}) catch buffer[0..];
+            return std.fmt.bufPrint(buffer, "TB", .{}) catch buffer[0..];
         } else if (size >= 1024 * 1024 * 1024) {
             return std.fmt.bufPrint(buffer, "{d: <4} GB", .{size / 1024 / 1024 / 1024}) catch buffer[0..];
         } else if (size >= 1024 * 1024) {
@@ -87,6 +87,28 @@ pub const DumpHardware = struct {
     }
 };
 
-test "format frequency" {
-    try std.testing.expect(DumpHardware.format_frequency(0), "0 MHz");
+test "DumpHardware.FormatFrequency" {
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("0    Hz", DumpHardware.format_frequency(0, &buffer));
+    try std.testing.expectEqualStrings("999  Hz", DumpHardware.format_frequency(999, &buffer));
+    try std.testing.expectEqualStrings("1    KHz", DumpHardware.format_frequency(1000, &buffer));
+    try std.testing.expectEqualStrings("1    KHz", DumpHardware.format_frequency(1500, &buffer));
+    try std.testing.expectEqualStrings("1    MHz", DumpHardware.format_frequency(1000000, &buffer));
+    try std.testing.expectEqualStrings("2    MHz", DumpHardware.format_frequency(2500000, &buffer));
+    try std.testing.expectEqualStrings("1    GHz", DumpHardware.format_frequency(1000000000, &buffer));
+    try std.testing.expectEqualStrings("1    GHz", DumpHardware.format_frequency(1250000000, &buffer));
+    try std.testing.expectEqualStrings("1    ---", DumpHardware.format_frequency(1000000000000, &buffer));
+}
+
+test "DumpHardware.FormatSize" {
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("0    B", DumpHardware.format_size(0, &buffer));
+    try std.testing.expectEqualStrings("999  B", DumpHardware.format_size(999, &buffer));
+    try std.testing.expectEqualStrings("1000 B", DumpHardware.format_size(1000, &buffer));
+    try std.testing.expectEqualStrings("1    KB", DumpHardware.format_size(1500, &buffer));
+    try std.testing.expectEqualStrings("976  KB", DumpHardware.format_size(1000000, &buffer));
+    try std.testing.expectEqualStrings("2    MB", DumpHardware.format_size(2500000, &buffer));
+    try std.testing.expectEqualStrings("953  MB", DumpHardware.format_size(1000000000, &buffer));
+    try std.testing.expectEqualStrings("1    GB", DumpHardware.format_size(1250000000, &buffer));
+    try std.testing.expectEqualStrings("TB", DumpHardware.format_size(1000000000000, &buffer));
 }

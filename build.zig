@@ -74,6 +74,7 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
 }
 
 pub fn build(b: *std.Build) !void {
+    const test_filters = b.option([]const []const u8, "test-filter", "comma separated list of test name filters") orelse &[0][]const u8{};
     const clean_step = b.step("clean", "Clean build artifacts");
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
     const run_tests_step = b.step("test", "Run Yasos tests");
@@ -124,70 +125,201 @@ pub fn build(b: *std.Build) !void {
     }
 
     const optimize = b.standardOptimizeOption(.{});
-
+    const target = b.standardTargetOptions(.{});
     const kernel_module_for_tests = b.addModule("kernel_under_test", .{
         .root_source_file = b.path("source/kernel/kernel.zig"),
-        .target = b.standardTargetOptions(.{}),
+        .target = target,
         .optimize = optimize,
     });
-    // fs_tests.root_module.addImport("kernel", kernel_module_for_tests);
+
+    const kernel_tests_module = b.addModule("kernel_tests_module", .{
+        .root_source_file = b.path("source/kernel/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const kernel_tests = b.addTest(.{
         .name = "kernel_tests",
-        // .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
-        .root_module = kernel_module_for_tests,
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .root_module = kernel_tests_module,
+        .use_llvm = true,
+        .filters = test_filters,
     });
 
-    // const fs_tests = b.addTest(.{
-    //     .name = "fs_tests",
-    //     .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
-    //     // .root_source_file = b.path("source/fs/tests.zig"),
-    // });
+    const arch_tests_module = b.addModule("arch_tests_module", .{
+        .root_source_file = b.path("source/arch/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const arch_tests = b.addTest(.{
+        .name = "arch_tests",
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .root_module = arch_tests_module,
+        .use_llvm = true,
+        .filters = test_filters,
+    });
+
+    const fs_tests_module = b.addModule("fs_tests_module", .{
+        .root_source_file = b.path("source/fs/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const fs_tests = b.addTest(.{
+        .name = "fs_tests",
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .root_module = fs_tests_module,
+        .use_llvm = true,
+        .filters = test_filters,
+    });
+    fs_tests.root_module.addImport("kernel", kernel_module_for_tests);
+
+    const yasld_stub = b.addModule("yasld_stub", .{
+        .root_source_file = b.path("dynamic_loader/stub/yasld.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    kernel_tests.root_module.addImport("yasld", yasld_stub);
+
+    const c_for_tests = b.addModule("c_for_tests", .{
+        .root_source_file = b.path("source/cimports.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_tests.root_module.addImport("c", c_for_tests);
 
     const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
     generate_defconfig_for_tests.step.dependOn(&venv.step);
     generate_defconfig_for_tests.has_side_effects = true;
     kernel_tests.step.dependOn(&generate_defconfig_for_tests.step);
-    // fs_tests.step.dependOn(&generate_defconfig_for_tests.step);
+    fs_tests.step.dependOn(&generate_defconfig_for_tests.step);
+    arch_tests.step.dependOn(&generate_defconfig_for_tests.step);
 
-    b.installArtifact(kernel_tests);
-    // b.installArtifact(fs_tests);
-
+    const install_kernel_tests = b.addInstallBinFile(kernel_tests.getEmittedBin(), "kernel_tests");
+    const install_fs_tests = b.addInstallBinFile(fs_tests.getEmittedBin(), "fs_tests");
+    const install_arch_tests = b.addInstallBinFile(arch_tests.getEmittedBin(), "arch_tests");
+    b.default_step.dependOn(&install_arch_tests.step);
+    b.default_step.dependOn(&install_fs_tests.step);
+    b.default_step.dependOn(&install_kernel_tests.step);
+    run_tests_step.dependOn(&install_arch_tests.step);
+    run_tests_step.dependOn(&install_fs_tests.step);
+    run_tests_step.dependOn(&install_kernel_tests.step);
     kernel_tests.linkLibC();
-    // fs_tests.linkLibC();
+    fs_tests.linkLibC();
+    arch_tests.linkLibC();
 
     const test_config_module = b.addModule("test_config", .{
         .root_source_file = b.path("config/tests/config.zig"),
     });
     kernel_tests.root_module.addImport("config", test_config_module);
-    // fs_tests.root_module.addImport("config", test_config_module);
+    fs_tests.root_module.addImport("config", test_config_module);
+    arch_tests.root_module.addImport("config", test_config_module);
+
+    const arch_for_tests = b.addModule("arch_for_tests", .{
+        .root_source_file = b.path("source/arch/ut/arch.zig"),
+    });
+
+    const hal_interface = b.addModule("hal_interface", .{
+        .root_source_file = b.path("hal/interface/hal.zig"),
+    });
+
+    const hal_for_tests = b.addModule("hal_for_tests", .{
+        .root_source_file = b.path("hal/source/ut_stub/hal.zig"),
+    });
+
+    hal_for_tests.addImport("hal_interface", hal_interface);
+    kernel_tests.root_module.addImport("hal", hal_for_tests);
+    kernel_tests.root_module.addImport("arch", arch_for_tests);
 
     const oop = b.dependency("modules/oop", .{});
 
     kernel_tests.root_module.addImport("interface", oop.module("interface"));
-    // fs_tests.root_module.addImport("interface", oop.module("interface"));
+    fs_tests.root_module.addImport("interface", oop.module("interface"));
+    arch_tests.root_module.addImport("interface", oop.module("interface"));
 
     const libc_imports_for_tests = b.addModule("libc_imports_for_tests", .{
         .root_source_file = b.path("source/libc_imports.zig"),
     });
+
+    hal_for_tests.addImport("libc_imports", libc_imports_for_tests);
     libc_imports_for_tests.addIncludePath(b.path("."));
+
     kernel_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
-    // fs_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
+    fs_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
+    arch_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
 
     const run_kernel_tests = b.addRunArtifact(kernel_tests);
-    // const run_fs_tests = b.addRunArtifact(fs_tests);
+    const run_fs_tests = b.addRunArtifact(fs_tests);
+    const run_arch_tests = b.addRunArtifact(arch_tests);
 
     run_tests_step.dependOn(&run_kernel_tests.step);
-    // run_tests_step.dependOn(&run_fs_tests.step);
+    run_tests_step.dependOn(&run_fs_tests.step);
+    run_tests_step.dependOn(&run_arch_tests.step);
 
     kernel_tests.root_module.addIncludePath(b.path("."));
-    // fs_tests.root_module.addIncludePath(b.path("."));
+    fs_tests.root_module.addIncludePath(b.path("."));
+    arch_tests.root_module.addIncludePath(b.path("."));
+
+    const zfat_host = b.dependency("modules/fatfs", .{
+        .optimize = optimize,
+        .mkfs = true,
+        .relative_path_api = .enabled_with_getcwd,
+    });
+    const zfat_host_module = zfat_host.module("zfat");
+
+    fs_tests.root_module.addImport("zfat", zfat_host_module);
+
     kernel_module_for_tests.addImport("interface", oop.module("interface"));
     kernel_module_for_tests.addImport("libc_imports", libc_imports_for_tests);
     if (!has_config) {
         std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
         return;
     }
+
+    const run_kernel_tests_coverage = b.addSystemCommand(&.{
+        "kcov",
+        "--clean",
+        "--include-path=source/",
+        b.pathJoin(&.{ b.install_path, "coverage_kernel" }),
+    });
+    const run_arch_tests_coverage = b.addSystemCommand(&.{
+        "kcov",
+        "--clean",
+        "--include-path=source/",
+        b.pathJoin(&.{ b.install_path, "coverage_arch" }),
+    });
+    const run_fs_tests_coverage = b.addSystemCommand(&.{
+        "kcov",
+        "--clean",
+        "--include-path=source/",
+        b.pathJoin(&.{ b.install_path, "coverage_fs" }),
+    });
+    run_kernel_tests_coverage.addArtifactArg(kernel_tests);
+    run_arch_tests_coverage.addArtifactArg(fs_tests);
+    run_fs_tests_coverage.addArtifactArg(arch_tests);
+
+    const run_coverage = b.addSystemCommand(&.{
+        "kcov",
+        "--exclude-path=source/fs/romfs/tests,source/fs/fatfs/tests,source/arch/ut",
+        "--exclude-pattern=tests.zig,stub.zig,osthread.zig",
+        "--merge",
+        b.pathJoin(&.{ b.install_path, "coverage_report" }),
+        b.pathJoin(&.{ b.install_path, "coverage_kernel" }),
+        b.pathJoin(&.{ b.install_path, "coverage_arch" }),
+        b.pathJoin(&.{ b.install_path, "coverage_fs" }),
+    });
+    run_coverage.step.dependOn(&run_kernel_tests_coverage.step);
+    run_coverage.step.dependOn(&run_arch_tests_coverage.step);
+    run_coverage.step.dependOn(&run_fs_tests_coverage.step);
+
+    run_arch_tests_coverage.step.dependOn(&install_arch_tests.step);
+    run_fs_tests_coverage.step.dependOn(&install_fs_tests.step);
+    run_kernel_tests_coverage.step.dependOn(&install_kernel_tests.step);
+
+    const coverage_step = b.step("coverage", "Generate code coverage report");
+    coverage_step.dependOn(&run_coverage.step);
 
     if (maybe_config_exists) |config_exists| {
         if (config_exists.kind == .file) {

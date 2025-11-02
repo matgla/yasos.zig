@@ -32,20 +32,23 @@ pub const RamFsDataError = error{
     FileNameTooLong,
 };
 
+var inode_counter: u32 = 1;
+
 pub const RamFsData = struct {
     /// File contents
     _allocator: std.mem.Allocator,
     /// Buffer for filename, do not use it except of this module, instead please use: `RamFsData.name`
-    name: []u8,
+    // name: []u8,
     data: std.ArrayListAligned(u8, .@"8"),
     refcounter: *i16,
+    inode: u32,
 
-    pub fn create(allocator: std.mem.Allocator, filename: []const u8) !RamFsData {
+    pub fn create(allocator: std.mem.Allocator) !RamFsData {
         const obj = RamFsData{
             ._allocator = allocator,
-            .name = try allocator.dupe(u8, filename),
             .data = try std.ArrayListAligned(u8, .@"8").initCapacity(allocator, 0),
             .refcounter = try allocator.create(i16),
+            .inode = inode_counter,
         };
         obj.refcounter.* = 1;
         return obj;
@@ -60,7 +63,6 @@ pub const RamFsData = struct {
         self.refcounter.* -= 1;
         if (self.refcounter.* == 0) {
             self.data.deinit(self._allocator);
-            self._allocator.free(self.name);
             self._allocator.destroy(self.refcounter);
             return true;
         }
@@ -68,29 +70,15 @@ pub const RamFsData = struct {
     }
 };
 
-test "RamFsData.ShouldCreateFile" {
-    var file1 = try RamFsData.create_file(std.testing.allocator, "file1");
-    defer file1.deinit();
-    try std.testing.expectEqualStrings("file1", file1.name());
-    // try std.testing.expectEqual(FileType.File, file1.type);
-
-    var file2 = try RamFsData.create_file(std.testing.allocator, "file3");
-    defer file2.deinit();
-    try std.testing.expectEqualStrings("file3", file2.name());
-    // try std.testing.expectEqual(FileType.File, file2.type);
-
-    var dir = try RamFsData.create_directory(std.testing.allocator, "dira");
-    defer dir.deinit();
-    try std.testing.expectEqualStrings("dira", dir.name());
-    // try std.testing.expectEqual(FileType.Directory, dir.type);
-}
-
 test "RamFsData.ShouldAppendToFile" {
-    var file1 = try RamFsData.create_file(std.testing.allocator, "file1");
-    try file1.data.appendSlice("This is test content");
-    try std.testing.expectEqualStrings("file1", file1.name());
-    // try std.testing.expectEqual(FileType.File, file1.type);
+    var file1 = try RamFsData.create(std.testing.allocator);
+    try file1.data.appendSlice(file1._allocator, "This is test content");
     try std.testing.expectEqualStrings("This is test content", file1.data.items);
 
-    defer file1.deinit();
+    var file2 = file1.share();
+    try std.testing.expect(!file1.deinit());
+
+    try std.testing.expectEqual(file1.refcounter.*, 1);
+    try std.testing.expectEqualStrings("This is test content", file2.data.items);
+    try std.testing.expect(file2.deinit());
 }

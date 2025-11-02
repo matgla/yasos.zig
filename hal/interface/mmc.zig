@@ -38,31 +38,31 @@ pub fn Mmc(comptime MmcType: anytype) type {
             try self.impl.init();
         }
 
-        pub fn get_config(self: Self) MmcConfig {
+        pub fn get_config(self: *const Self) MmcConfig {
             return self.impl.get_config();
         }
 
-        pub fn build_command(self: Self, command: u6, argument: u32) [6]u8 {
+        pub fn build_command(self: *Self, command: u6, argument: u32) [6]u8 {
             return self.impl.build_command(command, argument);
         }
 
-        pub fn transmit_blocking(self: Self, src: []const u8, dest: ?[]u8) void {
+        pub fn transmit_blocking(self: *Self, src: []const u8, dest: ?[]u8) void {
             return self.impl.transmit_blocking(src, dest);
         }
 
-        pub fn receive_blocking(self: Self, dest: []u8) void {
+        pub fn receive_blocking(self: *Self, dest: []u8) void {
             return self.impl.receive_blocking(dest);
         }
 
-        pub fn chip_select(self: Self, select: bool) void {
+        pub fn chip_select(self: *Self, select: bool) void {
             return self.impl.chip_select(select);
         }
 
-        pub fn change_speed_to(self: Self, speed_hz: u32) void {
+        pub fn change_speed_to(self: *Self, speed_hz: u32) void {
             return self.impl.change_speed_to(speed_hz);
         }
 
-        pub fn is_busy(self: Self) bool {
+        pub fn is_busy(self: *const Self) bool {
             return self.impl.is_busy();
         }
     };

@@ -28,6 +28,8 @@ const c = @import("libc_imports").c;
 
 const kernel = @import("kernel");
 
+const fatfs_error_to_errno = @import("errno_converter.zig").fatfs_error_to_errno;
+
 const log = kernel.log;
 
 pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
@@ -41,7 +43,9 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsFile {
         const filename = try allocator.dupe(u8, std.fs.path.basename(path));
         errdefer allocator.free(filename);
-        const file = try fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing });
+        const file = fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing }) catch |err| {
+            return fatfs_error_to_errno(err);
+        };
         return FatFsFile.init(.{
             ._file = file,
             ._allocator = allocator,
@@ -73,47 +77,30 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+        var new_position: c.off_t = 0;
         if (self._file) |*file| {
+            const file_size: c.off_t = @intCast(file.size());
             switch (whence) {
                 c.SEEK_SET => {
-                    file.seekTo(@intCast(offset)) catch return -1;
-                    return self.tell();
+                    new_position = offset;
                 },
                 c.SEEK_END => {
-                    const file_size: c.off_t = @intCast(file.size());
-                    if (file_size >= offset) {
-                        file.seekTo(@intCast(file_size - @as(c.off_t, @intCast(offset)))) catch return -1;
-                        return self.tell();
-                    } else {
-                        // set errno
-                        return -1;
-                    }
+                    new_position = file_size + offset;
                 },
                 c.SEEK_CUR => {
-                    const new_position = @as(c.off_t, @intCast(file.tell())) + offset;
-                    if (new_position < 0) {
-                        return -1;
-                    }
-                    file.seekTo(@intCast(new_position)) catch return -1;
-                    return self.tell();
+                    const current_pos: c.off_t = @intCast(file.tell());
+                    new_position = current_pos + offset;
                 },
-                else => return -1,
+                else => return kernel.errno.ErrnoSet.InvalidArgument,
             }
-            return -1;
+            if (new_position < 0 or new_position > file_size) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+            file.seekTo(@intCast(new_position)) catch |err| return fatfs_error_to_errno(err);
+            return @intCast(file.tell());
         }
-        return 0;
-    }
-
-    pub fn close(self: *Self) void {
-        if (!self._is_open) {
-            return;
-        }
-        self._is_open = false;
-        if (self._file) |*file| {
-            file.close();
-            self._file = null;
-        }
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn sync(self: *Self) i32 {
@@ -158,13 +145,21 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
+        if (!self._is_open) {
+            return;
+        }
+        self._is_open = false;
+        if (self._file) |*file| {
+            file.close();
+            self._file = null;
+        }
         self._allocator.free(self._name);
     }
 
-    pub fn stat(self: *Self, data: *c.struct_stat) void {
+    pub fn size(self: *const Self) usize {
         if (self._file) |*file| {
-            data.st_size = @as(usize, @intCast(file.size()));
+            return @as(usize, @intCast(file.size()));
         }
+        return 0;
     }
 });

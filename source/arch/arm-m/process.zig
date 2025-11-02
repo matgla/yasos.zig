@@ -222,9 +222,6 @@ pub const ArmProcess = struct {
 
     pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype) !Self {
         const stack = try process_allocator.alignedAlloc(u8, .@"8", stack_size);
-        // if (comptime config.process.use_stack_overflow_detection) {
-        // @memcpy(stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
-        // }
         const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg, true);
         return ArmProcess{
             .stack = stack,

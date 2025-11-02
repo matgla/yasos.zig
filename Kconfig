@@ -68,6 +68,8 @@ config CONFIG_SCHEDULER_OSTHREAD
   bool "OSThread"
 config CONFIG_SCHEDULER_ROUND_ROBIN
   bool "RoundRobinScheduler"
+config CONFIG_SCHEDULER_STUB
+  bool "StubScheduler"
 endchoice
 
 config CONFIG_PROCESS_MAX_PID_VALUE

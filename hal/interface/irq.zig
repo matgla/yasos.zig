@@ -20,7 +20,7 @@
 
 pub fn Irq(comptime IrqImpl: anytype) type {
     return struct {
-        const IrqType = IrqImpl.Type;
+        pub const IrqType = IrqImpl.Type;
         const Self = @This();
 
         pub fn create() Self {
@@ -54,6 +54,10 @@ pub fn Irq(comptime IrqImpl: anytype) type {
 
         pub fn leave_critical_section(_: Self) void {
             IrqImpl.leave_critical_section();
+        }
+
+        pub fn impl(_: Self) type {
+            return IrqImpl;
         }
     };
 }

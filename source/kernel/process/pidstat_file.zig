@@ -145,16 +145,16 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
         if (maybe_process) |process| {
             // const proc_name = process.get_name();
             const buffer = &interface.base(self)._buffer;
+            var name: []const u8 = "??";
+            if (kernel.dynamic_loader.get_executable_for_pid(self._pid)) |ex| {
+                if (ex.module.name) |n| {
+                    name = n;
+                }
+            }
             if (self._human_readable) {
-                const buf = std.fmt.bufPrint(buffer, human_readable_file_content_format, .{ "stub", 0, 0, 1, 0 }) catch buffer;
+                const buf = std.fmt.bufPrint(buffer, human_readable_file_content_format, .{ name, 0, 0, self._pid, 0 }) catch buffer;
                 interface.base(self)._end = buf.len;
             } else {
-                var name: []const u8 = "??";
-                if (kernel.dynamic_loader.get_executable_for_pid(self._pid)) |ex| {
-                    if (ex.module.name) |n| {
-                        name = n;
-                    }
-                }
                 const stat: PidStat = .{
                     .pid = self._pid,
                     .comm = name,
@@ -216,10 +216,85 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
-    }
-
-    pub fn close(self: *Self) void {
         _ = self;
     }
 });
+
+fn test_entry() void {}
+const DirectoryMock = @import("../fs/tests/directory_mock.zig").DirectoryMock;
+const FileMock = @import("../fs/tests/file_mock.zig").FileMock;
+const FileSystemMock = @import("../fs/tests/filesystem_mock.zig").FileSystemMock;
+
+test "PidStatFile.ShouldCreateStatFile" {
+    kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
+    defer kernel.process.process_manager.deinitialize_process_manager();
+    kernel.dynamic_loader.init(std.testing.allocator);
+    defer kernel.dynamic_loader.deinit();
+    kernel.fs.vfs_init(std.testing.allocator);
+    defer kernel.fs.vfs_deinit();
+
+    const fsmock = try FileSystemMock.create(std.testing.allocator);
+    try kernel.fs.get_vfs().mount_filesystem("/", fsmock.interface);
+
+    const filemock = try FileMock.create(std.testing.allocator);
+
+    const IoctlCallback = struct {
+        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
+            const cmd = args[0];
+            try std.testing.expectEqual(cmd, @as(i32, @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
+
+            const a = args[1];
+            var attr: *kernel.fs.FileMemoryMapAttributes = @ptrCast(@alignCast(a.?));
+            attr.is_memory_mapped = true;
+            attr.mapped_address_w = null;
+            attr.mapped_address_r = ctx.?;
+            return 0;
+        }
+    };
+    const test_mapped_address: usize = 0x1000;
+    _ = filemock
+        .expectCall("ioctl")
+        .invoke(&IoctlCallback.call, &test_mapped_address)
+        .willReturn(0);
+
+    _ = fsmock
+        .expectCall("get")
+        .withArgs(.{"stat"})
+        .willReturn(kernel.fs.Node.create_file(filemock.interface));
+
+    var arg: usize = 0;
+    try kernel.process.process_manager.instance.create_process(4096, &test_entry, &arg, "test");
+    _ = try kernel.dynamic_loader.load_executable("test", std.testing.allocator, 1);
+
+    var sut = try PidStatFile.InstanceType.create_node(std.testing.allocator, 1, false);
+    defer sut.delete();
+
+    try std.testing.expect(sut.is_file());
+    try std.testing.expectEqualStrings("stat", sut.name());
+
+    var buf: [512]u8 = undefined;
+    var file = sut.as_file().?;
+    const readed = file.interface.read(buf[0..]);
+    const expected = "1 (dummy_module) R 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 \n";
+    try std.testing.expectEqualStrings(expected, buf[0..@intCast(readed)]);
+
+    var sut_status = try PidStatFile.InstanceType.create_node(std.testing.allocator, 1, true);
+    defer sut_status.delete();
+
+    try std.testing.expect(sut_status.is_file());
+    try std.testing.expectEqualStrings("status", sut_status.name());
+
+    file = sut_status.as_file().?;
+    const readed_status = file.interface.read(buf[0..]);
+    const expected_status =
+        \\Name:   dummy_module
+        \\Umask:  0000
+        \\State:  R(running)
+        \\Tgid:   0
+        \\Ngid:   0
+        \\Pid:    1
+        \\PPid:   0
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected_status, buf[0..@intCast(readed_status)]);
+}

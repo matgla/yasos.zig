@@ -21,7 +21,7 @@
 const systick = @import("interrupts/systick.zig");
 const process_manager = @import("process_manager.zig");
 
-const kernel = @import("kernel");
+const kernel = @import("kernel.zig");
 const log = kernel.log;
 
 pub fn sleep_ms(ms: u32) void {
@@ -36,4 +36,44 @@ pub fn sleep_us(us: u32) void {
     if (maybe_process) |process| {
         process.sleep_for_us(us);
     }
+}
+
+const std = @import("std");
+const hal = @import("hal");
+const irq_systick = @import("interrupts/systick.zig").irq_systick;
+const irq_handlers = @import("arch").irq_handlers;
+const system_call = @import("interrupts/system_call.zig");
+
+fn test_entry() void {}
+
+var call_count: usize = 0;
+
+test "Time.ProcessShoulSleep" {
+    kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
+    defer kernel.process.process_manager.deinitialize_process_manager();
+    defer hal.irq.impl().clear();
+
+    var arg: usize = 0;
+    try kernel.process.process_manager.instance.create_process(1024, &test_entry, &arg, "test");
+    try kernel.process.process_manager.instance.create_process(1024, &test_entry, &arg, "test2");
+    _ = kernel.process.process_manager.instance.schedule_next();
+    _ = kernel.process.process_manager.get_next_task();
+    system_call.init(std.testing.allocator);
+
+    hal.time.impl.set_time(0);
+
+    const PendSvAction = struct {
+        pub fn call() void {
+            hal.time.systick.set_ticks(hal.time.systick.get_system_tick() + 1000);
+            for (0..1000) |_| irq_systick();
+            _ = irq_handlers.call_context_switch_handler(0);
+            call_count += 1;
+        }
+    };
+
+    hal.irq.impl().set_irq_action(.pendsv, &PendSvAction.call);
+
+    call_count = 0;
+    sleep_ms(400);
+    try std.testing.expectEqual(1, call_count);
 }

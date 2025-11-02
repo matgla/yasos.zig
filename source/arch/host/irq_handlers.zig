@@ -26,7 +26,7 @@ const c = @cImport({
 
 const hal = @import("hal");
 
-const ContextSwitchHandler = *const fn (lr: usize) void;
+const ContextSwitchHandler = *const fn (lr: usize) usize;
 const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
 
 var context_switch_handler: ?ContextSwitchHandler = null;
@@ -48,6 +48,13 @@ var system_call_handler: ?SystemCallHandler = null;
 
 pub fn set_context_switch_handler(handler: ContextSwitchHandler) void {
     context_switch_handler = handler;
+}
+
+pub fn call_context_switch_handler(lr: usize) usize {
+    if (context_switch_handler) |handler| {
+        return handler(lr);
+    }
+    return lr;
 }
 
 pub fn set_system_call_handler(handler: SystemCallHandler) void {

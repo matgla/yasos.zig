@@ -24,19 +24,25 @@ pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator,
     const Self = @This();
     _dir: fatfs.Dir,
     _allocator: std.mem.Allocator,
+    _name: ?[]const u8,
 
     pub fn create(dir: fatfs.Dir, allocator: std.mem.Allocator) FatFsIterator {
         return FatFsIterator.init(.{
             ._dir = dir,
             ._allocator = allocator,
+            ._name = null,
         });
     }
 
     pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
         const maybe_entry = self._dir.next() catch return null;
         if (maybe_entry) |entry| {
+            if (self._name) |old_name| {
+                self._allocator.free(old_name);
+            }
+            self._name = self._allocator.dupe(u8, entry.name()) catch return null;
             return .{
-                .name = entry.name(),
+                .name = self._name.?,
                 .kind = if (entry.kind == .Directory) .Directory else .File,
             };
         }
@@ -44,6 +50,9 @@ pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator,
     }
 
     pub fn delete(self: *Self) void {
+        if (self._name) |name| {
+            self._allocator.free(name);
+        }
         self._dir.close();
     }
 });
@@ -94,12 +103,7 @@ pub const FatFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         return self._name;
     }
 
-    pub fn close(self: *Self) void {
-        _ = self;
-    }
-
     pub fn delete(self: *Self) void {
-        self.close();
         self._allocator.free(self._name);
         self._allocator.free(self._path);
     }

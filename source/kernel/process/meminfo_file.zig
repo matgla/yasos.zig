@@ -82,10 +82,62 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
-    }
-
-    pub fn close(self: *Self) void {
         _ = self;
     }
 });
+
+test "MemInfoFile.ShouldShowMemInfo" {
+    kernel.memory.heap.malloc.reset();
+    kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
+    defer kernel.process.process_manager.deinitialize_process_manager();
+
+    var sut = try MemInfoFile.InstanceType.create().interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var buffer: [256]u8 = undefined;
+    const readed: usize = @intCast(sut.interface.read(buffer[0..]));
+
+    try std.testing.expectEqualStrings("meminfo", sut.interface.name());
+    const expected_text =
+        \\MemUsed:                0 B
+        \\MemKernelUsed:          0 B
+        \\MemProcessUsed:         0 B
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected_text, buffer[0..readed]);
+
+    var malloc = kernel.memory.heap.malloc.MallocAllocator(.{}).init();
+    defer malloc.deinit();
+
+    const a = try malloc.allocator().alloc(u8, 1024 * 1024); // allocate 1 MB
+    defer malloc.allocator().free(a);
+    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(512, 123);
+
+    _ = sut.interface.sync();
+    _ = try sut.interface.seek(0, c.SEEK_SET);
+    const readed_after_alloc: usize = @intCast(sut.interface.read(buffer[0..]));
+
+    const expected_allocated_text =
+        \\MemUsed:             3072 KB
+        \\MemKernelUsed:       1024 KB
+        \\MemProcessUsed:      2048 KB
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected_allocated_text, buffer[0..readed_after_alloc]);
+
+    const b = try malloc.allocator().alloc(u8, 1024 * 1024 * 2048);
+    defer malloc.allocator().free(b);
+    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(512, 123);
+
+    _ = sut.interface.sync();
+    _ = try sut.interface.seek(0, c.SEEK_SET);
+    const readed_after_alloc2: usize = @intCast(sut.interface.read(buffer[0..]));
+
+    const expected_allocated2_text =
+        \\MemUsed:             2053 MB
+        \\MemKernelUsed:       2049 MB
+        \\MemProcessUsed:      4096 KB
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected_allocated2_text, buffer[0..readed_after_alloc2]);
+}

@@ -60,10 +60,30 @@ pub const MaxProcFile = interface.DeriveFromBase(MaxProcBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.close();
-    }
-
-    pub fn close(self: *Self) void {
         _ = self;
     }
 });
+
+test "MaxProcFile.ShouldCreateNode" {
+    var node = try MaxProcFile.InstanceType.create_node(std.testing.allocator);
+    defer node.delete();
+
+    try std.testing.expect(node.is_file());
+    try std.testing.expectEqualStrings("pid_max", node.name());
+}
+
+test "MaxProcFile.ShouldSyncAndContainMaxPid" {
+    var sut = try MaxProcFile.InstanceType.create().interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    const result = sut.interface.sync();
+    try std.testing.expectEqual(@as(i32, 0), result);
+
+    var buffer: [64]u8 = undefined;
+    const readed = sut.interface.read(&buffer);
+
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "{d}\n", .{config.process.max_pid_value});
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, buffer[0..@intCast(readed)]);
+}

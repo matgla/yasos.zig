@@ -34,6 +34,12 @@ pub fn get_usage() usize {
     return if (memory_in_use < 0) 0 else @intCast(memory_in_use);
 }
 
+pub fn reset() void {
+    memory_in_use = 0;
+    surpressed_memory = 0;
+    counter = 0;
+}
+
 const Tracker = extern struct {
     next: ?*Tracker,
     prev: ?*Tracker,
@@ -127,7 +133,7 @@ pub fn MallocAllocator(comptime options: anytype) type {
 
         pub fn deinit(self: *Self) void {
             _ = self;
-            detect_leaks();
+            _ = detect_leaks();
         }
 
         pub fn start_leaks_detection() void {
@@ -137,14 +143,16 @@ pub fn MallocAllocator(comptime options: anytype) type {
             }
         }
 
-        pub fn detect_leaks() void {
+        pub fn detect_leaks() isize {
             if (comptime is_leaks_detection_enabled()) {
                 const leaked_memory = memory_in_use - surpressed_memory;
                 if (leaked_memory > 0) {
                     log.err("Memory leaks detected '{d}' bytes were left", .{leaked_memory});
                 }
                 tracker.print_leaks();
+                return leaked_memory;
             }
+            return 0;
         }
 
         fn is_leaks_detection_enabled() bool {
@@ -259,4 +267,249 @@ pub fn MallocAllocator(comptime options: anytype) type {
             }
         }
     };
+}
+
+test "MallocAllocator.ShouldAllocateAndFree" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const ptr = try allocator.alloc(u8, 100);
+    defer allocator.free(ptr);
+
+    try std.testing.expectEqual(@as(usize, 100), ptr.len);
+}
+
+test "MallocAllocator.ShouldTrackMemoryUsage" {
+    const initial_usage = @import("malloc.zig").get_usage();
+
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const ptr1 = try allocator.alloc(u8, 100);
+    const usage_after_alloc1 = @import("malloc.zig").get_usage();
+    try std.testing.expect(usage_after_alloc1 >= initial_usage + 100);
+
+    const ptr2 = try allocator.alloc(u8, 200);
+    const usage_after_alloc2 = @import("malloc.zig").get_usage();
+    try std.testing.expect(usage_after_alloc2 >= usage_after_alloc1 + 200);
+
+    allocator.free(ptr1);
+    const usage_after_free1 = @import("malloc.zig").get_usage();
+    try std.testing.expect(usage_after_free1 < usage_after_alloc2);
+
+    allocator.free(ptr2);
+    const usage_after_free2 = @import("malloc.zig").get_usage();
+    try std.testing.expectEqual(initial_usage, usage_after_free2);
+}
+
+test "MallocAllocator.ShouldAllocateMultipleTimes" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    var ptrs = try std.ArrayList([]u8).initCapacity(std.testing.allocator, 8);
+    defer ptrs.deinit(std.testing.allocator);
+
+    for (0..10) |i| {
+        const size = (i + 1) * 10;
+        const ptr = try allocator.alloc(u8, size);
+        try ptrs.append(std.testing.allocator, ptr);
+    }
+
+    for (ptrs.items) |ptr| {
+        allocator.free(ptr);
+    }
+}
+
+test "MallocAllocator.ShouldAllocateDifferentSizes" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const small = try allocator.alloc(u8, 1);
+    defer allocator.free(small);
+    try std.testing.expectEqual(@as(usize, 1), small.len);
+
+    const medium = try allocator.alloc(u8, 1024);
+    defer allocator.free(medium);
+    try std.testing.expectEqual(@as(usize, 1024), medium.len);
+
+    const large = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(large);
+    try std.testing.expectEqual(@as(usize, 1024 * 1024), large.len);
+}
+
+test "MallocAllocator.ShouldAllocateDifferentTypes" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const bytes = try allocator.alloc(u8, 100);
+    defer allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, 100), bytes.len);
+
+    const ints = try allocator.alloc(i32, 50);
+    defer allocator.free(ints);
+    try std.testing.expectEqual(@as(usize, 50), ints.len);
+
+    const floats = try allocator.alloc(f64, 25);
+    defer allocator.free(floats);
+    try std.testing.expectEqual(@as(usize, 25), floats.len);
+}
+
+test "MallocAllocator.ShouldCreateAndDestroy" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const TestStruct = struct {
+        value: i32,
+        name: []const u8,
+    };
+
+    const obj = try allocator.create(TestStruct);
+    defer allocator.destroy(obj);
+
+    obj.value = 42;
+    obj.name = "test";
+
+    try std.testing.expectEqual(@as(i32, 42), obj.value);
+    try std.testing.expectEqualStrings("test", obj.name);
+}
+
+test "MallocAllocator.ShouldAllocSentinel" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const str = try allocator.allocSentinel(u8, 10, 0);
+    defer allocator.free(str);
+
+    @memcpy(str[0..5], "hello");
+    try std.testing.expectEqualStrings("hello", str[0..5]);
+    try std.testing.expectEqual(@as(u8, 0), str[10]);
+}
+
+test "MallocAllocator.ShouldDupe" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const original = "Hello, World!";
+    const duped = try allocator.dupe(u8, original);
+    defer allocator.free(duped);
+
+    try std.testing.expectEqualStrings(original, duped);
+    try std.testing.expect(@intFromPtr(original.ptr) != @intFromPtr(duped.ptr));
+}
+
+test "MallocAllocator.WithLeakDetection.ShouldDetectLeaks" {
+    var malloc_alloc = MallocAllocator(.{ .leak_detection = true }).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    MallocAllocator(.{ .leak_detection = true }).start_leaks_detection();
+
+    // Intentionally leak memory for testing
+    _ = try allocator.alloc(u8, 100);
+    _ = try allocator.alloc(u8, 128);
+
+    // This should detect the leak when deinit is called
+    try std.testing.expectEqual(228, MallocAllocator(.{ .leak_detection = true }).detect_leaks());
+}
+
+test "MallocAllocator.WithLeakDetection.ShouldNotDetectLeaksWhenFreed" {
+    var malloc_alloc = MallocAllocator(.{ .leak_detection = true }).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    MallocAllocator(.{ .leak_detection = true }).start_leaks_detection();
+
+    const ptr = try allocator.alloc(u8, 100);
+    allocator.free(ptr);
+
+    // This should not detect any leaks
+    try std.testing.expectEqual(0, MallocAllocator(.{ .leak_detection = true }).detect_leaks());
+}
+
+test "MallocAllocator.ShouldHandleZeroUsageCorrectly" {
+    const usage = @import("malloc.zig").get_usage();
+    try std.testing.expect(usage >= 0);
+}
+
+test "MallocAllocator.ShouldAllocateAndFreeInLoop" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    for (0..100) |i| {
+        const ptr = try allocator.alloc(u8, (i + 1) * 10);
+        // Write some data
+        for (ptr, 0..) |*byte, idx| {
+            byte.* = @intCast(idx % 256);
+        }
+        allocator.free(ptr);
+    }
+}
+
+test "MallocAllocator.ShouldHandleAlignedAllocations" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    const aligned = try allocator.alignedAlloc(u8, .@"16", 100);
+    defer allocator.free(aligned);
+
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(aligned.ptr) % 16);
+}
+
+test "MallocAllocator.ShouldReallocate" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    var ptr = try allocator.alloc(u8, 100);
+    @memset(ptr, 42);
+
+    ptr = try allocator.realloc(ptr, 200);
+    defer allocator.free(ptr);
+
+    try std.testing.expectEqual(@as(usize, 200), ptr.len);
+    // First 100 bytes should still be 42
+    for (ptr[0..100]) |byte| {
+        try std.testing.expectEqual(@as(u8, 42), byte);
+    }
+}
+
+test "MallocAllocator.ShouldShrinkAllocation" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+
+    const allocator = malloc_alloc.allocator();
+
+    var ptr = try allocator.alloc(u8, 1000);
+    @memset(ptr, 123);
+
+    ptr = try allocator.realloc(ptr, 100);
+    defer allocator.free(ptr);
+
+    try std.testing.expectEqual(@as(usize, 100), ptr.len);
+    for (ptr) |byte| {
+        try std.testing.expectEqual(@as(u8, 123), byte);
+    }
 }

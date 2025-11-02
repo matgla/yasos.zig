@@ -66,10 +66,11 @@ pub fn FlashFile(comptime FlashType: anytype) type {
 
             pub fn write(self: *Self, data: []const u8) isize {
                 self._flash.write(self._current_address, data);
+                self._current_address += @intCast(data.len);
                 return @intCast(data.len);
             }
 
-            pub fn seek(self: *Self, offset: c.off_t, whence: i32) c.off_t {
+            pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
                 switch (whence) {
                     c.SEEK_SET => {
                         if (offset < 0) {
@@ -80,10 +81,6 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                     else => return -1,
                 }
                 return 0;
-            }
-
-            pub fn close(self: *Self) void {
-                _ = self;
             }
 
             pub fn sync(self: *Self) i32 {
@@ -121,17 +118,8 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return -1;
             }
 
-            pub fn stat(self: *Self, buf: *c.struct_stat) void {
-                buf.st_dev = 0;
-                buf.st_ino = 0;
-                buf.st_mode = 0;
-                buf.st_nlink = 0;
-                buf.st_uid = 0;
-                buf.st_gid = 0;
-                buf.st_rdev = 0;
-                buf.st_size = 0;
-                buf.st_blksize = FlashType.BlockSize;
-                buf.st_blocks = self._flash.get_number_of_blocks();
+            pub fn size(self: *const Self) usize {
+                return FlashType.BlockSize * self._flash.get_number_of_blocks();
             }
 
             pub fn filetype(self: *const Self) FileType {
@@ -141,9 +129,206 @@ pub fn FlashFile(comptime FlashType: anytype) type {
 
             pub fn delete(self: *Self) void {
                 log.debug("Flash file 0x{x} destruction", .{@intFromPtr(self)});
-                _ = self.close();
             }
         });
     };
     return Internal.FlashFileImpl;
+}
+
+const FlashMock = @import("tests/FlashMock.zig").FlashMock;
+const hal = @import("hal");
+const MockFlash = hal.flash.Flash(FlashMock);
+const TestFlashFile = FlashFile(MockFlash);
+
+fn create_sut() !kernel.fs.IFile {
+    const flash = MockFlash.create(0);
+    return try TestFlashFile.InstanceType.create(std.testing.allocator, flash, "flash0").interface.new(std.testing.allocator);
+}
+
+test "FlashFile.Create.ShouldInitializeCorrectly" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    try std.testing.expectEqualStrings("flash0", file.interface.name());
+    try std.testing.expectEqual(@as(u32, 0), file.as(TestFlashFile).data()._current_address);
+}
+
+test "FlashFile.CreateNode.ShouldCreateFileNode" {
+    const flash = MockFlash.create(0);
+    var node = try TestFlashFile.InstanceType.create_node(std.testing.allocator, flash, "flash1");
+    defer node.delete();
+    try std.testing.expect(node.is_file());
+    try std.testing.expectEqualStrings("flash1", node.name());
+    try std.testing.expectEqual(FileType.BlockDevice, node.filetype());
+}
+
+test "FlashFile.Filetype.ShouldReturnBlockDevice" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    try std.testing.expectEqual(FileType.BlockDevice, file.interface.filetype());
+}
+
+test "FlashFile.Size.ShouldReturnFlashSize" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    // 1 block * 4096 bytes = 4096
+    const expected_size = FlashMock.BlockSize * 1;
+    try std.testing.expectEqual(@as(usize, expected_size), file.interface.size());
+}
+
+test "FlashFile.Read.ShouldReadFromFlash" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    // First write some data
+    const write_data = "test flash data";
+    _ = file.interface.write(write_data);
+
+    // Reset position
+    _ = try file.interface.seek(0, c.SEEK_SET);
+
+    // Read it back
+    var buffer: [32]u8 = undefined;
+    const bytes_read = file.interface.read(&buffer);
+
+    try std.testing.expectEqual(@as(isize, 32), bytes_read);
+    try std.testing.expectEqualStrings(write_data, buffer[0..write_data.len]);
+}
+
+test "FlashFile.Write.ShouldWriteToFlash" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const data = "flash write test";
+    const bytes_written = file.interface.write(data);
+
+    try std.testing.expectEqual(@as(isize, @intCast(data.len)), bytes_written);
+    try std.testing.expectEqual(@as(u32, @intCast(data.len)), file.as(TestFlashFile).data()._current_address);
+}
+
+test "FlashFile.Seek.SEEK_SET.ShouldSetPosition" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const result = try file.interface.seek(100, c.SEEK_SET);
+    try std.testing.expectEqual(@as(c.off_t, 0), result);
+    try std.testing.expectEqual(@as(u32, 100), file.as(TestFlashFile).data()._current_address);
+}
+
+test "FlashFile.Seek.SEEK_SET.ShouldRejectNegativeOffset" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const result = try file.interface.seek(-100, c.SEEK_SET);
+    try std.testing.expectEqual(@as(c.off_t, -1), result);
+    try std.testing.expectEqual(@as(u32, 0), file.as(TestFlashFile).data()._current_address);
+}
+
+test "FlashFile.Seek.InvalidWhence.ShouldReturnError" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const result = try file.interface.seek(100, c.SEEK_CUR);
+    try std.testing.expectEqual(@as(c.off_t, -1), result);
+}
+
+test "FlashFile.Read.ShouldAdvancePosition" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    var buffer: [16]u8 = undefined;
+    _ = file.interface.read(&buffer);
+
+    try std.testing.expectEqual(@as(u32, 16), file.as(TestFlashFile).data()._current_address);
+
+    _ = file.interface.read(&buffer);
+    try std.testing.expectEqual(@as(u32, 32), file.as(TestFlashFile).data()._current_address);
+}
+
+test "FlashFile.ReadWrite.ShouldMaintainDataIntegrity" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const test_data = "Hello Flash!";
+
+    // Write data at offset 0
+    _ = file.interface.write(test_data);
+
+    // Seek back to start
+    _ = try file.interface.seek(0, c.SEEK_SET);
+
+    // Read it back
+    var buffer: [32]u8 = undefined;
+    _ = file.interface.read(&buffer);
+
+    try std.testing.expectEqualStrings(test_data, buffer[0..test_data.len]);
+}
+
+test "FlashFile.Ioctl.GetMemoryMappingStatus.ShouldReturnMappedAddress" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    var attr: FileMemoryMapAttributes = undefined;
+    const result = file.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), @ptrCast(&attr));
+
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect(attr.is_memory_mapped);
+    try std.testing.expect(attr.mapped_address_r != null);
+}
+
+test "FlashFile.Ioctl.InvalidCommand.ShouldReturnError" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const result = file.interface.ioctl(999, null);
+    try std.testing.expectEqual(@as(i32, -1), result);
+}
+
+test "FlashFile.Fcntl.ShouldReturnError" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const result = file.interface.fcntl(0, null);
+    try std.testing.expectEqual(@as(i32, -1), result);
+}
+
+test "FlashFile.Sync.ShouldReturnZero" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const result = file.interface.sync();
+    try std.testing.expectEqual(@as(i32, 0), result);
+}
+
+test "FlashFile.Tell.ShouldReturnZero" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    const result = file.interface.tell();
+    try std.testing.expectEqual(@as(c.off_t, 0), result);
+}
+
+test "FlashFile.MultipleReadWrites.ShouldHandleSequentialAccess" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    // Write multiple chunks
+    const chunk1 = "AAA";
+    const chunk2 = "BBB";
+    const chunk3 = "CCC";
+
+    _ = file.interface.write(chunk1);
+    _ = file.interface.write(chunk2);
+    _ = file.interface.write(chunk3);
+
+    // Seek to start
+    _ = try file.interface.seek(0, c.SEEK_SET);
+
+    // Read back all data
+    var buffer: [16]u8 = undefined;
+    _ = file.interface.read(&buffer);
+
+    try std.testing.expectEqualStrings("AAABBBCCC", buffer[0..9]);
 }

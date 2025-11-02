@@ -59,7 +59,7 @@ pub const Node = struct {
         };
     }
 
-    pub fn as_file(self: *Self) ?kernel.fs.IFile {
+    pub fn as_file(self: Self) ?kernel.fs.IFile {
         return switch (self.instance) {
             .file => self.instance.file,
             .directory => null,

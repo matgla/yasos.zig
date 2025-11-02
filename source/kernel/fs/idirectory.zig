@@ -32,10 +32,6 @@ pub const IDirectory = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "iterator", .{}, anyerror!kernel.fs.IDirectoryIterator);
     }
 
-    pub fn close(self: *Self) void {
-        interface.CountingInterfaceVirtualCall(self, "close", .{}, void);
-    }
-
     pub fn delete(self: *Self) void {
         interface.CountingInterfaceDestructorCall(self);
     }

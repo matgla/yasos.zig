@@ -25,27 +25,44 @@ pub const Loader = struct {
     file_resolver: FileResolver,
     allocator: std.mem.Allocator,
 
+    load_error: ?anyerror,
+
     pub fn create(file_resolver: FileResolver, allocator: std.mem.Allocator) Loader {
         return Loader{
             .file_resolver = file_resolver,
             .allocator = allocator,
+            .load_error = null,
         };
     }
 
-    pub fn load_executable(self: *Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !Executable {
+    pub fn deinit(self: *Loader) void {
         _ = self;
-        _ = module;
-        stdout.print("Loading executable...\n", .{});
+    }
 
+    pub fn load_should_fail(self: *Loader, err: anyerror) void {
+        self.load_error = err;
+    }
+    pub fn load_should_succeed(self: *Loader) void {
+        self.load_error = null;
+    }
+
+    pub fn load_executable(self: *Loader, module: *const anyopaque, process_allocator: std.mem.Allocator) !Executable {
+        _ = module;
+        if (self.load_error) |err| {
+            self.load_error = null;
+            return err;
+        }
         return .{
             .module = try Module.create(std.heap.page_allocator, process_allocator, false),
         };
     }
 
-    pub fn load_library(self: *Loader, module: *const anyopaque, stdout: anytype, process_allocator: std.mem.Allocator) !*Module {
-        _ = self;
-        _ = stdout;
+    pub fn load_library(self: *Loader, module: *const anyopaque, process_allocator: std.mem.Allocator) !*Module {
         _ = module;
+        if (self.load_error) |err| {
+            self.load_error = null;
+            return err;
+        }
         const module_obj = Module.create(std.heap.page_allocator, process_allocator, false);
         return module_obj;
     }
@@ -63,8 +80,9 @@ pub fn init(file_resolver: anytype, allocator: std.mem.Allocator) void {
 }
 
 pub fn deinit() void {
-    if (loader_object) |loader| {
+    if (loader_object) |*loader| {
         loader.deinit();
+        loader_object = null;
     }
 }
 

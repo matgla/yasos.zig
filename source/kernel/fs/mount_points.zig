@@ -76,7 +76,6 @@ pub const MountPoint = struct {
         }
 
         self.filesystem.interface.delete();
-        // allocator.destroy(self);
     }
 };
 
@@ -195,11 +194,10 @@ pub const MountPoints = struct {
         }
 
         // verify if path exists in FS and mount if so
-        if (longest_matching_point.point.filesystem.interface.has_path(longest_matching_point.left)) {
-            try longest_matching_point.point.appendChild(self.allocator, longest_matching_point.left, filesystem);
-        } else {
-            return MountPointError.PathNotExists;
-        }
+        var n = try longest_matching_point.point.filesystem.interface.get(longest_matching_point.left);
+        n.delete();
+        try longest_matching_point.point.appendChild(self.allocator, longest_matching_point.left, filesystem);
+
         var fs = filesystem;
         if (fs.interface.mount() < 0) {
             return MountPointError.NotMounted;
@@ -228,61 +226,105 @@ pub const MountPoints = struct {
 };
 
 test "MountPoints.ShouldErrorWhenRootNotMounted" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
     var sut = MountPoints.init(std.testing.allocator);
-    var fsstub = FileSystemStub.init(.{
-        .has_file = false,
-    });
-    try std.testing.expectError(MountPointError.RootNotMounted, sut.mount_filesystem("/a", fsstub.interface.create()));
+    defer sut.deinit();
+
+    var filesystem_mock = try FileSystemMock.create(std.testing.allocator);
+    var fs = filesystem_mock.get_interface();
+    defer fs.interface.delete();
+
+    try std.testing.expectError(MountPointError.RootNotMounted, sut.mount_filesystem("/a", fs));
 }
 
 test "MountPoints.MountRoot" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
     var sut = MountPoints.init(std.testing.allocator);
+    defer sut.deinit();
 
-    var fsstub = FileSystemStub.init(.{
-        .has_file = true,
-    });
-    try sut.mount_filesystem("/", fsstub.interface.create());
+    var filesystem_mock = try FileSystemMock.create(std.testing.allocator);
+    const fs = filesystem_mock.get_interface();
+
+    try sut.mount_filesystem("/", fs);
     try std.testing.expect(sut.root != null);
     try std.testing.expectEqualStrings("/", sut.root.?.path);
 }
 
 test "MountPoints.RejectTooLongPath" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
     var sut = MountPoints.init(std.testing.allocator);
+    defer sut.deinit();
 
-    var fsstub = FileSystemStub.init(.{
-        .has_file = true,
-    });
-    try sut.mount_filesystem("/", fsstub.interface.create());
-    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem("/" ** (config.fs.max_mount_point_size + 1), fsstub.interface.create()));
+    var filesystem_mock = try FileSystemMock.create(std.testing.allocator);
+    const fs = filesystem_mock.get_interface();
+
+    try sut.mount_filesystem("/", fs);
+    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem("/" ** (config.fs.max_mount_point_size + 1), fs));
 }
 
 test "MountPoints.RejectRootIfAlreadyMounted" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
-
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
     var sut = MountPoints.init(std.testing.allocator);
-    var fsstub = FileSystemStub.init(.{
-        .has_file = true,
-    });
-    try sut.mount_filesystem("/", fsstub.interface.create());
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.interface.create()));
+    defer sut.deinit();
+
+    var filesystem_mock = try FileSystemMock.create(std.testing.allocator);
+    const fs = filesystem_mock.get_interface();
+
+    try sut.mount_filesystem("/", fs);
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fs));
+}
+
+fn create_filesystem_mock(context: anytype) !kernel.fs.IFileSystem {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const fs2_mock = try FileSystemMock.create(std.testing.allocator);
+    const fs2 = fs2_mock.get_interface();
+
+    const ReturnSharedMock = struct {
+        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{[]const u8})) anyerror!anyerror!kernel.fs.Node {
+            _ = args;
+            const c: @TypeOf(context) = @ptrCast(@alignCast(ctx.?));
+            return c.file.share();
+        }
+    };
+    _ = fs2_mock.expectCall("get")
+        .withArgs(.{interface.mock.any{}})
+        .invoke(&ReturnSharedMock.call, context)
+        .times(interface.mock.any{});
+
+    _ = fs2_mock.expectCall("mount")
+        .withArgs(.{})
+        .willReturn(0)
+        .times(interface.mock.any{});
+    return fs2;
 }
 
 test "MountPoints.MountChilds" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
-
+    const FileMock = @import("tests/file_mock.zig").FileMock;
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub.init(.{
-        .has_file = true,
-    });
+
+    var file_mock = try FileMock.create(std.testing.allocator);
+    var file = file_mock.get_interface();
+    defer file.interface.delete();
+
+    var file_to_return: kernel.fs.Node = kernel.fs.Node.create_file(file);
+
+    const CallContext = struct {
+        file: *kernel.fs.Node,
+    };
+    const context = CallContext{
+        .file = &file_to_return,
+    };
+
+    const fs = try create_filesystem_mock(&context);
+
     var maybe_child = sut.find_longest_matching_point(*const MountPoint, "/a/b/x/d");
     try std.testing.expect(maybe_child == null);
 
-    try sut.mount_filesystem("/", fsstub.interface.create());
-    try sut.mount_filesystem("/a/b", fsstub.interface.create());
+    try sut.mount_filesystem("/", fs);
+
+    const fs2 = try create_filesystem_mock(&context);
+    try sut.mount_filesystem("/a/b", fs2);
 
     try std.testing.expect(sut.root != null);
     try std.testing.expectEqual(1, sut.root.?.children.len());
@@ -312,7 +354,8 @@ test "MountPoints.MountChilds" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("/", child.parent.?.path);
 
-    try sut.mount_filesystem("/a/c", fsstub.interface.create());
+    const fs3 = try create_filesystem_mock(&context);
+    try sut.mount_filesystem("/a/c", fs3);
     maybe_child = sut.find_longest_matching_point(*const MountPoint, "a/c/d");
     try std.testing.expect(maybe_child != null);
     child = maybe_child.?;
@@ -321,7 +364,8 @@ test "MountPoints.MountChilds" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("/", child.parent.?.path);
 
-    try sut.mount_filesystem("/a/c/a/c/", fsstub.interface.create());
+    const fs4 = try create_filesystem_mock(&context);
+    try sut.mount_filesystem("/a/c/a/c/", fs4);
     maybe_child = sut.find_longest_matching_point(*const MountPoint, "a/c/a");
     try std.testing.expect(maybe_child != null);
     child = maybe_child.?;
@@ -337,7 +381,8 @@ test "MountPoints.MountChilds" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("a/c", child.parent.?.path);
 
-    try sut.mount_filesystem("/a/c/a/c/e", fsstub.interface.create());
+    const fs5 = try create_filesystem_mock(&context);
+    try sut.mount_filesystem("/a/c/a/c/e", fs5);
     maybe_child = sut.find_longest_matching_point(*const MountPoint, "/a/c/a/c/e/deep/path/is/here");
     try std.testing.expect(maybe_child != null);
     child = maybe_child.?;
@@ -346,57 +391,100 @@ test "MountPoints.MountChilds" {
     try std.testing.expect(child.parent != null);
     try std.testing.expectEqualStrings("a/c", child.parent.?.path);
 
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fsstub.interface.create()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fsstub.interface.create()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/b", fsstub.interface.create()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fsstub.interface.create()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c", fsstub.interface.create()));
-    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c/e", fsstub.interface.create()));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/", fs));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fs));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/b", fs));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c", fs));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c", fs));
+    try std.testing.expectError(MountPointError.MountPointInUse, sut.mount_filesystem("/a/c/a/c/e", fs));
 }
 
 test "MountPoints.ReportErrorWhenTryingToMountRelativePath" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const fs_mock = try FileSystemMock.create(std.testing.allocator);
+    const fs = fs_mock.get_interface();
 
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub.init(.{
-        .has_file = true,
-    });
-    try sut.mount_filesystem("/", fsstub.interface.create());
-    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("otherfs/smth", fsstub.interface.create()));
-    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("", fsstub.interface.create()));
+
+    try sut.mount_filesystem("/", fs);
+    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("otherfs/smth", fs));
+    try std.testing.expectError(MountPointError.MountPointNotAbsolutePath, sut.mount_filesystem("", fs));
 }
 
 test "MountPoints.HandleNotExistingPath" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    const fs_mock = try FileSystemMock.create(std.testing.allocator);
+    const fs = fs_mock.get_interface();
 
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub.init(.{
-        .has_file = false,
-    });
-    try sut.mount_filesystem("/", fsstub.interface.create());
-    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c", fsstub.interface.create()));
-    fsstub.data().has_file = true;
-    try sut.mount_filesystem("/a/c", fsstub.interface.create());
-    fsstub.data().has_file = false;
-    try std.testing.expectError(MountPointError.PathNotExists, sut.mount_filesystem("/a/c/d", fsstub.interface.create()));
+
+    try sut.mount_filesystem("/", fs);
+    _ = fs_mock
+        .expectCall("get")
+        .withArgs(.{ interface.mock.any{}, interface.mock.any{} })
+        .willReturn(kernel.errno.ErrnoSet.NoEntry);
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.mount_filesystem("/a/c", fs));
+
+    var filemock = try FileMock.create(std.testing.allocator);
+    const file = filemock.get_interface();
+
+    const fs2_mock = try FileSystemMock.create(std.testing.allocator);
+    const fs2 = fs2_mock.get_interface();
+    _ = fs_mock
+        .expectCall("get")
+        .withArgs(.{ interface.mock.any{}, interface.mock.any{} })
+        .willReturn(kernel.fs.Node.create_file(file));
+
+    _ = fs2_mock
+        .expectCall("mount")
+        .withArgs(.{})
+        .willReturn(0)
+        .times(interface.mock.any{});
+
+    try sut.mount_filesystem("/a/c", fs2);
+
+    _ = fs2_mock
+        .expectCall("get")
+        .withArgs(.{ interface.mock.any{}, interface.mock.any{} })
+        .willReturn(kernel.errno.ErrnoSet.NoEntry);
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.mount_filesystem("/a/c/d", fs2));
 }
 
 test "MountPoints.RemoveChilds" {
-    const FileSystemStub = @import("tests/filesystem_stub.zig").FileSystemStub;
-
+    const FileMock = @import("tests/file_mock.zig").FileMock;
     var sut = MountPoints.init(std.testing.allocator);
     defer sut.deinit();
-    var fsstub = FileSystemStub.init(.{
-        .has_file = true,
-    });
-    try sut.mount_filesystem("/", fsstub.interface.create());
-    try sut.mount_filesystem("/a/b", fsstub.interface.create());
-    try sut.mount_filesystem("/a/c", fsstub.interface.create());
-    try sut.mount_filesystem("/a/c/a/c/", fsstub.interface.create());
-    try sut.mount_filesystem("/a/c/e", fsstub.interface.create());
-    try sut.mount_filesystem("/a/c/e/c/f", fsstub.interface.create());
+
+    var file_mock = try FileMock.create(std.testing.allocator);
+    var file = file_mock.get_interface();
+    defer file.interface.delete();
+
+    var file_to_return: kernel.fs.Node = kernel.fs.Node.create_file(file);
+
+    const CallContext = struct {
+        file: *kernel.fs.Node,
+    };
+    const context = CallContext{
+        .file = &file_to_return,
+    };
+
+    const fs1 = try create_filesystem_mock(&context);
+    const fs2 = try create_filesystem_mock(&context);
+    const fs3 = try create_filesystem_mock(&context);
+    const fs4 = try create_filesystem_mock(&context);
+    const fs5 = try create_filesystem_mock(&context);
+    const fs6 = try create_filesystem_mock(&context);
+
+    try sut.mount_filesystem("/", fs1);
+    try sut.mount_filesystem("/a/b", fs2);
+    try sut.mount_filesystem("/a/c", fs3);
+    try sut.mount_filesystem("/a/c/a/c/", fs4);
+    try sut.mount_filesystem("/a/c/e", fs5);
+    try sut.mount_filesystem("/a/c/e/c/f", fs6);
 
     var maybe_child = sut.find_longest_matching_point(*const MountPoint, "/a/c/e/c/f/deep/path");
     try std.testing.expect(maybe_child != null);
