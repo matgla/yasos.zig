@@ -86,7 +86,7 @@ pub const MmcSpi = struct {
     }
 
     pub fn transmit_blocking(self: MmcSpi, src: []const u8, dest: ?[]u8) void {
-        const pio: *volatile mmc_spi.pio_h_t = @ptrCast(self._pio);
+        const pio: *volatile mmc_spi.pio_hw_t = @ptrCast(self._pio);
         const txfifo: *volatile mmc_spi.io_rw_8 = @ptrCast(&pio.txf[self._sm]);
         const rxfifo: *volatile mmc_spi.io_rw_8 = @ptrCast(&pio.rxf[self._sm]);
 

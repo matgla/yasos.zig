@@ -366,7 +366,7 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     }
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
     defer kernel_allocator.free(path);
-    try fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links);
+    try fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0);
     return 0;
 }
 

@@ -73,7 +73,7 @@ pub const MmcPartitionFile =
         }
 
         pub fn seek(self: *Self, offset: c.off_t, base: i32) anyerror!c.off_t {
-            if ((self._start_lba << 9) + offset > (self._start_lba + self._size_in_sectors) << 9) {
+            if (@as(c.off_t, @intCast(self._start_lba << 9)) + offset > (self._start_lba + self._size_in_sectors) << 9) {
                 kernel.log.err("Seek offset {d} is out of bounds for MMC partition file", .{offset});
                 return kernel.errno.ErrnoSet.InvalidArgument;
             }

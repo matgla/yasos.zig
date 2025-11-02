@@ -164,7 +164,6 @@ pub const MmcIo = struct {
     }
 
     fn send_command(self: *const Self, cmd: u6, argument: u32, RespType: type, comptime deselect: bool) RespType {
-        std.debug.print("sending command: {d} with argument: {x}\n", .{ cmd, argument });
         self._mmc.chip_select(true);
         while (self._initialized and self._mmc.is_busy()) {
             var buffer: [1]u8 = [_]u8{0xff};

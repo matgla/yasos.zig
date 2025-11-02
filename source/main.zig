@@ -189,7 +189,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     try driverfs.data().append(try uart_driver.clone(), "stderr");
 
     const flash0name = "flash0";
-    const flash_driver_base = try kernel.driver.FlashDriver.InstanceType.create(allocator, board.flash.flash0, flash0name);
+    const flash_driver_base = try kernel.driver.FlashDriver(@TypeOf(board.flash.flash0)).InstanceType.create(allocator, board.flash.flash0, flash0name);
     var flash_driver = try flash_driver_base.interface.new(allocator);
     try driverfs.data().append(flash_driver, flash0name);
     var maybe_mmcnode: ?kernel.fs.Node = null;
@@ -199,7 +199,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
 
-            maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, @field(board.mmc, name), name)).interface.new(allocator);
+            maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, &@field(board.mmc, name), name)).interface.new(allocator);
             driverfs.data().append(maybe_mmcdriver.?, name) catch {};
             kernel.log.info("adding mmc driver: {s}", .{m.name});
             i = i + 1;
