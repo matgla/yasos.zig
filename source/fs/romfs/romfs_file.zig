@@ -35,6 +35,8 @@ const FileHeader = @import("file_header.zig").FileHeader;
 const IoctlCommonCommands = kernel.fs.IoctlCommonCommands;
 const FileMemoryMapAttributes = kernel.fs.FileMemoryMapAttributes;
 
+const log = std.log;
+
 pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     const Self = @This();
     base: ReadOnlyFile,
