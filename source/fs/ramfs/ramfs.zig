@@ -399,11 +399,11 @@ test "RamFs.StatShouldWork" {
 
     try sut.interface.mkdir("/test", 0);
     try sut.interface.stat("/test", &stat_data, true);
-    try std.testing.expectEqual(c.S_IFDIR, stat_data.st_mode);
+    try std.testing.expectEqual(c.S_IFDIR, @as(c_int, @intCast(stat_data.st_mode)));
 
     try sut.interface.create("/test/file.txt", 0);
     try sut.interface.stat("/test/file.txt", &stat_data, true);
-    try std.testing.expectEqual(c.S_IFREG, stat_data.st_mode);
+    try std.testing.expectEqual(c.S_IFREG, @as(c_int, @intCast(stat_data.st_mode)));
 }
 
 test "RamFs.AccessShouldWork" {

@@ -277,7 +277,7 @@ test "ProcFs.StatShouldReturnDirectoryForDir" {
     var stat_data: c.struct_stat = undefined;
     try sut.interface.stat("/sys", &stat_data, false);
 
-    try std.testing.expectEqual(c.S_IFDIR, stat_data.st_mode);
+    try std.testing.expectEqual(c.S_IFDIR, @as(c_int, @intCast(stat_data.st_mode)));
 }
 
 test "ProcFs.StatShouldReturnFileForFile" {
@@ -287,5 +287,5 @@ test "ProcFs.StatShouldReturnFileForFile" {
     var stat_data: c.struct_stat = undefined;
     try sut.interface.stat("/meminfo", &stat_data, false);
 
-    try std.testing.expectEqual(c.S_IFREG, stat_data.st_mode);
+    try std.testing.expectEqual(c.S_IFREG, @as(c_int, @intCast(stat_data.st_mode)));
 }
