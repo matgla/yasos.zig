@@ -76,6 +76,7 @@ if $CLEAR; then
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
+  cd apps/zork && make clean && cd ../..
 fi
 mkdir -p rootfs
 mkdir -p rootfs/usr/include
@@ -153,6 +154,32 @@ build_makefile()
 }
 
 
+build_zork_makefile()
+{
+  cd $1
+  make CC=$CC CFLAGS="-g -Wl,-oformat=elf32-littlearm" -j4
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  mv zork zork.elf
+
+  make CC=$CC -j4
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+
+  mkdir -p $PREFIX/games
+  mkdir -p $PREFIX/games/lib
+
+  make CC=$CC install BINDIR=$PREFIX/games/ DATADIR=$PREFIX/games/lib/ MANDIR=$PREFIX/share/man/man6
+  mv $PREFIX/games/zork $PREFIX/games/hmm
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  cd ..
+}
+
+
 build_cross_compiler
 
 echo "Building libc..."
@@ -169,6 +196,9 @@ build_makefile yasos_curses
 
 echo "Building libm..."
 build_makefile libm
+
+echo "Building termcap..."
+build_makefile termcap
 
 echo "Building target C compiler..."
 build_c_compiler
@@ -187,6 +217,7 @@ build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs
 build_makefile longjump_tester
+build_zork_makefile zork
 
 $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 

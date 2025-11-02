@@ -146,7 +146,7 @@ pub const Loader = struct {
         try self.process_symbol_table_relocations(&parser, module, header);
         try self.process_local_relocations(&parser, module);
         try self.process_data_relocations(&parser, module);
-        log.err(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
+        log.debug(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
         log.debug(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
         log.debug(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
         log.debug(".bss  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });

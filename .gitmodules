@@ -28,3 +28,6 @@
 [submodule "apps/toybox"]
 	path = apps/toybox
 	url = https://github.com/landley/toybox.git
+[submodule "apps/zork"]
+	path = apps/zork
+	url = https://github.com/devshane/zork.git
