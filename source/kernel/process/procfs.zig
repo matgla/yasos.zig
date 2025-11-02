@@ -102,7 +102,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
-        if (path.len == 0) {
+        if (path.len == 0 or std.mem.eql(u8, path, "/")) {
             return kernel.fs.Node.create_directory(self._root.share());
         }
 
@@ -161,3 +161,131 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         }
     }
 });
+
+test "ProcFs.ShouldInitializeAndDeinitialize" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectEqualStrings("procfs", sut.interface.name());
+}
+
+test "ProcFs.ShouldGetRootDirectory" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var node = try sut.interface.get("/");
+    defer node.delete();
+
+    try std.testing.expect(node.is_directory());
+}
+
+test "ProcFs.ShouldGetMemInfoFile" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var node = try sut.interface.get("/meminfo");
+    defer node.delete();
+
+    try std.testing.expect(node.is_file());
+    const file = node.as_file().?;
+    try std.testing.expectEqualStrings("meminfo", file.interface.name());
+}
+
+test "ProcFs.ShouldGetSysDirectory" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var node = try sut.interface.get("/sys");
+    defer node.delete();
+
+    try std.testing.expect(node.is_directory());
+}
+
+test "ProcFs.ShouldGetSysKernelDirectory" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var node = try sut.interface.get("/sys/kernel");
+    defer node.delete();
+
+    try std.testing.expect(node.is_directory());
+}
+
+test "ProcFs.ShouldGetMaxProcFile" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var node = try sut.interface.get("/sys/kernel/pid_max");
+    defer node.delete();
+
+    try std.testing.expect(node.is_file());
+}
+
+test "ProcFs.ShouldReturnNoEntryForInvalidPath" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.get("/invalid_path"));
+}
+
+test "ProcFs.ShouldReturnNoEntryForInvalidNestedPath" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.get("/sys/invalid"));
+}
+
+test "ProcFs.ShouldReturnNotADirectoryForFileInPath" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NotADirectory, sut.interface.get("/meminfo/invalid"));
+}
+
+test "ProcFs.AccessShouldDenyExecute" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.PermissionDenied, sut.interface.access("/meminfo", c.X_OK, 0));
+}
+
+test "ProcFs.AccessShouldDenyWrite" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, sut.interface.access("/meminfo", c.W_OK, 0));
+}
+
+test "ProcFs.AccessShouldAllowRead" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try sut.interface.access("/meminfo", c.R_OK, 0);
+}
+
+test "ProcFs.FormatShouldReturnNotSupported" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    try std.testing.expectError(error.NotSupported, sut.interface.format());
+}
+
+test "ProcFs.StatShouldReturnDirectoryForDir" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var stat_data: c.struct_stat = undefined;
+    try sut.interface.stat("/sys", &stat_data, false);
+
+    try std.testing.expectEqual(c.S_IFDIR, stat_data.st_mode);
+}
+
+test "ProcFs.StatShouldReturnFileForFile" {
+    var sut = try (try ProcFs.InstanceType.init(std.testing.allocator)).interface.new(std.testing.allocator);
+    defer sut.interface.delete();
+
+    var stat_data: c.struct_stat = undefined;
+    try sut.interface.stat("/meminfo", &stat_data, false);
+
+    try std.testing.expectEqual(c.S_IFREG, stat_data.st_mode);
+}

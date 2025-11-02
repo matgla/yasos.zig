@@ -6,8 +6,8 @@
         .yasos_hal = .{ .path = "hal" },
         .yasld = .{ .path = "dynamic_loader" },
         .@"modules/oop" = .{
-            .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#5aa2507387c9cb628fc47b7ac1422531509a3645",
-            .hash = "oop_zig-0.0.1-SbIaG829AACpR_7OQEHG3QBo3vVyY9Px6JQBWiIQPDNE",
+            .url = "git+https://github.com/matgla/oop.zig/?ref=HEAD#437eb4a11d486df213cda81b4a9fdd970ed12bb3",
+            .hash = "oop_zig-0.0.1-SbIaG0O-AAAP4Y5_1hxHv6IFofGaPspNwpfIKwygzHen",
         },
         .@"modules/fatfs" = .{
             .url = "git+https://github.com/matgla/zfat.git/?ref=HEAD#d532ab0af3067211557a1afa04cf0244b40e661f",

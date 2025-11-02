@@ -68,12 +68,15 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     _size: u32,
     _initialized: bool,
     _node: kernel.fs.Node,
+    _refcounter: *i16,
+    var global_refcount: i16 = 0;
 
-    var refcounter: i16 = 0;
-    pub fn create(allocator: std.mem.Allocator, mmc: hal.mmc.Mmc, driver_name: []const u8) !MmcDriver {
+    pub fn create(allocator: std.mem.Allocator, mmc: *hal.mmc.Mmc, driver_name: []const u8) !MmcDriver {
         const mmcio = try allocator.create(MmcIo);
         mmcio.* = MmcIo.create(mmc);
-        refcounter += 1;
+        const refcounter = try allocator.create(i16);
+        refcounter.* = 1;
+        global_refcount += 1;
         return MmcDriver.init(.{
             ._allocator = allocator,
             ._mmcio = mmcio,
@@ -82,16 +85,18 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
             ._size = 0,
             ._initialized = false,
             ._node = try MmcFile.InstanceType.create_node(allocator, mmcio, driver_name),
+            ._refcounter = refcounter,
         });
+    }
+
+    pub fn __clone(self: *Self, other: *const Self) void {
+        self.* = other.*;
+        global_refcount += 1;
+        self._refcounter.* += 1;
     }
 
     pub fn node(self: *Self) anyerror!kernel.fs.Node {
         return try self._node.clone();
-    }
-
-    pub fn partition_driver(self: *Self, allocator: std.mem.Allocator) ?IDriver {
-        const driver = MmcPartitionDriver(Self).InstanceType.create(self, "mmc_smth").interface.new(allocator) catch return null;
-        return driver;
     }
 
     pub fn load(self: *Self) anyerror!void {
@@ -105,16 +110,53 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
 
     pub fn delete(self: *Self) void {
         // this cannot be removed before all copies are gone
-        refcounter -= 1;
-        if (refcounter > 0) {
+        self._refcounter.* -= 1;
+        if (self._refcounter.* > 0) {
             return;
         }
-        self._mmcio.deinit();
+
         self._allocator.destroy(self._mmcio);
+        self._allocator.destroy(self._refcounter);
         self._node.delete();
+        global_refcount -= 1;
+        if (global_refcount == 0) {
+            self._mmcio.deinit();
+        }
     }
 
     pub fn name(self: *const Self) []const u8 {
         return self._name;
     }
 });
+
+test "MmcDriver.Create.ShouldInitializeCorrectly" {
+    var mmc_stub = hal.mmc.Mmc.create(.{
+        .mode = .SPI,
+        .pins = .{
+            .clk = 0,
+            .cmd = 1,
+            .d0 = 2,
+        },
+    });
+    defer mmc_stub.impl.reset();
+
+    var driver = try (try MmcDriver.InstanceType.create(std.testing.allocator, &mmc_stub, "mmc0")).interface.new(std.testing.allocator);
+    defer driver.interface.delete();
+    var driver2 = try (try MmcDriver.InstanceType.create(std.testing.allocator, &mmc_stub, "mmc1")).interface.new(std.testing.allocator);
+    defer driver2.interface.delete();
+    var driver3 = try driver2.clone();
+    defer driver3.interface.delete();
+
+    try std.testing.expectEqualStrings("mmc1", driver3.interface.name());
+
+    try std.testing.expectEqualStrings("mmc0", driver.interface.name());
+    var node = try driver.interface.node();
+    defer node.delete();
+
+    try std.testing.expectEqual(@as(u32, 0), node.as_file().?.interface.size());
+    try std.testing.expectEqual(kernel.fs.FileType.BlockDevice, node.filetype());
+
+    try std.testing.expect(!mmc_stub.impl.initialized);
+    try std.testing.expect(driver2.interface.unload());
+    try std.testing.expectError(error.CardInitializationFailure, driver.interface.load());
+}

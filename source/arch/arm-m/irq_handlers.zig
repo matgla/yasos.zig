@@ -60,7 +60,7 @@ export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatil
     }
 }
 
-export fn do_context_switch(lr: usize) usize {
+pub export fn do_context_switch(lr: usize) usize {
     if (context_switch_handler) |handler| {
         return handler(lr);
     }

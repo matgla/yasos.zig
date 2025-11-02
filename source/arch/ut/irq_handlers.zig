@@ -24,8 +24,6 @@ const c = @cImport({
     @cInclude("source/sys/include/syscall.h");
 });
 
-const hal = @import("hal");
-
 const ContextSwitchHandler = *const fn (lr: usize) usize;
 const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
 
@@ -54,11 +52,12 @@ pub fn call_context_switch_handler(lr: usize) usize {
     if (context_switch_handler) |handler| {
         return handler(lr);
     }
-    return lr;
+    return 0;
 }
 
 pub fn set_system_call_handler(handler: SystemCallHandler) void {
-    hal.internal.Irq.set_system_call_handler(handler);
+    _ = handler;
+    // hal.internal.Irq.set_system_call_handler(handler);
 }
 
 export fn store_and_switch_to_next_task(lr: usize) void {
@@ -68,19 +67,7 @@ export fn store_and_switch_to_next_task(lr: usize) void {
     };
 }
 
-export fn switch_to_next_task() void {
-    std.Thread.yield() catch |err| {
-        std.debug.print("Error during context switch: {}\n", .{err});
-    };
-}
-
-export fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: usize) i32 {
-    _ = argc;
-    _ = argv;
-    _ = address;
-    _ = got;
-    return 0; // Placeholder for actual implementation
-}
+pub export fn switch_to_the_next_task() void {}
 
 export fn call_entry(address: usize, got: usize) i32 {
     _ = address;
@@ -91,3 +78,5 @@ export fn call_entry(address: usize, got: usize) i32 {
 export fn reload_current_task() void {
     // Placeholder for actual implementation
 }
+
+pub export fn switch_to_the_first_task() void {}

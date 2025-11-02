@@ -21,3 +21,4 @@ pub const HardwareProcess = process.HardwareProcess;
 export fn switch_to_main_task() void {}
 
 pub const panic = @import("panic.zig");
+pub const irq_handlers = @import("irq_handlers.zig");

@@ -160,7 +160,7 @@ pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.mkdir_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
-    try fs.get_ivfs().interface.mkdir(path, context.mode);
+    try fs.get_ivfs().interface.mkdir(path, @intCast(context.mode));
     return 0;
 }
 
@@ -366,7 +366,7 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     }
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
     defer kernel_allocator.free(path);
-    try fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links == 1);
+    try fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links);
     return 0;
 }
 

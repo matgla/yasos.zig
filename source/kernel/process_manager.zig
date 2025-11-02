@@ -129,8 +129,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return kernel.errno.ErrnoSet.TryAgain;
         }
 
-        pub fn get_process_memory_pool(self: Self) kernel.memory.heap.ProcessMemoryPool {
-            return self._process_memory_pool;
+        pub fn get_process_memory_pool(self: *Self) *kernel.memory.heap.ProcessMemoryPool {
+            return &self._process_memory_pool;
         }
 
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
@@ -302,7 +302,7 @@ pub fn deinitialize_process_manager() void {
     instance.deinit();
 }
 
-export fn get_next_task() *const u8 {
+pub export fn get_next_task() *const u8 {
     if (instance._scheduler.get_next()) |task| {
         instance._scheduler.update_current();
         return task.stack_pointer();

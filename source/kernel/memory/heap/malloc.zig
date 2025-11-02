@@ -34,6 +34,12 @@ pub fn get_usage() usize {
     return if (memory_in_use < 0) 0 else @intCast(memory_in_use);
 }
 
+pub fn reset() void {
+    memory_in_use = 0;
+    surpressed_memory = 0;
+    counter = 0;
+}
+
 const Tracker = extern struct {
     next: ?*Tracker,
     prev: ?*Tracker,

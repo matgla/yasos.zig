@@ -13,28 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-const std = @import("std");
-
 comptime {
-    _ = @import("drivers/tests.zig");
-    _ = @import("fs/tests.zig");
-    _ = @import("scheduler/tests.zig");
-
-    _ = @import("benchmark.zig");
-    _ = @import("mutex.zig");
-    _ = @import("modules.zig");
-    _ = @import("process_manager.zig");
-    _ = @import("memory/tests.zig");
-    _ = @import("errno.zig");
-    _ = @import("spawn.zig");
-    _ = @import("semaphore.zig");
-    _ = @import("dump_hardware.zig");
-    _ = @import("process.zig");
-    _ = @import("process/tests.zig");
-    _ = @import("time.zig");
-    _ = @import("interrupts/kernel_semaphore.zig");
-}
-
-test {
-    std.testing.refAllDeclsRecursive(@This());
+    _ = @import("procfs_directory.zig");
+    _ = @import("meminfo_file.zig");
+    _ = @import("pid_directory.zig");
+    _ = @import("maxproc_file.zig");
+    _ = @import("pidstat_file.zig");
+    _ = @import("procfs.zig");
 }

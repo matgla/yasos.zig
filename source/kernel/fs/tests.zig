@@ -16,4 +16,6 @@
 comptime {
     _ = @import("mount_points.zig");
     _ = @import("vfs.zig");
+    _ = @import("mbr.zig");
+    _ = @import("buffered_file.zig");
 }

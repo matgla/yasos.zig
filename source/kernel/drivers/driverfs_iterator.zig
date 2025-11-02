@@ -50,19 +50,184 @@ pub const DriverFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterat
     }
 });
 
-// test "DriverFsIterator.IterateThroughElements" {
-//     const DriverMock = @import("tests/driver_mock.zig").DriverMock;
-//    const FileMock = @import("../fs/tests/file_mock.zig").FileMock;
-//     var file_mock = try FileMock.create(std.testing.allocator);
-//     defer file_mock.delete();
+const DriverMock = @import("tests/driver_mock.zig").DriverMock;
 
-//     var file0 = file_mock.get_interface();
-//     defer file0.interface.delete();
+test "DriverFsIterator.ShouldIterateEmptyHashMap" {
+    var drivers = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+    defer drivers.deinit();
 
-//     var mapping = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
-//     defer mapping.deinit();
+    var iterator = try DriverFsIterator.InstanceType.create(drivers.iterator(), std.testing.allocator).interface.new(std.testing.allocator);
+    defer iterator.interface.delete();
 
-//     var driver0 = DriverStub.InstanceType.init(file0.*);
-//     // defer driver0.interface.delete();
-//     try mapping.put("file0", driver0.interface.create());
-// }
+    const entry = iterator.interface.next();
+    try std.testing.expectEqual(@as(?kernel.fs.DirectoryEntry, null), entry);
+}
+
+test "DriverFsIterator.ShouldIterateSingleDriver" {
+    var drivers = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+    defer drivers.deinit();
+
+    var mock_driver = try DriverMock.create(std.testing.allocator);
+    var mock = mock_driver.get_interface();
+    defer mock.interface.delete();
+
+    try drivers.put("device1", mock_driver.get_interface());
+
+    var iterator = try DriverFsIterator.InstanceType.create(drivers.iterator(), std.testing.allocator).interface.new(std.testing.allocator);
+    defer iterator.interface.delete();
+
+    const entry = iterator.interface.next();
+    try std.testing.expect(entry != null);
+    try std.testing.expectEqualStrings("device1", entry.?.name);
+    try std.testing.expectEqual(kernel.fs.FileType.File, entry.?.kind);
+
+    const next_entry = iterator.interface.next();
+    try std.testing.expectEqual(@as(?kernel.fs.DirectoryEntry, null), next_entry);
+}
+
+test "DriverFsIterator.ShouldIterateMultipleDrivers" {
+    var drivers = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+    defer drivers.deinit();
+
+    var mock_driver1 = try DriverMock.create(std.testing.allocator);
+    var mock1 = mock_driver1.get_interface();
+    defer mock1.interface.delete();
+
+    var mock_driver2 = try DriverMock.create(std.testing.allocator);
+    var mock2 = mock_driver2.get_interface();
+    defer mock2.interface.delete();
+
+    var mock_driver3 = try DriverMock.create(std.testing.allocator);
+    var mock3 = mock_driver3.get_interface();
+    defer mock3.interface.delete();
+
+    try drivers.put("device1", mock_driver1.get_interface());
+    try drivers.put("device2", mock_driver2.get_interface());
+    try drivers.put("device3", mock_driver3.get_interface());
+
+    var iterator = try DriverFsIterator.InstanceType.create(drivers.iterator(), std.testing.allocator).interface.new(std.testing.allocator);
+    defer iterator.interface.delete();
+
+    var count: usize = 0;
+    var found = std.StringHashMap(void).init(std.testing.allocator);
+    defer found.deinit();
+
+    while (iterator.interface.next()) |entry| {
+        count += 1;
+        try std.testing.expectEqual(kernel.fs.FileType.File, entry.kind);
+        try found.put(entry.name, {});
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expect(found.contains("device1"));
+    try std.testing.expect(found.contains("device2"));
+    try std.testing.expect(found.contains("device3"));
+}
+
+test "DriverFsIterator.ShouldReturnNullAfterIterationComplete" {
+    var drivers = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+    defer drivers.deinit();
+
+    var mock_driver = try DriverMock.create(std.testing.allocator);
+    var mock = mock_driver.get_interface();
+    defer mock.interface.delete();
+
+    try drivers.put("device1", mock_driver.get_interface());
+
+    var iterator = try DriverFsIterator.InstanceType.create(drivers.iterator(), std.testing.allocator).interface.new(std.testing.allocator);
+    defer iterator.interface.delete();
+
+    // First call should return the entry
+    const entry1 = iterator.interface.next();
+    try std.testing.expect(entry1 != null);
+
+    // Subsequent calls should return null
+    const entry2 = iterator.interface.next();
+    try std.testing.expectEqual(@as(?kernel.fs.DirectoryEntry, null), entry2);
+
+    const entry3 = iterator.interface.next();
+    try std.testing.expectEqual(@as(?kernel.fs.DirectoryEntry, null), entry3);
+}
+
+test "DriverFsIterator.ShouldIterateDriversWithDifferentNames" {
+    var drivers = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+    defer drivers.deinit();
+
+    var mock_driver1 = try DriverMock.create(std.testing.allocator);
+    var mock1 = mock_driver1.get_interface();
+    defer mock1.interface.delete();
+
+    var mock_driver2 = try DriverMock.create(std.testing.allocator);
+    var mock2 = mock_driver2.get_interface();
+    defer mock2.interface.delete();
+
+    try drivers.put("uart0", mock_driver1.get_interface());
+    try drivers.put("spi1", mock_driver2.get_interface());
+
+    var iterator = try DriverFsIterator.InstanceType.create(drivers.iterator(), std.testing.allocator).interface.new(std.testing.allocator);
+    defer iterator.interface.delete();
+
+    var names = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 1);
+    defer names.deinit(std.testing.allocator);
+
+    while (iterator.interface.next()) |entry| {
+        try names.append(std.testing.allocator, entry.name);
+        try std.testing.expectEqual(kernel.fs.FileType.File, entry.kind);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), names.items.len);
+
+    // Check that both names are present (order doesn't matter in hash map)
+    var found_uart0 = false;
+    var found_spi1 = false;
+    for (names.items) |name| {
+        if (std.mem.eql(u8, name, "uart0")) found_uart0 = true;
+        if (std.mem.eql(u8, name, "spi1")) found_spi1 = true;
+    }
+    try std.testing.expect(found_uart0);
+    try std.testing.expect(found_spi1);
+}
+
+test "DriverFsIterator.ShouldAlwaysReturnFileType" {
+    var drivers = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+    defer drivers.deinit();
+
+    var mock_driver1 = try DriverMock.create(std.testing.allocator);
+    var mock1 = mock_driver1.get_interface();
+    defer mock1.interface.delete();
+
+    var mock_driver2 = try DriverMock.create(std.testing.allocator);
+    var mock2 = mock_driver2.get_interface();
+    defer mock2.interface.delete();
+
+    try drivers.put("dev1", mock_driver1.get_interface());
+    try drivers.put("dev2", mock_driver2.get_interface());
+
+    var iterator = try DriverFsIterator.InstanceType.create(drivers.iterator(), std.testing.allocator).interface.new(std.testing.allocator);
+    defer iterator.interface.delete();
+
+    while (iterator.interface.next()) |entry| {
+        // All driver entries should be of type File
+        try std.testing.expectEqual(kernel.fs.FileType.File, entry.kind);
+    }
+}
+
+test "DriverFsIterator.ShouldHandleLongDeviceNames" {
+    var drivers = std.StringHashMap(kernel.driver.IDriver).init(std.testing.allocator);
+    defer drivers.deinit();
+
+    var mock_driver = try DriverMock.create(std.testing.allocator);
+    var mock = mock_driver.get_interface();
+    defer mock.interface.delete();
+
+    const long_name = "very_long_device_name_that_should_still_work_correctly";
+    try drivers.put(long_name, mock_driver.get_interface());
+
+    var iterator = try DriverFsIterator.InstanceType.create(drivers.iterator(), std.testing.allocator).interface.new(std.testing.allocator);
+    defer iterator.interface.delete();
+
+    const entry = iterator.interface.next();
+    try std.testing.expect(entry != null);
+    try std.testing.expectEqualStrings(long_name, entry.?.name);
+    try std.testing.expectEqual(kernel.fs.FileType.File, entry.?.kind);
+}
