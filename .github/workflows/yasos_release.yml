@@ -30,7 +30,7 @@ jobs:
           echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.target }}
           path: output/${{ matrix.target }}_${{ steps.vars.outputs.PACKAGE_VERSION }}.tar.gz
