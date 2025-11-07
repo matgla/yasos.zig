@@ -12,3 +12,4 @@ rootfs/
 build/
 rootfs.img
 __pycache__/
+output/

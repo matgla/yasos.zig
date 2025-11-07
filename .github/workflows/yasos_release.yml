@@ -1,0 +1,36 @@
+name: Yasos Releasing Workflow
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build_image:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/matgla/yasos.zig:v0.16
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      matrix:
+        target: [pimoroni_pico_plus2_and_vga, mspc]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+      - name: Build image
+        shell: bash
+        run:
+          ./build_image.sh ${{ matrix.target }}
+      - name: Deduce package version
+        id: vars
+        run: |
+          PACKAGE_VERSION=$(git describe --tags --always)
+          echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.target }}
+          path: output/${{ matrix.target }}_${{ steps.vars.outputs.PACKAGE_VERSION }}.tar.gz
