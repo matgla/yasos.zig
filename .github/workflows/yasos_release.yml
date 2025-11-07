@@ -22,7 +22,7 @@ jobs:
       - name: Build image
         shell: bash
         run:
-          ./build_image.sh ${{ matrix.target }}
+          ./build_image.sh ${{ matrix.target }}_defconfig
       - name: Deduce package version
         id: vars
         run: |
