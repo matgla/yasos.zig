@@ -26,6 +26,7 @@ jobs:
       - name: Deduce package version
         id: vars
         run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE 
           PACKAGE_VERSION=$(git describe --tags --always)
           echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
 
