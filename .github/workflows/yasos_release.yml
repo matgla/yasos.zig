@@ -34,4 +34,4 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.target }}
-          path: output/${{ matrix.target }}_${{ steps.vars.outputs.PACKAGE_VERSION }}.tar.gz
+          path: ${{ github.workspace }}/output/${{ matrix.target }}_${{ steps.vars.outputs.PACKAGE_VERSION }}.tar.gz
