@@ -29,6 +29,7 @@ echo "Creating package..."
 rm -rf $SCRIPT_DIR/output/target_package/
 mkdir -p $SCRIPT_DIR/output/target_package
 
+git config --global --add safe.directory .
 PACKAGE_VERSION=$(git describe --tags --always)
 PACKAGE_NAME="${1%_defconfig}_${PACKAGE_VERSION}"
 
