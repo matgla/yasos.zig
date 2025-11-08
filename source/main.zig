@@ -64,18 +64,6 @@ pub const std_options: std.Options = .{
             .scope = .yasld,
             .level = .info,
         },
-        .{
-            .scope = .@"vfs/driverfs",
-            .level = .debug,
-        },
-        .{
-            .scope = .@"kernel/fs/mount_points",
-            .level = .debug,
-        },
-        .{
-            .scope = .benchmark,
-            .level = .debug,
-        },
     },
 };
 
