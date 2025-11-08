@@ -21,12 +21,12 @@ jobs:
           submodules: 'recursive'
       - name: Build image
         shell: bash
-        run:
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE 
           ./build_image.sh ${{ matrix.target }}_defconfig
       - name: Deduce package version
         id: vars
         run: |
-          git config --global --add safe.directory $GITHUB_WORKSPACE 
           PACKAGE_VERSION=$(git describe --tags --always)
           echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
 
