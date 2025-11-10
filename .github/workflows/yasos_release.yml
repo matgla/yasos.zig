@@ -5,7 +5,61 @@ on:
     tags: ['v*']
 
 jobs:
+  create_release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.vars.outputs.PACKAGE_VERSION }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Deduce package version
+        id: vars
+        run: |
+          PACKAGE_VERSION=$(git describe --tags --always)
+          echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          # Get the previous tag
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${GITHUB_REF#refs/tags/}$" | head -n 1)
+
+          # Generate changelog
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # First release - get all commits
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            # Get commits between previous tag and current tag
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..${GITHUB_REF#refs/tags/} --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # Create release body
+          {
+            echo "RELEASE_BODY<<EOF"
+            echo "## Changes"
+            echo ""
+            if [ -z "$CHANGELOG" ]; then
+              echo "- No changes"
+            else
+              echo "$CHANGELOG"
+            fi
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          body: ${{ steps.release_notes.outputs.RELEASE_BODY }}
+          draft: false
+          prerelease: false
+
   build_image:
+    needs: create_release
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/matgla/yasos.zig:v0.16
@@ -22,30 +76,19 @@ jobs:
       - name: Build image
         shell: bash
         run: |
-          git config --global --add safe.directory $GITHUB_WORKSPACE 
+          git config --global --add safe.directory $GITHUB_WORKSPACE
           ./build_image.sh ${{ matrix.target }}_defconfig
-      - name: Deduce package version
-        id: vars
-        run: |
-          PACKAGE_VERSION=$(git describe --tags --always)
-          echo "PACKAGE_VERSION=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
-
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.target }}
-          path: ${{ github.workspace }}/output/${{ matrix.target }}_${{ steps.vars.outputs.PACKAGE_VERSION }}.tar.gz
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+          path: ${{ github.workspace }}/output/${{ matrix.target }}_${{ needs.create_release.outputs.version }}.tar.gz
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          body: |
-            Changes in this Release
-            - First Change
-            - Second Change
-          draft: false
-          prerelease: false
+          upload_url: ${{ needs.create_release.outputs.upload_url }}
+          asset_path: ${{ github.workspace }}/output/${{ matrix.target }}_${{ needs.create_release.outputs.version }}.tar.gz
+          asset_name: ${{ matrix.target }}_${{ needs.create_release.outputs.version }}.tar.gz
+          asset_content_type: application/gzip
