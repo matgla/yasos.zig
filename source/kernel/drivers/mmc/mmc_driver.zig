@@ -120,7 +120,7 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
         self._node.delete();
         global_refcount -= 1;
         if (global_refcount == 0) {
-            self._mmcio.deinit();
+            // self._mmcio.deinit();
         }
     }
 
