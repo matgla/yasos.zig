@@ -49,6 +49,19 @@ To create rootfs image use:
 ./build_rootfs.sh -c -o rootfs.img
 ```
 
+# Flashing
+After successful building of kernel and rootfs.img flashing can be done using openocd scripts
+
+Kernel only:
+```
+openocd -f flash_kernel_rp2350.cfg
+```
+
+Kernel and rootfs: 
+```
+openocd -f flash_rp2350.cfg
+```
+
 # Pimoroni Pico Plus 2 Setup
 Connect wiring to UART console and SWD debugger (PicoProbe) as shown on below diagram: 
 
