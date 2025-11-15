@@ -142,6 +142,9 @@ build_c_compiler()
 build_makefile()
 {
   cd $1
+  if [ $CLEAR = true ]; then
+    make clean
+  fi
   make CC=$CC -j4
   if [ $? -ne 0 ]; then
     exit -1;
@@ -207,7 +210,6 @@ cd ..
 
 cd apps
 
-build_makefile shell
 build_makefile coreutils
 build_makefile cowsay
 build_makefile ascii_animations
@@ -217,6 +219,7 @@ build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs
 build_makefile longjump_tester
+build_makefile rzsz
 build_zork_makefile zork
 
 $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
