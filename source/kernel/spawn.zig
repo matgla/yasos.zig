@@ -24,6 +24,7 @@ const hal = @import("hal");
 const system_call = @import("interrupts/system_call.zig");
 
 const process_manager = @import("process_manager.zig");
+const sys_start_root_process = @import("interrupts/syscall_handlers.zig").sys_start_root_process;
 
 const c = @import("libc_imports").c;
 
@@ -33,8 +34,13 @@ pub fn root_process(entry: anytype, arg: ?*const anyopaque, stack_size: u32) !vo
     if (process_manager.instance.schedule_next() != .NoAction) {
         process_manager.instance.initialize_context_switching();
         hal.time.systick.enable();
-        system_call.trigger(c.sys_start_root_process, arg, null);
+        // system_call.trigger(c.sys_start_root_process, arg, null);
+        _ = try sys_start_root_process(arg.?);
     }
+}
+
+pub fn idle_process(entry: anytype, arg: ?*const anyopaque, stack_size: u32) !void {
+    try process_manager.instance.create_idle_process(stack_size, entry, arg, "/");
 }
 
 const kernel = @import("kernel.zig");

@@ -119,10 +119,20 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
         }
 
+        pub fn create_idle_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
+            const maybe_pid = self.get_next_pid();
+            if (maybe_pid) |pid| {
+                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
+                self.processes.append(&new_process.node);
+                return;
+            }
+            return kernel.errno.ErrnoSet.TryAgain;
+        }
+
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
-                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid);
+                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
                 self.processes.append(&new_process.node);
                 return;
             }
@@ -288,6 +298,25 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
     };
 }
+
+pub fn yield() void {
+    const maybe_process = instance.get_current_process();
+    if (maybe_process) |p| {
+        p.wait_for_io(true);
+    }
+    hal.irq.trigger(.pendsv);
+}
+
+extern fn store_kernel_context_and_switch() void;
+
+pub fn kernel_yield() void {
+    const maybe_process = instance.get_current_process();
+    if (maybe_process) |p| {
+        p.wait_for_io(false);
+    }
+    // store_kernel_context_and_switch();
+}
+
 pub const ProcessManager = ProcessManagerGenerator(Scheduler);
 
 pub var instance: ProcessManager = undefined;

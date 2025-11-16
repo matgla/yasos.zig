@@ -28,6 +28,8 @@ pub const process = struct {
     pub const initialize_context_switching = @import("process.zig").initialize_context_switching;
     pub const init = @import("process.zig").init;
     pub const ProcFs = @import("process/procfs.zig").ProcFs;
+    pub const yield = @import("process_manager.zig").yield;
+    pub const kernel_yield = @import("process_manager.zig").kernel_yield;
 };
 
 pub const spawn = @import("spawn.zig");

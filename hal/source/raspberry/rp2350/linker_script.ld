@@ -30,7 +30,9 @@ SECTIONS
   .text :
   {
     . = ALIGN(4);
+    __vectors_start = .;
     KEEP(*(.vectors))
+    __vectors_end = .;
     __bootmeta_start__ = .;
     KEEP(*(.bootmeta))
     __bootmeta_end__ = .;

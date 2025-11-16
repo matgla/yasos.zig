@@ -39,6 +39,32 @@ pub const RoundRobin = struct {
         };
     }
 
+    pub fn schedule_idle(self: *Self, first_node: *std.DoublyLinkedList.Node) kernel.scheduler.Action {
+        var next: ?*std.DoublyLinkedList.Node = first_node;
+        if (self.current != null) {
+            next = self.current.?.next;
+        }
+
+        while (next) |node| {
+            // search for the next ready process
+            const process: *Process = @alignCast(@fieldParentPtr("node", node));
+            if (process._idle) {
+                process.set_core(@intCast(cpu.coreid()));
+                self.next = node;
+                if (self.current) |current_node| {
+                    const current_process: *Process = @alignCast(@fieldParentPtr("node", current_node));
+                    if (current_process.is_initialized()) {
+                        return .StoreAndSwitch;
+                    }
+                }
+                return .Switch;
+            }
+
+            next = node.next;
+        }
+        return .NoAction;
+    }
+
     pub fn schedule_next(self: *Self, first_node: *std.DoublyLinkedList.Node) kernel.scheduler.Action {
         var next: ?*std.DoublyLinkedList.Node = first_node;
         if (self.current != null) {
@@ -61,7 +87,7 @@ pub const RoundRobin = struct {
         while (next) |node| {
             // search for the next ready process
             const process: *Process = @alignCast(@fieldParentPtr("node", node));
-            if (process.state == Process.State.Ready) {
+            if (process.state == Process.State.Ready and !process._idle) {
                 process.set_core(@intCast(cpu.coreid()));
                 self.next = node;
                 if (self.current) |current_node| {
@@ -81,12 +107,17 @@ pub const RoundRobin = struct {
             const process: *Process = @alignCast(@fieldParentPtr("node", node));
 
             if (node == self.current) {
-                // only already running process can be executed
-                return .NoAction;
+                if (process.state == Process.State.Ready or process.state == Process.State.Running) {
+                    // only already running process can be executed
+                    return .NoAction;
+                }
+                // no ready processes, reset io wait state and schedule idle
+                process.wait_for_io(false);
+                return self.schedule_idle(first_node);
             }
 
             // search for the next ready process
-            if (process.state == Process.State.Ready) {
+            if (process.state == Process.State.Ready and !process._idle) {
                 process.set_core(@intCast(cpu.coreid()));
                 self.next = node;
 
@@ -164,7 +195,7 @@ const test_arg: i32 = 0;
 const c = @import("libc_imports").c;
 
 fn create_process(pid: c.pid_t, cwd: []const u8, pool: *ProcessMemoryPool) !*Process {
-    return try Process.init(std.testing.allocator, 4096, &entry, &test_arg, cwd, pool, null, pid);
+    return try Process.init(std.testing.allocator, 4096, &entry, &test_arg, cwd, pool, null, pid, false);
 }
 
 test "RoundRobin.ShouldScheduleFirstReadyProcess" {

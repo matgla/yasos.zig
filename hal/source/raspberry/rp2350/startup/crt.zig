@@ -62,6 +62,19 @@ fn initialize_libc_constructors() void {
 
 export fn _init() void {}
 
+const ram_vector_table_size: usize = c.VTABLE_FIRST_IRQ + c.PICO_NUM_VTABLE_IRQS;
+var ram_vector_table: [ram_vector_table_size]usize linksection(".ram_vector_table") = [_]usize{0} ** ram_vector_table_size;
+
+extern var __vectors_start: usize;
+extern var __vectors_end: usize;
+
+fn initialize_ram_vector_table() void {
+    const vectors_start: *usize = @ptrCast(&__vectors_start);
+    const vectors_end: *usize = @ptrCast(&__vectors_end);
+    _ = c.__builtin_memcpy(@ptrCast(&ram_vector_table), vectors_start, @intFromPtr(vectors_end) - @intFromPtr(vectors_start));
+    cpu.scb.vtor.write(@intFromPtr(&ram_vector_table));
+}
+
 export fn crt_init() void {
     c.reset_block(~(c.RESETS_RESET_IO_QSPI_BITS | c.RESETS_RESET_PADS_QSPI_BITS |
         c.RESETS_RESET_PLL_USB_BITS | c.RESETS_RESET_USBCTRL_BITS | c.RESETS_RESET_SYSCFG_BITS |
@@ -72,6 +85,7 @@ export fn crt_init() void {
             c.RESETS_RESET_SPI1_BITS | c.RESETS_RESET_UART0_BITS |
             c.RESETS_RESET_UART1_BITS | c.RESETS_RESET_USBCTRL_BITS));
 
+    initialize_ram_vector_table();
     initialize_data();
     initialize_bss();
     initialize_libc_constructors();

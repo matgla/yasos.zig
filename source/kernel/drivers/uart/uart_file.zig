@@ -68,6 +68,9 @@ pub fn UartFile(comptime UartType: anytype) type {
                             return @intCast(index);
                         }
                     }
+                    while (!Self.uart.is_readable()) {
+                        kernel.process.kernel_yield();
+                    }
                     const result = Self.uart.read(ch[0..1]) catch {
                         continue;
                     };

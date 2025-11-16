@@ -416,7 +416,7 @@ pub const MmcIo = struct {
         const csd = try self.read_csd();
         self._size = csd.get_size() / csd.get_sector_size();
         dump_struct(csd);
-        self._mmc.change_speed_to(csd.get_speed() / 4);
+        self._mmc.change_speed_to(csd.get_speed() / 8);
         self._initialized = true;
     }
 };

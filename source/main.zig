@@ -73,7 +73,7 @@ pub const os = struct {
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
-        .baudrate = 921600,
+        .baudrate = 115200,
     });
 
     kernel.stdout.set_output(&board.uart.uart0, @TypeOf(board.uart.uart0).write_some_opaque);
@@ -253,8 +253,20 @@ const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
     .dump_stats = config.instrumentation.print_memory_usage,
 });
 
+fn idle_task() void {
+    while (true) {
+        asm volatile (
+            \\ wfi
+        );
+        kernel.process.yield();
+    }
+}
+
 export fn kernel_process(argument: *KernelAllocator) void {
     _ = argument;
+    kernel.spawn.idle_process(&idle_task, null, 256) catch |err| {
+        kernel.log.err("Can't create idle task: {s}", .{@errorName(err)});
+    };
     const maybe_process = kernel.process.process_manager.instance.get_current_process();
     if (maybe_process) |process| {
         attach_default_filedescriptors_to_root_process(process) catch {

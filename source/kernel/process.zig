@@ -129,6 +129,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _vfork_context: ?*const volatile c.vfork_context = null,
         _initialized: bool = false,
         _start_time: u64,
+        _wait_for_io: bool = false,
+        _idle: bool = false,
 
         pub const State = enum(u3) {
             Initialized,
@@ -138,7 +140,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             Terminated,
         };
 
-        pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: anytype, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType, parent: ?*Self, pid: c.pid_t) !*Self {
+        pub fn get_state(self: *const Self) State {
+            return self.state;
+        }
+
+        pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: anytype, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType, parent: ?*Self, pid: c.pid_t, idle: bool) !*Self {
             const process = try kernel_allocator.create(Self);
             kernel.log.debug("initializing memory allocator for pid: {d}", .{pid});
             var process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool);
@@ -164,8 +170,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._stack_shared_with_parent = false,
                 ._vfork_context = null,
                 ._start_time = hal.time.get_time_us(),
+                ._wait_for_io = false,
+                ._idle = idle,
             };
             return process;
+        }
+
+        pub fn wait_for_io(self: *Self, wait: bool) void {
+            self._wait_for_io = wait;
+            self.reevaluate_state();
         }
 
         pub fn clear_fds(self: *Self) void {
@@ -250,6 +263,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._vfork_context = context,
                 ._initialized = false,
                 ._start_time = hal.time.get_time_us(),
+                ._wait_for_io = false,
+                ._idle = false,
             };
 
             return process;
@@ -351,6 +366,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             }
 
             if (self._blocked_by.first != null) {
+                self.state = Process.State.Blocked;
+                return;
+            }
+
+            if (self._wait_for_io) {
                 self.state = Process.State.Blocked;
                 return;
             }
@@ -564,7 +584,7 @@ test "Process.ShouldBeCreated" {
     const cwd_for_process = "/some/path";
     const pid_for_process = 10;
     hal.time.impl.set_time(1000);
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, cwd_for_process, &pool, null, pid_for_process);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, cwd_for_process, &pool, null, pid_for_process, false);
     defer sut.deinit();
 
     try std.testing.expectEqual(pid_for_process, sut.pid);
@@ -578,7 +598,7 @@ test "Process.ShouldChangeDirectory" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
     hal.time.impl.set_time(0);
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 20);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 20, false);
     defer sut.deinit();
 
     try sut.change_directory("/home/user");
@@ -589,7 +609,7 @@ test "Process.ShouldAttachAndReleaseFile" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
     hal.time.impl.set_time(0);
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 30);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 30, false);
     defer sut.deinit();
 
     var file_mock = try FileMock.create(std.testing.allocator);
@@ -618,7 +638,7 @@ test "Process.ShouldReuseReleasedFileDescriptor" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
     hal.time.impl.set_time(0);
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 40);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 40, false);
     defer sut.deinit();
 
     var file_mock1 = try FileMock.create(std.testing.allocator);
@@ -641,7 +661,7 @@ test "Process.ShouldReturnUptime" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
     hal.time.impl.set_time(500);
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 50);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 50, false);
     defer sut.deinit();
 
     hal.time.impl.set_time(2500);
@@ -652,7 +672,7 @@ test "Process.ShouldSetCurrentCore" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
     hal.time.impl.set_time(0);
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 60);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 60, false);
     defer sut.deinit();
 
     sut.set_core(2);
@@ -664,7 +684,7 @@ test "Process.ShouldSleepForMilliseconds" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
     hal.time.impl.set_time(0);
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 70);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 70, false);
     defer sut.deinit();
 
     const PendSvAction = struct {
@@ -682,7 +702,7 @@ test "Process.ShouldForkProcess" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
     hal.time.impl.set_time(0);
-    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 80);
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 80, false);
     try std.testing.expectEqual(null, parent._parent);
     defer parent.deinit();
 
@@ -719,13 +739,13 @@ test "Process.ShouldWaitForMultipleProcessesAndUnblock" {
     var arg: usize = 1;
 
     hal.time.impl.set_time(0);
-    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 90);
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 90, false);
     defer parent.deinit();
 
-    var child1 = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 91);
+    var child1 = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 91, false);
     defer child1.deinit();
 
-    var child2 = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 92);
+    var child2 = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 92, false);
     defer child2.deinit();
 
     var context = MultiProcessUnblock.Context{};
@@ -798,7 +818,7 @@ test "Process.ShouldWaitForMultipleProcessesAndUnblock" {
 test "Process.ShouldBlockOnSemaphore" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 100);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 100, false);
     defer sut.deinit();
 
     var sem = Semaphore.create(1);
@@ -811,7 +831,7 @@ test "Process.ShouldBlockOnSemaphore" {
 test "Process.ShouldUnblockSemaphoreAndUpdateState" {
     var pool = ProcessMemoryPoolForTests{};
     var arg: usize = 1;
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 110);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 110, false);
     defer sut.deinit();
 
     var sem = Semaphore.create(1);
@@ -829,7 +849,7 @@ test "Process.ShouldRestoreParentStack" {
     var arg: usize = 1;
     hal.time.impl.set_time(0);
 
-    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 120);
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 120, false);
     defer parent.deinit();
 
     const parent_stack_before = parent.stack_pointer();
@@ -866,7 +886,7 @@ test "Process.ShouldMmapMemory" {
     var arg: usize = 1;
     hal.time.impl.set_time(0);
 
-    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 120);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 120, false);
     defer sut.deinit();
 
     var addr: usize = 0x10;
@@ -891,8 +911,8 @@ test "Process.ShouldDeinitBlockedStructures" {
     var arg: usize = 0;
     hal.time.impl.set_time(0);
 
-    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 200);
-    var child = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 201);
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 200, false);
+    var child = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, parent, 201, false);
 
     var ctx = MultiProcessUnblock.Context{};
     try parent.wait_for_process(child, &MultiProcessUnblock.action, &ctx);
@@ -910,7 +930,7 @@ test "Process.ShouldDuplicateFileHandlesOnVfork" {
     var arg: usize = 0;
     hal.time.impl.set_time(0);
 
-    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &parent_pool, null, 210);
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &parent_pool, null, 210, false);
     defer parent.deinit();
 
     const file_mock1 = try FileMock.create(std.testing.allocator);

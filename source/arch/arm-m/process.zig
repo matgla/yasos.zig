@@ -134,12 +134,12 @@ pub fn create_default_hardware_registers(comptime exit_handler: *const fn () voi
     };
 }
 
-pub fn create_default_software_registers() SoftwareStoredRegisters {
+pub fn create_default_software_registers(process_entry: anytype) SoftwareStoredRegisters {
     return .{
         // for now handler msp mode is reserved for kernel
         // interrupts handlers, but in the future kernel process
         // may also use thread/handler msp mode
-        .lr = exc_return.return_to_thread_psp,
+        .lr = @as(u32, @intCast(@intFromPtr(process_entry))),
         .r4 = 0,
         .r5 = 0,
         .r6 = 0,
@@ -194,7 +194,7 @@ pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const
     const sw_registers_size = @sizeOf(SoftwareStoredRegisters);
     const sw_registers_place = stack_start - sw_registers_size - hw_registers_size;
 
-    const software_pushed_registers = create_default_software_registers();
+    const software_pushed_registers = create_default_software_registers(process_entry);
     @memcpy(stack[sw_registers_place .. sw_registers_place + @sizeOf(SoftwareStoredRegisters)], std.mem.asBytes(&software_pushed_registers));
 
     return &stack[sw_registers_place];
@@ -207,7 +207,7 @@ pub fn init() void {
 }
 
 pub fn initialize_context_switching() void {
-    hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
+    hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible by context switch
     hal.irq.set_priority(.pendsv, 0xfe);
     hal.irq.set_priority(.systick, 0x00);
 }

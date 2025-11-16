@@ -182,6 +182,37 @@ build_zork_makefile()
   cd ..
 }
 
+build_gnumake()
+{
+  cd $1
+  if [ $CLEAR = true ]; then
+    make clean
+  fi
+  LDFLAGS="-Wl,-oformat=elf32-littlearm" CC=$CC ./configure --host=arm-none-eabi --prefix=$PREFIX
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  make
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  cp make make.elf
+  CC=$CC ./configure --host=arm-none-eabi --prefix=$PREFIX
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  make
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+
+  make install
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  cd ..
+}
+
 
 build_cross_compiler
 
@@ -221,6 +252,7 @@ build_makefile mkfs
 build_makefile longjump_tester
 build_makefile rzsz
 build_zork_makefile zork
+build_gnumake make
 
 $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 

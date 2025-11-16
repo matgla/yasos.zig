@@ -76,6 +76,10 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "read", .{buf}, isize);
     }
 
+    // pub fn read_callback(self: *Self, buf: []u8) isize {
+    //     return interface.CountingInterfaceVirtualCall(self, "read", .{buf}, isize);
+    // }
+
     pub fn write(self: *Self, buf: []const u8) isize {
         return interface.CountingInterfaceVirtualCall(self, "write", .{buf}, isize);
     }

@@ -88,18 +88,30 @@ fn is_requested_file(file: kernel.fs.IFile, context: *ModuleContext) bool {
     return false;
 }
 
-var modules_list: std.AutoHashMap(c.pid_t, yasld.Executable) = undefined;
+const ExecutableHandle = struct {
+    allocator: std.mem.Allocator,
+    executable: ?yasld.Executable,
+    memory: ?[]align(16) u8,
+};
+
+var modules_list: std.AutoHashMap(c.pid_t, ExecutableHandle) = undefined;
 var libraries_list: std.AutoHashMap(c.pid_t, std.DoublyLinkedList) = undefined;
 
 pub fn init(allocator: std.mem.Allocator) void {
     log.info("yasld initialization started", .{});
     yasld.loader_init(&file_resolver, allocator);
-    modules_list = std.AutoHashMap(c.pid_t, yasld.Executable).init(allocator);
+    modules_list = std.AutoHashMap(c.pid_t, ExecutableHandle).init(allocator);
     libraries_list = std.AutoHashMap(c.pid_t, std.DoublyLinkedList).init(allocator);
     kernel_allocator = allocator;
 }
 
 pub fn deinit() void {
+    var it = modules_list.iterator();
+    while (it.next()) |item| {
+        if (item.value_ptr.memory) |mem| {
+            item.value_ptr.allocator.free(mem);
+        }
+    }
     modules_list.deinit();
     libraries_list.deinit();
     yasld.loader_deinit();
@@ -117,12 +129,18 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
         };
         _ = f.interface.ioctl(@intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus), &attr);
         var header_address: *const anyopaque = undefined;
-
+        var entry = ExecutableHandle{
+            .allocator = process_allocator,
+            .executable = null,
+            .memory = null,
+        };
         if (attr.mapped_address_r) |address| {
             header_address = address;
         } else {
-            // copy file to memory before running
-            @panic("Implement image copying to memory");
+            var memory: []align(16) u8 = try process_allocator.alignedAlloc(u8, .@"16", f.interface.size());
+            header_address = @ptrCast(&memory[0]);
+            entry.memory = memory;
+            _ = f.interface.read(memory);
         }
         if (yasld.get_loader()) |loader| {
             const executable = loader.*.load_executable(header_address, process_allocator) catch |err| {
@@ -130,8 +148,9 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
                 return err;
             };
             release_executable(pid);
-            modules_list.put(pid, executable) catch |err| return err;
-            const exec_ptr: *yasld.Executable = modules_list.getPtr(pid).?;
+            entry.executable = executable;
+            modules_list.put(pid, entry) catch |err| return err;
+            const exec_ptr: *yasld.Executable = &modules_list.getPtr(pid).?.executable.?;
             return exec_ptr;
         } else {
             log.err("yasld is not initialized", .{});
@@ -183,17 +202,19 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
 }
 
 pub fn release_executable(pid: c.pid_t) void {
-    const maybe_executable = modules_list.getPtr(pid);
-    if (maybe_executable) |executable| {
-        executable.deinit();
-        _ = modules_list.remove(pid);
-        const maybe_list = libraries_list.getPtr(pid);
-        if (maybe_list) |list| {
-            var next = list.pop();
-            while (next) |node| {
-                const library: *yasld.Module = @fieldParentPtr("list_node", node);
-                library.destroy();
-                next = list.pop();
+    var maybe_entry = modules_list.getPtr(pid);
+    if (maybe_entry) |*entry| {
+        if (entry.*.executable) |*executable| {
+            executable.deinit();
+            _ = modules_list.remove(pid);
+            const maybe_list = libraries_list.getPtr(pid);
+            if (maybe_list) |list| {
+                var next = list.pop();
+                while (next) |node| {
+                    const library: *yasld.Module = @fieldParentPtr("list_node", node);
+                    library.destroy();
+                    next = list.pop();
+                }
             }
         }
         _ = libraries_list.remove(pid);
@@ -214,7 +235,13 @@ pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
 }
 
 pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
-    return modules_list.getPtr(pid);
+    if (!modules_list.contains(pid)) {
+        return null;
+    }
+    if (modules_list.getPtr(pid).?.executable) |*exec| {
+        return exec;
+    }
+    return null;
 }
 
 test "Modules.ShouldInitializeAndDeinitialize" {

@@ -245,11 +245,15 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
             };
         };
         if (maybe_node) |file| {
-            return try process.attach_file(path, file);
+            const fd = try process.attach_file(path, file);
+            kernel.log.err("Opended file at path: {s} with fd: {d}", .{ path, fd });
+            return fd;
         } else if ((context.flags & c.O_CREAT) != 0) {
             try fs.get_ivfs().interface.create(path, context.mode);
             const ifile = try fs.get_ivfs().interface.get(path);
-            return try process.attach_file(path, ifile);
+            const fd = try process.attach_file(path, ifile);
+            kernel.log.err("Created file at path: {s} with fd: {d}", .{ path, fd });
+            return fd;
         }
     }
     return kernel.errno.ErrnoSet.NoEntry;
@@ -324,6 +328,7 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
 
     if (maybe_process) |process| {
         const maybe_handle = process.get_file_handle(@intCast(context.fd));
+
         if (maybe_handle) |handle| {
             var maybe_file = handle.node.as_file();
             if (maybe_file) |*file| {
@@ -436,7 +441,9 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    return try process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
+    const path = try determine_path_for_file(kernel_allocator, context.filename, -1);
+    defer kernel_allocator.free(path);
+    return try process_manager.instance.prepare_exec(path, context.argv, context.envp);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {

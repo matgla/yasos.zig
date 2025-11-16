@@ -143,6 +143,7 @@ pub const MountPoints = struct {
 
             if (bestchild) |child| {
                 parent = mountpoint;
+
                 left = std.mem.trimLeft(u8, left[child.path.len..], "/");
                 last_matched_point = child;
             }
@@ -189,6 +190,7 @@ pub const MountPoints = struct {
             return MountPointError.RootNotMounted;
         }
         const longest_matching_point = maybe_longest_matching_point.?;
+
         if (longest_matching_point.left.len == 0) {
             return MountPointError.MountPointInUse;
         }
