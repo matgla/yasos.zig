@@ -147,7 +147,7 @@ pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *vo
         write_result(out, kernel.errno.ErrnoSet.NotImplemented);
         return;
     }
-    write_result(out, syscall_lookup_table[number](arg, out));
+    write_result(out, syscall_lookup_table[number](arg));
 }
 
 // can be called only from the user process, not from the kernel

@@ -100,20 +100,6 @@ store_and_switch_to_next_task:
   bl switch_to_next_task
   pop {r4, pc}
 
-//.global store_kernel_context_and_switch
-//.thumb_func
-//store_kernel_context_and_switch:
-  // push {r4, lr}
-  // cpsid i // better to not interrupt that operation from nested IRQ
-  // // how to store msp too?
-  // mrs r0, psp
-  // vstmdb r0!, {s16-s31}
-  // stmdb r0!, {r4-r12, lr}
-
-  // bl update_stack_pointer
-  // bl switch_to_next_task
-  // pop {r4, pc}
-
 .global switch_to_the_next_task
 .thumb_func
 switch_to_the_next_task:
@@ -125,40 +111,34 @@ switch_to_the_next_task:
 .global irq_svcall
 .thumb_func
 irq_svcall:
+  cmp r0, #16
+  bne check_if_start_root
+  push {r0, r1, r2, lr}
+  mrs r0, psp
+  mov r1, lr
+  vstmdb r0!, {s16-s31}
+  stmdb r0!, {r1, r4-r12}
+  bl update_stack_pointer
+  pop {r0, r1, r2, lr}
+  b call_svcall
+check_if_start_root:
+  cmp r0, #1
+  bne call_svcall
+  ldr r0, =sp_call
+  str sp, [r0]
+  tst lr, #0x10
+  bne omit_fpu
+  ldr r0, =sp_call_fpu
+  push {r1}
+  mov r1, #1
+  str r1, [r0]
+  pop {r1}
+omit_fpu:
+  mov r0, 1
+call_svcall:
   push {r0, lr}
   bl _irq_svcall
-  mrs r1, psp
-  str r0, [r1]
   pop {r0, pc}
-
- //  cmp r0, #16
-  // bne check_if_start_root
-  // push {r0, r1, r2, lr}
-  // mrs r0, psp
-  // mov r1, lr
-  // vstmdb r0!, {s16-s31}
-  // stmdb r0!, {r1, r4-r12}
-  // bl update_stack_pointer
-  // pop {r0, r1, r2, lr}
-  // b call_svcall
-// check_if_start_root:
-  // cmp r0, #1
-  // bne call_svcall
-  // ldr r0, =sp_call
-  // str sp, [r0]
-  // tst lr, #0x10
-  // bne omit_fpu
-  // ldr r0, =sp_call_fpu
-  // push {r1}
-  // mov r1, #1
-  // str r1, [r0]
-  // pop {r1}
-// omit_fpu:
-  // mov r0, 1
-// call_svcall:
-  // push {r0, lr}
-  // bl _irq_svcall
-  // pop {r1, pc}
 
 .global irq_pendsv
 .thumb_func
@@ -171,8 +151,4 @@ irq_pendsv:
 .thumb_func
 switch_to_the_first_task:
   bl switch_to_next_task
-  mrs r1, CONTROL
-  orr r1, r1, #3
-  msr CONTROL, r1
-  isb
   bx r0
