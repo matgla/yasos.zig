@@ -27,6 +27,8 @@ const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
 
+const hal = @import("hal");
+
 const interface = @import("interface");
 
 pub fn UartFile(comptime UartType: anytype) type {
@@ -39,6 +41,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             _nonblock: bool,
             _allocator: std.mem.Allocator,
             _name: []const u8,
+            _read_timeout: usize,
 
             pub fn delete(self: *Self) void {
                 _ = self;
@@ -51,6 +54,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                     ._nonblock = false,
                     ._allocator = allocator,
                     ._name = filename,
+                    ._read_timeout = 0,
                 });
             }
 
@@ -68,11 +72,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                             return @intCast(index);
                         }
                     }
-                    while (!Self.uart.is_readable()) {
-                        kernel.process.kernel_yield();
-                    }
                     const result = Self.uart.read(ch[0..1]) catch {
-                        continue;
+                        return @intCast(index);
                     };
                     if (result == 0) {
                         return @intCast(index);
@@ -144,6 +145,9 @@ pub fn UartFile(comptime UartType: anytype) type {
                         c.TCSETS => {
                             self._icanonical = (termios.c_lflag & c.ICANON) != 0;
                             self._echo = (termios.c_lflag & c.ECHO) != 0;
+                            self._read_timeout = @intCast(termios.c_cc[c.VTIME]);
+                            self._read_timeout *= 100;
+
                             return 0;
                         },
                         c.TCSETSW => {
@@ -162,6 +166,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                             termios.c_cc[1] = 0;
                             termios.c_cc[2] = 0;
                             termios.c_cc[3] = 0;
+                            termios.c_cc[c.VTIME] = @intCast(self._read_timeout / 100);
                             if (self._icanonical) {
                                 termios.c_lflag |= c.ICANON;
                             }
@@ -174,6 +179,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                             const ws: *c.struct_winsize = @ptrCast(@alignCast(termios_arg));
                             ws.*.ws_row = 24;
                             ws.*.ws_col = 80;
+                            return 0;
+                        },
+                        c.FIONREAD => {
+                            const bytes_available: *c_int = @ptrCast(@alignCast(termios_arg));
+                            bytes_available.* = @intCast(uart.bytes_to_read());
                             return 0;
                         },
                         else => {
@@ -210,7 +220,7 @@ pub fn UartFile(comptime UartType: anytype) type {
 
             pub fn size(self: *const Self) usize {
                 _ = self;
-                return 0;
+                return uart.bytes_to_read();
             }
 
             pub fn filetype(self: *const Self) FileType {

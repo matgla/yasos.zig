@@ -152,6 +152,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             };
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                handlers.remove_async_tasks_for_process(p);
                 next = node.next;
                 if (p.pid == pid) {
                     const has_shared_stack = p.has_stack_shared_with_parent();
@@ -168,7 +169,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     self._scheduler.remove_process(&p.node);
                     if (self.processes.first == null) {
                         var data: u32 = 0;
-                        _ = handlers.sys_stop_root_process(&data) catch {
+                        var out: i32 = 0;
+                        _ = handlers.sys_stop_root_process(&data, &out) catch {
                             @panic("ProcessManager: can't get back to main");
                         };
                     }
@@ -300,21 +302,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 }
 
 pub fn yield() void {
-    const maybe_process = instance.get_current_process();
-    if (maybe_process) |p| {
-        p.wait_for_io(true);
-    }
     hal.irq.trigger(.pendsv);
 }
 
 extern fn store_kernel_context_and_switch() void;
 
 pub fn kernel_yield() void {
-    const maybe_process = instance.get_current_process();
-    if (maybe_process) |p| {
-        p.wait_for_io(false);
-    }
-    // store_kernel_context_and_switch();
+    hal.irq.trigger(.pendsv);
 }
 
 pub const ProcessManager = ProcessManagerGenerator(Scheduler);

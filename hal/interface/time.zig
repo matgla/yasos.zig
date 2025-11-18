@@ -45,5 +45,13 @@ pub fn Time(comptime time: anytype) type {
         pub fn get_time_us(_: Self) u64 {
             return TimeImplementation.get_time_us();
         }
+
+        pub fn get_time_ms(self: Self) u64 {
+            return self.get_time_us() / 1000;
+        }
+
+        pub fn get_time(self: Self) u64 {
+            return self.get_time_ms() / 1000;
+        }
     };
 }

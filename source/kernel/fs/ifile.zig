@@ -69,16 +69,18 @@ pub const FileName = struct {
     }
 };
 
+pub const AsyncReadContext = struct {
+    buf: []u8,
+    callback: fn (result: isize, context: *AsyncReadContext) void,
+    user_data: ?*anyopaque,
+};
+
 pub const IFile = interface.ConstructCountingInterface(struct {
     pub const Self = @This();
 
     pub fn read(self: *Self, buf: []u8) isize {
         return interface.CountingInterfaceVirtualCall(self, "read", .{buf}, isize);
     }
-
-    // pub fn read_callback(self: *Self, buf: []u8) isize {
-    //     return interface.CountingInterfaceVirtualCall(self, "read", .{buf}, isize);
-    // }
 
     pub fn write(self: *Self, buf: []const u8) isize {
         return interface.CountingInterfaceVirtualCall(self, "write", .{buf}, isize);

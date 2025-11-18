@@ -68,4 +68,8 @@ pub const MockUart = struct {
     pub fn get_written_data() []const u8 {
         return write_buffer[0..write_index];
     }
+
+    pub fn bytes_to_read() usize {
+        return read_length - read_index;
+    }
 };

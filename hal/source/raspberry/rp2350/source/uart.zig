@@ -28,8 +28,8 @@ const picosdk = @import("picosdk.zig").picosdk;
 
 const RingBuffer = struct {
     buffer: [128]u8,
-    head: usize,
-    tail: usize,
+    head: u16,
+    tail: u16,
     pub fn init() RingBuffer {
         return .{
             .buffer = [_]u8{0} ** 128,
@@ -38,39 +38,47 @@ const RingBuffer = struct {
         };
     }
 
-    pub fn put(self: *RingBuffer, byte: u8) void {
+    pub fn put(self: *volatile RingBuffer, byte: u8) void {
         const next_head = (self.head + 1) % self.buffer.len;
         if (next_head != self.tail) {
             self.buffer[self.head] = byte;
-            self.head = next_head;
+            self.head = @intCast(next_head);
         }
     }
 
-    pub fn get(self: *RingBuffer) ?u8 {
+    pub fn get(self: *volatile RingBuffer) ?u8 {
         if (self.head == self.tail) {
             return null;
         }
         const byte = self.buffer[self.tail];
-        self.tail = (self.tail + 1) % self.buffer.len;
+        self.tail = @intCast((self.tail + 1) % self.buffer.len);
         return byte;
     }
 
-    pub fn read_all(self: *RingBuffer, buffer: []u8) usize {
+    pub fn read_all(self: *volatile RingBuffer, buffer: []u8) usize {
         var count: usize = 0;
         while (count < buffer.len and self.head != self.tail) {
             buffer[count] = self.buffer[self.tail];
-            self.tail = (self.tail + 1) % self.buffer.len;
+            self.tail = @intCast((self.tail + 1) % self.buffer.len);
             count += 1;
         }
         return count;
     }
 
-    pub fn clear(self: *RingBuffer) void {
+    pub fn clear(self: *volatile RingBuffer) void {
         self.head = 0;
         self.tail = 0;
     }
 
-    pub fn is_empty(self: *RingBuffer) bool {
+    pub fn bytes_to_read(self: *volatile RingBuffer) usize {
+        if (self.head >= self.tail) {
+            return self.head - self.tail;
+        } else {
+            return self.buffer.len - (self.tail - self.head);
+        }
+    }
+
+    pub fn is_empty(self: *volatile RingBuffer) bool {
         return self.head == self.tail;
     }
 };
@@ -86,8 +94,6 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         var rx_buffer: RingBuffer = RingBuffer.init();
         var initialized: bool = false;
 
-        var async_read_context: ?interface.uart.AsyncReadContext = null;
-
         fn uart_is_readable() bool {
             const derived_ptr = &RegisterVolatile.*.fr;
             return (derived_ptr.* & picosdk.UART_UARTFR_RXFE_BITS) == 0;
@@ -96,18 +102,8 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         fn on_rx_interrupt() callconv(.c) void {
             while (uart_is_readable()) {
                 const dr_ptr = &RegisterVolatile.*.dr;
-                const byte: u8 = @intCast(dr_ptr.*);
+                const byte: u8 = @truncate(dr_ptr.*);
                 Self.rx_buffer.put(byte);
-            }
-
-            if (async_read_context) |*ctx| {
-                const readed = Self.rx_buffer.read_all(ctx.buffer[ctx.readed..]);
-                ctx.readed += readed;
-                // if all readed then trigger callback
-                if (ctx.readed == ctx.buffer.len) {
-                    ctx.callback(ctx.readed);
-                    async_read_context = null;
-                }
             }
         }
 
@@ -131,14 +127,10 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         }
 
         pub fn is_readable(_: Self) bool {
-            lock();
-            defer unlock();
             return !rx_buffer.is_empty();
         }
 
         pub fn getc(self: Self) !u8 {
-            lock();
-            defer unlock();
             _ = self;
             const byte = rx_buffer.get();
             if (byte == null) {
@@ -158,32 +150,25 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
 
         pub fn read(self: Self, buffer: []u8) !usize {
             _ = self;
-            lock();
-            defer unlock();
             var already_readed: usize = 0;
-            while (already_readed < buffer.len) {
-                already_readed += rx_buffer.read_all(buffer[already_readed..]);
+            const ptr: *volatile usize = @ptrCast(@alignCast(&already_readed));
+            while (ptr.* < buffer.len and !rx_buffer.is_empty()) {
+                already_readed += rx_buffer.read_all(buffer[ptr.*..]);
             }
             return buffer.len;
         }
 
-        pub fn read_async(self: Self, context: interface.uart.AsyncReadContext) void {
-            _ = self;
-            lock();
-            defer unlock();
-            async_read_context = context;
-            // read whatever is already in buffer
-            on_rx_interrupt();
-        }
-
         pub fn flush(self: Self) void {
             _ = self;
-            lock();
-            defer unlock();
             const uart_hw: *volatile picosdk.uart_hw_t = @ptrCast(picosdk.uart_get_hw(Register));
             const derived_ptr = &uart_hw.*.fr;
             while ((derived_ptr.* & picosdk.UART_UARTFR_BUSY_BITS) != 0) {}
             rx_buffer.clear();
+        }
+
+        pub fn bytes_to_read(self: Self) usize {
+            _ = self;
+            return rx_buffer.bytes_to_read();
         }
 
         fn lock() void {

@@ -103,7 +103,8 @@ extern fn switch_to_main_task(lr: usize, with_fpu: bool) void;
 var sp: usize = 0;
 var with_fpu: bool = false;
 
-pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
+pub fn sys_start_root_process(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     sp = @as(*const volatile usize, @ptrCast(@alignCast(arg))).*;
     if (sp & 1 == 1) {
         with_fpu = true;
@@ -114,15 +115,17 @@ pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_stop_root_process(arg: *const volatile anyopaque) !i32 {
+pub fn sys_stop_root_process(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     hal.time.systick.disable();
     std.log.info("Stopping root process with stack pointer: {x}", .{sp});
     switch_to_main_task(sp, with_fpu);
     return 0;
 }
 
-pub fn sys_create_process(arg: *const volatile anyopaque) !i32 {
+pub fn sys_create_process(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile CreateProcessCall = @ptrCast(@alignCast(arg));
     process_manager.instance.create_process(context.stack_size, context.entry, context.arg, "/") catch |err| {
         return err;
@@ -130,17 +133,20 @@ pub fn sys_create_process(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_semaphore_acquire(arg: *const volatile anyopaque) !i32 {
+pub fn sys_semaphore_acquire(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
     return KernelSemaphore.acquire(context.object);
 }
 
-pub fn sys_semaphore_release(arg: *const volatile anyopaque) !i32 {
+pub fn sys_semaphore_release(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
     return KernelSemaphore.release(context.object);
 }
 
-pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
+pub fn sys_getpid(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const check_parent: *const volatile u8 = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -156,7 +162,8 @@ pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
+pub fn sys_mkdir(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.mkdir_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
@@ -164,12 +171,14 @@ pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
+pub fn sys_fstat(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
 
-pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
+pub fn sys_isatty(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -232,7 +241,8 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
     return error.CannotDeterminePath;
 }
 
-pub fn sys_open(arg: *const volatile anyopaque) !i32 {
+pub fn sys_open(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
@@ -271,12 +281,14 @@ fn close_fd(fd: i32) i32 {
     return -1;
 }
 
-pub fn sys_close(arg: *const volatile anyopaque) !i32 {
+pub fn sys_close(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     return close_fd(fd.*);
 }
 
-pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
+pub fn sys_exit(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -287,26 +299,140 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     return context.*;
 }
 
-pub fn sys_read(arg: *const volatile anyopaque) !i32 {
+var tasks: std.DoublyLinkedList = std.DoublyLinkedList{};
+const AsyncTask = struct {
+    node: std.DoublyLinkedList.Node,
+    allocator: std.mem.Allocator,
+    callback: *const fn (arg: *anyopaque) bool,
+    context: *anyopaque,
+    process: *kernel.process.Process,
+};
+
+const AsyncReadContext = struct {
+    buf: []u8,
+    out: *isize,
+    process: *kernel.process.Process,
+    fd: u16,
+    allocator: std.mem.Allocator,
+    timeout: usize,
+    start_time: usize,
+};
+
+pub fn process_async_tasks() void {
+    var it = tasks.first;
+    while (it) |task_node| {
+        const task: *AsyncTask = @fieldParentPtr("node", task_node);
+        if (task.callback(task.context)) {
+            tasks.remove(task_node);
+            task.allocator.destroy(task);
+        }
+        it = task_node.next;
+    }
+}
+
+pub fn remove_async_tasks_for_process(process: *kernel.process.Process) void {
+    var it = tasks.first;
+    while (it) |task_node| {
+        const task: *AsyncTask = @fieldParentPtr("node", task_node);
+        if (task.process == process) {
+            tasks.remove(task_node);
+            task.allocator.destroy(task);
+        }
+        it = task_node.next;
+    }
+}
+
+pub fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") void {
+    const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
+    const result: i32 = result_or_error catch |err| {
+        c_result.*.err = kernel.errno.to_errno(err);
+        c_result.*.result = -1;
+        return;
+    };
+
+    c_result.*.result = result;
+    c_result.*.err = -1;
+}
+
+pub fn sys_read(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.read_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (context.buf == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
     }
     if (maybe_process) |process| {
-        const maybe_handle = process.get_file_handle(@intCast(context.fd));
-        if (maybe_handle) |handle| {
-            var maybe_file = handle.node.as_file();
-            if (maybe_file) |*file| {
-                context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
-                return 0;
-            }
+        const allocator = process.get_process_memory_allocator();
+        var file = try get_file_from_process(@intCast(context.fd));
+        if (file.interface.filetype() != FileType.CharDevice) {
+            const result = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
+            context.result.* = @intCast(result);
+            return 0;
         }
+
+        var termios: c.termios = undefined;
+        _ = file.interface.ioctl(c.TCGETS, &termios);
+        const async_read_context = try allocator.create(AsyncReadContext);
+        async_read_context.* = AsyncReadContext{
+            .buf = @as([*]u8, @ptrCast(context.buf.?))[0..context.count],
+            .out = context.result,
+            .process = process,
+            .fd = @intCast(context.fd),
+            .allocator = allocator,
+            .timeout = @as(usize, @intCast(termios.c_cc[c.VTIME])) * 100,
+            .start_time = @intCast(hal.time.get_time_ms()),
+        };
+
+        const ReadFunctor = struct {
+            pub fn call(read_context: *anyopaque) bool {
+                const read_ctx: *AsyncReadContext = @ptrCast(@alignCast(read_context));
+                const maybe_handle = read_ctx.process.get_file_handle(read_ctx.fd);
+                if (maybe_handle) |h| {
+                    var maybe_file = h.node.as_file();
+                    if (maybe_file) |*f| {
+                        const size = f.interface.size();
+                        if (size == 0) {
+                            if (read_ctx.timeout != 0) {
+                                const current_time = hal.time.get_time_ms();
+                                if (read_ctx.timeout > 0 and current_time - read_ctx.start_time >= read_ctx.timeout) {
+                                    // log.err("Read timeout reached after {d} ms", .{read_ctx.timeout});
+                                    read_ctx.out.* = 0;
+                                    read_ctx.process.wait_for_io(false);
+                                    read_ctx.allocator.destroy(read_ctx);
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        const to_read = @min(size, read_ctx.buf.len);
+                        const result = f.interface.read(read_ctx.buf[0..to_read]);
+                        read_ctx.process.wait_for_io(false);
+                        read_ctx.out.* = @intCast(result);
+                        read_ctx.allocator.destroy(read_ctx);
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+
+        const task = try allocator.create(AsyncTask);
+        task.* = AsyncTask{
+            .allocator = allocator,
+            .callback = ReadFunctor.call,
+            .context = async_read_context,
+            .node = std.DoublyLinkedList.Node{},
+            .process = process,
+        };
+        process.wait_for_io(true);
+        tasks.append(&task.node);
+        kernel.process.yield();
     }
     return 0;
 }
-pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
+pub fn sys_kill(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     // const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -318,7 +444,8 @@ pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_write(arg: *const volatile anyopaque) !i32 {
+pub fn sys_write(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
 
@@ -340,21 +467,24 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
+pub fn sys_vfork(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.vfork_context = @ptrCast(@alignCast(arg));
     const result = try process_manager.instance.vfork(context);
     // hal.irq.trigger(.pendsv);
     return result;
 }
 
-pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {
+pub fn sys_unlink(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.unlink_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.unlink(path);
     return 0;
 }
-pub fn sys_link(arg: *const volatile anyopaque) !i32 {
+pub fn sys_link(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.link_context = @ptrCast(@alignCast(arg));
     const old_path = try determine_path_for_file(kernel_allocator, context.oldpath, context.olddirfd);
     defer kernel_allocator.free(old_path);
@@ -364,7 +494,8 @@ pub fn sys_link(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
+pub fn sys_stat(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.stat_context = @ptrCast(@alignCast(arg));
     if (context.statbuf == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
@@ -375,28 +506,33 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
+pub fn sys_getentropy(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
 
-pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
+pub fn sys_lseek(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     context.result.* = try file.interface.seek(context.offset, context.whence);
     return 0;
 }
 
-pub fn sys_wait(arg: *const volatile anyopaque) !i32 {
+pub fn sys_wait(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
-pub fn sys_times(arg: *const volatile anyopaque) !i32 {
+pub fn sys_times(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
 
-pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
+pub fn sys_getdents(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
 
     context.result.* = -1;
@@ -424,33 +560,39 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
+pub fn sys_ioctl(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     return file.interface.ioctl(context.op, context.arg);
 }
 
-pub fn sys_gettimeofday(arg: *const volatile anyopaque) !i32 {
+pub fn sys_gettimeofday(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
-pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
+pub fn sys_waitpid(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));
     return process_manager.instance.waitpid(context.pid, context.status);
 }
 
-pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
+pub fn sys_execve(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.filename, -1);
     defer kernel_allocator.free(path);
     return try process_manager.instance.prepare_exec(path, context.argv, context.envp);
 }
 
-pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
+pub fn sys_nanosleep(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
-pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
+pub fn sys_mmap(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     context.result.* = @ptrFromInt(0);
@@ -462,7 +604,8 @@ pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
+pub fn sys_munmap(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -472,7 +615,8 @@ pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
+pub fn sys_getcwd(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
     if (process_manager.instance.get_current_process()) |current_process| {
         const cwd = current_process.get_current_directory();
@@ -493,7 +637,8 @@ pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
+pub fn sys_chdir(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -525,31 +670,37 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
     return kernel.errno.ErrnoSet.NoSuchProcess;
 }
 
-pub fn sys_time(arg: *const volatile anyopaque) !i32 {
+pub fn sys_time(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
     const ticks: c.time_t = @intCast(systick.get_system_ticks().*);
     context.result.* = ticks;
     return 0;
 }
-pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
+pub fn sys_fcntl(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     return file.interface.fcntl(context.op, context.arg);
 }
-pub fn sys_remove(arg: *const volatile anyopaque) !i32 {
+pub fn sys_remove(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
-pub fn sys_realpath(arg: *const volatile anyopaque) !i32 {
+pub fn sys_realpath(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
-pub fn sys_mprotect(arg: *const volatile anyopaque) !i32 {
+pub fn sys_mprotect(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     return -1;
 }
 
-pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
+pub fn sys_dlopen(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.dlopen_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -563,7 +714,8 @@ pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_dlclose(arg: *const volatile anyopaque) !i32 {
+pub fn sys_dlclose(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.dlclose_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
@@ -574,7 +726,8 @@ pub fn sys_dlclose(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_dlsym(arg: *const volatile anyopaque) !i32 {
+pub fn sys_dlsym(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.dlsym_context = @ptrCast(@alignCast(arg));
     const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
     const maybe_symbol = library.find_symbol(std.mem.span(@as([*:0]const u8, @ptrCast(context.symbol))));
@@ -585,19 +738,22 @@ pub fn sys_dlsym(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_getuid(arg: *const volatile anyopaque) !i32 {
+pub fn sys_getuid(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     // we are always root until we implement user management
     return 0;
 }
 
-pub fn sys_geteuid(arg: *const volatile anyopaque) !i32 {
+pub fn sys_geteuid(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
     _ = arg;
+    _ = out;
     // we are always root until we implement user management
     return 0;
 }
 
-pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
+pub fn sys_dup(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.dup_context = @ptrCast(@alignCast(arg));
     const maybe_process = process_manager.instance.get_current_process();
     if (maybe_process) |process| {
@@ -616,7 +772,8 @@ pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_sysinfo(arg: *const volatile anyopaque) !i32 {
+pub fn sys_sysinfo(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.sysinfo_context = @ptrCast(@alignCast(arg));
     if (context.info == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
@@ -629,7 +786,8 @@ pub fn sys_sysinfo(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
+pub fn sys_sysconf(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.sysconf_context = @ptrCast(@alignCast(arg));
     switch (context.name) {
         c._SC_CLK_TCK => {
@@ -642,7 +800,8 @@ pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
     }
 }
 
-pub fn sys_access(arg: *const volatile anyopaque) !i32 {
+pub fn sys_access(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
+    _ = out;
     const context: *const volatile c.access_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);

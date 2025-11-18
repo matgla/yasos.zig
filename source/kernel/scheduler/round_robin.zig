@@ -41,10 +41,6 @@ pub const RoundRobin = struct {
 
     pub fn schedule_idle(self: *Self, first_node: *std.DoublyLinkedList.Node) kernel.scheduler.Action {
         var next: ?*std.DoublyLinkedList.Node = first_node;
-        if (self.current != null) {
-            next = self.current.?.next;
-        }
-
         while (next) |node| {
             // search for the next ready process
             const process: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -112,7 +108,6 @@ pub const RoundRobin = struct {
                     return .NoAction;
                 }
                 // no ready processes, reset io wait state and schedule idle
-                process.wait_for_io(false);
                 return self.schedule_idle(first_node);
             }
 
@@ -131,7 +126,7 @@ pub const RoundRobin = struct {
             }
             next = node.next;
         }
-        return .NoAction;
+        return self.schedule_idle(first_node);
     }
 
     pub fn remove_process(self: *Self, node: *std.DoublyLinkedList.Node) void {

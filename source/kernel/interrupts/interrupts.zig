@@ -18,3 +18,4 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 pub const system_call = @import("system_call.zig");
+pub const syscall_handlers = @import("syscall_handlers.zig");

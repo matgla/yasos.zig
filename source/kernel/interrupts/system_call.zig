@@ -44,7 +44,7 @@ comptime {
 extern fn store_and_switch_to_next_task(lr: usize) usize;
 extern fn switch_to_the_next_task(lr: usize) usize;
 
-const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
+const SyscallHandler = *const fn (arg: *const volatile anyopaque, out: *volatile anyopaque) anyerror!i32;
 
 fn context_switch_handler(lr: usize) linksection(".time_critical") usize {
     switch (process_manager.instance.schedule_next()) {
@@ -57,8 +57,9 @@ fn context_switch_handler(lr: usize) linksection(".time_critical") usize {
 
 fn sys_unhandled_factory(comptime i: usize) linksection(".time_critical") type {
     return struct {
-        fn handler(arg: *const volatile anyopaque) !i32 {
+        fn handler(arg: *const volatile anyopaque, out: *volatile anyopaque) !i32 {
             _ = arg;
+            _ = out;
             log.err("\nUnhandled system call id: {d}\n", .{i});
             return -1;
         }
@@ -130,24 +131,12 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
-fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") void {
-    const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
-    const result: i32 = result_or_error catch |err| {
-        c_result.*.err = kernel.errno.to_errno(err);
-        c_result.*.result = -1;
-        return;
-    };
-
-    c_result.*.result = result;
-    c_result.*.err = -1;
-}
-
 pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
     if (number >= c.SYSCALL_COUNT) {
-        write_result(out, kernel.errno.ErrnoSet.NotImplemented);
+        handlers.write_result(out, kernel.errno.ErrnoSet.NotImplemented);
         return;
     }
-    write_result(out, syscall_lookup_table[number](arg));
+    handlers.write_result(out, syscall_lookup_table[number](arg, out));
 }
 
 // can be called only from the user process, not from the kernel
@@ -241,7 +230,8 @@ test "SystemCall.VerifyLookupTable" {
 test "SystemCall.UnhandledSyscallReturnsError" {
     const sut = sys_unhandled_factory(0);
     var data: i32 = 0;
-    try std.testing.expectEqual(-1, sut.handler(&data));
+    var out: i32 = 0;
+    try std.testing.expectEqual(-1, sut.handler(&data, &out));
 }
 
 test "SystemCall.ShouldWriteResult" {
@@ -249,7 +239,7 @@ test "SystemCall.ShouldWriteResult" {
         .result = 0,
         .err = 0,
     };
-    write_result(&result_data, 42);
+    handlers.write_result(&result_data, 42);
     try std.testing.expectEqual(42, result_data.result);
     try std.testing.expectEqual(-1, result_data.err);
 
@@ -257,7 +247,7 @@ test "SystemCall.ShouldWriteResult" {
         .result = 0,
         .err = 0,
     };
-    write_result(&result_data, error.InvalidArgument);
+    handlers.write_result(&result_data, error.InvalidArgument);
     try std.testing.expectEqual(-1, result_data.result);
     try std.testing.expectEqual(kernel.errno.to_errno(error.InvalidArgument), result_data.err);
 }

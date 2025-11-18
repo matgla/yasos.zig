@@ -253,18 +253,22 @@ const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
     .dump_stats = config.instrumentation.print_memory_usage,
 });
 
+// make me priviledge using msp
 fn idle_task() void {
     while (true) {
         asm volatile (
             \\ wfi
         );
+        // process scheduled async tasks
+        kernel.irq.syscall_handlers.process_async_tasks();
+
         kernel.process.yield();
     }
 }
 
 export fn kernel_process(argument: *KernelAllocator) void {
     _ = argument;
-    kernel.spawn.idle_process(&idle_task, null, 256) catch |err| {
+    kernel.spawn.idle_process(&idle_task, null, 4096) catch |err| {
         kernel.log.err("Can't create idle task: {s}", .{@errorName(err)});
     };
     const maybe_process = kernel.process.process_manager.instance.get_current_process();

@@ -74,7 +74,8 @@ export fn _fstat(_: c_int, _: *c.struct_stat) c_int {
 }
 
 pub export fn _isatty(fd: c_int) c_int {
-    return handlers.sys_isatty(&fd) catch {
+    var out: i32 = 0;
+    return handlers.sys_isatty(&fd, &out) catch {
         return -1;
     };
 }
