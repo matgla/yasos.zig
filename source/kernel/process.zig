@@ -129,6 +129,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _vfork_context: ?*const volatile c.vfork_context = null,
         _initialized: bool = false,
         _start_time: u64,
+        _uses_fpu: bool = true,
 
         pub const State = enum(u3) {
             Initialized,
@@ -294,6 +295,14 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 }
             }
             self.impl.set_stack_pointer(ptr, blocked_by_process);
+        }
+
+        pub fn set_uses_fpu(self: *Self, uses_fpu: bool) void {
+            self._uses_fpu = uses_fpu;
+        }
+
+        pub fn get_uses_fpu(self: *Self) bool {
+            return self._uses_fpu;
         }
 
         pub fn block_semaphore(self: *Self, semaphore: *const Semaphore) void {
@@ -475,8 +484,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.sleep_for_us(@as(u64, @intCast(ms)) * 1000);
         }
 
-        pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, use_fpu: bool) void {
-            self.impl.reinitialize_stack(process_entry, argc, argv, symbol, got, exit_handler_impl, use_fpu);
+        pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize) void {
+            self.impl.reinitialize_stack(process_entry, argc, argv, symbol, got, exit_handler_impl, self._uses_fpu);
             self._initialized = false;
         }
 

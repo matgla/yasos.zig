@@ -44,10 +44,6 @@ else
 extern fn switch_to_next_task() void;
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
 
-extern fn reload_current_task() void;
-
-extern var sp_call_fpu: bool;
-
 fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
     return struct {
         pub const ContainerType = std.DoublyLinkedList;
@@ -64,6 +60,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         _scheduler: SchedulerType,
         _process_memory_pool: kernel.memory.heap.ProcessMemoryPool,
         _pid_map: std.StaticBitSet(config.process.max_pid_value),
+        core: [hal.cpu.number_of_cores()]*ProcessType,
 
         pub fn init(allocator: std.mem.Allocator) Self {
             log.debug("Using scheduler '{s}'", .{SchedulerType.Name});
@@ -78,6 +75,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 ._scheduler = SchedulerType.init(),
                 ._process_memory_pool = processes_memory_pool,
                 ._pid_map = std.StaticBitSet(config.process.max_pid_value).initFull(),
+                .core = undefined,
             };
         }
 
@@ -138,7 +136,6 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             var should_restore_parent = false;
             defer if (should_restore_parent) {
                 hal.irq.trigger(.pendsv);
-                //reload_current_task();
             };
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -170,33 +167,30 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
-            const maybe_current_process = self._scheduler.get_current();
-            if (maybe_current_process) |current_process| {
-                const maybe_pid = self.get_next_pid();
-                if (maybe_pid == null) {
-                    return kernel.errno.ErrnoSet.TryAgain;
-                }
-                const new_process = current_process.vfork(&self._process_memory_pool, context, maybe_pid.?) catch {
-                    return -1;
-                };
-
-                const Action = struct {
-                    pub fn on_process_unblock(ctx: ?*anyopaque, rc: i32) void {
-                        _ = ctx;
-                        _ = rc;
-                    }
-                };
-
-                current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch {
-                    return -1;
-                };
-
-                self.processes.append(&new_process.node);
-                context.pid.* = 0;
-                hal.irq.trigger(.pendsv);
-                return 0;
+            const current_process = self.get_current_process();
+            const maybe_pid = self.get_next_pid();
+            if (maybe_pid == null) {
+                return kernel.errno.ErrnoSet.TryAgain;
             }
-            return -1;
+            const new_process = current_process.vfork(&self._process_memory_pool, context, maybe_pid.?) catch {
+                return -1;
+            };
+
+            const Action = struct {
+                pub fn on_process_unblock(ctx: ?*anyopaque, rc: i32) void {
+                    _ = ctx;
+                    _ = rc;
+                }
+            };
+
+            current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch {
+                return -1;
+            };
+
+            self.processes.append(&new_process.node);
+            context.pid.* = 0;
+            hal.irq.trigger(.pendsv);
+            return 0;
         }
 
         // load executable into process
@@ -213,33 +207,29 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             var should_restore_parent = false;
             defer if (should_restore_parent) {
                 hal.irq.trigger(.pendsv);
-                // reload_current_task();
             };
-            const maybe_current_process = self._scheduler.get_current();
-            if (maybe_current_process) |p| {
-                // TODO: move loader to struct, pass allocator to loading functions
-                const executable = try dynamic_loader.load_executable(path, p.get_process_memory_allocator(), p.pid);
-                var argc: usize = 0;
-                while (argv[argc] != null) : (argc += 1) {}
+            const current_process = self.get_current_process();
+            // TODO: move loader to struct, pass allocator to loading functions
+            const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
+            var argc: usize = 0;
+            while (argv[argc] != null) : (argc += 1) {}
 
-                var envpc: usize = 0;
-                while (envp[envpc] != null) : (envpc += 1) {}
+            var envpc: usize = 0;
+            while (envp[envpc] != null) : (envpc += 1) {}
 
-                var symbol: SymbolEntry = undefined;
-                if (executable.module.entry) |entry| {
-                    symbol = entry;
-                } else if (executable.module.find_symbol("_start")) |entry| {
-                    symbol = entry;
-                } else {
-                    return -1;
-                }
-
-                _ = p.release_parent_after_getting_freedom();
-                p.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address, sp_call_fpu);
-                should_restore_parent = true;
-                return 0;
+            var symbol: SymbolEntry = undefined;
+            if (executable.module.entry) |entry| {
+                symbol = entry;
+            } else if (executable.module.find_symbol("_start")) |entry| {
+                symbol = entry;
+            } else {
+                return -1;
             }
-            return -1;
+
+            _ = current_process.release_parent_after_getting_freedom();
+            current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
+            should_restore_parent = true;
+            return 0;
         }
 
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
@@ -255,28 +245,26 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn waitpid(self: *Self, pid: i32, status: *i32) !i32 {
-            const maybe_current_process = self.get_current_process();
-            if (maybe_current_process) |current_process| {
-                const maybe_process = self.get_process_for_pid(pid);
-                if (maybe_process) |p| {
-                    const Action = struct {
-                        pub fn on_process_finished(context: ?*anyopaque, rc: i32) void {
-                            const s: *i32 = @ptrCast(@alignCast(context));
-                            s.* = rc;
-                        }
-                    };
-                    current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
-                        return -1;
-                    };
-                    hal.irq.trigger(.pendsv);
-                }
+            const current_process = self.get_current_process();
+            const maybe_process = self.get_process_for_pid(pid);
+            if (maybe_process) |p| {
+                const Action = struct {
+                    pub fn on_process_finished(context: ?*anyopaque, rc: i32) void {
+                        const s: *i32 = @ptrCast(@alignCast(context));
+                        s.* = rc;
+                    }
+                };
+                current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
+                    return -1;
+                };
+                hal.irq.trigger(.pendsv);
             }
 
             return 0;
         }
 
-        pub fn get_current_process(self: *const Self) ?*Process {
-            return self._scheduler.get_current();
+        pub fn get_current_process(self: *const Self) *Process {
+            return self.core[hal.cpu.coreid()];
         }
 
         pub fn initialize_context_switching(_: Self) void {
@@ -302,35 +290,26 @@ pub fn deinitialize_process_manager() void {
     instance.deinit();
 }
 
-pub export fn get_next_task() *const u8 {
+pub export fn process_set_next_task() *const u8 {
     if (instance._scheduler.get_next()) |task| {
         instance._scheduler.update_current();
+        instance.core[hal.cpu.coreid()] = task;
         return task.stack_pointer();
     }
-
     @panic("Context switch called without tasks available");
+}
+
+pub export fn process_is_current_using_fpu() u32 {
+    return if (instance.core[hal.cpu.coreid()].get_uses_fpu()) 1 else 0;
 }
 
 export fn get_stack_bottom() *const u8 {
-    if (instance._scheduler.get_current()) |task| {
-        return task.get_stack_bottom();
-    }
-
-    @panic("Context switch called without tasks available");
+    return instance.core[hal.cpu.coreid()].get_stack_bottom();
 }
 
-export fn get_current_task() *const u8 {
-    if (instance._scheduler.get_current()) |task| {
-        return task.stack_pointer();
-    }
-
-    @panic("Context switch called without tasks available");
-}
-
-export fn update_stack_pointer(ptr: *u8) void {
-    if (instance._scheduler.get_current()) |task| {
-        task.set_stack_pointer(ptr);
-    }
+export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
+    instance.core[hal.cpu.coreid()].set_stack_pointer(ptr);
+    instance.core[hal.cpu.coreid()].set_uses_fpu(uses_fpu != 0);
 }
 
 const StubScheduler = @import("scheduler/stub.zig").StubScheduler;
@@ -341,7 +320,6 @@ test "ProcessManager.ShouldInitializeGlobalInstance" {
 
     try std.testing.expect(instance.is_empty());
     try std.testing.expectEqual(.NoAction, instance.schedule_next());
-    try std.testing.expect(instance.get_current_process() == null);
 }
 
 test "ProcessManager.ShouldReactCorrectlyWhenIsEmpty" {
@@ -350,7 +328,6 @@ test "ProcessManager.ShouldReactCorrectlyWhenIsEmpty" {
 
     try std.testing.expect(sut.is_empty());
     try std.testing.expectEqual(.NoAction, sut.schedule_next());
-    try std.testing.expectEqual(null, sut.get_current_process());
     try std.testing.expectEqual(1, sut.get_next_pid().?);
     try std.testing.expectEqual(null, sut.get_process_for_pid(1));
     try std.testing.expectEqual(config.process.max_pid_value - 1, sut.get_pidmap().count());
@@ -400,7 +377,7 @@ test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {
         .pid = &pid,
     };
     try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
-    _ = get_next_task();
+    _ = process_set_next_task();
     try std.testing.expectError(kernel.errno.ErrnoSet.TryAgain, sut.vfork(&vfork_context));
 }
 
@@ -429,29 +406,24 @@ test "ProcessManager.ShouldScheduleProcesses" {
 
     for (1..4) |i| {
         try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
-        _ = get_next_task();
-        try std.testing.expect(sut.get_current_process() != null);
-        try std.testing.expectEqual(@as(c_int, @intCast(i)), sut.get_current_process().?.pid);
+        _ = process_set_next_task();
+        try std.testing.expectEqual(@as(c_int, @intCast(i)), sut.get_current_process().pid);
     }
     try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
-    _ = get_next_task();
-    try std.testing.expect(sut.get_current_process() != null);
-    try std.testing.expectEqual(1, sut.get_current_process().?.pid);
+    _ = process_set_next_task();
+    try std.testing.expectEqual(1, sut.get_current_process().pid);
 
     try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
-    _ = get_next_task();
-    try std.testing.expect(sut.get_current_process() != null);
-    try std.testing.expectEqual(2, sut.get_current_process().?.pid);
+    _ = process_set_next_task();
+    try std.testing.expectEqual(2, sut.get_current_process().pid);
 
     sut.delete_process(2, 0);
-    try std.testing.expectEqual(null, sut.get_current_process());
 
     for (1..4) |i| {
         if (i == 2) continue;
         try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
-        _ = get_next_task();
-        try std.testing.expect(sut.get_current_process() != null);
-        try std.testing.expectEqual(@as(c_int, @intCast(i)), sut.get_current_process().?.pid);
+        _ = process_set_next_task();
+        try std.testing.expectEqual(@as(c_int, @intCast(i)), sut.get_current_process().pid);
     }
 }
 
@@ -476,9 +448,8 @@ test "ProcessManager.ShouldForkProcess" {
 
     try std.testing.expectEqual(-1, sut.vfork(&vfork_context));
     try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
-    _ = get_next_task();
-    try std.testing.expect(sut.get_current_process() != null);
-    try std.testing.expectEqual(1, sut.get_current_process().?.pid);
+    _ = process_set_next_task();
+    try std.testing.expectEqual(1, sut.get_current_process().pid);
 
     var child = sut.get_process_for_pid(4);
     try std.testing.expect(child == null);
@@ -490,7 +461,7 @@ test "ProcessManager.ShouldForkProcess" {
     child = sut.get_process_for_pid(4);
     try std.testing.expect(child != null);
 
-    const current = sut.get_current_process().?;
+    const current = sut.get_current_process();
     try std.testing.expect(current._blocked_by.first != null);
     const blocked_data: *const Process.BlockedByProcess = @fieldParentPtr("node", current._blocked_by.first.?);
     try std.testing.expect(blocked_data.waiting_for == child.?);
@@ -549,11 +520,11 @@ test "ProcessManager.ShouldForkProcess" {
 
     try kernel.fs.get_vfs().mount_filesystem("/", fs);
     _ = sut.schedule_next();
-    _ = get_next_task();
+    _ = process_set_next_task();
     _ = sut.schedule_next();
-    _ = get_next_task();
+    _ = process_set_next_task();
     _ = sut.schedule_next();
-    _ = get_next_task();
+    _ = process_set_next_task();
 
     _ = try sut.prepare_exec("/test", argv, envp);
 
@@ -572,11 +543,7 @@ test "ProcessManager.ShouldReturnStackForExternalUse" {
     try sut.create_process(4096, &test_entry, &arg, "/test");
     _ = sut.schedule_next();
     var stack_pointer: u8 = 123;
-    update_stack_pointer(&stack_pointer);
-    const task_ptr = get_current_task();
-    try std.testing.expectEqual(task_ptr, &stack_pointer);
-    const stack_bottom = get_stack_bottom();
-    try std.testing.expectEqual(@as(*const u8, @ptrFromInt(@intFromPtr(task_ptr) + 0x1000)), stack_bottom);
+    update_stack_pointer(&stack_pointer, 0);
 }
 
 test "ProcessManager.ShouldWaitForProcess" {
@@ -599,7 +566,7 @@ test "ProcessManager.ShouldWaitForProcess" {
     };
 
     try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
-    _ = get_next_task();
+    _ = process_set_next_task();
     try std.testing.expectEqual(0, try sut.vfork(&vfork_context));
     var status: i32 = 3;
     try std.testing.expectEqual(0, try sut.waitpid(4, &status));

@@ -26,9 +26,6 @@ const kernel = @import("kernel");
 
 const hal = @import("hal");
 
-// This must be reimplemented for armv6-m
-// TODO!
-
 fn void_or_register() type {
     if (config.cpu.has_fpu and config.cpu.use_fpu) {
         return u32;
@@ -42,8 +39,6 @@ fn void_or_value(comptime value: anytype) void_or_register() {
     }
     return {};
 }
-
-extern fn push_registers_on_stack(sp: usize, lr: usize) *u8;
 
 pub const HardwareStoredRegisters = extern struct {
     r0: u32,
@@ -235,15 +230,6 @@ pub const ArmProcess = struct {
     }
 
     pub fn stack_pointer(self: *const Self) *const u8 {
-        // if (config.process.use_stack_overflow_detection) {
-        //     if (!self.validate_stack()) {
-        //         if (!config.process.use_mpu_stack_protection) {
-        //             @panic("Stack overlflow occured, please reset");
-        //         } else {
-        //             @panic("TODO: implement process kill here");
-        //         }
-        //     }
-        // }
         return self.stack_position;
     }
 
@@ -253,24 +239,7 @@ pub const ArmProcess = struct {
 
     pub fn set_stack_pointer(self: *Self, ptr: *u8, blocked_by_process: ?*Self) void {
         _ = blocked_by_process;
-        // if the process is using its parent stack, then we have to copy stack to parent
-        // and set stack position to the freshly pushed registers
-        // if (!self.has_own_stack) {
-        //     // temporary hack
-        //     if (blocked_by_process) |p| {
-        //         if (@intFromPtr(ptr) < @intFromPtr(p.stack_position)) {
-        //             const diff = @intFromPtr(p.stack_position) - @intFromPtr(ptr);
-        //             self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) - diff);
-        //         } else {
-        //             const diff = @intFromPtr(ptr) - @intFromPtr(p.stack_position);
-        //             self.stack_position = @ptrFromInt(@intFromPtr(self.stack_position) + diff);
-        //         }
-        //         @memcpy(self.stack, p.stack);
-        //         p.stack_position = ptr;
-        //     }
-        // } else {
         self.stack_position = ptr;
-        // }
     }
 
     pub fn vfork(self: *Self, process_allocator: std.mem.Allocator) !Self {
@@ -282,13 +251,11 @@ pub const ArmProcess = struct {
         );
 
         const stack: []align(8) u8 = try process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
-        // const stack_position: *u8 = @ptrFromInt(psp_value);
         // parent should push to new stack
 
         // this only matters for parent process
 
         @memcpy(stack, self.stack);
-        // const new_stack_position = push_registers_on_stack(psp_value, 0xfffffffd);
         const parent_stack = self.stack;
         self.stack = stack;
         // parent won't do anything, let's compute stack offset

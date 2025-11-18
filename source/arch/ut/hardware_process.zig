@@ -87,7 +87,6 @@ pub const HardwareProcess = struct {
 
 pub fn init() void {}
 
-export var sp_call_fpu: bool = false;
 export fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: usize) i32 {
     _ = argc;
     _ = argv;

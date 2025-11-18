@@ -23,4 +23,8 @@ pub const CpuStub = struct {
     pub fn coreid() u8 {
         return _coreid;
     }
+
+    pub fn number_of_cores() u8 {
+        return 1;
+    }
 };

@@ -379,6 +379,8 @@ pub fn build(b: *std.Build) !void {
             const arch_module = b.addModule("arch", .{
                 .root_source_file = b.path(b.fmt("source/arch/{s}/arch.zig", .{config.cpu_arch})),
             });
+            arch_module.addIncludePath(b.path("."));
+            arch_module.addIncludePath(b.path("libs/libc"));
 
             const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
             const board_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("board").?;

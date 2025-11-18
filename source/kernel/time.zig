@@ -25,17 +25,13 @@ const kernel = @import("kernel.zig");
 const log = kernel.log;
 
 pub fn sleep_ms(ms: u32) void {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        process.sleep_for_ms(ms);
-    }
+    const process = process_manager.instance.get_current_process();
+    process.sleep_for_ms(ms);
 }
 
 pub fn sleep_us(us: u32) void {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        process.sleep_for_us(us);
-    }
+    const process = process_manager.instance.get_current_process();
+    process.sleep_for_us(us);
 }
 
 const std = @import("std");
@@ -57,7 +53,7 @@ test "Time.ProcessShoulSleep" {
     try kernel.process.process_manager.instance.create_process(1024, &test_entry, &arg, "test");
     try kernel.process.process_manager.instance.create_process(1024, &test_entry, &arg, "test2");
     _ = kernel.process.process_manager.instance.schedule_next();
-    _ = kernel.process.process_manager.get_next_task();
+    _ = kernel.process.process_manager.process_set_next_task();
     system_call.init(std.testing.allocator);
 
     hal.time.impl.set_time(0);

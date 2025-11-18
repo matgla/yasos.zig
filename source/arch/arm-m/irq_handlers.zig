@@ -46,18 +46,8 @@ const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque
 var context_switch_handler: ?ContextSwitchHandler = null;
 var system_call_handler: ?SystemCallHandler = null;
 
-export var sp_call: usize = 0;
-export var sp_call_fpu: bool = false;
-
 export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
-    if (number == 1) {
-        if (sp_call_fpu) {
-            sp_call |= 1;
-        }
-        system_call_handler.?(number, &sp_call, out);
-    } else {
-        system_call_handler.?(number, arg, out);
-    }
+    system_call_handler.?(number, arg, out);
 }
 
 pub export fn do_context_switch(lr: usize) usize {

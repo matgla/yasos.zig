@@ -49,10 +49,8 @@ pub const KernelSemaphore = struct {
     pub fn acquire(semaphore: *Semaphore) !i32 {
         if (!semaphore.counter.compare_not_equal_decrement(0)) {
             // this must be service call
-            const maybe_process = process_manager.instance.get_current_process();
-            if (maybe_process) |process| {
-                process.block_semaphore(semaphore);
-            }
+            const process = process_manager.instance.get_current_process();
+            process.block_semaphore(semaphore);
             hal.irq.trigger(.pendsv);
             // process is blocked, let's trigger scheduler
             return 1;
@@ -79,7 +77,7 @@ test "KernelSemaphore.ShouldBlockProcess" {
     try kernel.process.process_manager.instance.create_process(1024, &test_entry, &proc_arg, "test");
     try kernel.process.process_manager.instance.create_process(1024, &test_entry, &proc_arg, "test2");
     _ = kernel.process.process_manager.instance.schedule_next();
-    _ = kernel.process.process_manager.get_next_task();
+    _ = kernel.process.process_manager.process_set_next_task();
 
     const ActionCall = struct {
         pub fn acquire(id: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void {
@@ -117,7 +115,7 @@ test "KernelSemaphore.ShouldBlockProcess" {
     try std.testing.expectEqual(1, try KernelSemaphore.acquire(&semaphore));
     try std.testing.expectEqual(0, semaphore.counter.value);
     try std.testing.expectEqual(1, call_count);
-    const process = kernel.process.process_manager.instance.get_current_process().?;
+    const process = kernel.process.process_manager.instance.get_current_process();
     try std.testing.expectEqual(Process.State.Blocked, process.state);
     process.reevaluate_state();
     try std.testing.expectEqual(Process.State.Blocked, process.state);

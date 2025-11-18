@@ -34,27 +34,20 @@ const FileType = @import("../fs/ifile.zig").FileType;
 const handlers = @import("syscall_handlers.zig");
 
 fn get_file_from_process(fd: u16) ?*kernel.fs.IFile {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        const maybe_handle = process.get_file_handle(fd);
-        if (maybe_handle) |handle| {
-            var maybe_file = handle.node.as_file();
-            if (maybe_file) |*file| {
-                return file;
-            }
+    const process = process_manager.instance.get_current_process();
+    const maybe_handle = process.get_file_handle(fd);
+    if (maybe_handle) |handle| {
+        var maybe_file = handle.node.as_file();
+        if (maybe_file) |*file| {
+            return file;
         }
     }
     return null;
 }
 
 pub export fn _exit(code: c_int) void {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        process_manager.instance.delete_process(process.pid, code);
-    } else {
-        @panic("No process found");
-    }
-    // log.print("Process exited with code {d}\n", .{code});
+    const process = process_manager.instance.get_current_process();
+    process_manager.instance.delete_process(process.pid, code);
 }
 
 export fn _kill(_: c.pid_t, _: c_int) c.pid_t {
@@ -80,10 +73,8 @@ pub export fn _isatty(fd: c_int) c_int {
 }
 
 pub export fn _close(fd: c_int) c_int {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        process.release_file(@intCast(fd));
-    }
+    const process = process_manager.instance.get_current_process();
+    process.release_file(@intCast(fd));
     return 0;
 }
 
@@ -159,16 +150,14 @@ export fn _sbrk(incr: usize) *allowzero anyopaque {
 }
 
 pub fn process_sbrk(incr: usize) *allowzero anyopaque {
-    const maybe_process = process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        const prev_heap_end: *u8 = process.heap_end;
-        const next_heap_end: *u8 = @ptrFromInt(@intFromPtr(process.heap_end) + incr);
-        if (@intFromPtr(next_heap_end) >= @intFromPtr(&__heap_limit__)) {
-            return @ptrFromInt(0);
-        }
-        process.heap_end = next_heap_end;
-        return prev_heap_end;
+    const process = process_manager.instance.get_current_process();
+    const prev_heap_end: *u8 = process.heap_end;
+    const next_heap_end: *u8 = @ptrFromInt(@intFromPtr(process.heap_end) + incr);
+    if (@intFromPtr(next_heap_end) >= @intFromPtr(&__heap_limit__)) {
+        return @ptrFromInt(0);
     }
+    process.heap_end = next_heap_end;
+    return prev_heap_end;
 }
 
 export fn hard_assertion_failure() void {

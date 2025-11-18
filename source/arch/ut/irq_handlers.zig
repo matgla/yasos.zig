@@ -75,8 +75,4 @@ export fn call_entry(address: usize, got: usize) i32 {
     return 0; // Placeholder for actual implementation
 }
 
-export fn reload_current_task() void {
-    // Placeholder for actual implementation
-}
-
 pub export fn switch_to_the_first_task() void {}

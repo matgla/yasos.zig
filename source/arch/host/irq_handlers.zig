@@ -87,7 +87,3 @@ export fn call_entry(address: usize, got: usize) i32 {
     _ = got;
     return 0; // Placeholder for actual implementation
 }
-
-export fn reload_current_task() void {
-    // Placeholder for actual implementation
-}
