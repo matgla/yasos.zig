@@ -21,7 +21,7 @@
 const std = @import("std");
 const c = @import("libc_imports").c;
 
-const kernel = @import("kernel");
+const kernel = @import("../../kernel.zig");
 
 const log = kernel.log;
 
@@ -39,7 +39,7 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
             };
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
             self._pool.release_pages_for(self._pid);
         }
 

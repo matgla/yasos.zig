@@ -41,21 +41,21 @@ pub const VForkContext = extern struct {
 };
 
 const ContextSwitchHandler = *const fn (lr: usize) usize;
-const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
+const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void;
 
-var context_switch_handler: ?ContextSwitchHandler = null;
-var system_call_handler: ?SystemCallHandler = null;
+var context_switch_handler: ContextSwitchHandler = undefined;
+var system_call_handler: SystemCallHandler = undefined;
 
-export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
-    system_call_handler.?(number, arg, out);
-}
+// export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
+//     // system_call_handler(number, arg, out);
+//     _ = number;
+//     _ = arg;
+//     _ = out;
+// }
 
-pub export fn do_context_switch(lr: usize) usize {
-    if (context_switch_handler) |handler| {
-        return handler(lr);
-    }
-    return lr;
-}
+// pub export fn do_context_switch(is_fpu_used: usize) usize {
+//     return context_switch_handler(is_fpu_used);
+// }
 
 pub fn set_context_switch_handler(handler: ContextSwitchHandler) void {
     context_switch_handler = handler;

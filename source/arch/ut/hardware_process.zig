@@ -16,8 +16,10 @@
 const std = @import("std");
 
 pub const HardwareProcess = struct {
-    var stack: usize = 0;
+    var stack_dat: usize = 0;
     _sp: ?*const u8,
+    stack: []u8,
+    stack_position: *u8,
 
     pub fn create(allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype) !HardwareProcess {
         _ = allocator;
@@ -26,14 +28,17 @@ pub const HardwareProcess = struct {
         _ = exit_handler_impl;
     }
 
-    pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype) !HardwareProcess {
+    pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype, is_root: bool) !HardwareProcess {
+        _ = is_root;
         _ = process_allocator;
         _ = stack_size;
         _ = process_entry;
         _ = exit_handler_impl;
         _ = arg;
         return HardwareProcess{
-            ._sp = @ptrCast(&stack),
+            ._sp = @ptrCast(&stack_dat),
+            .stack = &[_]u8{},
+            .stack_position = @ptrCast(&stack_dat),
         };
     }
 
@@ -46,14 +51,14 @@ pub const HardwareProcess = struct {
         if (self._sp) |sp| {
             return sp;
         }
-        return @ptrCast(&stack);
+        return @ptrCast(&stack_dat);
     }
 
     pub fn get_stack_bottom(self: *const HardwareProcess) *const u8 {
         if (self._sp) |sp| {
             return @ptrFromInt(@intFromPtr(sp) + 0x1000);
         }
-        return @ptrFromInt(@intFromPtr(&stack) + 0x1000);
+        return @ptrFromInt(@intFromPtr(&stack_dat) + 0x1000);
     }
 
     pub fn set_stack_pointer(self: *HardwareProcess, ptr: *u8, blocked_by_process: ?*HardwareProcess) void {
@@ -70,6 +75,8 @@ pub const HardwareProcess = struct {
         _ = allocator;
         return HardwareProcess{
             ._sp = self._sp,
+            .stack = self.stack,
+            .stack_position = self.stack_position,
         };
     }
 
@@ -99,6 +106,11 @@ pub var context_switch_initialized: bool = false;
 
 pub fn initialize_context_switching() void {
     context_switch_initialized = true;
+}
+
+pub fn get_offset_of_hardware_stored_registers(use_fpu: bool) isize {
+    _ = use_fpu;
+    return 0;
 }
 
 // pub fn

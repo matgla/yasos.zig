@@ -20,8 +20,8 @@
 
 const std = @import("std");
 
-const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
-var system_call_handler: ?SystemCallHandler = null;
+const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void;
+var system_call_handler: SystemCallHandler = undefined;
 
 pub const Irq = struct {
     pub const Type = enum {
@@ -35,9 +35,7 @@ pub const Irq = struct {
         std.debug.print("TODO: implement setting priority for IRQ {s} to {d}\n", .{ @tagName(irq), priority });
     }
     pub fn trigger_supervisor_call(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void {
-        if (system_call_handler) |handler| {
-            handler(number, arg, out);
-        }
+        system_call_handler(number, arg, out);
     }
 
     pub fn trigger(irq: Type) void {

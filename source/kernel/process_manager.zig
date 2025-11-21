@@ -24,6 +24,7 @@ const hal = @import("hal");
 const config = @import("config");
 const kernel = @import("kernel.zig");
 const process = kernel.process;
+const VForkContext = process.VForkContext;
 const Process = process.Process;
 const log = std.log.scoped(.process_manager);
 const dynamic_loader = @import("modules.zig");
@@ -43,6 +44,7 @@ else
 
 extern fn switch_to_next_task() void;
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
+extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 
 fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
     return struct {
@@ -61,6 +63,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         _process_memory_pool: kernel.memory.heap.ProcessMemoryPool,
         _pid_map: std.StaticBitSet(config.process.max_pid_value),
         core: [hal.cpu.number_of_cores()]*ProcessType,
+        mutex: kernel.sync.Mutex,
 
         pub fn init(allocator: std.mem.Allocator) Self {
             log.debug("Using scheduler '{s}'", .{SchedulerType.Name});
@@ -76,11 +79,25 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 ._process_memory_pool = processes_memory_pool,
                 ._pid_map = std.StaticBitSet(config.process.max_pid_value).initFull(),
                 .core = undefined,
+                .mutex = .{},
             };
         }
 
         pub fn schedule_next(self: *Self) kernel.scheduler.Action {
             if (self.processes.first) |first| {
+                const current = self.get_current_process();
+                if (current.state == Process.State.Terminated) {
+                    self._scheduler.remove_process(&current.node);
+                    self.processes.remove(&current.node);
+                    current.deinit();
+                    if (self.processes.first == null) {
+                        // var data: u32 = 0;
+                        // _ = handlers.sys_stop_root_process(&data) catch {
+                        // @panic("ProcessManager: can't get back to main");
+                        // };
+                        return .ReturnToMain;
+                    }
+                }
                 return self._scheduler.schedule_next(first);
             }
 
@@ -117,11 +134,22 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
         }
 
-        pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: anytype, cwd: []const u8) !void {
+        pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: ?*const anyopaque, cwd: []const u8) !void {
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
-                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid);
+                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
                 self.processes.append(&new_process.node);
+                return;
+            }
+            return kernel.errno.ErrnoSet.TryAgain;
+        }
+
+        pub fn create_root_process(self: *Self, stack_size: u32, process_entry: anytype, args: ?*const anyopaque, cwd: []const u8) !void {
+            const maybe_pid = self.get_next_pid();
+            if (maybe_pid) |pid| {
+                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
+                self.processes.append(&new_process.node);
+                self.core[hal.cpu.coreid()] = new_process;
                 return;
             }
             return kernel.errno.ErrnoSet.TryAgain;
@@ -133,34 +161,19 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
             var next = self.processes.first;
-            var should_restore_parent = false;
-            defer if (should_restore_parent) {
-                hal.irq.trigger(.pendsv);
-            };
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 next = node.next;
                 if (p.pid == pid) {
-                    const has_shared_stack = p.has_stack_shared_with_parent();
                     self.release_pid(pid);
-                    p.unblock_all(return_code);
-                    if (has_shared_stack) {
+                    // fix me
+                    if (p._vfork_context != null) {
                         _ = p.release_parent_after_getting_freedom();
-                        should_restore_parent = true;
                     }
-                    self.processes.remove(&p.node);
+                    // i can't remove myself on my on stack
                     dynamic_loader.release_executable(pid);
-                    p.deinit();
-                    // self.allocator.destroy(p);
-                    self._scheduler.remove_process(&p.node);
-                    if (self.processes.first == null) {
-                        var data: u32 = 0;
-                        _ = handlers.sys_stop_root_process(&data) catch {
-                            @panic("ProcessManager: can't get back to main");
-                        };
-                    }
-
-                    hal.irq.trigger(.pendsv);
+                    p.schedule_removal();
+                    p.unblock_all(return_code);
                     break;
                 }
             }
@@ -172,7 +185,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             if (maybe_pid == null) {
                 return kernel.errno.ErrnoSet.TryAgain;
             }
-            const new_process = current_process.vfork(&self._process_memory_pool, context, maybe_pid.?) catch {
+            const new_process = current_process.vfork(&self._process_memory_pool, maybe_pid.?) catch {
                 return -1;
             };
 
@@ -187,10 +200,64 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 return -1;
             };
 
+            // child is now running without context switch, but uses parent stack until exec
             self.processes.append(&new_process.node);
-            context.pid.* = 0;
-            hal.irq.trigger(.pendsv);
-            return 0;
+
+            // switch without context switch, just to represent correct state
+            self._scheduler.set_next(&new_process.node);
+            self.core[hal.cpu.coreid()] = new_process;
+
+            const got = @intFromPtr(dynamic_loader.get_executable_for_pid(current_process.pid).?.module.unique_data.?.got.?.ptr);
+
+            var lr: usize = 0;
+            var sp: usize = 0;
+            context.pid.* = new_process.pid;
+            // var fp: usize = 0;
+            asm volatile (
+            // \\ mov %[fp], r11
+                \\ mov %[sp], sp
+                \\ ldr %[pc], =back_here
+                : [pc] "=r" (lr),
+                  [sp] "=r" (sp),
+                  //   [fp] "=r" (fp),
+            );
+            const ctx = VForkContext{
+                .lr = lr,
+                .sp = sp - 40,
+                .fp = 0,
+            };
+
+            current_process._vfork_context = ctx;
+            asm volatile (
+                \\ push {r4-r12, lr}
+                \\ mov r11, %[r11]
+                \\ push {%[r9], lr} // is taken from stack due to abi
+                \\ mov r0, #0
+                \\ bx %[lr]
+                :
+                : [r11] "r" (context.r9.?),
+                  [r9] "r" (got),
+                  [lr] "r" (context.lr.?),
+            );
+
+            return asm volatile (
+                \\ .thumb_func
+                \\ back_here:
+                \\ pop {r4-r12, lr}
+                : [ret] "={r0}" (-> i32),
+            );
+            // // child or parent
+            // if (self.core[hal.cpu.coreid()] == new_process) {
+            //     context.pid.* = 0;
+            //     return 0;
+            // } else {
+            //     context.pid.* = @intCast(new_process.pid);
+            //     return @intCast(new_process.pid);
+            // }
+
+            // // we are not in interrupt, this will make context switch immediately
+            // // hal.irq.trigger(.pendsv);
+            // return 0;
         }
 
         // load executable into process
@@ -204,10 +271,6 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         };
 
         pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
-            var should_restore_parent = false;
-            defer if (should_restore_parent) {
-                hal.irq.trigger(.pendsv);
-            };
             const current_process = self.get_current_process();
             // TODO: move loader to struct, pass allocator to loading functions
             const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
@@ -226,10 +289,33 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 return -1;
             }
 
-            _ = current_process.release_parent_after_getting_freedom();
-            current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
-            should_restore_parent = true;
-            return 0;
+            try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
+            asm volatile ("cpsid i");
+            // this stack can't be modified until we switch stack pointer
+            // @memcpy(parent.impl.stack, current_process.impl.stack);
+            // i should get back there
+            // switch to parent without context switch
+            self._scheduler.set_next(&current_process._parent.?.node);
+            self.core[hal.cpu.coreid()] = current_process._parent.?;
+            // jump back to the parent
+
+            const ctx = current_process._parent.?._vfork_context.?;
+            current_process._parent.?._vfork_context = null;
+            current_process.unblock_parent();
+            // const get_back: *const fn (ret: i32) i32 = @ptrFromInt(ctx.lr);
+            asm volatile (
+                \\ mov sp, %[sp]
+                \\ cpsie i
+                \\ mov r0, %[rt]
+                \\ bx %[lr]
+                :
+                : [sp] "r" (ctx.sp),
+                  [rt] "r" (current_process.pid),
+                  [lr] "r" (ctx.lr),
+            );
+            return current_process.pid;
+            // hal.irq.trigger(.pendsv);
+            // return 0;
         }
 
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
@@ -263,16 +349,37 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return 0;
         }
 
+        // Synchronization
+        // core access - secure, different memory regions
+        // interrupts - disabled during access
         pub fn get_current_process(self: *const Self) *Process {
+            defer kernel.irq.enable_interrupts();
+            kernel.irq.disable_interrupts();
             return self.core[hal.cpu.coreid()];
         }
 
+        // Synchronization
+        // no data access
         pub fn initialize_context_switching(_: Self) void {
             process.initialize_context_switching();
         }
 
+        // Synchronization
+        // this must be synchronized across interrupts and cores
         pub fn is_empty(self: Self) bool {
+            self.lock_access();
+            defer self.unlock_access();
             return self.processes.first == null;
+        }
+
+        fn lock_access(self: *Self) void {
+            self.mutex.lock();
+            kernel.irq.disable_interrupts();
+        }
+
+        fn unlock_access(self: *Self) void {
+            kernel.irq.enable_interrupts();
+            self.mutex.unlock();
         }
     };
 }
@@ -299,17 +406,13 @@ pub export fn process_set_next_task() *const u8 {
     @panic("Context switch called without tasks available");
 }
 
-pub export fn process_is_current_using_fpu() u32 {
-    return if (instance.core[hal.cpu.coreid()].get_uses_fpu()) 1 else 0;
-}
-
 export fn get_stack_bottom() *const u8 {
     return instance.core[hal.cpu.coreid()].get_stack_bottom();
 }
 
 export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
+    _ = uses_fpu;
     instance.core[hal.cpu.coreid()].set_stack_pointer(ptr);
-    instance.core[hal.cpu.coreid()].set_uses_fpu(uses_fpu != 0);
 }
 
 const StubScheduler = @import("scheduler/stub.zig").StubScheduler;
@@ -343,7 +446,7 @@ test "ProcessManager.ShouldCreateProcesses" {
     try std.testing.expectEqual(.NoAction, sut.schedule_next());
 
     const arg = "argument";
-    try sut.create_process(4096, &test_entry, &arg, "/test");
+    try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
 }
 
 test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {
@@ -359,7 +462,7 @@ test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {
     for (0..config.process.max_pid_value) |i| {
         const path = try std.fmt.allocPrint(std.testing.allocator, "/proc/{d}", .{i});
         defer std.testing.allocator.free(path);
-        try sut.create_process(4096, &test_entry, &arg, path);
+        try sut.create_process(4096, &test_entry, @ptrCast(&arg), path);
     }
 
     for (1..config.process.max_pid_value + 1) |i| {
@@ -370,7 +473,7 @@ test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {
         try std.testing.expectEqualStrings(path, proc.?.get_current_directory());
     }
 
-    try std.testing.expectError(kernel.errno.ErrnoSet.TryAgain, sut.create_process(4096, &test_entry, &arg, "/test"));
+    try std.testing.expectError(kernel.errno.ErrnoSet.TryAgain, sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test"));
     try std.testing.expectEqual(null, sut.get_next_pid());
     var pid: c.pid_t = 0;
     var vfork_context = c.vfork_context{
@@ -394,7 +497,7 @@ test "ProcessManager.ShouldScheduleProcesses" {
     const arg = "argument";
     inline for (0..3) |i| {
         const path = std.fmt.comptimePrint("/proc/{d}", .{i});
-        try sut.create_process(4096, &test_entry, &arg, path);
+        try sut.create_process(4096, &test_entry, @ptrCast(&arg), path);
     }
 
     inline for (1..4) |i| {
@@ -438,7 +541,7 @@ test "ProcessManager.ShouldForkProcess" {
     const arg = "argument";
     inline for (0..3) |i| {
         const path = std.fmt.comptimePrint("/proc/{d}", .{i});
-        try sut.create_process(4096, &test_entry, &arg, path);
+        try sut.create_process(4096, &test_entry, @ptrCast(&arg), path);
     }
 
     var pid: c.pid_t = 0;
@@ -540,7 +643,7 @@ test "ProcessManager.ShouldReturnStackForExternalUse" {
     try std.testing.expectEqual(.NoAction, sut.schedule_next());
 
     const arg = "argument";
-    try sut.create_process(4096, &test_entry, &arg, "/test");
+    try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
     _ = sut.schedule_next();
     var stack_pointer: u8 = 123;
     update_stack_pointer(&stack_pointer, 0);
@@ -557,7 +660,7 @@ test "ProcessManager.ShouldWaitForProcess" {
     const arg = "argument";
     inline for (0..3) |i| {
         const path = std.fmt.comptimePrint("/proc/{d}", .{i});
-        try sut.create_process(4096, &test_entry, &arg, path);
+        try sut.create_process(4096, &test_entry, @ptrCast(&arg), path);
     }
 
     var pid: c.pid_t = 0;

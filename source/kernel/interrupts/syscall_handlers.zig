@@ -98,14 +98,12 @@ pub const VForkContext = extern struct {
 extern fn switch_to_the_first_task() void;
 extern fn push_return_address() void;
 extern fn switch_to_main_task(lr: usize, with_fpu: bool) void;
-var sp: usize = 0;
+var main_process_stack_pointer_before_scheduler_started: usize = 0;
 
 pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
-    sp = @intFromPtr(arg);
-    if (sp & 1 == 1) {
-        sp -= 1;
-    }
-    std.log.info("Starting root process with stack pointer: {x}", .{sp});
+    main_process_stack_pointer_before_scheduler_started = @intCast(@as(isize, @intCast(@intFromPtr(arg))) + kernel.process.get_offset_of_hardware_stored_registers(config.cpu.use_fpu));
+
+    std.log.info("Starting root process with stack pointer: {x}", .{main_process_stack_pointer_before_scheduler_started});
     switch_to_the_first_task();
     return 0;
 }
@@ -113,8 +111,8 @@ pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
 pub fn sys_stop_root_process(arg: *const volatile anyopaque) !i32 {
     _ = arg;
     hal.time.systick.disable();
-    std.log.info("Stopping root process with stack pointer: {x}", .{sp});
-    switch_to_main_task(sp, config.cpu.use_fpu);
+    std.log.info("Stopping root process with stack pointer: {x}", .{main_process_stack_pointer_before_scheduler_started});
+    switch_to_main_task(main_process_stack_pointer_before_scheduler_started, config.cpu.use_fpu);
     return 0;
 }
 
@@ -256,9 +254,12 @@ pub fn sys_close(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
+    asm volatile ("cpsid i");
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process_manager.instance.delete_process(process.pid, context.*);
+    hal.irq.trigger(.pendsv);
+    asm volatile ("cpsie i");
     return context.*;
 }
 
@@ -304,11 +305,12 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
+extern fn arch_store_registers_on_stack(exc_return: usize, uses_fpu: usize) void;
+
 pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
+    // arch_store_registers_on_stack(if (process_manager.instance.get_current_process().get_uses_fpu()) arch.exc_return.return_to_thread_mode_with_fp_psp else arch.exc_return.return_to_thread_psp, if (process_manager.instance.get_current_process().get_uses_fpu()) 1 else 0);
     const context: *const volatile c.vfork_context = @ptrCast(@alignCast(arg));
-    const result = try process_manager.instance.vfork(context);
-    // hal.irq.trigger(.pendsv);
-    return result;
+    return try process_manager.instance.vfork(context);
 }
 
 pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {
@@ -403,7 +405,7 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    return try process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
+    return process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
@@ -417,7 +419,7 @@ pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
     context.result.* = process.mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset) catch {
         return -1;
     };
-    return -1;
+    return 0;
 }
 
 pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {

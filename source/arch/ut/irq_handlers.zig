@@ -25,7 +25,7 @@ const c = @cImport({
 });
 
 const ContextSwitchHandler = *const fn (lr: usize) usize;
-const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
+const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void;
 
 var context_switch_handler: ?ContextSwitchHandler = null;
 var system_call_handler: ?SystemCallHandler = null;

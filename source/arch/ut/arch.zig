@@ -20,5 +20,19 @@ pub const HardwareProcess = process.HardwareProcess;
 
 export fn switch_to_main_task() void {}
 
+var sp: usize = 0;
+export fn arch_get_stack_pointer() *usize {
+    return &sp;
+}
 pub const panic = @import("panic.zig");
 pub const irq_handlers = @import("irq_handlers.zig");
+pub const exc_return = struct {
+    pub const return_to_handler_msp: u32 = 0xfffffff1;
+    pub const return_to_thread_msp: u32 = 0xfffffff9;
+    pub const return_to_thread_psp: u32 = 0xfffffffd;
+    pub const return_to_handler_mode_with_fp_msp: u32 = 0xffffffe1;
+    pub const return_to_thread_mode_with_fp_msp: u32 = 0xffffffe9;
+    pub const return_to_thread_mode_with_fp_psp: u32 = 0xffffffed;
+};
+
+export fn arch_store_registers_on_stack() void {}

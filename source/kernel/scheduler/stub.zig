@@ -40,6 +40,10 @@ pub const StubScheduler = struct {
         return @fieldParentPtr("node", self.next.?);
     }
 
+    pub fn set_next(self: *Self, process: *std.DoublyLinkedList.Node) void {
+        self.next = process;
+    }
+
     pub fn get_current(self: Self) ?*Process {
         if (self.current == null) {
             return null;

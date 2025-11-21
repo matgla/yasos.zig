@@ -46,23 +46,21 @@ switch_to_next_task:
 .thumb_func
 arm_load_registers_from_stack:
   push {lr}
-  push {r0}
-  bl process_is_current_using_fpu
-  pop {r1}
-  ldmia r1!, {r2, r4-r12}
-  cmp r0, #0
+  ldmia r0!, {r1} // is fpu used
+  ldmia r0!, {r2, r4-r12}
+  cmp r1, #0
   beq load_no_fpu
-  vldmia r1!, {s16-s31}
+  vldmia r0!, {s16-s31}
 load_no_fpu:
-  msr psp, r1
+  msr psp, r0
   mov r0, r2
   pop {pc}
 
 // r0 - address LR to return to
 // r1 - 1 if FPU registers should be stored, 0 otherwise
-.global arm_store_registers_on_stack
+.global arch_store_registers_on_stack
 .thumb_func
-arm_store_registers_on_stack:
+arch_store_registers_on_stack:
   push {lr}
   mov r2, r0
   mrs r0, psp
@@ -71,6 +69,7 @@ arm_store_registers_on_stack:
   vstmdb r0!, {s16-s31}
 store_no_fpu:
   stmdb r0!, {r2, r4-r12}
+  stmdb r0!, {r1}
   bl update_stack_pointer
   pop {pc}
 
@@ -82,12 +81,8 @@ store_no_fpu:
 store_and_switch_to_next_task:
   push {r4, lr}
   // let's check if fpu is used by current task
-  tst lr, #0x10
-  ite eq
-  moveq r1, #1
-  movne r1, #0
   cpsid i // better to not interrupt that operation from nested IRQ
-  bl arm_store_registers_on_stack
+  bl arch_store_registers_on_stack
   bl switch_to_next_task
   cpsie i
   pop {r4, pc}
@@ -95,57 +90,112 @@ store_and_switch_to_next_task:
 .global switch_to_the_next_task
 .thumb_func
 switch_to_the_next_task:
-  push {r4, lr}
+  push {lr}
   cpsid i // better to not interrupt that operation from nested IRQ
   bl switch_to_next_task
   cpsie i
-  pop {r4, pc}
+  pop {pc}
 
+.global dispatch_syscall
+.thumb_func
+dispatch_syscall:
+  bl _irq_svcall
+  push {r0, r1}
+  mov r0, #0
+  svc #1 // this pushes another context
+
+// r0 - syscall number
+// r1 - arg pointer
+// r2 - syscall result pointer
+// syscall number 0 is internal syscall to return to user mode
 .global irq_svcall
 .thumb_func
 irq_svcall:
-  // vfork must store non mangled context first
-  cmp r0, #SYS_VFORK_ID
-  bne check_if_start_root
-  push {r0, r1, r2, lr}
-  push {lr}
-  bl process_is_current_using_fpu
-  mov r1, r0
-  pop {r0}
-  bl arm_store_registers_on_stack
-  pop {r0, r1, r2, lr}
-  b call_svcall
-check_if_start_root:
-  cmp r0, #1
-  bne call_svcall
-  mov r1, sp
-call_svcall:
-  push {r0, lr}
-  bl _irq_svcall
-  pop {r0, pc}
+  cmp r0, #0
+  bne process_syscall_entry
+  // process syscall exit
+  @ mrs r0, control
+  @ orr r0, r0, #1
+  @ msr control, r0
+  mrs r2, psp
+    // let's check if fpu is used by current task
+  tst lr, #0x10
+  bne process_syscall_return_without_fpu
+  add r2, r2, #68 // remove fpu registers from stack
+process_syscall_return_without_fpu:
+  add r2, r2, #32 // skip general purpose registers
+  ldmia r2!, {r0, r3}
+  add r2, r2, #4
+  ldmia r2!, {r1}
+  msr psp, r2
+  bx r1
+
+process_syscall_entry:
+  push {r4, r5, r6}
+  mrs r4, psp
+  ldr r6, [r4, #28] // get psr
+  ldr r3, =return_from_syscall
+  ldr r5, =dispatch_syscall
+  stmdb r4!, {r0, lr}
+  stmdb r4!, {r3, r5, r6}
+  stmdb r4!, {r0-r3, r12}
+  msr psp, r4
+  mrs r4, control
+  bic r4, r4, #1
+  msr control, r4
+  ldr r3, =0xfffffffd
+  pop {r4, r5, r6}
+  bx r3 // we are taking back context from 134
+.thumb_func
+return_from_syscall:
+  @ we are no longer in exception, restore stack manually
+  pop {r1, pc}
+
+.global arch_get_stack_pointer
+.thumb_func
+arch_get_stack_pointer:
+  mov r0, sp
+  bx lr
+
 
 .global switch_to_main_task
 .thumb_func:
 switch_to_main_task:
+  mrs r0, msp
+  add r0, r0, #4
   msr msp, r0
-  cmp r1, #1
-  bne switch_no_fpu
-  ldr r0, =0xffffffe9
-  b return_to_main_task
-switch_no_fpu:
-  ldr r0, =0xfffffff9
-return_to_main_task:
-  bx r0
+  mrs r0, control
+  bic r0, r0, #3
+  msr control, r0
+  pop {pc}
+
+@ .global syscall_dispatch_handler
+@ .thumb_func
+@ syscall_dispatch_handler:
+
 
 .global irq_pendsv
 .thumb_func
 irq_pendsv:
-  mov r0, lr
+  push {lr}
+  tst lr, #0x10
+  ite eq
+  moveq r0, #1
+  movne r0, #0
   bl do_context_switch
-  bx r0
+  cmp r0, #0
+  beq pendsv_exit
+  pop {pc}
+pendsv_exit:
+  b switch_to_main_task
+
 
 .global switch_to_the_first_task
 .thumb_func
 switch_to_the_first_task:
+  push {lr}
   bl switch_to_next_task
+  mrs r1, control
+  orr r1, r1, #3 // unprivileged + psp
+  msr control, r1
   bx r0

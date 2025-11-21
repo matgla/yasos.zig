@@ -13,15 +13,26 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub const c = @cImport({
-    @cInclude("libs/libc/sys/syscall.h");
-    @cInclude("libs/libc/unistd.h");
-    @cInclude("libs/libc/stdlib.h");
-    @cInclude("libs/libc/sys/ioctl.h");
-    @cInclude("libs/libc/termios.h");
-    @cInclude("libs/libc/dirent.h");
-    @cInclude("libs/libc/fcntl.h");
-    @cInclude("libs/libc/errno.h");
-    @cInclude("libs/libc/sys/stat.h");
-    @cInclude("libs/libc/sys/sysinfo.h");
-});
+pub inline fn data_synchronization_barrier() void {
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+}
+
+pub inline fn instruction_synchronization_barrier() void {
+    asm volatile ("isb sy" ::: .{ .memory = true });
+}
+
+pub inline fn wait_for_event() void {
+    asm volatile ("wfe" ::: .{ .memory = true });
+}
+
+pub inline fn wait_for_interrupt() void {
+    asm volatile ("wfi" ::: .{ .memory = true });
+}
+
+pub inline fn disable_interrupts() void {
+    asm volatile ("cpsid i" ::: .{ .memory = true });
+}
+
+pub inline fn enable_interrupts() void {
+    asm volatile ("cpsie i" ::: .{ .memory = true });
+}

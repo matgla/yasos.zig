@@ -18,3 +18,5 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 pub const system_call = @import("system_call.zig");
+pub const disable_interrupts = @import("arch").disable_interrupts;
+pub const enable_interrupts = @import("arch").enable_interrupts;

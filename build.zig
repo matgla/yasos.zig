@@ -202,7 +202,7 @@ pub fn build(b: *std.Build) !void {
     const install_arch_tests = b.addInstallBinFile(arch_tests.getEmittedBin(), "arch_tests");
     b.default_step.dependOn(&install_arch_tests.step);
     b.default_step.dependOn(&install_fs_tests.step);
-    b.default_step.dependOn(&install_kernel_tests.step);
+    // b.default_step.dependOn(&install_kernel_tests.step);
     run_tests_step.dependOn(&install_arch_tests.step);
     run_tests_step.dependOn(&install_fs_tests.step);
     run_tests_step.dependOn(&install_kernel_tests.step);

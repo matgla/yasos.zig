@@ -70,6 +70,7 @@ pub const HardwareStoredRegisters = extern struct {
 };
 
 pub const SoftwareStoredRegisters = extern struct {
+    is_fpu_frame: u32,
     lr: u32,
     r4: u32,
     r5: u32,
@@ -98,7 +99,7 @@ pub const SoftwareStoredRegisters = extern struct {
     s31: void_or_register(),
 };
 
-pub fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
+fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
     return .{
         .r0 = 0,
         .r1 = 0,
@@ -129,12 +130,13 @@ pub fn create_default_hardware_registers(comptime exit_handler: *const fn () voi
     };
 }
 
-pub fn create_default_software_registers() SoftwareStoredRegisters {
+fn create_default_software_registers(lr: usize) SoftwareStoredRegisters {
     return .{
         // for now handler msp mode is reserved for kernel
         // interrupts handlers, but in the future kernel process
         // may also use thread/handler msp mode
-        .lr = exc_return.return_to_thread_psp,
+        .is_fpu_frame = if (config.cpu.has_fpu and config.cpu.use_fpu) 1 else 0,
+        .lr = lr,
         .r4 = 0,
         .r5 = 0,
         .r6 = 0,
@@ -163,7 +165,7 @@ pub fn create_default_software_registers() SoftwareStoredRegisters {
     };
 }
 
-pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize, use_fpu: bool) *u8 {
+fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize, use_fpu: bool, is_root: bool) *u8 {
     _ = use_fpu; // unused in this function, but used in the caller
     var hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
     if (maybe_args) |args| {
@@ -188,8 +190,11 @@ pub fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const
 
     const sw_registers_size = @sizeOf(SoftwareStoredRegisters);
     const sw_registers_place = stack_start - sw_registers_size - hw_registers_size;
-
-    const software_pushed_registers = create_default_software_registers();
+    var lr = if (config.cpu.has_fpu) exc_return.return_to_thread_mode_with_fp_psp else exc_return.return_to_thread_psp;
+    if (is_root) {
+        lr = @intFromPtr(process_entry);
+    }
+    const software_pushed_registers = create_default_software_registers(lr);
     @memcpy(stack[sw_registers_place .. sw_registers_place + @sizeOf(SoftwareStoredRegisters)], std.mem.asBytes(&software_pushed_registers));
 
     return &stack[sw_registers_place];
@@ -213,15 +218,15 @@ pub const ArmProcess = struct {
     const stack_marker: u32 = 0xdeadbeef;
     stack: []align(8) u8,
     stack_position: *u8,
-    has_own_stack: bool = true,
+    process_allocator: std.mem.Allocator,
 
-    pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype) !Self {
+    pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype, is_root: bool) !Self {
         const stack = try process_allocator.alignedAlloc(u8, .@"8", stack_size);
-        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg, true);
+        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg, true, is_root);
         return ArmProcess{
             .stack = stack,
             .stack_position = stack_position,
-            .has_own_stack = true,
+            .process_allocator = process_allocator,
         };
     }
 
@@ -250,65 +255,33 @@ pub const ArmProcess = struct {
             : [out] "=r" (psp_value),
         );
 
-        const stack: []align(8) u8 = try process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
-        // parent should push to new stack
-
-        // this only matters for parent process
-
-        @memcpy(stack, self.stack);
-        const parent_stack = self.stack;
-        self.stack = stack;
-        // parent won't do anything, let's compute stack offset
-        const stack_position: usize = psp_value - @intFromPtr(parent_stack.ptr);
-        self.stack_position = &self.stack[stack_position];
-
-        self.has_own_stack = false;
-
-        asm volatile (
-            \\ msr psp, %[new_psp]
-            : // No output operands
-            : [new_psp] "r" (stack_position + @intFromPtr(stack.ptr)), // Set the new PSP,
-        );
-
         return .{
-            .stack = parent_stack,
-            .stack_position = @ptrFromInt(psp_value - @sizeOf(SoftwareStoredRegisters)),
-            .has_own_stack = false,
+            .stack = self.stack,
+            .stack_position = @ptrFromInt(psp_value),
+            .process_allocator = process_allocator,
         };
     }
 
-    pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype, use_fpu: bool) void {
+    pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype, use_fpu: bool) !void {
         const args = [_]usize{
             argc,
             argv,
             symbol,
             got,
         };
-        self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4], use_fpu);
-        asm volatile (
-            \\ msr psp, %[new_psp]
-            : // No output operands
-            : [new_psp] "r" (self.stack_position),
-        );
+
+        self.stack = try self.process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
+        self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4], use_fpu, false);
     }
 
     pub fn validate_stack(self: *const Self) bool {
         return std.mem.eql(u8, self.stack[0..@sizeOf(u32)], std.mem.asBytes(&stack_marker));
     }
-
-    pub fn restore_parent_stack(self: *Self, parent: *Self) void {
-        if (!parent.has_own_stack) {
-            @memcpy(self.stack, parent.stack);
-            const stack = parent.stack;
-            const stack_position = @intFromPtr(parent.stack_position) - @intFromPtr(parent.stack.ptr);
-            parent.stack = self.stack;
-            parent.stack_position = &self.stack[stack_position];
-            self.stack = stack;
-            parent.has_own_stack = true;
-            self.has_own_stack = true;
-        }
-    }
 };
+
+pub fn get_offset_of_hardware_stored_registers(use_fpu: bool) isize {
+    return if (use_fpu) -@sizeOf(HardwareStoredRegisters) else -(@sizeOf(HardwareStoredRegisters) - @sizeOf(u32) * 18);
+}
 
 fn test_entry() void {}
 fn test_exit_handler() void {}
