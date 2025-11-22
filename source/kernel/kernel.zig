@@ -33,7 +33,7 @@ pub const process = struct {
 };
 
 pub const sync = struct {
-    pub const Mutex = @import("mutex.zig").Mutex;
+    pub const Mutex = @import("interrupts/kernel_mutex.zig").KernelMutex;
     pub const Semaphore = @import("semaphore.zig").Semaphore;
 };
 

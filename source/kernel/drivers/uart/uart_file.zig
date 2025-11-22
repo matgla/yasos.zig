@@ -183,24 +183,22 @@ pub fn UartFile(comptime UartType: anytype) type {
 
             pub fn fcntl(self: *Self, op: i32, maybe_arg: ?*anyopaque) i32 {
                 var result: i32 = 0;
-                if (maybe_arg) |arg| {
-                    const flags: *c_int = @ptrCast(@alignCast(arg));
-                    switch (op) {
-                        c.F_GETFL => {
-                            if (self._nonblock) {
-                                result |= c.O_NONBLOCK;
-                                return result;
-                            }
-                            return 0;
-                        },
-                        c.F_SETFL => {
-                            self._nonblock = (flags.* & c.O_NONBLOCK) != 0;
-                            return 0;
-                        },
-                        else => {
-                            return -1;
-                        },
-                    }
+                switch (op) {
+                    c.F_GETFL => {
+                        if (self._nonblock) {
+                            result |= c.O_NONBLOCK;
+                            return result;
+                        }
+                        return 0;
+                    },
+                    c.F_SETFL => {
+                        const flags: c_int = if (maybe_arg) |a| @truncate(@as(c_int, @intCast(@intFromPtr(a)))) else 0;
+                        self._nonblock = (flags & c.O_NONBLOCK) != 0;
+                        return 0;
+                    },
+                    else => {
+                        return -1;
+                    },
                 }
                 return -1;
             }

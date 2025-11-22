@@ -136,11 +136,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _vfork_context: ?VForkContext = null,
         _initialized: bool = false,
         _start_time: u64,
-        _uses_fpu: bool = true,
         processes_syscall: bool = false,
         vfork_return: usize = 0,
         vfork_sp: usize = 0,
         vfork_fp: usize = 0,
+        child_exit_code: i32 = 0,
 
         pub const State = enum(u3) {
             Initialized,
@@ -310,14 +310,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.impl.set_stack_pointer(ptr, blocked_by_process);
         }
 
-        pub fn set_uses_fpu(self: *Self, uses_fpu: bool) void {
-            self._uses_fpu = uses_fpu;
-        }
-
-        pub fn get_uses_fpu(self: *Self) bool {
-            return self._uses_fpu;
-        }
-
         pub fn block_semaphore(self: *Self, semaphore: *const Semaphore) void {
             self.waiting_for = semaphore;
             self.reevaluate_state();
@@ -355,6 +347,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn reevaluate_state(self: *Self) void {
+            if (self.state == State.Terminated) {
+                return;
+            }
             if (self.waiting_for != null) {
                 self.state = Process.State.Blocked;
                 return;
@@ -443,6 +438,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return kernel.errno.ErrnoSet.OutOfMemory;
         }
 
+        pub fn reallocate_stack(self: *Self) !void {
+            try self.impl.reallocate_stack();
+        }
+
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
             if (maybe_address) |addr| {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
@@ -486,7 +485,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize) !void {
-            try self.impl.reinitialize_stack(process_entry, argc, argv, symbol, got, exit_handler_impl, self._uses_fpu);
+            try self.impl.reinitialize_stack(process_entry, argc, argv, symbol, got, exit_handler_impl);
             self._initialized = false;
         }
 

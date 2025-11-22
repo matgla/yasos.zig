@@ -165,8 +165,7 @@ fn create_default_software_registers(lr: usize) SoftwareStoredRegisters {
     };
 }
 
-fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize, use_fpu: bool, is_root: bool) *u8 {
-    _ = use_fpu; // unused in this function, but used in the caller
+fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn () void, process_entry: anytype, maybe_args: ?[]const usize, is_root: bool) *u8 {
     var hardware_pushed_registers = create_default_hardware_registers(exit_handler, process_entry);
     if (maybe_args) |args| {
         if (args.len >= 1) {
@@ -219,18 +218,23 @@ pub const ArmProcess = struct {
     stack: []align(8) u8,
     stack_position: *u8,
     process_allocator: std.mem.Allocator,
+    stack_is_shared: bool = false,
 
     pub fn init(process_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, exit_handler_impl: anytype, arg: anytype, is_root: bool) !Self {
         const stack = try process_allocator.alignedAlloc(u8, .@"8", stack_size);
-        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg, true, is_root);
+        const stack_position = prepare_process_stack(stack, exit_handler_impl, process_entry, arg, is_root);
         return ArmProcess{
             .stack = stack,
             .stack_position = stack_position,
             .process_allocator = process_allocator,
+            .stack_is_shared = false,
         };
     }
 
     pub fn deinit(self: *Self, process_allocator: std.mem.Allocator) void {
+        if (self.stack_is_shared) {
+            return;
+        }
         process_allocator.free(self.stack);
     }
 
@@ -259,10 +263,16 @@ pub const ArmProcess = struct {
             .stack = self.stack,
             .stack_position = @ptrFromInt(psp_value),
             .process_allocator = process_allocator,
+            .stack_is_shared = true,
         };
     }
 
-    pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype, use_fpu: bool) !void {
+    pub fn reallocate_stack(self: *Self) !void {
+        self.stack = try self.process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
+        self.stack_is_shared = false;
+    }
+
+    pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) !void {
         const args = [_]usize{
             argc,
             argv,
@@ -270,8 +280,7 @@ pub const ArmProcess = struct {
             got,
         };
 
-        self.stack = try self.process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
-        self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4], use_fpu, false);
+        self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4], false);
     }
 
     pub fn validate_stack(self: *const Self) bool {

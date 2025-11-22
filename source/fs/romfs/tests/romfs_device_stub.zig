@@ -83,7 +83,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         return std.fs.path.basename(self.path);
     }
 
-    pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
+    pub fn ioctl(self: *Self, cmd: i32, data: ?*const anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => {
                 if (data) |ptr| {
@@ -106,7 +106,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         return 0;
     }
 
-    pub fn fcntl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
+    pub fn fcntl(self: *Self, cmd: i32, data: ?*const anyopaque) i32 {
         _ = self;
         _ = cmd;
         _ = data;

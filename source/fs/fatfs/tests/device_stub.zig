@@ -106,7 +106,7 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
         return "fatfs_device_stub";
     }
 
-    pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
+    pub fn ioctl(self: *Self, cmd: i32, data: ?*const anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => {
                 if (data) |ptr| {
@@ -129,7 +129,7 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
         return 0;
     }
 
-    pub fn fcntl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
+    pub fn fcntl(self: *Self, cmd: i32, data: ?*const anyopaque) i32 {
         _ = self;
         _ = cmd;
         _ = data;

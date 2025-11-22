@@ -32,6 +32,8 @@ const fatfs_error_to_errno = @import("errno_converter.zig").fatfs_error_to_errno
 
 const log = kernel.log;
 
+// extern fn get_arg_from_va_list(args: ?*const anyopaque, index: c.va_list)
+
 pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     const Self = @This();
     _file: ?fatfs.File,
@@ -125,7 +127,10 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         _ = self;
         switch (cmd) {
             @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => {
-                var attr: *kernel.fs.FileMemoryMapAttributes = @ptrCast(@alignCast(data));
+                if (data == null) {
+                    return -1;
+                }
+                var attr: *kernel.fs.FileMemoryMapAttributes = @ptrCast(@alignCast(data.?));
                 attr.is_memory_mapped = false;
             },
             else => {

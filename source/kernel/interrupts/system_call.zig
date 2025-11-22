@@ -45,8 +45,20 @@ extern fn store_and_switch_to_next_task(is_fpu_used: usize) void;
 extern fn switch_to_the_next_task(is_fpu_used: usize) void;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
+var context_switch_enabled: bool = true;
+
+export fn block_context_switch() void {
+    context_switch_enabled = false;
+}
+
+export fn unblock_context_switch() void {
+    context_switch_enabled = true;
+}
 
 export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") usize {
+    if (!context_switch_enabled) {
+        return 1;
+    }
     switch (process_manager.instance.schedule_next()) {
         .Switch => {
             switch_to_the_next_task(is_fpu_used);

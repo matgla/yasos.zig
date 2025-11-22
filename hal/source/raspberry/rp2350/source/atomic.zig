@@ -32,12 +32,15 @@ pub const HardwareAtomic = struct {
         return bugfree_spinlocks.len;
     }
 
-    pub fn lock(comptime id: u32) void {
+    pub fn lock(comptime id: u32) bool {
         if (id < bugfree_spinlocks.len) {
-            while (sio.spinlocks[bugfree_spinlocks[id]].read() == 0) {}
+            if (sio.spinlocks[bugfree_spinlocks[id]].read() == 0) {
+                return false;
+            }
         } else {
             @compileError(std.fmt.comptimePrint("RP2350 supports only {d} non-buggy hardware spinlocks. Trying to lock: {d}", .{ bugfree_spinlocks.len, id }));
         }
+        return true;
     }
 
     pub fn unlock(comptime id: u32) void {

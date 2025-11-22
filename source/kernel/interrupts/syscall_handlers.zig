@@ -117,6 +117,8 @@ pub fn sys_stop_root_process(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_create_process(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile CreateProcessCall = @ptrCast(@alignCast(arg));
     process_manager.instance.create_process(context.stack_size, context.entry, context.arg, "/") catch |err| {
         return err;
@@ -125,16 +127,22 @@ pub fn sys_create_process(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_semaphore_acquire(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
     return KernelSemaphore.acquire(context.object);
 }
 
 pub fn sys_semaphore_release(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
     return KernelSemaphore.release(context.object);
 }
 
 pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const check_parent: *const volatile u8 = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     if (check_parent.* != 0) {
@@ -148,6 +156,8 @@ pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.mkdir_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
@@ -156,11 +166,15 @@ pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 
 pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const maybe_handle = process.get_file_handle(@intCast(fd.*));
@@ -219,6 +233,8 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
 }
 
 pub fn sys_open(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
@@ -240,6 +256,8 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
 }
 
 fn close_fd(fd: i32) i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     if (fd < 0) {
         return -1;
     }
@@ -249,21 +267,25 @@ fn close_fd(fd: i32) i32 {
 }
 
 pub fn sys_close(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     return close_fd(fd.*);
 }
 
 pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
-    asm volatile ("cpsid i");
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
+    if (process._parent) |parent| {
+        parent.child_exit_code = context.*;
+    }
     process_manager.instance.delete_process(process.pid, context.*);
-    hal.irq.trigger(.pendsv);
-    asm volatile ("cpsie i");
     return context.*;
 }
 
 pub fn sys_read(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.read_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     if (context.buf == null) {
@@ -280,6 +302,8 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     const process = process_manager.instance.get_current_process();
     process_manager.instance.delete_process(process.pid, -1);
@@ -287,6 +311,8 @@ pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_write(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
 
@@ -308,12 +334,15 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
 extern fn arch_store_registers_on_stack(exc_return: usize, uses_fpu: usize) void;
 
 pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
-    // arch_store_registers_on_stack(if (process_manager.instance.get_current_process().get_uses_fpu()) arch.exc_return.return_to_thread_mode_with_fp_psp else arch.exc_return.return_to_thread_psp, if (process_manager.instance.get_current_process().get_uses_fpu()) 1 else 0);
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.vfork_context = @ptrCast(@alignCast(arg));
     return try process_manager.instance.vfork(context);
 }
 
 pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.unlink_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);
@@ -321,6 +350,8 @@ pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 pub fn sys_link(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.link_context = @ptrCast(@alignCast(arg));
     const old_path = try determine_path_for_file(kernel_allocator, context.oldpath, context.olddirfd);
     defer kernel_allocator.free(old_path);
@@ -331,6 +362,8 @@ pub fn sys_link(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.stat_context = @ptrCast(@alignCast(arg));
     if (context.statbuf == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
@@ -342,11 +375,15 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 
 pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     context.result.* = try file.interface.seek(context.offset, context.whence);
@@ -354,15 +391,21 @@ pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_wait(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 pub fn sys_times(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 
 pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
 
     context.result.* = -1;
@@ -389,30 +432,42 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    return file.interface.ioctl(context.op, context.arg);
+    return file.interface.ioctl(context.op, @ptrFromInt(@as(usize, @intCast(context.arg))));
 }
 
 pub fn sys_gettimeofday(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));
     return process_manager.instance.waitpid(context.pid, context.status);
 }
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
     return process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     context.result.* = @ptrFromInt(0);
@@ -423,6 +478,8 @@ pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process.munmap(context.addr, context.length);
@@ -430,6 +487,8 @@ pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
     const current_process = process_manager.instance.get_current_process();
     const cwd = current_process.get_current_directory();
@@ -445,6 +504,8 @@ pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     var slice_allocated = false;
@@ -474,30 +535,42 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_time(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
     const ticks: c.time_t = @intCast(systick.get_system_ticks().*);
     context.result.* = ticks;
     return 0;
 }
 pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    return file.interface.fcntl(context.op, context.arg);
+    return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @intCast(context.arg))));
 }
 pub fn sys_remove(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 pub fn sys_realpath(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 pub fn sys_mprotect(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     return -1;
 }
 
 pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.dlopen_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const library = dynamic_loader.load_shared_library(std.mem.span(@as([*:0]const u8, @ptrCast(context.path))), process.get_process_memory_allocator(), process.pid) catch {
@@ -509,6 +582,8 @@ pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_dlclose(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.dlclose_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
@@ -517,6 +592,8 @@ pub fn sys_dlclose(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_dlsym(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.dlsym_context = @ptrCast(@alignCast(arg));
     const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
     const maybe_symbol = library.find_symbol(std.mem.span(@as([*:0]const u8, @ptrCast(context.symbol))));
@@ -528,18 +605,24 @@ pub fn sys_dlsym(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getuid(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     // we are always root until we implement user management
     return 0;
 }
 
 pub fn sys_geteuid(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     _ = arg;
     // we are always root until we implement user management
     return 0;
 }
 
 pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.dup_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const maybe_handle = process.get_file_handle(@intCast(context.fd));
@@ -557,6 +640,8 @@ pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_sysinfo(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.sysinfo_context = @ptrCast(@alignCast(arg));
     if (context.info == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
@@ -570,6 +655,8 @@ pub fn sys_sysinfo(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.sysconf_context = @ptrCast(@alignCast(arg));
     switch (context.name) {
         c._SC_CLK_TCK => {
@@ -583,6 +670,8 @@ pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_access(arg: *const volatile anyopaque) !i32 {
+    kernel.irq.disable_interrupts();
+    defer kernel.irq.enable_interrupts();
     const context: *const volatile c.access_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);

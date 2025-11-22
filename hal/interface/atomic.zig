@@ -35,16 +35,22 @@ pub fn AtomicInterface(comptime ImplementationType: anytype) type {
                     return self.value;
                 }
 
-                pub fn store(self: *Self, new: ValueType) void {
-                    ImplementationType.lock(spinlock_id);
+                pub fn store(self: *Self, new: ValueType) bool {
+                    if (!ImplementationType.lock(spinlock_id)) {
+                        return false;
+                    }
                     defer ImplementationType.unlock(spinlock_id);
                     self.value = new;
+                    return true;
                 }
 
-                pub fn increment(self: *Self) void {
-                    ImplementationType.lock(spinlock_id);
+                pub fn increment(self: *Self) bool {
+                    if (!ImplementationType.lock(spinlock_id)) {
+                        return false;
+                    }
                     defer ImplementationType.unlock(spinlock_id);
                     self.value += 1;
+                    return true;
                 }
 
                 pub fn exchange(self: *Self, new: ValueType) ValueType {
@@ -68,7 +74,9 @@ pub fn AtomicInterface(comptime ImplementationType: anytype) type {
                 }
 
                 pub fn compare_not_equal_decrement(self: *Self, expected: ValueType) bool {
-                    ImplementationType.lock(spinlock_id);
+                    if (!ImplementationType.lock(spinlock_id)) {
+                        return false;
+                    }
                     defer ImplementationType.unlock(spinlock_id);
                     if (self.value != expected) {
                         self.value -= 1;

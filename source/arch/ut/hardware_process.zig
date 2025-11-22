@@ -80,7 +80,7 @@ pub const HardwareProcess = struct {
         };
     }
 
-    pub fn reinitialize_stack(self: *HardwareProcess, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype, use_fpu: bool) void {
+    pub fn reinitialize_stack(self: *HardwareProcess, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) void {
         _ = self;
         _ = process_entry;
         _ = argc;

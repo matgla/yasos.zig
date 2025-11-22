@@ -32,7 +32,9 @@ const Semaphore = @import("../semaphore.zig").Semaphore;
 pub const KernelSemaphore = struct {
     // blocking
     pub fn release(semaphore: *Semaphore) i32 {
-        semaphore.counter.increment();
+        while (!semaphore.counter.increment()) {
+            hal.irq.trigger(.pendsv);
+        }
         // unblock waiting processes
         var next = process_manager.instance.processes.first;
         while (next) |node| {

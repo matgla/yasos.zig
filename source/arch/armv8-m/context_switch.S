@@ -81,26 +81,26 @@ store_no_fpu:
 store_and_switch_to_next_task:
   push {r4, lr}
   // let's check if fpu is used by current task
-  cpsid i // better to not interrupt that operation from nested IRQ
   bl arch_store_registers_on_stack
   bl switch_to_next_task
-  cpsie i
   pop {r4, pc}
 
 .global switch_to_the_next_task
 .thumb_func
 switch_to_the_next_task:
   push {lr}
-  cpsid i // better to not interrupt that operation from nested IRQ
   bl switch_to_next_task
-  cpsie i
   pop {pc}
 
 .global dispatch_syscall
 .thumb_func
 dispatch_syscall:
-  bl _irq_svcall
   push {r0, r1}
+  push {r0-r3}
+  bl unblock_context_switch
+  pop {r0-r3}
+  bl _irq_svcall
+  bl block_context_switch
   mov r0, #0
   svc #1 // this pushes another context
 
@@ -111,6 +111,9 @@ dispatch_syscall:
 .global irq_svcall
 .thumb_func
 irq_svcall:
+  push {r0-r4, lr}
+  bl block_context_switch
+  pop {r0-r4, lr}
   cmp r0, #0
   bne process_syscall_entry
   // process syscall exit
@@ -149,6 +152,7 @@ process_syscall_entry:
 .thumb_func
 return_from_syscall:
   @ we are no longer in exception, restore stack manually
+  bl unblock_context_switch
   pop {r1, pc}
 
 .global arch_get_stack_pointer
@@ -161,9 +165,9 @@ arch_get_stack_pointer:
 .global switch_to_main_task
 .thumb_func:
 switch_to_main_task:
-  mrs r0, msp
-  add r0, r0, #4
-  msr msp, r0
+  @ mrs r0, msp
+  @ add r0, r0, #4
+  @ msr msp, r0
   mrs r0, control
   bic r0, r0, #3
   msr control, r0
@@ -184,8 +188,9 @@ irq_pendsv:
   movne r0, #0
   bl do_context_switch
   cmp r0, #0
+  pop {r2}
   beq pendsv_exit
-  pop {pc}
+  bx r2
 pendsv_exit:
   b switch_to_main_task
 
@@ -199,3 +204,36 @@ switch_to_the_first_task:
   orr r1, r1, #3 // unprivileged + psp
   msr control, r1
   bx r0
+
+
+// r0 - pid
+// r1 - sp
+// r2 - lr
+.global process_get_back_to_parent_vfork
+.thumb_func
+process_get_back_to_parent_vfork:
+  mov sp, r1
+  bx r2
+
+
+
+// r0 - pointer to child r11 value
+// r1 - pointer to child got value
+// r2 - pointer to child return
+.global process_vfork_child
+.thumb_func
+process_vfork_child:
+  push {r4-r12, lr}
+  mov r3, sp
+  mov r11, r0
+  push {r1, r2} // r9 for child, other for alignment
+  ldr r0, =process_vfork_back_here
+  mov r1, r3
+  bl arch_store_vfork_back_point
+  ldr r1, [sp, #4]
+  mov r0, #0
+  bx r1
+
+.thumb_func
+process_vfork_back_here:
+  pop {r4-r12, pc}

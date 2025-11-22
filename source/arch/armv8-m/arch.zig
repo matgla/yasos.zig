@@ -49,3 +49,7 @@ export fn irq_securefault() void {
 export fn irq_debugmonitor() void {
     @panic("Debug monitor fault occurred");
 }
+
+export fn print_register(reg: usize) void {
+    std.log.err("Register value: {x}\n", .{reg});
+}

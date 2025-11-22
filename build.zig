@@ -201,7 +201,7 @@ pub fn build(b: *std.Build) !void {
     const install_fs_tests = b.addInstallBinFile(fs_tests.getEmittedBin(), "fs_tests");
     const install_arch_tests = b.addInstallBinFile(arch_tests.getEmittedBin(), "arch_tests");
     b.default_step.dependOn(&install_arch_tests.step);
-    b.default_step.dependOn(&install_fs_tests.step);
+    // b.default_step.dependOn(&install_fs_tests.step);
     // b.default_step.dependOn(&install_kernel_tests.step);
     run_tests_step.dependOn(&install_arch_tests.step);
     run_tests_step.dependOn(&install_fs_tests.step);
@@ -337,6 +337,7 @@ pub fn build(b: *std.Build) !void {
             const kernel_exec = boardDep.artifact("yasos_kernel");
             kernel_exec.addIncludePath(b.path("source/sys/include"));
             kernel_exec.addIncludePath(b.path("."));
+            // kernel_exec.addIncludePath(b.path("rootfs/usr/include"));
 
             const yasld = b.dependency("yasld", .{
                 .optimize = optimize,
@@ -357,8 +358,8 @@ pub fn build(b: *std.Build) !void {
             });
             libc_imports_module.addIncludePath(b.path("."));
             libc_imports_module.addIncludePath(b.path("libs/libc"));
-            libc_imports_module.addIncludePath(b.path("libs/tinycc/include"));
-
+            // libc_imports_module.addIncludePath(b.path("./libs/tinycc/include"));
+            libc_imports_module.addIncludePath(b.path("rootfs/usr/include"));
             const cimports_module = b.addModule("cimports", .{
                 .root_source_file = b.path("source/cimports.zig"),
                 .target = kernel_exec.root_module.resolved_target,
