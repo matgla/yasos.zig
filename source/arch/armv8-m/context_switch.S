@@ -165,18 +165,10 @@ arch_get_stack_pointer:
 .global switch_to_main_task
 .thumb_func:
 switch_to_main_task:
-  @ mrs r0, msp
-  @ add r0, r0, #4
-  @ msr msp, r0
   mrs r0, control
   bic r0, r0, #3
   msr control, r0
   pop {pc}
-
-@ .global syscall_dispatch_handler
-@ .thumb_func
-@ syscall_dispatch_handler:
-
 
 .global irq_pendsv
 .thumb_func
