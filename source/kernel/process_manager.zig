@@ -89,6 +89,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn schedule_next(self: *Self) kernel.scheduler.Action {
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             var next = self.terminate_list.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -119,10 +121,14 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn get_pidmap(self: *const Self) std.StaticBitSet(config.process.max_pid_value) {
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             return self._pid_map;
         }
 
         fn get_next_pid(self: *Self) ?c.pid_t {
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             const maybe_index = self._pid_map.findFirstSet();
             if (maybe_index) |index| {
                 self._pid_map.unset(index);
@@ -133,6 +139,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         fn release_pid(self: *Self, pid: c.pid_t) void {
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             if (pid > 0 and pid < config.process.max_pid_value) {
                 self._pid_map.set(@intCast(pid - 1));
             }
@@ -142,6 +150,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
                 var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
+
+                kernel.process.block_context_switch();
+                defer kernel.process.unblock_context_switch();
                 self.processes.append(&new_process.node);
                 return;
             }
@@ -164,8 +175,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
-            self.lock_access();
-
+            kernel.process.block_context_switch();
             var next = self.processes.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -186,7 +196,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         const parent = p._parent.?;
                         self._scheduler.set_next(&parent.node);
                         self.core[hal.cpu.coreid()] = parent;
-                        self.unlock_access();
+                        // we will not get back to that place, process is terminated with forcing parent to run without context switch
+                        kernel.process.unblock_context_switch();
                         _ = process_get_back_to_parent_vfork(pid, ctx.?.sp, ctx.?.lr);
                         return;
                     }
@@ -195,11 +206,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             }
 
-            self.unlock_access();
+            kernel.process.unblock_context_switch();
             hal.irq.trigger(.pendsv);
         }
 
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
+            kernel.process.block_context_switch();
+            errdefer kernel.process.unblock_context_switch();
             const current_process = self.get_current_process();
             const maybe_pid = self.get_next_pid();
             if (maybe_pid == null) {
@@ -230,15 +243,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
             context.pid.* = new_process.pid;
 
-            {
-                self.processes.append(&new_process.node);
-                self._scheduler.set_next(&new_process.node);
-                self.core[hal.cpu.coreid()] = new_process;
-            }
+            self.processes.append(&new_process.node);
+            self._scheduler.set_next(&new_process.node);
+            self.core[hal.cpu.coreid()] = new_process;
             // child is now running without context switch, but uses parent stack until exec
             // switch without context switch, just to represent correct state
-
-            self.unlock_access();
+            kernel.process.unblock_context_switch();
             return process_vfork_child(@intFromPtr(context.r9.?), got, @intFromPtr(context.lr.?));
         }
 
@@ -264,8 +274,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 
         // TODO: exec on currently running process is not supported yet
         pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
+            kernel.process.block_context_switch();
             const current_process = self.get_current_process();
-            try current_process.reallocate_stack();
             // TODO: move loader to struct, pass allocator to loading functions
             const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
             var argc: usize = 0;
@@ -280,24 +290,23 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             } else if (executable.module.find_symbol("_start")) |entry| {
                 symbol = entry;
             } else {
+                kernel.process.unblock_context_switch();
                 return -1;
             }
 
+            try current_process.reallocate_stack();
             try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
+            self._scheduler.set_next(&current_process._parent.?.node);
+            self.core[hal.cpu.coreid()] = current_process._parent.?;
 
-            {
-                self.lock_access();
-                defer self.unlock_access();
-
-                self._scheduler.set_next(&current_process._parent.?.node);
-                self.core[hal.cpu.coreid()] = current_process._parent.?;
-            }
             if (current_process._vfork_context != null) {
                 const ctx = current_process._vfork_context.?;
                 current_process._vfork_context = null;
                 current_process.unblock_parent();
+                kernel.process.unblock_context_switch();
                 return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
             }
+            kernel.process.unblock_context_switch();
             return 0;
         }
 
@@ -314,11 +323,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn waitpid(self: *Self, pid: i32, status: *i32) !i32 {
+            kernel.process.block_context_switch();
             const current_process = self.get_current_process();
             const maybe_process = self.get_process_for_pid(pid);
             if (maybe_process) |p| {
                 if (p.state == Process.State.Terminated) {
                     status.* = current_process.child_exit_code;
+                    kernel.process.unblock_context_switch();
                     return pid;
                 }
                 const Action = struct {
@@ -328,9 +339,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     }
                 };
                 current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
+                    kernel.process.unblock_context_switch();
                     return -1;
                 };
+                kernel.process.unblock_context_switch();
                 hal.irq.trigger(.pendsv);
+            } else {
+                kernel.process.unblock_context_switch();
             }
             status.* = current_process.child_exit_code;
             return pid;
@@ -340,8 +355,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         // core access - secure, different memory regions
         // interrupts - disabled during access
         pub fn get_current_process(self: *const Self) *Process {
-            defer kernel.irq.enable_interrupts();
-            kernel.irq.disable_interrupts();
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             return self.core[hal.cpu.coreid()];
         }
 
@@ -362,12 +377,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         fn lock_access(self: *Self) void {
             // self.mutex.lock();
             _ = self;
-            kernel.irq.disable_interrupts();
+            // kernel.irq.disable_interrupts();
         }
 
         fn unlock_access(self: *Self) void {
             _ = self;
-            kernel.irq.enable_interrupts();
+            // kernel.irq.enable_interrupts();
             // self.mutex.unlock();
         }
     };
@@ -387,6 +402,8 @@ pub fn deinitialize_process_manager() void {
 }
 
 pub export fn process_set_next_task() *const u8 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
     if (instance._scheduler.get_next()) |task| {
         instance._scheduler.update_current();
         instance.core[hal.cpu.coreid()] = task;
@@ -396,16 +413,22 @@ pub export fn process_set_next_task() *const u8 {
 }
 
 export fn get_stack_bottom() *const u8 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
     return instance.core[hal.cpu.coreid()].get_stack_bottom();
 }
 
 export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
     _ = uses_fpu;
+    kernel.process.block_context_switch();
     instance.core[hal.cpu.coreid()].set_stack_pointer(ptr);
+    kernel.process.unblock_context_switch();
 }
 
 export fn arch_store_vfork_back_point(back_point: usize, stack_pointer: usize) void {
+    kernel.process.block_context_switch();
     instance.set_vfork_back_point(back_point, stack_pointer);
+    kernel.process.unblock_context_switch();
 }
 
 const StubScheduler = @import("scheduler/stub.zig").StubScheduler;
