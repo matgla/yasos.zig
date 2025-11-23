@@ -3,9 +3,9 @@ CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
 LDFLAGS = -fvisibility=hidden -g
 SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
-LDFLAGS_ELF = $(LDFLAGS) 
+LDFLAGS_ELF = $(LDFLAGS)
 
-TARGET = build/sh
+TARGET = build/rz
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -29,7 +29,7 @@ $(TARGET): $(OBJS)
 $(TARGET).elf: $(OBJS)
 	$(CC) $(LDFLAGS_ELF) $^ -o $@
 
-install: $(TARGET) 
+install: $(TARGET)
 	mkdir -p $(BINDIR)
 	cp $(TARGET) $(BINDIR)
 

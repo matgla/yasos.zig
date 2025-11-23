@@ -139,9 +139,43 @@ build_c_compiler()
   cd ..
 }
 
+build_gnumake()
+{
+  cd $1
+  if [ $CLEAR = true ]; then
+    make clean
+  fi
+  LDFLAGS="-Wl,-oformat=elf32-littlearm" CC=$CC ./configure --host=arm-none-eabi --prefix=$PREFIX
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  make
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  cp make make.elf
+  CC=$CC ./configure --host=arm-none-eabi --prefix=$PREFIX
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  make
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+
+  make install
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  cd ..
+}
+
 build_makefile()
 {
   cd $1
+  if [ $CLEAR = true]; then
+    make clean
+  fi
   make CC=$CC -j4
   if [ $? -ne 0 ]; then
     exit -1;
@@ -207,7 +241,6 @@ cd ..
 
 cd apps
 
-build_makefile shell
 build_makefile coreutils
 build_makefile cowsay
 build_makefile ascii_animations
@@ -218,6 +251,8 @@ build_makefile yasvi
 build_makefile mkfs
 build_makefile longjump_tester
 build_zork_makefile zork
+build_makefile rzsz
+# build_gnumake make
 
 $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 
