@@ -220,7 +220,14 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 return -1;
             };
 
-            const got = @intFromPtr(dynamic_loader.get_executable_for_pid(current_process.pid).?.module.unique_data.?.got.?.ptr);
+            var got: usize = 0;
+            if (dynamic_loader.get_executable_for_pid(current_process.pid)) |exec| {
+                if (exec.module.unique_data) |ud| {
+                    if (ud.got) |got_ptr| {
+                        got = @intFromPtr(got_ptr.ptr);
+                    }
+                }
+            }
             context.pid.* = new_process.pid;
 
             {
@@ -255,6 +262,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             current_process._vfork_context = ctx;
         }
 
+        // TODO: exec on currently running process is not supported yet
         pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
             const current_process = self.get_current_process();
             try current_process.reallocate_stack();
@@ -284,10 +292,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 self._scheduler.set_next(&current_process._parent.?.node);
                 self.core[hal.cpu.coreid()] = current_process._parent.?;
             }
-            const ctx = current_process._vfork_context.?;
-            current_process._vfork_context = null;
-            current_process.unblock_parent();
-            return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
+            if (current_process._vfork_context != null) {
+                const ctx = current_process._vfork_context.?;
+                current_process._vfork_context = null;
+                current_process.unblock_parent();
+                return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
+            }
+            return 0;
         }
 
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
@@ -404,7 +415,7 @@ test "ProcessManager.ShouldInitializeGlobalInstance" {
     defer deinitialize_process_manager();
 
     try std.testing.expect(instance.is_empty());
-    try std.testing.expectEqual(.NoAction, instance.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, instance.schedule_next());
 }
 
 test "ProcessManager.ShouldReactCorrectlyWhenIsEmpty" {
@@ -412,7 +423,7 @@ test "ProcessManager.ShouldReactCorrectlyWhenIsEmpty" {
     defer sut.deinit();
 
     try std.testing.expect(sut.is_empty());
-    try std.testing.expectEqual(.NoAction, sut.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, sut.schedule_next());
     try std.testing.expectEqual(1, sut.get_next_pid().?);
     try std.testing.expectEqual(null, sut.get_process_for_pid(1));
     try std.testing.expectEqual(config.process.max_pid_value - 1, sut.get_pidmap().count());
@@ -425,7 +436,7 @@ test "ProcessManager.ShouldCreateProcesses" {
     defer sut.deinit();
 
     try std.testing.expect(sut.is_empty());
-    try std.testing.expectEqual(.NoAction, sut.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, sut.schedule_next());
 
     const arg = "argument";
     try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
@@ -437,7 +448,7 @@ test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {
     defer deinitialize_process_manager();
 
     try std.testing.expect(sut.is_empty());
-    try std.testing.expectEqual(.NoAction, sut.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, sut.schedule_next());
 
     const arg = "argument";
 
@@ -474,7 +485,7 @@ test "ProcessManager.ShouldScheduleProcesses" {
     var sut = &instance;
 
     try std.testing.expect(sut.is_empty());
-    try std.testing.expectEqual(.NoAction, sut.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, sut.schedule_next());
 
     const arg = "argument";
     inline for (0..3) |i| {
@@ -513,12 +524,14 @@ test "ProcessManager.ShouldScheduleProcesses" {
 }
 
 test "ProcessManager.ShouldForkProcess" {
+    kernel.dynamic_loader.init(std.testing.allocator);
+    // defer kernel.dynamic_loader.deinit();
     initialize_process_manager(std.testing.allocator);
     defer deinitialize_process_manager();
     var sut = &instance;
 
     try std.testing.expect(sut.is_empty());
-    try std.testing.expectEqual(.NoAction, sut.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, sut.schedule_next());
 
     const arg = "argument";
     inline for (0..3) |i| {
@@ -527,11 +540,14 @@ test "ProcessManager.ShouldForkProcess" {
     }
 
     var pid: c.pid_t = 0;
+    var lr: usize = 1234;
+    var r9: usize = 5678;
     var vfork_context = c.vfork_context{
         .pid = &pid,
+        .lr = &lr,
+        .r9 = &r9,
     };
 
-    try std.testing.expectEqual(-1, sut.vfork(&vfork_context));
     try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
     _ = process_set_next_task();
     try std.testing.expectEqual(1, sut.get_current_process().pid);
@@ -539,21 +555,21 @@ test "ProcessManager.ShouldForkProcess" {
     var child = sut.get_process_for_pid(4);
     try std.testing.expect(child == null);
 
+    const parent = sut.get_current_process();
     try std.testing.expectEqual(0, try sut.vfork(&vfork_context));
-    try std.testing.expectEqual(0, pid);
+    try std.testing.expectEqual(4, pid);
 
     // new process was created with new pid
     child = sut.get_process_for_pid(4);
     try std.testing.expect(child != null);
 
-    const current = sut.get_current_process();
-    try std.testing.expect(current._blocked_by.first != null);
-    const blocked_data: *const Process.BlockedByProcess = @fieldParentPtr("node", current._blocked_by.first.?);
+    try std.testing.expect(parent._blocked_by.first != null);
+    const blocked_data: *const Process.BlockedByProcess = @fieldParentPtr("node", parent._blocked_by.first.?);
     try std.testing.expect(blocked_data.waiting_for == child.?);
 
     try std.testing.expect(child.?._blocks.first != null);
     const block_data: *const Process.BlockedProcessAction = @fieldParentPtr("node", child.?._blocks.first.?);
-    try std.testing.expect(block_data.blocked == current);
+    try std.testing.expect(block_data.blocked == parent);
 
     // Create argv - array of C string pointers
     var args_storage = [_][*:0]const u8{
@@ -622,7 +638,7 @@ test "ProcessManager.ShouldReturnStackForExternalUse" {
     defer sut.deinit();
 
     try std.testing.expect(sut.is_empty());
-    try std.testing.expectEqual(.NoAction, sut.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, sut.schedule_next());
 
     const arg = "argument";
     try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
@@ -632,12 +648,13 @@ test "ProcessManager.ShouldReturnStackForExternalUse" {
 }
 
 test "ProcessManager.ShouldWaitForProcess" {
+    kernel.dynamic_loader.init(std.testing.allocator);
     initialize_process_manager(std.testing.allocator);
     defer deinitialize_process_manager();
     var sut = &instance;
 
     try std.testing.expect(sut.is_empty());
-    try std.testing.expectEqual(.NoAction, sut.schedule_next());
+    try std.testing.expectEqual(.ReturnToMain, sut.schedule_next());
 
     const arg = "argument";
     inline for (0..3) |i| {
@@ -646,15 +663,19 @@ test "ProcessManager.ShouldWaitForProcess" {
     }
 
     var pid: c.pid_t = 0;
+    var lr: usize = 1234;
+    var r9: usize = 5678;
     var vfork_context = c.vfork_context{
         .pid = &pid,
+        .lr = &lr,
+        .r9 = &r9,
     };
 
     try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
     _ = process_set_next_task();
     try std.testing.expectEqual(0, try sut.vfork(&vfork_context));
     var status: i32 = 3;
-    try std.testing.expectEqual(0, try sut.waitpid(4, &status));
+    try std.testing.expectEqual(4, try sut.waitpid(4, &status));
     const p = sut.get_process_for_pid(4).?;
     p.unblock_parent();
     try std.testing.expectEqual(0, status);

@@ -241,6 +241,8 @@ test "SystemCall.UnhandledSyscallReturnsError" {
 }
 
 test "SystemCall.ShouldWriteResult" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
     var result_data: c.syscall_result = .{
         .result = 0,
         .err = 0,
@@ -258,7 +260,13 @@ test "SystemCall.ShouldWriteResult" {
     try std.testing.expectEqual(kernel.errno.to_errno(error.InvalidArgument), result_data.err);
 }
 
+fn root_entry() void {}
+
 test "SystemCall.ShouldErrorOnUnhandledSyscall" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+    process_manager.instance.create_root_process(1024, root_entry, null, "/") catch {};
+
     var result_data: c.syscall_result = .{
         .result = 0,
         .err = 0,

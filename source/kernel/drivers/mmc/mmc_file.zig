@@ -130,13 +130,13 @@ var mmc_stub = hal.mmc.Mmc.create(.{
         .d0 = 2,
     },
 });
-var mmcio: ?MmcIo = null;
 
+var mmcio_sut: ?MmcIo = null;
 fn create_sut() !kernel.fs.IFile {
-    mmcio = MmcIo.create(&mmc_stub);
-    try std.testing.expectError(error.CardInitializationFailure, mmcio.?.init());
+    mmcio_sut = MmcIo.create(&mmc_stub);
+    try std.testing.expectError(error.CardInitializationFailure, mmcio_sut.?.init());
 
-    return try MmcFile.InstanceType.create(std.testing.allocator, &mmcio.?, "mmc0").interface.new(std.testing.allocator);
+    return try MmcFile.InstanceType.create(std.testing.allocator, &mmcio_sut.?, "mmc0").interface.new(std.testing.allocator);
 }
 
 test "MmcFile.Create.ShouldInitializeCorrectly" {
@@ -148,150 +148,151 @@ test "MmcFile.Create.ShouldInitializeCorrectly" {
     try std.testing.expectEqual(@as(u32, 0), sut.as(MmcFile).data()._current_block);
 }
 
-// test "MmcFile.CreateNode.ShouldCreateFileNode" {
-//     var sut = try MmcFile.InstanceType.create_node(std.testing.allocator, &mmcio, "mmc0");
-//     defer mmc_stub.impl.reset();
-//     defer sut.delete();
+test "MmcFile.CreateNode.ShouldCreateFileNode" {
+    var mmcio = MmcIo.create(&mmc_stub);
+    var sut = try MmcFile.InstanceType.create_node(std.testing.allocator, &mmcio, "mmc0");
+    defer mmc_stub.impl.reset();
+    defer sut.delete();
 
-//     try std.testing.expect(sut.is_file());
-//     const maybe_file = sut.as_file();
-//     try std.testing.expect(maybe_file != null);
-//     if (maybe_file) |file| {
-//         try std.testing.expectEqualStrings("mmc0", file.interface.name());
-//     }
-// }
+    try std.testing.expect(sut.is_file());
+    const maybe_file = sut.as_file();
+    try std.testing.expect(maybe_file != null);
+    if (maybe_file) |file| {
+        try std.testing.expectEqualStrings("mmc0", file.interface.name());
+    }
+}
 
-// test "MmcFile.Filetype.ShouldReturnBlockDevice" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
-//     try std.testing.expectEqual(kernel.fs.FileType.BlockDevice, file.interface.filetype());
-// }
+test "MmcFile.Filetype.ShouldReturnBlockDevice" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
+    try std.testing.expectEqual(kernel.fs.FileType.BlockDevice, file.interface.filetype());
+}
 
-// test "MmcFile.Sync.ShouldReturnZero" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
-//     const result = file.interface.sync();
-//     try std.testing.expectEqual(@as(i32, 0), result);
-// }
+test "MmcFile.Sync.ShouldReturnZero" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
+    const result = file.interface.sync();
+    try std.testing.expectEqual(@as(i32, 0), result);
+}
 
-// test "MmcFile.Tell.ShouldReturnZero" {
-//     var file = try create_sut();
-//     defer file.interface.delete();
-//     defer mmc_stub.impl.reset();
-//     const result = file.interface.tell();
-//     try std.testing.expectEqual(@as(c.off_t, 0), result);
-// }
+test "MmcFile.Tell.ShouldReturnZero" {
+    var file = try create_sut();
+    defer file.interface.delete();
+    defer mmc_stub.impl.reset();
+    const result = file.interface.tell();
+    try std.testing.expectEqual(@as(c.off_t, 0), result);
+}
 
-// test "MmcFile.Ioctl.ShouldReturnZero" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
-//     const result = file.interface.ioctl(0, null);
-//     try std.testing.expectEqual(@as(i32, 0), result);
-// }
+test "MmcFile.Ioctl.ShouldReturnZero" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
+    const result = file.interface.ioctl(0, null);
+    try std.testing.expectEqual(@as(i32, 0), result);
+}
 
-// test "MmcFile.Fcntl.ShouldReturnZero" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
-//     const result = file.interface.fcntl(0, null);
-//     try std.testing.expectEqual(@as(i32, 0), result);
-// }
+test "MmcFile.Fcntl.ShouldReturnZero" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
+    const result = file.interface.fcntl(0, null);
+    try std.testing.expectEqual(@as(i32, 0), result);
+}
 
-// test "MmcFile.Seek.SEEK_SET.ShouldSetPosition" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
+test "MmcFile.Seek.SEEK_SET.ShouldSetPosition" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
 
-//     // Seek to block 10 (offset 5120 = 10 * 512)
-//     const result = try file.interface.seek(5120, c.SEEK_SET);
-//     // device is uninitialized
-//     try std.testing.expectEqual(-1, result);
-// }
+    // Seek to block 10 (offset 5120 = 10 * 512)
+    const result = try file.interface.seek(5120, c.SEEK_SET);
+    // device is uninitialized
+    try std.testing.expectEqual(-1, result);
+}
 
-// test "MmcFile.Seek.SEEK_SET.ShouldRejectNegativeOffset" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
+test "MmcFile.Seek.SEEK_SET.ShouldRejectNegativeOffset" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
 
-//     const result = try file.interface.seek(-100, c.SEEK_SET);
-//     try std.testing.expectEqual(@as(c.off_t, -1), result);
-// }
+    const result = try file.interface.seek(-100, c.SEEK_SET);
+    try std.testing.expectEqual(@as(c.off_t, -1), result);
+}
 
-// test "MmcFile.Seek.SEEK_CUR.ShouldSeekRelatively" {
-//     var file = try create_sut();
-//     defer file.interface.delete();
-//     defer mmc_stub.impl.reset();
-//     file.as(MmcFile).data()._current_block = 10;
+test "MmcFile.Seek.SEEK_CUR.ShouldSeekRelatively" {
+    var file = try create_sut();
+    defer file.interface.delete();
+    defer mmc_stub.impl.reset();
+    file.as(MmcFile).data()._current_block = 10;
 
-//     // Seek forward by 5 blocks (2560 bytes = 5 * 512)
-//     const result = try file.interface.seek(2560, c.SEEK_CUR);
-//     try std.testing.expectEqual(@as(u32, 15), file.as(MmcFile).data()._current_block);
-//     try std.testing.expectEqual(@as(c.off_t, 15 << 9), result);
-// }
+    // Seek forward by 5 blocks (2560 bytes = 5 * 512)
+    const result = try file.interface.seek(2560, c.SEEK_CUR);
+    try std.testing.expectEqual(@as(u32, 15), file.as(MmcFile).data()._current_block);
+    try std.testing.expectEqual(@as(c.off_t, 15 << 9), result);
+}
 
-// test "MmcFile.Seek.SEEK_CUR.ShouldSeekBackward" {
-//     var file = try create_sut();
-//     defer file.interface.delete();
-//     defer mmc_stub.impl.reset();
-//     file.as(MmcFile).data()._current_block = 10;
+test "MmcFile.Seek.SEEK_CUR.ShouldSeekBackward" {
+    var file = try create_sut();
+    defer file.interface.delete();
+    defer mmc_stub.impl.reset();
+    file.as(MmcFile).data()._current_block = 10;
 
-//     // Seek backward by 5 blocks (-2560 bytes = -5 * 512)
-//     const result = try file.interface.seek(-2560, c.SEEK_CUR);
-//     try std.testing.expectEqual(@as(u32, 5), file.as(MmcFile).data()._current_block);
-//     try std.testing.expectEqual(@as(c.off_t, 5 << 9), result);
-// }
+    // Seek backward by 5 blocks (-2560 bytes = -5 * 512)
+    const result = try file.interface.seek(-2560, c.SEEK_CUR);
+    try std.testing.expectEqual(@as(u32, 5), file.as(MmcFile).data()._current_block);
+    try std.testing.expectEqual(@as(c.off_t, 5 << 9), result);
+}
 
-// test "MmcFile.Seek.SEEK_CUR.ShouldRejectNegativePosition" {
-//     var file = try create_sut();
-//     defer file.interface.delete();
-//     defer mmc_stub.impl.reset();
-//     file.as(MmcFile).data()._current_block = 5;
+test "MmcFile.Seek.SEEK_CUR.ShouldRejectNegativePosition" {
+    var file = try create_sut();
+    defer file.interface.delete();
+    defer mmc_stub.impl.reset();
+    file.as(MmcFile).data()._current_block = 5;
 
-//     // Try to seek before start
-//     const result = try file.interface.seek(-10240, c.SEEK_CUR);
-//     try std.testing.expectEqual(@as(c.off_t, -1), result);
-// }
+    // Try to seek before start
+    const result = try file.interface.seek(-10240, c.SEEK_CUR);
+    try std.testing.expectEqual(@as(c.off_t, -1), result);
+}
 
-// test "MmcFile.Seek.SEEK_END.ShouldReturnError" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
+test "MmcFile.Seek.SEEK_END.ShouldReturnError" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
 
-//     const result = try file.interface.seek(0, c.SEEK_END);
-//     try std.testing.expectEqual(@as(c.off_t, -1), result);
-// }
+    const result = try file.interface.seek(0, c.SEEK_END);
+    try std.testing.expectEqual(@as(c.off_t, -1), result);
+}
 
-// test "MmcFile.Seek.InvalidWhence.ShouldReturnError" {
-//     var file = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer file.interface.delete();
+test "MmcFile.Seek.InvalidWhence.ShouldReturnError" {
+    var file = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer file.interface.delete();
 
-//     const result = try file.interface.seek(0, 999);
-//     try std.testing.expectEqual(@as(c.off_t, -1), result);
-// }
+    const result = try file.interface.seek(0, 999);
+    try std.testing.expectEqual(@as(c.off_t, -1), result);
+}
 
-// test "MmcFile.Size.ShouldReturnSizeInBytes" {
-//     var sut = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer sut.interface.delete();
-//     try std.testing.expectEqual(0, sut.interface.size());
-// }
+test "MmcFile.Size.ShouldReturnSizeInBytes" {
+    var sut = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer sut.interface.delete();
+    try std.testing.expectEqual(0, sut.interface.size());
+}
 
-// test "MmcFile.Read.ShouldFailWhenUninitialized" {
-//     var sut = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer sut.interface.delete();
-//     var buf: [512]u8 = undefined;
-//     try std.testing.expectEqual(-1, sut.interface.read(&buf));
-// }
+test "MmcFile.Read.ShouldFailWhenUninitialized" {
+    var sut = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer sut.interface.delete();
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqual(-1, sut.interface.read(&buf));
+}
 
-// test "MmcFile.Write.ShouldFailWhenUninitialized" {
-//     var sut = try create_sut();
-//     defer mmc_stub.impl.reset();
-//     defer sut.interface.delete();
-//     var buf: [512]u8 = undefined;
-//     try std.testing.expectEqual(-1, sut.interface.write(&buf));
-// }
+test "MmcFile.Write.ShouldFailWhenUninitialized" {
+    var sut = try create_sut();
+    defer mmc_stub.impl.reset();
+    defer sut.interface.delete();
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqual(-1, sut.interface.write(&buf));
+}

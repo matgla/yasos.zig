@@ -200,9 +200,6 @@ pub fn build(b: *std.Build) !void {
     const install_kernel_tests = b.addInstallBinFile(kernel_tests.getEmittedBin(), "kernel_tests");
     const install_fs_tests = b.addInstallBinFile(fs_tests.getEmittedBin(), "fs_tests");
     const install_arch_tests = b.addInstallBinFile(arch_tests.getEmittedBin(), "arch_tests");
-    b.default_step.dependOn(&install_arch_tests.step);
-    b.default_step.dependOn(&install_fs_tests.step);
-    // b.default_step.dependOn(&install_kernel_tests.step);
     run_tests_step.dependOn(&install_arch_tests.step);
     run_tests_step.dependOn(&install_fs_tests.step);
     run_tests_step.dependOn(&install_kernel_tests.step);
@@ -358,7 +355,6 @@ pub fn build(b: *std.Build) !void {
             });
             libc_imports_module.addIncludePath(b.path("."));
             libc_imports_module.addIncludePath(b.path("libs/libc"));
-            // libc_imports_module.addIncludePath(b.path("./libs/tinycc/include"));
             libc_imports_module.addIncludePath(b.path("rootfs/usr/include"));
             const cimports_module = b.addModule("cimports", .{
                 .root_source_file = b.path("source/cimports.zig"),
@@ -366,7 +362,6 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             });
 
-            // libc_imports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
             cimports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
 
             kernel_module.addImport("libc_imports", libc_imports_module);

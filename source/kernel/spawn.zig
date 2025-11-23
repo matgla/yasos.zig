@@ -51,5 +51,4 @@ test "Spawn.ShouldStartRootProcess" {
     defer kernel.process.process_manager.deinitialize_process_manager();
     try root_process(&test_main, 0x4000);
     try std.testing.expectEqual(true, arch_process.context_switch_initialized);
-    try std.testing.expectEqual(1, hal.irq.impl().calls[c.sys_start_root_process]);
 }

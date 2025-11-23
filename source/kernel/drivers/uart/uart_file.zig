@@ -220,423 +220,423 @@ pub fn UartFile(comptime UartType: anytype) type {
 const MockUart = @import("tests/uart_mock.zig").MockUart;
 const TestUartFile = UartFile(MockUart);
 
-// test "UartFile.Create.ShouldInitializeWithDefaults" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-
-//     try std.testing.expect(file.data()._icanonical);
-//     try std.testing.expect(file.data()._echo);
-//     try std.testing.expect(!file.data()._nonblock);
-//     try std.testing.expectEqualStrings("uart0", file.data()._name);
-// }
-
-// test "UartFile.CreateNode.ShouldCreateFileNode" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var node = try TestUartFile.InstanceType.create_node(std.testing.allocator, "uart0");
-//     defer node.delete();
-
-//     try std.testing.expect(node.is_file());
-//     const maybe_file = node.as_file();
-//     try std.testing.expect(maybe_file != null);
-//     if (maybe_file) |file| {
-//         try std.testing.expectEqualStrings("uart0", file.interface.name());
-//     }
-// }
-
-// test "UartFile.Filetype.ShouldReturnCharDevice" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     try std.testing.expectEqual(FileType.CharDevice, file.data().filetype());
-// }
-
-// test "UartFile.Size.ShouldReturnZero" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     try std.testing.expectEqual(@as(usize, 0), file.data().size());
-// }
-
-// test "UartFile.Write.ShouldWriteToUart" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     const data = "Hello, UART!";
-
-//     const written = file.data().write(data);
-//     try std.testing.expectEqual(@as(isize, @intCast(data.len)), written);
-//     try std.testing.expectEqualStrings(data, MockUart.get_written_data());
-// }
-
-// test "UartFile.Read.ShouldReadFromUart" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     MockUart.set_read_data("test\n");
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     try std.testing.expectEqual(@as(isize, 5), bytes_read);
-//     try std.testing.expectEqualStrings("test\n", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldConvertCarriageReturnToNewline" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     MockUart.set_read_data("test\r");
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     try std.testing.expectEqual(@as(isize, 5), bytes_read);
-//     try std.testing.expectEqualStrings("test\n", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldHandleBackspace" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     // Simulate typing "hello" then backspace, then "i"
-//     MockUart.set_read_data("hello");
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._echo = false; // Disable echo for simpler testing
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     try std.testing.expectEqual(@as(isize, 5), bytes_read);
-//     try std.testing.expectEqualStrings("hello", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldStopAtNewlineInCanonicalMode" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     MockUart.set_read_data("hello\nworld");
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var buffer: [20]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     try std.testing.expectEqual(@as(isize, 6), bytes_read);
-//     try std.testing.expectEqualStrings("hello\n", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldReadAllDataInNonCanonicalMode" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     MockUart.set_read_data("hello\nworld");
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._icanonical = false;
-//     var buffer: [20]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     try std.testing.expectEqual(@as(isize, 11), bytes_read);
-//     try std.testing.expectEqualStrings("hello\nworld", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldReturnImmediatelyInNonBlockMode" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     MockUart.readable = false;
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._nonblock = true;
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     try std.testing.expectEqual(@as(isize, 0), bytes_read);
-// }
-
-// test "UartFile.Ioctl.TCGETS.ShouldReturnCurrentSettings" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var termios: c.termios = undefined;
-
-//     const result = file.data().ioctl(c.TCGETS, @ptrCast(&termios));
-//     try std.testing.expectEqual(@as(i32, 0), result);
-//     try std.testing.expect((termios.c_lflag & c.ICANON) != 0);
-//     try std.testing.expect((termios.c_lflag & c.ECHO) != 0);
-// }
-
-// test "UartFile.Ioctl.TCSETS.ShouldSetCanonicalMode" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var termios: c.termios = std.mem.zeroes(c.termios);
-//     termios.c_lflag = c.ICANON;
-
-//     const result = file.data().ioctl(c.TCSETS, @ptrCast(&termios));
-//     try std.testing.expectEqual(@as(i32, 0), result);
-//     try std.testing.expect(file.data()._icanonical);
-//     try std.testing.expect(!file.data()._echo);
-// }
-
-// test "UartFile.Ioctl.TCSETS.ShouldSetEchoMode" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var termios: c.termios = std.mem.zeroes(c.termios);
-//     termios.c_lflag = c.ECHO;
-
-//     const result = file.data().ioctl(c.TCSETS, @ptrCast(&termios));
-//     try std.testing.expectEqual(@as(i32, 0), result);
-//     try std.testing.expect(!file.data()._icanonical);
-//     try std.testing.expect(file.data()._echo);
-// }
-
-// test "UartFile.Ioctl.TIOCGWINSZ.ShouldReturnWindowSize" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var ws: c.struct_winsize = undefined;
-
-//     const result = file.data().ioctl(c.TIOCGWINSZ, @ptrCast(&ws));
-//     try std.testing.expectEqual(@as(i32, 0), result);
-//     try std.testing.expectEqual(@as(c_ushort, 24), ws.ws_row);
-//     try std.testing.expectEqual(@as(c_ushort, 80), ws.ws_col);
-// }
-
-// test "UartFile.Ioctl.ShouldReturnErrorForInvalidOp" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var termios: c.termios = undefined;
-
-//     const result = file.data().ioctl(0xf00d, @ptrCast(&termios));
-//     try std.testing.expectEqual(@as(i32, -1), result);
-// }
-
-// test "UartFile.Ioctl.ShouldReturnErrorForNullArg" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     const result = file.data().ioctl(c.TCGETS, null);
-//     try std.testing.expectEqual(@as(i32, -1), result);
-// }
-
-// test "UartFile.Fcntl.F_GETFL.ShouldReturnFlags" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._nonblock = true;
-
-//     const result = file.data().fcntl(c.F_GETFL, null);
-//     try std.testing.expect((result & c.O_NONBLOCK) != 0);
-// }
-
-// test "UartFile.Fcntl.F_SETFL.ShouldSetNonBlockMode" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var flags: c_int = c.O_NONBLOCK;
-
-//     const result = file.data().fcntl(c.F_SETFL, @ptrCast(&flags));
-//     try std.testing.expectEqual(@as(i32, 0), result);
-//     try std.testing.expect(file.data()._nonblock);
-// }
-
-// test "UartFile.Fcntl.ShouldReturnErrorForInvalidOp" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var flags: c_int = 0;
-
-//     const result = file.data().fcntl(0xf00d, @ptrCast(&flags));
-//     try std.testing.expectEqual(@as(i32, -1), result);
-// }
-
-// test "UartFile.Seek.ShouldReturnZero" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     const result = try file.data().seek(100, 0);
-//     try std.testing.expectEqual(@as(c.off_t, 0), result);
-// }
-
-// test "UartFile.Tell.ShouldReturnZero" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     const result = file.data().tell();
-//     try std.testing.expectEqual(@as(c.off_t, 0), result);
-// }
-
-// test "UartFile.Sync.ShouldReturnZero" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     const result = file.data().sync();
-//     try std.testing.expectEqual(@as(i32, 0), result);
-// }
-
-// test "UartFile.Fcntl.F_GETFL.ShouldReturnZeroWhenNonBlockIsNotSet" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._nonblock = false;
-//     var flags: c_int = 0;
-//     const result = file.data().fcntl(c.F_GETFL, &flags);
-//     try std.testing.expectEqual(@as(i32, 0), result);
-//     try std.testing.expect((result & c.O_NONBLOCK) == 0);
-// }
-
-// test "UartFile.Fcntl.F_GETFL.ShouldReturnStatusWhenNonBlockIsSet" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var flags: c_int = 0;
-//     file.data()._nonblock = true;
-//     const result = file.data().fcntl(c.F_GETFL, &flags);
-//     try std.testing.expectEqual(@as(i32, c.O_NONBLOCK), result);
-// }
-
-// test "UartFile.Ioctl.TCSETSW.ShouldReturnError" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var termios: c.termios = std.mem.zeroes(c.termios);
-
-//     const result = file.data().ioctl(c.TCSETSW, @ptrCast(&termios));
-//     try std.testing.expectEqual(@as(i32, -1), result);
-// }
-
-// test "UartFile.Ioctl.TCSETSF.ShouldReturnError" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     var termios: c.termios = std.mem.zeroes(c.termios);
-
-//     const result = file.data().ioctl(c.TCSETSF, @ptrCast(&termios));
-//     try std.testing.expectEqual(@as(i32, -1), result);
-// }
-
-// test "UartFile.Read.ShouldHandleBackspaceCharacter" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     // Simulate typing "abc" then backspace (ASCII 8)
-//     const data = "abc\x08";
-//     MockUart.set_read_data(data);
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._echo = false; // Disable echo for simpler testing
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     // Should read "abc", then backspace removes 'c', leaving "ab"
-//     try std.testing.expectEqual(@as(isize, 2), bytes_read);
-//     try std.testing.expectEqualStrings("ab", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldHandleDeleteCharacter" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     // Simulate typing "xyz" then delete (ASCII 127)
-//     const data = "xyz\x7F";
-//     MockUart.set_read_data(data);
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._echo = false; // Disable echo for simpler testing
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     // Should read "xyz", then delete removes 'z', leaving "xy"
-//     try std.testing.expectEqual(@as(isize, 2), bytes_read);
-//     try std.testing.expectEqualStrings("xy", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldHandleMultipleBackspaces" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     // Simulate typing "hello" then three backspaces
-//     const data = "hello\x08\x08\x08";
-//     MockUart.set_read_data(data);
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._echo = false;
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     // Should read "hello", then three backspaces remove "llo", leaving "he"
-//     try std.testing.expectEqual(@as(isize, 2), bytes_read);
-//     try std.testing.expectEqualStrings("he", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldHandleBackspaceAtStartOfBuffer" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     // Simulate backspace at the beginning (should be ignored)
-//     const data = "\x08abc";
-//     MockUart.set_read_data(data);
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._echo = false;
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     // Backspace at start should be ignored, should read "abc"
-//     try std.testing.expectEqual(@as(isize, 3), bytes_read);
-//     try std.testing.expectEqualStrings("abc", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldHandleMixedBackspaceAndDelete" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     // Simulate typing with mixed backspace and delete
-//     const data = "test\x08\x7Fok";
-//     MockUart.set_read_data(data);
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._echo = false;
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     // "test" -> backspace removes 't' -> "tes" -> delete removes 's' -> "te" -> add "ok" -> "teok"
-//     try std.testing.expectEqual(@as(isize, 4), bytes_read);
-//     try std.testing.expectEqualStrings("teok", buffer[0..@intCast(bytes_read)]);
-// }
-
-// test "UartFile.Read.ShouldEchoBackspaceSequence" {
-//     MockUart.reset();
-//     defer MockUart.reset();
-//     const data = "ab\x08";
-//     MockUart.set_read_data(data);
-
-//     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-//     file.data()._echo = true; // Enable echo
-//     var buffer: [10]u8 = undefined;
-
-//     const bytes_read = file.data().read(&buffer);
-//     try std.testing.expectEqual(@as(isize, 1), bytes_read);
-//     try std.testing.expectEqualStrings("a", buffer[0..@intCast(bytes_read)]);
-
-//     // Check that backspace sequence was written (backspace, space, backspace)
-//     const written = MockUart.get_written_data();
-//     // Should contain the characters 'a', 'b', then backspace sequence: \x08, ' ', \x08
-//     try std.testing.expect(written.len >= 5);
-// }
+test "UartFile.Create.ShouldInitializeWithDefaults" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+
+    try std.testing.expect(file.data()._icanonical);
+    try std.testing.expect(file.data()._echo);
+    try std.testing.expect(!file.data()._nonblock);
+    try std.testing.expectEqualStrings("uart0", file.data()._name);
+}
+
+test "UartFile.CreateNode.ShouldCreateFileNode" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var node = try TestUartFile.InstanceType.create_node(std.testing.allocator, "uart0");
+    defer node.delete();
+
+    try std.testing.expect(node.is_file());
+    const maybe_file = node.as_file();
+    try std.testing.expect(maybe_file != null);
+    if (maybe_file) |file| {
+        try std.testing.expectEqualStrings("uart0", file.interface.name());
+    }
+}
+
+test "UartFile.Filetype.ShouldReturnCharDevice" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    try std.testing.expectEqual(FileType.CharDevice, file.data().filetype());
+}
+
+test "UartFile.Size.ShouldReturnZero" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    try std.testing.expectEqual(@as(usize, 0), file.data().size());
+}
+
+test "UartFile.Write.ShouldWriteToUart" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    const data = "Hello, UART!";
+
+    const written = file.data().write(data);
+    try std.testing.expectEqual(@as(isize, @intCast(data.len)), written);
+    try std.testing.expectEqualStrings(data, MockUart.get_written_data());
+}
+
+test "UartFile.Read.ShouldReadFromUart" {
+    MockUart.reset();
+    defer MockUart.reset();
+    MockUart.set_read_data("test\n");
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqual(@as(isize, 5), bytes_read);
+    try std.testing.expectEqualStrings("test\n", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldConvertCarriageReturnToNewline" {
+    MockUart.reset();
+    defer MockUart.reset();
+    MockUart.set_read_data("test\r");
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqual(@as(isize, 5), bytes_read);
+    try std.testing.expectEqualStrings("test\n", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldHandleBackspace" {
+    MockUart.reset();
+    defer MockUart.reset();
+    // Simulate typing "hello" then backspace, then "i"
+    MockUart.set_read_data("hello");
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._echo = false; // Disable echo for simpler testing
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqual(@as(isize, 5), bytes_read);
+    try std.testing.expectEqualStrings("hello", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldStopAtNewlineInCanonicalMode" {
+    MockUart.reset();
+    defer MockUart.reset();
+    MockUart.set_read_data("hello\nworld");
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var buffer: [20]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqual(@as(isize, 6), bytes_read);
+    try std.testing.expectEqualStrings("hello\n", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldReadAllDataInNonCanonicalMode" {
+    MockUart.reset();
+    defer MockUart.reset();
+    MockUart.set_read_data("hello\nworld");
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._icanonical = false;
+    var buffer: [20]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqual(@as(isize, 11), bytes_read);
+    try std.testing.expectEqualStrings("hello\nworld", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldReturnImmediatelyInNonBlockMode" {
+    MockUart.reset();
+    defer MockUart.reset();
+    MockUart.readable = false;
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._nonblock = true;
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqual(@as(isize, 0), bytes_read);
+}
+
+test "UartFile.Ioctl.TCGETS.ShouldReturnCurrentSettings" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = undefined;
+
+    const result = file.data().ioctl(c.TCGETS, @ptrCast(&termios));
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect((termios.c_lflag & c.ICANON) != 0);
+    try std.testing.expect((termios.c_lflag & c.ECHO) != 0);
+}
+
+test "UartFile.Ioctl.TCSETS.ShouldSetCanonicalMode" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = std.mem.zeroes(c.termios);
+    termios.c_lflag = c.ICANON;
+
+    const result = file.data().ioctl(c.TCSETS, @ptrCast(&termios));
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect(file.data()._icanonical);
+    try std.testing.expect(!file.data()._echo);
+}
+
+test "UartFile.Ioctl.TCSETS.ShouldSetEchoMode" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = std.mem.zeroes(c.termios);
+    termios.c_lflag = c.ECHO;
+
+    const result = file.data().ioctl(c.TCSETS, @ptrCast(&termios));
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect(!file.data()._icanonical);
+    try std.testing.expect(file.data()._echo);
+}
+
+test "UartFile.Ioctl.TIOCGWINSZ.ShouldReturnWindowSize" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var ws: c.struct_winsize = undefined;
+
+    const result = file.data().ioctl(c.TIOCGWINSZ, @ptrCast(&ws));
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expectEqual(@as(c_ushort, 24), ws.ws_row);
+    try std.testing.expectEqual(@as(c_ushort, 80), ws.ws_col);
+}
+
+test "UartFile.Ioctl.ShouldReturnErrorForInvalidOp" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = undefined;
+
+    const result = file.data().ioctl(0xf00d, @ptrCast(&termios));
+    try std.testing.expectEqual(@as(i32, -1), result);
+}
+
+test "UartFile.Ioctl.ShouldReturnErrorForNullArg" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    const result = file.data().ioctl(c.TCGETS, null);
+    try std.testing.expectEqual(@as(i32, -1), result);
+}
+
+test "UartFile.Fcntl.F_GETFL.ShouldReturnFlags" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._nonblock = true;
+
+    const result = file.data().fcntl(c.F_GETFL, null);
+    try std.testing.expect((result & c.O_NONBLOCK) != 0);
+}
+
+test "UartFile.Fcntl.F_SETFL.ShouldSetNonBlockMode" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    const flags: c_int = c.O_NONBLOCK;
+
+    const result = file.data().fcntl(c.F_SETFL, @ptrFromInt(flags));
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect(file.data()._nonblock);
+}
+
+test "UartFile.Fcntl.ShouldReturnErrorForInvalidOp" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var flags: c_int = 0;
+
+    const result = file.data().fcntl(0xf00d, @ptrCast(&flags));
+    try std.testing.expectEqual(@as(i32, -1), result);
+}
+
+test "UartFile.Seek.ShouldReturnZero" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    const result = try file.data().seek(100, 0);
+    try std.testing.expectEqual(@as(c.off_t, 0), result);
+}
+
+test "UartFile.Tell.ShouldReturnZero" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    const result = file.data().tell();
+    try std.testing.expectEqual(@as(c.off_t, 0), result);
+}
+
+test "UartFile.Sync.ShouldReturnZero" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    const result = file.data().sync();
+    try std.testing.expectEqual(@as(i32, 0), result);
+}
+
+test "UartFile.Fcntl.F_GETFL.ShouldReturnZeroWhenNonBlockIsNotSet" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._nonblock = false;
+    const flags: c_int = 0;
+    const result = file.data().fcntl(c.F_GETFL, @ptrFromInt(flags));
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect((result & c.O_NONBLOCK) == 0);
+}
+
+test "UartFile.Fcntl.F_GETFL.ShouldReturnStatusWhenNonBlockIsSet" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    const flags: c_int = 0;
+    file.data()._nonblock = true;
+    const result = file.data().fcntl(c.F_GETFL, @ptrFromInt(flags));
+    try std.testing.expectEqual(@as(i32, c.O_NONBLOCK), result);
+}
+
+test "UartFile.Ioctl.TCSETSW.ShouldReturnError" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = std.mem.zeroes(c.termios);
+
+    const result = file.data().ioctl(c.TCSETSW, @ptrCast(&termios));
+    try std.testing.expectEqual(@as(i32, -1), result);
+}
+
+test "UartFile.Ioctl.TCSETSF.ShouldReturnError" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = std.mem.zeroes(c.termios);
+
+    const result = file.data().ioctl(c.TCSETSF, @ptrCast(&termios));
+    try std.testing.expectEqual(@as(i32, -1), result);
+}
+
+test "UartFile.Read.ShouldHandleBackspaceCharacter" {
+    MockUart.reset();
+    defer MockUart.reset();
+    // Simulate typing "abc" then backspace (ASCII 8)
+    const data = "abc\x08";
+    MockUart.set_read_data(data);
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._echo = false; // Disable echo for simpler testing
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    // Should read "abc", then backspace removes 'c', leaving "ab"
+    try std.testing.expectEqual(@as(isize, 2), bytes_read);
+    try std.testing.expectEqualStrings("ab", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldHandleDeleteCharacter" {
+    MockUart.reset();
+    defer MockUart.reset();
+    // Simulate typing "xyz" then delete (ASCII 127)
+    const data = "xyz\x7F";
+    MockUart.set_read_data(data);
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._echo = false; // Disable echo for simpler testing
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    // Should read "xyz", then delete removes 'z', leaving "xy"
+    try std.testing.expectEqual(@as(isize, 2), bytes_read);
+    try std.testing.expectEqualStrings("xy", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldHandleMultipleBackspaces" {
+    MockUart.reset();
+    defer MockUart.reset();
+    // Simulate typing "hello" then three backspaces
+    const data = "hello\x08\x08\x08";
+    MockUart.set_read_data(data);
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._echo = false;
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    // Should read "hello", then three backspaces remove "llo", leaving "he"
+    try std.testing.expectEqual(@as(isize, 2), bytes_read);
+    try std.testing.expectEqualStrings("he", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldHandleBackspaceAtStartOfBuffer" {
+    MockUart.reset();
+    defer MockUart.reset();
+    // Simulate backspace at the beginning (should be ignored)
+    const data = "\x08abc";
+    MockUart.set_read_data(data);
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._echo = false;
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    // Backspace at start should be ignored, should read "abc"
+    try std.testing.expectEqual(@as(isize, 3), bytes_read);
+    try std.testing.expectEqualStrings("abc", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldHandleMixedBackspaceAndDelete" {
+    MockUart.reset();
+    defer MockUart.reset();
+    // Simulate typing with mixed backspace and delete
+    const data = "test\x08\x7Fok";
+    MockUart.set_read_data(data);
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._echo = false;
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    // "test" -> backspace removes 't' -> "tes" -> delete removes 's' -> "te" -> add "ok" -> "teok"
+    try std.testing.expectEqual(@as(isize, 4), bytes_read);
+    try std.testing.expectEqualStrings("teok", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Read.ShouldEchoBackspaceSequence" {
+    MockUart.reset();
+    defer MockUart.reset();
+    const data = "ab\x08";
+    MockUart.set_read_data(data);
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._echo = true; // Enable echo
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqual(@as(isize, 1), bytes_read);
+    try std.testing.expectEqualStrings("a", buffer[0..@intCast(bytes_read)]);
+
+    // Check that backspace sequence was written (backspace, space, backspace)
+    const written = MockUart.get_written_data();
+    // Should contain the characters 'a', 'b', then backspace sequence: \x08, ' ', \x08
+    try std.testing.expect(written.len >= 5);
+}
