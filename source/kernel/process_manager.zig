@@ -342,7 +342,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 
         // Synchronization
         // this must be synchronized across interrupts and cores
-        pub fn is_empty(self: Self) bool {
+        pub fn is_empty(self: *Self) bool {
             self.lock_access();
             defer self.unlock_access();
             return self.processes.first == null;

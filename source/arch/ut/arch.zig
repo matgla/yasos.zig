@@ -36,3 +36,6 @@ pub const exc_return = struct {
 };
 
 export fn arch_store_registers_on_stack() void {}
+
+pub fn disable_interrupts() void {}
+pub fn enable_interrupts() void {}

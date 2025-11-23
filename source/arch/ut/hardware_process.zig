@@ -42,6 +42,10 @@ pub const HardwareProcess = struct {
         };
     }
 
+    pub fn reallocate_stack(self: *HardwareProcess) !void {
+        _ = self;
+    }
+
     pub fn deinit(self: *HardwareProcess, allocator: std.mem.Allocator) void {
         _ = allocator;
         _ = self;
@@ -80,7 +84,7 @@ pub const HardwareProcess = struct {
         };
     }
 
-    pub fn reinitialize_stack(self: *HardwareProcess, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) void {
+    pub fn reinitialize_stack(self: *HardwareProcess, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) !void {
         _ = self;
         _ = process_entry;
         _ = argc;
@@ -88,7 +92,6 @@ pub const HardwareProcess = struct {
         _ = symbol;
         _ = got;
         _ = exit_handler_impl;
-        _ = use_fpu;
     }
 };
 
@@ -110,6 +113,20 @@ pub fn initialize_context_switching() void {
 
 pub fn get_offset_of_hardware_stored_registers(use_fpu: bool) isize {
     _ = use_fpu;
+    return 0;
+}
+
+pub export fn process_vfork_child(r11: usize, got: usize, lr: usize) i32 {
+    _ = r11;
+    _ = got;
+    _ = lr;
+    return 0;
+}
+
+pub export fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize) i32 {
+    _ = pid;
+    _ = sp;
+    _ = lr;
     return 0;
 }
 

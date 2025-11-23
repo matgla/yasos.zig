@@ -338,14 +338,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.reevaluate_state();
         }
 
-        pub fn set_vfork_pid(self: *Self, pid: c.pid_t) void {
-            if (self._vfork_context) |context| {
-                context.pid.* = pid;
-            } else {
-                log.err("Process {d} vfork context is null, cannot set pid", .{self.pid});
-            }
-        }
-
         pub fn reevaluate_state(self: *Self) void {
             if (self.state == State.Terminated) {
                 return;
@@ -695,19 +687,10 @@ test "Process.ShouldForkProcess" {
     try std.testing.expectEqual(null, parent._parent);
     defer parent.deinit();
 
-    var pid: c.pid_t = -1;
-    const vfork_context = c.vfork_context{
-        .pid = &pid,
-    };
-
-    var child = try parent.vfork(&pool, &vfork_context, 81);
+    var child = try parent.vfork(&pool, 81);
     defer child.deinit();
 
     try std.testing.expect(child.get_parent() == parent);
-    try std.testing.expectEqual(-1, pid);
-
-    child.set_vfork_pid(123);
-    try std.testing.expectEqual(123, pid);
 }
 
 const MultiProcessUnblock = struct {
@@ -843,10 +826,7 @@ test "Process.ShouldRestoreParentStack" {
 
     const parent_stack_before = parent.stack_pointer();
 
-    var pid: c.pid_t = -1;
-    const vfork_ctx = c.vfork_context{ .pid = &pid };
-
-    var child = try parent.vfork(&pool, &vfork_ctx, 121);
+    var child = try parent.vfork(&pool, 121);
     defer child.deinit();
 
     try std.testing.expect(child.has_stack_shared_with_parent());
@@ -858,16 +838,6 @@ test "Process.ShouldRestoreParentStack" {
 
     // try std.testing.expect(parent.stack_pointer() != parent_stack_before);
     try std.testing.expectEqual(new_child_sp, child.stack_pointer());
-
-    child.restore_parent_stack();
-
-    try std.testing.expect(!child.has_stack_shared_with_parent());
-    try std.testing.expectEqual(parent_stack_before, parent.stack_pointer());
-
-    child.restore_parent_stack();
-
-    try std.testing.expect(!child.has_stack_shared_with_parent());
-    try std.testing.expectEqual(parent_stack_before, parent.stack_pointer());
 }
 
 test "Process.ShouldMmapMemory" {
@@ -933,10 +903,7 @@ test "Process.ShouldDuplicateFileHandlesOnVfork" {
     const fd0 = try parent.attach_file("/dev/test0", node1);
     const fd1 = try parent.attach_file("/dev/test1", node2);
 
-    var pid: c.pid_t = -1;
-    const vfork_ctx = c.vfork_context{ .pid = &pid };
-
-    var child = try parent.vfork(&child_pool, &vfork_ctx, 211);
+    var child = try parent.vfork(&child_pool, 211);
     defer child.deinit();
 
     const parent_handle0 = parent.get_file_handle(fd0).?;

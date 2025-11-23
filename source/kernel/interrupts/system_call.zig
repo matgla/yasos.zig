@@ -245,7 +245,7 @@ test "SystemCall.ShouldWriteResult" {
         .result = 0,
         .err = 0,
     };
-    write_result(&result_data, 42);
+    _ = write_result(&result_data, 42);
     try std.testing.expectEqual(42, result_data.result);
     try std.testing.expectEqual(-1, result_data.err);
 
@@ -253,7 +253,7 @@ test "SystemCall.ShouldWriteResult" {
         .result = 0,
         .err = 0,
     };
-    write_result(&result_data, error.InvalidArgument);
+    _ = write_result(&result_data, error.InvalidArgument);
     try std.testing.expectEqual(-1, result_data.result);
     try std.testing.expectEqual(kernel.errno.to_errno(error.InvalidArgument), result_data.err);
 }
@@ -264,7 +264,7 @@ test "SystemCall.ShouldErrorOnUnhandledSyscall" {
         .err = 0,
     };
     var arg: i32 = 0;
-    _irq_svcall(c.SYSCALL_COUNT, &arg, &result_data);
+    _ = _irq_svcall(c.SYSCALL_COUNT, &arg, &result_data);
     try std.testing.expectEqual(-1, result_data.result);
     try std.testing.expectEqual(kernel.errno.to_errno(kernel.errno.ErrnoSet.NotImplemented), result_data.err);
 }
