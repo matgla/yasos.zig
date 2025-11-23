@@ -24,30 +24,32 @@
 
 #include "libs/libc/sys/syscall_ids.h"
 
-// This functionality should be called from PendSV IRQ,
-// thank's to that we are on MSP with privilege mode
+// r0 - is fpu used
+// r1 - lr to return to
 .global switch_to_next_task
 .thumb_func
 switch_to_next_task:
   // call scheduler to configure next task for the execution
-  push {lr}
-  bl process_set_next_task
-  push {r0-r1}
-  bl get_stack_bottom
+  push {lr, r0} // lr and is fpu
+  push {r0, r1} // is fpu and process lr
+  bl process_set_next_task // no arguments r0 = next sp
+  push {r0, r1}
+  bl get_stack_bottom // no arguments - r0 = sp bottom
   msr psplim, r0
-  pop {r0-r1}
-
+  pop {r0, r1}
+  pop {r2, r1}
   // load task context
   bl arm_load_registers_from_stack
-  pop {pc}
+  pop {pc, r1}
 
-// r0 - address of the stack to load registers from
+// r0 - address to load from
+// r1 - 1 if FPU registers should be loaded, 0 otherwise
 .global arm_load_registers_from_stack
 .thumb_func
 arm_load_registers_from_stack:
   push {lr}
   ldmia r0!, {r1} // is fpu used
-  ldmia r0!, {r2, r4-r12}
+  ldmia r0!, {r2, r4-r11}
   cmp r1, #0
   beq load_no_fpu
   vldmia r0!, {s16-s31}
@@ -56,20 +58,21 @@ load_no_fpu:
   mov r0, r2
   pop {pc}
 
-// r0 - address LR to return to
-// r1 - 1 if FPU registers should be stored, 0 otherwise
+// r0 - 1 if FPU registers should be stored, 0 otherwise
+// r1 - address LR to return to
 .global arch_store_registers_on_stack
 .thumb_func
 arch_store_registers_on_stack:
   push {lr}
-  mov r2, r0
-  mrs r0, psp
-  cmp r1, #0
+  mov r2, r1
+  mrs r1, psp
+  cmp r0, #0
   beq store_no_fpu
-  vstmdb r0!, {s16-s31}
+  vstmdb r1!, {s16-s31}
 store_no_fpu:
-  stmdb r0!, {r2, r4-r12}
-  stmdb r0!, {r1}
+  stmdb r1!, {r2, r4-r11}
+  stmdb r1!, {r0}
+  mov r0, r1
   bl update_stack_pointer
   pop {pc}
 
@@ -81,26 +84,18 @@ store_no_fpu:
 store_and_switch_to_next_task:
   push {r4, lr}
   // let's check if fpu is used by current task
+  push {r0, r1}
   bl arch_store_registers_on_stack
+  pop {r0, r1}
   bl switch_to_next_task
   pop {r4, pc}
-
-.global switch_to_the_next_task
-.thumb_func
-switch_to_the_next_task:
-  push {lr}
-  bl switch_to_next_task
-  pop {pc}
 
 .global dispatch_syscall
 .thumb_func
 dispatch_syscall:
+  // this is not in IRQ, so can be interrupted
   push {r0, r1}
-  push {r0-r3}
-  bl unblock_context_switch
-  pop {r0-r3}
   bl _irq_svcall
-  bl block_context_switch
   mov r0, #0
   svc #1 // this pushes another context
 
@@ -111,15 +106,9 @@ dispatch_syscall:
 .global irq_svcall
 .thumb_func
 irq_svcall:
-  push {r0-r4, lr}
-  bl block_context_switch
-  pop {r0-r4, lr}
+  // this is processed in irq
   cmp r0, #0
   bne process_syscall_entry
-  // process syscall exit
-  @ mrs r0, control
-  @ orr r0, r0, #1
-  @ msr control, r0
   mrs r2, psp
     // let's check if fpu is used by current task
   tst lr, #0x10
@@ -148,11 +137,11 @@ process_syscall_entry:
   msr control, r4
   ldr r3, =0xfffffffd
   pop {r4, r5, r6}
+  // process stack is modified, but not yet ready to be switched, block context switch till prepared
   bx r3 // we are taking back context from 134
 .thumb_func
 return_from_syscall:
   @ we are no longer in exception, restore stack manually
-  bl unblock_context_switch
   pop {r1, pc}
 
 .global arch_get_stack_pointer
@@ -168,29 +157,46 @@ switch_to_main_task:
   mrs r0, control
   bic r0, r0, #3
   msr control, r0
-  pop {pc}
+  pop {r0, pc}
 
+// caller saved registers are already saved by exception entry
 .global irq_pendsv
 .thumb_func
 irq_pendsv:
-  push {lr}
   tst lr, #0x10
   ite eq
   moveq r0, #1
   movne r0, #0
+  push {r0, lr}
   bl do_context_switch
+  cmp r0, #3
+  beq pendsv_ignore
+  cmp r0, #1
+  beq pendsv_store_and_switch
+  cmp r0, #2
+  beq pendsv_switch_to_next_task
   cmp r0, #0
-  pop {r2}
   beq pendsv_exit
-  bx r2
 pendsv_exit:
+  pop {r0, r1}
   b switch_to_main_task
+pendsv_store_and_switch:
+  pop {r0, r1}
+  bl store_and_switch_to_next_task
+  bx r0
+pendsv_switch_to_next_task:
+  pop {r0, r1}
+  bl switch_to_next_task
+  bx r0
+pendsv_ignore:
+  pop {r0, pc}
 
 
 .global switch_to_the_first_task
 .thumb_func
 switch_to_the_first_task:
-  push {lr}
+  push {r0, lr} // this will be taken by return to user mode
+  mov r1, lr
   bl switch_to_next_task
   mrs r1, control
   orr r1, r1, #3 // unprivileged + psp
@@ -206,8 +212,6 @@ switch_to_the_first_task:
 process_get_back_to_parent_vfork:
   mov sp, r1
   bx r2
-
-
 
 // r0 - pointer to child r11 value
 // r1 - pointer to child got value

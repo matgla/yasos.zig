@@ -32,14 +32,14 @@ pub inline fn wait_for_interrupt() void {
 var nested_counter: i32 = 0;
 
 pub inline fn disable_interrupts() void {
-    // asm volatile ("cpsid i" ::: .{ .memory = true });
+    asm volatile ("cpsid i" ::: .{ .memory = true });
     nested_counter += 1;
 }
 
 pub inline fn enable_interrupts() void {
     if (nested_counter > 0) nested_counter -= 1;
     if (nested_counter == 0) {
-        // asm volatile ("cpsie i" ::: .{ .memory = true });
+        asm volatile ("cpsie i" ::: .{ .memory = true });
     } else if (nested_counter < 0) {
         @panic("Mismatched enable_interrupts call");
     }

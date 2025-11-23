@@ -35,7 +35,5 @@ pub const exc_return = struct {
     pub const return_to_thread_mode_with_fp_psp: u32 = 0xffffffed;
 };
 
-export fn arch_store_registers_on_stack() void {}
-
 pub fn disable_interrupts() void {}
 pub fn enable_interrupts() void {}

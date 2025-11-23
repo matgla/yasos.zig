@@ -30,6 +30,8 @@ pub const process = struct {
     pub const get_offset_of_hardware_stored_registers = @import("arch").process.get_offset_of_hardware_stored_registers;
     pub const init = @import("process.zig").init;
     pub const ProcFs = @import("process/procfs.zig").ProcFs;
+    pub const block_context_switch = @import("interrupts/system_call.zig").block_context_switch;
+    pub const unblock_context_switch = @import("interrupts/system_call.zig").unblock_context_switch;
 };
 
 pub const sync = struct {

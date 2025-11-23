@@ -67,8 +67,6 @@ export fn store_and_switch_to_next_task(lr: usize) void {
     };
 }
 
-pub export fn switch_to_the_next_task() void {}
-
 export fn call_entry(address: usize, got: usize) i32 {
     _ = address;
     _ = got;

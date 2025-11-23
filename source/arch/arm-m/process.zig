@@ -80,7 +80,6 @@ pub const SoftwareStoredRegisters = extern struct {
     r9: u32,
     r10: u32,
     r11: u32,
-    r12: u32,
     s16: void_or_register(),
     s17: void_or_register(),
     s18: void_or_register(),
@@ -145,7 +144,6 @@ fn create_default_software_registers(lr: usize) SoftwareStoredRegisters {
         .r9 = 0,
         .r10 = 0,
         .r11 = 0,
-        .r12 = 0,
         .s16 = void_or_value(0),
         .s17 = void_or_value(0),
         .s18 = void_or_value(0),
@@ -202,10 +200,12 @@ fn prepare_process_stack(stack: []align(8) u8, comptime exit_handler: *const fn 
 pub fn init() void {
     std.log.info("Initializing ARM Cortex-M process module...", .{});
     hal.time.systick.init(@intCast(hal.cpu.frequency() / 1000)) catch @panic("Unable to initialize systick");
+    initialize_context_switching();
     hal.time.systick.disable();
 }
 
 pub fn initialize_context_switching() void {
+    std.log.err("Initializing ARM Cortex-M context switching...", .{});
     hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
     hal.irq.set_priority(.pendsv, 0xfe);
     hal.irq.set_priority(.systick, 0x00);
