@@ -22,18 +22,22 @@ const std = @import("std");
 const hal = @import("hal");
 
 const system_call = @import("interrupts/system_call.zig");
+const syscall_handlers = @import("interrupts/syscall_handlers.zig");
 
 const process_manager = @import("process_manager.zig");
 
 const c = @import("libc_imports").c;
 
-pub fn root_process(entry: anytype, arg: ?*const anyopaque, stack_size: u32) !void {
-    try process_manager.instance.create_process(stack_size, entry, arg, "/");
+extern fn arch_get_stack_pointer() *usize;
+
+pub fn root_process(entry: anytype, stack_size: u32) !void {
+    try process_manager.instance.create_root_process(stack_size, entry, null, "/");
 
     if (process_manager.instance.schedule_next() != .NoAction) {
         process_manager.instance.initialize_context_switching();
         hal.time.systick.enable();
-        system_call.trigger(c.sys_start_root_process, arg, null);
+        // hal.irq.trigger_supervisor_call(c.sys_start_root_process, arch_get_stack_pointer(), &out);
+        _ = try syscall_handlers.sys_start_root_process(arch_get_stack_pointer());
     }
 }
 
@@ -45,7 +49,6 @@ fn test_main() void {}
 test "Spawn.ShouldStartRootProcess" {
     kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
     defer kernel.process.process_manager.deinitialize_process_manager();
-    try root_process(&test_main, null, 0x4000);
+    try root_process(&test_main, 0x4000);
     try std.testing.expectEqual(true, arch_process.context_switch_initialized);
-    try std.testing.expectEqual(1, hal.irq.impl().calls[c.sys_start_root_process]);
 }

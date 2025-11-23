@@ -25,7 +25,7 @@ const c = @cImport({
 });
 
 const ContextSwitchHandler = *const fn (lr: usize) usize;
-const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) void;
+const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void;
 
 var context_switch_handler: ?ContextSwitchHandler = null;
 var system_call_handler: ?SystemCallHandler = null;
@@ -73,10 +73,6 @@ export fn call_entry(address: usize, got: usize) i32 {
     _ = address;
     _ = got;
     return 0; // Placeholder for actual implementation
-}
-
-export fn reload_current_task() void {
-    // Placeholder for actual implementation
 }
 
 pub export fn switch_to_the_first_task() void {}

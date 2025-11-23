@@ -100,7 +100,10 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
                 switch (cmd) {
                     @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
-                        var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(arg));
+                        if (arg == null) {
+                            return -1;
+                        }
+                        var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(arg.?));
                         attr.is_memory_mapped = true;
                         attr.mapped_address_r = self._flash.get_physical_address().ptr;
                     },

@@ -22,5 +22,5 @@ pub const return_to_handler_msp: u32 = 0xfffffff1;
 pub const return_to_thread_msp: u32 = 0xfffffff9;
 pub const return_to_thread_psp: u32 = 0xfffffffd;
 pub const return_to_handler_mode_with_fp_msp: u32 = 0xffffffe1;
-pub const return_to_thread_mode_with_fp_msp: u32 = 0xffffffe1;
-pub const return_to_thread_mode_with_fp_psp: u32 = 0xffffffe1;
+pub const return_to_thread_mode_with_fp_msp: u32 = 0xffffffe9;
+pub const return_to_thread_mode_with_fp_psp: u32 = 0xffffffed;

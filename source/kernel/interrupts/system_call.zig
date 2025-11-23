@@ -41,18 +41,37 @@ comptime {
     }
 }
 
-extern fn store_and_switch_to_next_task(lr: usize) usize;
-extern fn switch_to_the_next_task(lr: usize) usize;
+extern fn store_and_switch_to_next_task(is_fpu_used: usize) void;
+extern fn switch_to_the_next_task(is_fpu_used: usize) void;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
+var context_switch_enabled: bool = true;
 
-fn context_switch_handler(lr: usize) linksection(".time_critical") usize {
-    switch (process_manager.instance.schedule_next()) {
-        .Switch => return switch_to_the_next_task(lr),
-        .StoreAndSwitch => return store_and_switch_to_next_task(lr),
-        else => return lr,
+export fn block_context_switch() void {
+    context_switch_enabled = false;
+}
+
+export fn unblock_context_switch() void {
+    context_switch_enabled = true;
+}
+
+export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") usize {
+    if (!context_switch_enabled) {
+        return 1;
     }
-    return lr;
+    switch (process_manager.instance.schedule_next()) {
+        .Switch => {
+            switch_to_the_next_task(is_fpu_used);
+            return 1;
+        },
+        .StoreAndSwitch => {
+            store_and_switch_to_next_task(is_fpu_used);
+            return 1;
+        },
+        .ReturnToMain => return 0,
+        else => return 1,
+    }
+    return 1;
 }
 
 fn sys_unhandled_factory(comptime i: usize) linksection(".time_critical") type {
@@ -130,62 +149,39 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
-fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") void {
+fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") isize {
     const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
     const result: i32 = result_or_error catch |err| {
         c_result.*.err = kernel.errno.to_errno(err);
         c_result.*.result = -1;
-        return;
+        return -1;
     };
 
     c_result.*.result = result;
     c_result.*.err = -1;
+    return result;
 }
 
-pub fn system_call_handler(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") void {
+pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") callconv(.c) isize {
+    process_manager.instance.get_current_process().processes_syscall = true;
     if (number >= c.SYSCALL_COUNT) {
-        write_result(out, kernel.errno.ErrnoSet.NotImplemented);
-        return;
+        return write_result(out, kernel.errno.ErrnoSet.NotImplemented);
     }
-    write_result(out, syscall_lookup_table[number](arg));
+    const result = write_result(out, syscall_lookup_table[number](arg));
+    process_manager.instance.get_current_process().processes_syscall = false;
+    return result;
 }
 
-// can be called only from the user process, not from the kernel
-pub fn trigger(number: c.SystemCall, arg: ?*const anyopaque, out: ?*anyopaque) linksection(".time_critical") void {
-    var svc_arg: *const anyopaque = undefined;
-    var svc_out: *anyopaque = undefined;
-
-    if (arg) |a| {
-        svc_arg = a;
-    } else {
-        const a: i32 = 0;
-        svc_arg = @ptrCast(&a);
-    }
-    if (out) |o| {
-        svc_out = o;
-    } else {
-        var o: c.syscall_result = .{
-            .result = 0,
-            .err = 0,
-        };
-        svc_out = @ptrCast(&o);
-    }
-
-    hal.irq.trigger_supervisor_call(number, svc_arg, svc_out);
-}
+// // can be called only from the user process, not from the kernel
+// pub fn trigger(number: c.SystemCall, arg: *const anyopaque, out: *anyopaque) linksection(".time_critical") void {
+//     hal.irq.trigger_supervisor_call(number, svc_arg, svc_out);
+// }
 
 pub fn init(kernel_allocator: std.mem.Allocator) void {
     log.info("initialization...", .{});
-    arch.irq_handlers.set_system_call_handler(system_call_handler);
-    arch.irq_handlers.set_context_switch_handler(context_switch_handler);
+    // arch.irq_handlers.set_system_call_handler(system_call_handler);
+    // arch.irq_handlers.set_context_switch_handler(context_switch_handler);
     handlers.init(kernel_allocator);
-}
-
-test "SystemCall.ShouldTriggerSVC" {
-    trigger(c.sys_getpid, null, null);
-    try std.testing.expectEqual(1, hal.irq.impl().calls[c.sys_getpid]);
-    trigger(c.sys_getpid, null, null);
-    try std.testing.expectEqual(2, hal.irq.impl().calls[c.sys_getpid]);
 }
 
 test "SystemCall.VerifyLookupTable" {
@@ -245,11 +241,13 @@ test "SystemCall.UnhandledSyscallReturnsError" {
 }
 
 test "SystemCall.ShouldWriteResult" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
     var result_data: c.syscall_result = .{
         .result = 0,
         .err = 0,
     };
-    write_result(&result_data, 42);
+    _ = write_result(&result_data, 42);
     try std.testing.expectEqual(42, result_data.result);
     try std.testing.expectEqual(-1, result_data.err);
 
@@ -257,18 +255,24 @@ test "SystemCall.ShouldWriteResult" {
         .result = 0,
         .err = 0,
     };
-    write_result(&result_data, error.InvalidArgument);
+    _ = write_result(&result_data, error.InvalidArgument);
     try std.testing.expectEqual(-1, result_data.result);
     try std.testing.expectEqual(kernel.errno.to_errno(error.InvalidArgument), result_data.err);
 }
 
+fn root_entry() void {}
+
 test "SystemCall.ShouldErrorOnUnhandledSyscall" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+    process_manager.instance.create_root_process(1024, root_entry, null, "/") catch {};
+
     var result_data: c.syscall_result = .{
         .result = 0,
         .err = 0,
     };
     var arg: i32 = 0;
-    system_call_handler(c.SYSCALL_COUNT, &arg, &result_data);
+    _ = _irq_svcall(c.SYSCALL_COUNT, &arg, &result_data);
     try std.testing.expectEqual(-1, result_data.result);
     try std.testing.expectEqual(kernel.errno.to_errno(kernel.errno.ErrnoSet.NotImplemented), result_data.err);
 }

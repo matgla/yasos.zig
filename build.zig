@@ -200,9 +200,6 @@ pub fn build(b: *std.Build) !void {
     const install_kernel_tests = b.addInstallBinFile(kernel_tests.getEmittedBin(), "kernel_tests");
     const install_fs_tests = b.addInstallBinFile(fs_tests.getEmittedBin(), "fs_tests");
     const install_arch_tests = b.addInstallBinFile(arch_tests.getEmittedBin(), "arch_tests");
-    b.default_step.dependOn(&install_arch_tests.step);
-    b.default_step.dependOn(&install_fs_tests.step);
-    b.default_step.dependOn(&install_kernel_tests.step);
     run_tests_step.dependOn(&install_arch_tests.step);
     run_tests_step.dependOn(&install_fs_tests.step);
     run_tests_step.dependOn(&install_kernel_tests.step);
@@ -337,6 +334,7 @@ pub fn build(b: *std.Build) !void {
             const kernel_exec = boardDep.artifact("yasos_kernel");
             kernel_exec.addIncludePath(b.path("source/sys/include"));
             kernel_exec.addIncludePath(b.path("."));
+            // kernel_exec.addIncludePath(b.path("rootfs/usr/include"));
 
             const yasld = b.dependency("yasld", .{
                 .optimize = optimize,
@@ -357,15 +355,13 @@ pub fn build(b: *std.Build) !void {
             });
             libc_imports_module.addIncludePath(b.path("."));
             libc_imports_module.addIncludePath(b.path("libs/libc"));
-            libc_imports_module.addIncludePath(b.path("libs/tinycc/include"));
-
+            libc_imports_module.addIncludePath(b.path("rootfs/usr/include"));
             const cimports_module = b.addModule("cimports", .{
                 .root_source_file = b.path("source/cimports.zig"),
                 .target = kernel_exec.root_module.resolved_target,
                 .optimize = optimize,
             });
 
-            // libc_imports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
             cimports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
 
             kernel_module.addImport("libc_imports", libc_imports_module);
@@ -379,6 +375,8 @@ pub fn build(b: *std.Build) !void {
             const arch_module = b.addModule("arch", .{
                 .root_source_file = b.path(b.fmt("source/arch/{s}/arch.zig", .{config.cpu_arch})),
             });
+            arch_module.addIncludePath(b.path("."));
+            arch_module.addIncludePath(b.path("libs/libc"));
 
             const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
             const board_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("board").?;

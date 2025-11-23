@@ -26,6 +26,9 @@ pub const irq_handlers = @import("arm-m").irq_handlers;
 pub const panic = @import("arm-m").panic;
 pub const HardwareProcess = @import("arm-m").HardwareProcess;
 pub const get_lr = @import("arm-m").get_lr;
+pub const exc_return = @import("arm-m").exc_return;
+pub const disable_interrupts = @import("arm-m").disable_interrupts;
+pub const enable_interrupts = @import("arm-m").enable_interrupts;
 
 export fn irq_memmanage() void {
     @panic("Memory management fault occurred");
@@ -45,4 +48,8 @@ export fn irq_securefault() void {
 
 export fn irq_debugmonitor() void {
     @panic("Debug monitor fault occurred");
+}
+
+export fn print_register(reg: usize) void {
+    std.log.err("Register value: {x}\n", .{reg});
 }

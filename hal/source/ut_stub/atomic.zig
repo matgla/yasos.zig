@@ -14,11 +14,14 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 pub const AtomicStub = struct {
-    pub fn lock(comptime id: u32) void {
+    pub fn lock(comptime id: u32) bool {
         _ = id;
         // no-op
+        return true;
     }
-
+    pub fn number_of_spinlocks() u32 {
+        return 12;
+    }
     pub fn unlock(comptime id: u32) void {
         _ = id;
         // no-op

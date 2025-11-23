@@ -46,7 +46,7 @@ pub const Semaphore = struct {
             };
             var result: bool = false;
             while (!result) {
-                syscall.trigger(c.sys_semaphore_acquire, &event, &result);
+                hal.irq.trigger_supervisor_call(c.sys_semaphore_acquire, &event, &result);
             }
         }
     }
@@ -56,7 +56,8 @@ pub const Semaphore = struct {
             const event = SemaphoreEvent{
                 .object = self,
             };
-            syscall.trigger(c.sys_semaphore_release, &event, null);
+            var result: bool = false;
+            hal.irq.trigger_supervisor_call(c.sys_semaphore_release, &event, &result);
         }
     }
 };

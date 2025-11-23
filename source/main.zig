@@ -86,6 +86,8 @@ fn initialize_board() void {
         } else {
             kernel.log.err("External memory post test failed", .{});
         }
+    } else {
+        kernel.log.err("No external memory found", .{});
     }
 }
 
@@ -253,27 +255,24 @@ const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
     .dump_stats = config.instrumentation.print_memory_usage,
 });
 
-export fn kernel_process(argument: *KernelAllocator) void {
-    _ = argument;
-    const maybe_process = kernel.process.process_manager.instance.get_current_process();
-    if (maybe_process) |process| {
-        attach_default_filedescriptors_to_root_process(process) catch {
-            kernel.log.err("Can't attach default streams to root process", .{});
-        };
-        const pid = process.pid;
-        // this loads executable replacing current image
-        const sh = kernel.dynamic_loader.load_executable("/bin/sh", process.get_process_memory_allocator(), pid) catch |err| {
-            kernel.log.err("Executable loading failed with error: {s}", .{@errorName(err)});
-            return;
-        };
+export fn kernel_process() void {
+    const process = kernel.process.process_manager.instance.get_current_process();
+    attach_default_filedescriptors_to_root_process(process) catch {
+        kernel.log.err("Can't attach default streams to root process", .{});
+    };
+    const pid = process.pid;
+    // this loads executable replacing current image
+    const sh = kernel.dynamic_loader.load_executable("/bin/sh", process.get_process_memory_allocator(), pid) catch |err| {
+        kernel.log.err("Executable loading failed with error: {s}", .{@errorName(err)});
+        return;
+    };
 
-        var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };
-        var args: [2][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0) };
+    var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };
+    var args: [2][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0) };
 
-        _ = sh.main(@ptrCast(&args[0]), 1) catch |err| {
-            kernel.log.err("Cannot execute main: {s}", .{@errorName(err)});
-        };
-    }
+    _ = sh.main(@ptrCast(&args[0]), 1) catch |err| {
+        kernel.log.err("Cannot execute main: {s}", .{@errorName(err)});
+    };
 }
 
 pub fn splashscreen() void {
@@ -302,9 +301,12 @@ pub export fn main() void {
         defer kernel.fs.get_vfs().deinit();
 
         // we need to get real return address to get back from user mode successfully
-        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, &allocator, 1024 * 16 }) catch {};
+        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, 1024 * 32 }) catch |err| {
+            kernel.log.err("Cannot start root process: {s}", .{@errorName(err)});
+        };
         kernel.log.warn("Root process died", .{});
     }
     _ = @call(.never_inline, KernelAllocator.detect_leaks, .{});
-    kernel.stdout.print("You can turn off your PC now!\n", .{});
+    // kernel system calls are not available here
+    _ = board.uart.uart0.write_some("Kernel has halted.\nYou can turn off your PC now!\n") catch 0;
 }

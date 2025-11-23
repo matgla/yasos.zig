@@ -25,6 +25,12 @@ pub const SymbolEntry = struct {
     address: usize,
 };
 
+pub const LoadedUniqueData = struct {
+    address: usize,
+    size: usize,
+    got: ?[]usize,
+};
+
 pub const Module = struct {
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
@@ -32,6 +38,7 @@ pub const Module = struct {
     list_node: std.DoublyLinkedList.Node,
     entry: ?SymbolEntry,
     name: ?[]const u8,
+    unique_data: ?LoadedUniqueData,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -42,6 +49,7 @@ pub const Module = struct {
             .list_node = .{},
             .entry = null,
             .name = "dummy_module",
+            .unique_data = null,
         };
         return module;
     }

@@ -20,16 +20,34 @@
 
 const sio = @import("sio.zig").sio;
 
+const std = @import("std");
+
 pub const HardwareAtomic = struct {
-    pub fn lock(comptime id: u32) void {
-        if (id >= 32) @compileError("RPXXXX supports only 32 hardware spinlocks");
-        // from datasheet
-        // if both cores try to lock at the same time core 0 succeeds
-        while (sio.spinlocks[id].read() == 0) {}
+    // RP2350 has hardware bug in spinlocks (errata RP2350-E2), this comptime array maps ids to correct spinlocks
+    const bugfree_spinlocks = [_]u32{
+        5, 6, 7, 10, 11, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    };
+
+    pub fn number_of_spinlocks() usize {
+        return bugfree_spinlocks.len;
+    }
+
+    pub fn lock(comptime id: u32) bool {
+        if (id < bugfree_spinlocks.len) {
+            if (sio.spinlocks[bugfree_spinlocks[id]].read() == 0) {
+                return false;
+            }
+        } else {
+            @compileError(std.fmt.comptimePrint("RP2350 supports only {d} non-buggy hardware spinlocks. Trying to lock: {d}", .{ bugfree_spinlocks.len, id }));
+        }
+        return true;
     }
 
     pub fn unlock(comptime id: u32) void {
-        if (id >= 32) @compileError("RPXXXX supports only 32 hardware spinlocks");
-        sio.spinlocks[id].write(1);
+        if (id < bugfree_spinlocks.len) {
+            sio.spinlocks[bugfree_spinlocks[id]].write(1);
+        } else {
+            @compileError(std.fmt.comptimePrint("RP2350 supports only {d} non-buggy hardware spinlocks. Trying to lock: {d}", .{ bugfree_spinlocks.len, id }));
+        }
     }
 };

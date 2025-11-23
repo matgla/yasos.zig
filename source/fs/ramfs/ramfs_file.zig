@@ -150,7 +150,10 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
-                var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data));
+                if (data == null) {
+                    return -1;
+                }
+                var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data.?));
                 attr.is_memory_mapped = true;
                 attr.mapped_address_r = self._data.data.items.ptr;
             },

@@ -25,9 +25,16 @@ pub const stdout = @import("stdout.zig");
 pub const process = struct {
     pub const process_manager = @import("process_manager.zig");
     pub const Process = @import("process.zig").Process;
+    pub const VForkContext = @import("process.zig").VForkContext;
     pub const initialize_context_switching = @import("process.zig").initialize_context_switching;
+    pub const get_offset_of_hardware_stored_registers = @import("arch").process.get_offset_of_hardware_stored_registers;
     pub const init = @import("process.zig").init;
     pub const ProcFs = @import("process/procfs.zig").ProcFs;
+};
+
+pub const sync = struct {
+    pub const Mutex = @import("interrupts/kernel_mutex.zig").KernelMutex;
+    pub const Semaphore = @import("semaphore.zig").Semaphore;
 };
 
 pub const spawn = @import("spawn.zig");

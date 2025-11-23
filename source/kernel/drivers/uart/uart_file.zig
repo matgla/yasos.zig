@@ -183,24 +183,22 @@ pub fn UartFile(comptime UartType: anytype) type {
 
             pub fn fcntl(self: *Self, op: i32, maybe_arg: ?*anyopaque) i32 {
                 var result: i32 = 0;
-                if (maybe_arg) |arg| {
-                    const flags: *c_int = @ptrCast(@alignCast(arg));
-                    switch (op) {
-                        c.F_GETFL => {
-                            if (self._nonblock) {
-                                result |= c.O_NONBLOCK;
-                                return result;
-                            }
-                            return 0;
-                        },
-                        c.F_SETFL => {
-                            self._nonblock = (flags.* & c.O_NONBLOCK) != 0;
-                            return 0;
-                        },
-                        else => {
-                            return -1;
-                        },
-                    }
+                switch (op) {
+                    c.F_GETFL => {
+                        if (self._nonblock) {
+                            result |= c.O_NONBLOCK;
+                            return result;
+                        }
+                        return 0;
+                    },
+                    c.F_SETFL => {
+                        const flags: c_int = if (maybe_arg) |a| @truncate(@as(c_int, @intCast(@intFromPtr(a)))) else 0;
+                        self._nonblock = (flags & c.O_NONBLOCK) != 0;
+                        return 0;
+                    },
+                    else => {
+                        return -1;
+                    },
                 }
                 return -1;
             }
@@ -448,9 +446,9 @@ test "UartFile.Fcntl.F_SETFL.ShouldSetNonBlockMode" {
     defer MockUart.reset();
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-    var flags: c_int = c.O_NONBLOCK;
+    const flags: c_int = c.O_NONBLOCK;
 
-    const result = file.data().fcntl(c.F_SETFL, @ptrCast(&flags));
+    const result = file.data().fcntl(c.F_SETFL, @ptrFromInt(flags));
     try std.testing.expectEqual(@as(i32, 0), result);
     try std.testing.expect(file.data()._nonblock);
 }
@@ -499,8 +497,8 @@ test "UartFile.Fcntl.F_GETFL.ShouldReturnZeroWhenNonBlockIsNotSet" {
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
     file.data()._nonblock = false;
-    var flags: c_int = 0;
-    const result = file.data().fcntl(c.F_GETFL, &flags);
+    const flags: c_int = 0;
+    const result = file.data().fcntl(c.F_GETFL, @ptrFromInt(flags));
     try std.testing.expectEqual(@as(i32, 0), result);
     try std.testing.expect((result & c.O_NONBLOCK) == 0);
 }
@@ -510,9 +508,9 @@ test "UartFile.Fcntl.F_GETFL.ShouldReturnStatusWhenNonBlockIsSet" {
     defer MockUart.reset();
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-    var flags: c_int = 0;
+    const flags: c_int = 0;
     file.data()._nonblock = true;
-    const result = file.data().fcntl(c.F_GETFL, &flags);
+    const result = file.data().fcntl(c.F_GETFL, @ptrFromInt(flags));
     try std.testing.expectEqual(@as(i32, c.O_NONBLOCK), result);
 }
 

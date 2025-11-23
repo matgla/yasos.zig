@@ -106,6 +106,9 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
         switch (cmd) {
             @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
+                if (data == null) {
+                    return -1;
+                }
                 var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data.?));
                 if (self.header.get_mapped_address()) |address| {
                     attr.is_memory_mapped = true;

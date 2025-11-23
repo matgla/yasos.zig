@@ -72,7 +72,6 @@ pub const RoundRobin = struct {
                 }
                 return .Switch;
             }
-
             next = node.next;
         }
         // if not found, try to search from beginning
@@ -98,6 +97,7 @@ pub const RoundRobin = struct {
                 }
                 return .Switch;
             }
+
             next = node.next;
         }
         return .NoAction;
@@ -164,7 +164,7 @@ const test_arg: i32 = 0;
 const c = @import("libc_imports").c;
 
 fn create_process(pid: c.pid_t, cwd: []const u8, pool: *ProcessMemoryPool) !*Process {
-    return try Process.init(std.testing.allocator, 4096, &entry, &test_arg, cwd, pool, null, pid);
+    return try Process.init(std.testing.allocator, 4096, &entry, &test_arg, cwd, pool, null, pid, false);
 }
 
 test "RoundRobin.ShouldScheduleFirstReadyProcess" {

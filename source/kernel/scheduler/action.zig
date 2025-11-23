@@ -17,4 +17,5 @@ pub const ActionType = enum {
     StoreAndSwitch,
     Switch,
     NoAction,
+    ReturnToMain,
 };
