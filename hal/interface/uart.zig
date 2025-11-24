@@ -64,6 +64,10 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
         pub fn is_readable(self: Self) bool {
             return self.impl.is_readable();
         }
+
+        pub fn bytes_to_read(self: Self) usize {
+            return self.impl.bytes_to_read();
+        }
     };
 }
 

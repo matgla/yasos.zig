@@ -173,7 +173,7 @@ build_gnumake()
 build_makefile()
 {
   cd $1
-  if [ $CLEAR = true]; then
+  if [ $CLEAR = true ]; then
     make clean
   fi
   make CC=$CC -j4
@@ -252,6 +252,7 @@ build_makefile mkfs
 build_makefile longjump_tester
 build_zork_makefile zork
 build_makefile rzsz
+build_makefile sha
 # build_gnumake make
 
 $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX

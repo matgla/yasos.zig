@@ -286,6 +286,7 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
             context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
+
             return 0;
         }
     }

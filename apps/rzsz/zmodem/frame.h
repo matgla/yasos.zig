@@ -19,7 +19,7 @@
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#pragma once
+#pragma once 
 
 typedef enum {
     ZHEX = 'B',
@@ -41,6 +41,6 @@ typedef enum {
     ZDATA = 0x0a,
     ZEOF = 0x0b,
     ZFERR = 0x0c,
-    ZCRC = 0x0d,
+    ZCRC = 0x0d, 
     ZFREECNT = 0x11,
 } ZFrameType;

@@ -107,8 +107,19 @@ pub const MmcIo = struct {
         const block_address = address >> 9;
         const num_blocks = buf.len / 512;
         var i: usize = 0;
+        var retransmissions: usize = 0;
+        const max_retransmissions: usize = 3;
         while (i < num_blocks) : (i += 1) {
-            self.block_read_impl(17, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch return -1;
+            self.block_read_impl(17, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                if (retransmissions < max_retransmissions) {
+                    log.err("Read error on block {d}, retransmitting... ({d}/{d})", .{ i, retransmissions + 1, max_retransmissions });
+                    retransmissions += 1;
+                    i -= 1; // retry the same block
+                    continue;
+                }
+                log.err("Permanent read error on block {d}: {s}", .{ i, @errorName(err) });
+                return -1;
+            };
         }
 
         return @intCast(buf.len);
@@ -416,7 +427,7 @@ pub const MmcIo = struct {
         const csd = try self.read_csd();
         self._size = csd.get_size() / csd.get_sector_size();
         dump_struct(csd);
-        self._mmc.change_speed_to(csd.get_speed() / 8); // increase me after retransmission implementation
+        self._mmc.change_speed_to(csd.get_speed() / 4); // increase me after retransmission implementation
         self._initialized = true;
     }
 };
