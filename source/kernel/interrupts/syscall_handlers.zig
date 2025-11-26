@@ -134,8 +134,8 @@ pub fn sys_semaphore_release(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const check_parent: *const volatile u8 = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     if (check_parent.* != 0) {
@@ -162,8 +162,8 @@ pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const maybe_handle = process.get_file_handle(@intCast(fd.*));
@@ -222,8 +222,8 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
 }
 
 pub fn sys_open(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
@@ -254,34 +254,35 @@ fn close_fd(fd: i32) i32 {
 }
 
 pub fn sys_close(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
     return close_fd(fd.*);
 }
 
 pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
+    kernel.process.block_context_switch(@src());
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
+    log.err("sys_exit called for: {d}", .{process.pid});
     if (process._parent) |parent| {
         parent.child_exit_code = context.*;
     }
-    kernel.process.unblock_context_switch();
+    // kernel.process.unblock_context_switch(@src());
     process_manager.instance.delete_process(process.pid, context.*);
 
     return context.*;
 }
 
 pub fn sys_read(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
+    kernel.process.block_context_switch(@src());
     const context: *const volatile c.read_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     if (context.buf == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
     }
     const maybe_handle = process.get_file_handle(@intCast(context.fd));
-    kernel.process.unblock_context_switch();
+    kernel.process.unblock_context_switch(@src());
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
@@ -294,13 +295,14 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
 }
 pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
     _ = arg;
+    kernel.process.block_context_switch(@src());
     const process = process_manager.instance.get_current_process();
     process_manager.instance.delete_process(process.pid, -1);
     return 0;
 }
 
 pub fn sys_write(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
+    kernel.process.block_context_switch(@src());
     const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
 
@@ -309,7 +311,7 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     }
 
     const maybe_handle = process.get_file_handle(@intCast(context.fd));
-    kernel.process.unblock_context_switch();
+    kernel.process.unblock_context_switch(@src());
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
@@ -326,8 +328,8 @@ pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.unlink_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);
@@ -349,8 +351,8 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     if (context.statbuf == null) {
         return kernel.errno.ErrnoSet.InvalidArgument;
     }
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0);
@@ -363,8 +365,8 @@ pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     context.result.* = try file.interface.seek(context.offset, context.whence);
@@ -432,8 +434,8 @@ pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     context.result.* = process.mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset) catch {
@@ -443,8 +445,8 @@ pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process.munmap(context.addr, context.length);
@@ -452,14 +454,14 @@ pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
     const current_process = process_manager.instance.get_current_process();
     const cwd = current_process.get_current_directory();
     const cwd_len = @min(cwd.len, context.size);
     std.mem.copyForwards(u8, context.buf[0..cwd_len], cwd[0..cwd_len]);
-    var last_index = cwd.len;
+    var last_index = cwd_len;
     if (last_index > context.size) {
         last_index = context.size - 1;
     }
@@ -469,8 +471,8 @@ pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     var slice_allocated = false;
@@ -506,8 +508,8 @@ pub fn sys_time(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @intCast(context.arg))));
@@ -611,8 +613,8 @@ pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_access(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.access_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);

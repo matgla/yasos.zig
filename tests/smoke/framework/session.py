@@ -61,6 +61,18 @@ class Session:
     def wait_for_prompt(self):
         return self.wait_for_data("$ ")
 
+    def wait_for_prompt_except_logs(self):
+        while True:
+            lines = self.serial.read_until(b"$ ").decode('utf-8').splitlines()
+            filtered_lines = []
+            for line in lines:
+                self.file.write(line + "\n")
+                if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
+                    continue
+                filtered_lines.append(line.strip())
+
+            return filtered_lines
+
     def wait_for_data(self, data):
         line = self.serial.read_until(data.encode('utf-8')).decode('utf-8')
         self.file.write(line)
@@ -72,8 +84,18 @@ class Session:
     def read_until(self, data):
         return self.wait_for_data(data)
 
+    def read_raw(self, size, timeout=3):
+        old_timeout = self.serial.timeout
+        self.serial.timeout = timeout
+        data = self.serial.read(size)
+        self.serial.timeout = old_timeout
+        return data
+
     def read_until_prompt(self):
         return self.read_until("$")
+
+    def write_raw(self, data, timeout):
+        self.serial.write(data)
 
     def write_command(self, command):
         self.serial.write((command + '\n').encode('utf-8'))

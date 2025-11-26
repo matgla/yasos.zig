@@ -28,3 +28,4 @@ pub const get_lr = @import("assembly.zig").get_lr;
 pub const exc_return = @import("exc_return.zig");
 pub const disable_interrupts = @import("sync.zig").disable_interrupts;
 pub const enable_interrupts = @import("sync.zig").enable_interrupts;
+pub const sync = @import("sync.zig");

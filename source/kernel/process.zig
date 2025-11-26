@@ -328,8 +328,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn wait_for_process(self: *Self, process: *Self, action: UnblockAction, context: ?*anyopaque) !void {
             // this process will be unblocked until other processes are finished
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            defer kernel.process.unblock_context_switch(@src());
             const blocked_data = try self._kernel_allocator.create(BlockedByProcess);
             try process.blocks_process(self, action, context);
             blocked_data.* = .{
@@ -337,6 +337,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .node = std.DoublyLinkedList.Node{},
             };
             self._blocked_by.append(&blocked_data.node);
+            kernel.log.err("Waiting for process {d} in pid {d}", .{ process.pid, self.pid });
             self.reevaluate_state();
         }
 
@@ -350,6 +351,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             }
 
             if (self._blocked_by.first != null) {
+                kernel.log.err("I am blocked by other process in pid {d}", .{self.pid});
                 self.state = Process.State.Blocked;
                 return;
             }
@@ -419,8 +421,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, _: i32, _: i32, _: i32) !*anyopaque {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            defer kernel.process.unblock_context_switch(@src());
             if (addr == null) {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
@@ -439,8 +441,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            defer kernel.process.unblock_context_switch(@src());
             if (maybe_address) |addr| {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {

@@ -29,6 +29,7 @@ pub const get_lr = @import("arm-m").get_lr;
 pub const exc_return = @import("arm-m").exc_return;
 pub const disable_interrupts = @import("arm-m").disable_interrupts;
 pub const enable_interrupts = @import("arm-m").enable_interrupts;
+pub const sync = @import("arm-m").sync;
 
 export fn irq_memmanage() void {
     @panic("Memory management fault occurred");

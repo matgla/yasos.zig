@@ -73,7 +73,7 @@ pub const os = struct {
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
-        .baudrate = 115200,
+        .baudrate = 921600,
     });
 
     kernel.stdout.set_output(&board.uart.uart0, @TypeOf(board.uart.uart0).write_some_opaque);

@@ -48,35 +48,87 @@ var context_switch_enabled: bool = true;
 
 var counter: i32 = 0;
 
-pub export fn block_context_switch() callconv(.c) void {
-    kernel.irq.disable_interrupts();
+pub fn block_context_switch(src: std.builtin.SourceLocation) void {
+    // kernel.irq.disable_interrupts();
+    asm volatile (
+        \\ cpsid i
+    );
+    const number_ptr: *volatile usize = &number_of_context_switches_print;
+    if (number_ptr.* > 0) {
+        log.err("Blocking context switch called: {d}, from: {s}:{d}", .{ number_ptr.*, src.file, src.line });
+        number_ptr.* -= 1;
+    }
     counter += 1;
-    context_switch_enabled = false;
-    kernel.irq.enable_interrupts();
+    const ptr: *volatile bool = &context_switch_enabled;
+    ptr.* = false;
+    asm volatile (
+        \\ cpsie i
+        \\ dsb sy
+    );
 }
 
-pub export fn unblock_context_switch() callconv(.c) void {
-    kernel.irq.disable_interrupts();
+pub fn unblock_context_switch(src: std.builtin.SourceLocation) void {
+    // kernel.irq.disable_interrupts();
+    asm volatile (
+        \\ cpsid i
+    );
+    const number_ptr: *volatile usize = &number_of_context_switches_print;
+    if (number_ptr.* > 0) {
+        log.err("Unblocking context switch called: from: {s}:{d}", .{ src.file, src.line });
+        number_ptr.* -= 1;
+    }
     counter -= 1;
     if (counter == 0) {
-        context_switch_enabled = true;
+        const ptr: *volatile bool = &context_switch_enabled;
+        ptr.* = true;
     } else if (counter < 0) {
         @panic("Mismatched unblock_context_switch call");
     }
-    kernel.irq.enable_interrupts();
+    // kernel.irq.enable_interrupts();
+    asm volatile (
+        \\ cpsie i
+        \\ dsb sy
+    );
+}
+
+pub export fn get_context_switch_state() callconv(.c) bool {
+    const ptr: *volatile bool = &context_switch_enabled;
+    return ptr.*;
+}
+
+var number_of_context_switches_print: usize = 0;
+pub fn print_context_switches(count: usize) void {
+    kernel.log.err("Context switch printing enabled for {d} switches", .{count});
+    const ptr: *volatile usize = &number_of_context_switches_print;
+    ptr.* = count;
 }
 
 export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") usize {
     _ = is_fpu_used;
-    if (!context_switch_enabled) {
+    const ptr: *volatile bool = &context_switch_enabled;
+    const number_ptr: *volatile usize = &number_of_context_switches_print;
+
+    if (!ptr.*) {
+        if (number_ptr.* > 0) {
+            log.err("Context switch skipped, context switching is blocked", .{});
+            number_ptr.* -= 1;
+        }
         return 3;
     }
     switch (process_manager.instance.schedule_next()) {
         .Switch => {
             // switch_to_the_next_task(is_fpu_used);
+            if (number_ptr.* > 0) {
+                log.err("Context switch performed", .{});
+                number_ptr.* -= 1;
+            }
             return 2;
         },
         .StoreAndSwitch => {
+            if (number_ptr.* > 0) {
+                log.err("Context switch with storing current task performed", .{});
+                number_ptr.* -= 1;
+            }
             // store_and_switch_to_next_task(is_fpu_used);
             return 1;
         },

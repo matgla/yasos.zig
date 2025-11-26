@@ -51,7 +51,6 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
                 const error_byte = RegisterVolatile.*.rsr;
                 if ((byte & 0x00000f00) != 0 or (error_byte & 0xf) != 0) {
                     RegisterVolatile.*.icr = 0;
-                    asm volatile ("bkpt #1");
                 }
                 rx_buffer.push(@truncate(byte));
             }

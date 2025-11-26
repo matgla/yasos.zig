@@ -33,6 +33,8 @@ const system_call = @import("interrupts/system_call.zig");
 const c = @import("libc_imports").c;
 const handlers = @import("interrupts/syscall_handlers.zig");
 
+const arch = @import("arch");
+
 const Scheduler = if (config.scheduler.round_robin)
     @import("scheduler/round_robin.zig").RoundRobin
 else if (config.scheduler.osthread)
@@ -46,7 +48,7 @@ extern fn switch_to_next_task() void;
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
 extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 
-extern fn process_vfork_child(r11: usize, got: usize, lr: usize) i32;
+extern fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32;
 extern fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize) i32;
 
 fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
@@ -89,8 +91,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn schedule_next(self: *Self) kernel.scheduler.Action {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            // kernel.process.block_context_switch(@src());
+            // defer kernel.process.unblock_context_switch(@src());
             var next = self.terminate_list.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -121,14 +123,14 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn get_pidmap(self: *const Self) std.StaticBitSet(config.process.max_pid_value) {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            defer kernel.process.unblock_context_switch(@src());
             return self._pid_map;
         }
 
         fn get_next_pid(self: *Self) ?c.pid_t {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            defer kernel.process.unblock_context_switch(@src());
             const maybe_index = self._pid_map.findFirstSet();
             if (maybe_index) |index| {
                 self._pid_map.unset(index);
@@ -139,8 +141,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         fn release_pid(self: *Self, pid: c.pid_t) void {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            defer kernel.process.unblock_context_switch(@src());
             if (pid > 0 and pid < config.process.max_pid_value) {
                 self._pid_map.set(@intCast(pid - 1));
             }
@@ -151,8 +153,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             if (maybe_pid) |pid| {
                 var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
 
-                kernel.process.block_context_switch();
-                defer kernel.process.unblock_context_switch();
+                kernel.process.block_context_switch(@src());
+                defer kernel.process.unblock_context_switch(@src());
                 self.processes.append(&new_process.node);
                 return;
             }
@@ -175,7 +177,6 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
-            kernel.process.block_context_switch();
             var next = self.processes.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -197,7 +198,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         self._scheduler.set_next(&parent.node);
                         self.core[hal.cpu.coreid()] = parent;
                         // we will not get back to that place, process is terminated with forcing parent to run without context switch
-                        kernel.process.unblock_context_switch();
+                        // kernel.process.unblock_context_switch(@src());
+                        log.err("Getting back to parent of vforked process: {d}", .{pid});
                         _ = process_get_back_to_parent_vfork(pid, ctx.?.sp, ctx.?.lr);
                         return;
                     }
@@ -206,13 +208,14 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             }
 
-            kernel.process.unblock_context_switch();
+            log.err("Process terminated successfully: {d}", .{pid});
+            kernel.process.unblock_context_switch(@src());
             hal.irq.trigger(.pendsv);
         }
 
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
-            kernel.process.block_context_switch();
-            errdefer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            errdefer kernel.process.unblock_context_switch(@src());
             const current_process = self.get_current_process();
             const maybe_pid = self.get_next_pid();
             if (maybe_pid == null) {
@@ -248,8 +251,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             self.core[hal.cpu.coreid()] = new_process;
             // child is now running without context switch, but uses parent stack until exec
             // switch without context switch, just to represent correct state
-            kernel.process.unblock_context_switch();
-            return process_vfork_child(@intFromPtr(context.r9.?), got, @intFromPtr(context.lr.?));
+            log.err("Vforked new process: {d}", .{new_process.pid});
+            kernel.process.unblock_context_switch(@src());
+            return process_vfork_child(@intFromPtr(context.sp.?), got, @intFromPtr(context.lr.?), context.is_fpu_used);
         }
 
         // load executable into process
@@ -274,7 +278,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 
         // TODO: exec on currently running process is not supported yet
         pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
-            kernel.process.block_context_switch();
+            kernel.process.block_context_switch(@src());
             const current_process = self.get_current_process();
             // TODO: move loader to struct, pass allocator to loading functions
             const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
@@ -283,6 +287,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 
             var envpc: usize = 0;
             while (envp[envpc] != null) : (envpc += 1) {}
+            log.err("Calling exec for process: {d}, path: {s}, argc: {d}, envpc: {d}", .{ current_process.pid, path, argc, envpc });
 
             var symbol: SymbolEntry = undefined;
             if (executable.module.entry) |entry| {
@@ -290,11 +295,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             } else if (executable.module.find_symbol("_start")) |entry| {
                 symbol = entry;
             } else {
-                kernel.process.unblock_context_switch();
+                kernel.process.unblock_context_switch(@src());
                 return -1;
             }
 
             try current_process.reallocate_stack();
+
+            std.log.err("Process {d} state is now {s}, reinitialized: argc={d}, argv={x}", .{ current_process.pid, @tagName(current_process.state), argc, @intFromPtr(argv) });
             try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
             self._scheduler.set_next(&current_process._parent.?.node);
             self.core[hal.cpu.coreid()] = current_process._parent.?;
@@ -303,10 +310,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 const ctx = current_process._vfork_context.?;
                 current_process._vfork_context = null;
                 current_process.unblock_parent();
-                kernel.process.unblock_context_switch();
+                // kernel.process.unblock_context_switch(@src());
+                log.err("Getting back to parent of vforked process after exec: {d}", .{current_process.pid});
                 return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
             }
-            kernel.process.unblock_context_switch();
+            kernel.process.unblock_context_switch(@src());
             return 0;
         }
 
@@ -323,13 +331,14 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn waitpid(self: *Self, pid: i32, status: *i32) !i32 {
-            kernel.process.block_context_switch();
+            kernel.process.block_context_switch(@src());
+            log.err("waitpid called for pid: {d}", .{pid});
             const current_process = self.get_current_process();
             const maybe_process = self.get_process_for_pid(pid);
             if (maybe_process) |p| {
                 if (p.state == Process.State.Terminated) {
                     status.* = current_process.child_exit_code;
-                    kernel.process.unblock_context_switch();
+                    kernel.process.unblock_context_switch(@src());
                     return pid;
                 }
                 const Action = struct {
@@ -339,15 +348,27 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     }
                 };
                 current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
-                    kernel.process.unblock_context_switch();
+                    kernel.process.unblock_context_switch(@src());
                     return -1;
                 };
-                kernel.process.unblock_context_switch();
+                // log.err("Waiting for process: {d}", .{pid});
+                kernel.irq.system_call.print_context_switches(5);
+                kernel.process.unblock_context_switch(@src());
+                // log.err("Triggering context switch for waiting process: {d}, my tsate is: {s}", .{ pid, @tagName(current_process.state) });
+                // log.err("Trigger pendsv", .{});
+                // arch.enable_interrupts(); // just in case they are blocked
                 hal.irq.trigger(.pendsv);
-            } else {
-                kernel.process.unblock_context_switch();
+                // log.err("After trigger pendsv", .{});
+                // hal.irq.trigger(.pendsv);
+                // current_process.reevaluate_state();
+                // while (current_process.state != Process.State.Running and current_process.state != Process.State.Ready) {
+                // current_process.reevaluate_state();
+                // }
+                kernel.process.block_context_switch(@src());
             }
             status.* = current_process.child_exit_code;
+            // log.err("Process waited successfully: {d}, code: {d}, my pid is: {d}", .{ pid, current_process.child_exit_code, self.get_current_process().pid });
+            kernel.process.unblock_context_switch(@src());
             return pid;
         }
 
@@ -355,8 +376,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         // core access - secure, different memory regions
         // interrupts - disabled during access
         pub fn get_current_process(self: *const Self) *Process {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            kernel.process.block_context_switch(@src());
+            defer kernel.process.unblock_context_switch(@src());
             return self.core[hal.cpu.coreid()];
         }
 
@@ -402,9 +423,10 @@ pub fn deinitialize_process_manager() void {
 }
 
 pub export fn process_set_next_task() *const u8 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    // kernel.process.block_context_switch(@src());
+    // defer kernel.process.unblock_context_switch(@src());
     if (instance._scheduler.get_next()) |task| {
+        std.log.err("Switching to process: {d}", .{task.pid});
         instance._scheduler.update_current();
         instance.core[hal.cpu.coreid()] = task;
         return task.stack_pointer();
@@ -413,22 +435,42 @@ pub export fn process_set_next_task() *const u8 {
 }
 
 export fn get_stack_bottom() *const u8 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    // kernel.process.block_context_switch(@src());
+    // defer kernel.process.unblock_context_switch(@src());
     return instance.core[hal.cpu.coreid()].get_stack_bottom();
 }
 
 export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
     _ = uses_fpu;
-    kernel.process.block_context_switch();
+    // kernel.process.block_context_switch(@src());
+    log.err("Updating stack pointer to {x} for: {d}", .{ @intFromPtr(ptr), instance.core[hal.cpu.coreid()].pid });
+    loaded_counter = 5;
     instance.core[hal.cpu.coreid()].set_stack_pointer(ptr);
-    kernel.process.unblock_context_switch();
+    // kernel.process.unblock_context_switch(@src());
+}
+
+var loaded_counter: usize = 0;
+
+export fn print_process_loaded(jump_address: usize) void {
+    if (jump_address == 0) {
+        if (loaded_counter > 0) {
+            log.err("Processing started ...", .{});
+            loaded_counter -= 1;
+            return;
+        }
+    }
+    log.err("Process loaded: {d}, 0x{x}, is sp mod 8? {d}", .{ instance.core[hal.cpu.coreid()].pid, jump_address, @mod(jump_address, 8) });
 }
 
 export fn arch_store_vfork_back_point(back_point: usize, stack_pointer: usize) void {
-    kernel.process.block_context_switch();
+    kernel.process.block_context_switch(@src());
     instance.set_vfork_back_point(back_point, stack_pointer);
-    kernel.process.unblock_context_switch();
+    kernel.process.unblock_context_switch(@src());
+}
+
+export fn process_unblock_context_switch() void {
+    kernel.process.unblock_context_switch(@src());
+    hal.irq.trigger(.pendsv); // will this crash
 }
 
 const StubScheduler = @import("scheduler/stub.zig").StubScheduler;

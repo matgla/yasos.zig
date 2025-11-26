@@ -31,11 +31,7 @@
 #include "packet.h"
 #include "terminal.h"
 
-#define MAX_RETRIES 10
-
-#define MAX_FRAMES 5
-ymodem_packet_t frames[MAX_FRAMES];
-int frame_count = 0;
+#define MAX_RETRIES 20
 
 typedef enum {
   SOH = 0x01,
@@ -65,9 +61,6 @@ typedef enum {
   STATUS_INVALID_COMPLEMENTARY = -5,
 } ymodem_status_t;
 
-ymodem_status_t errors[128];
-int error_count = 0;
-
 typedef struct {
   ymodem_state_t state;
   int retries;
@@ -93,7 +86,6 @@ ymodem_status_t read_packet(ymodem_packet_t *packet) {
   do {
     if (read(STDIN_FILENO, &packet->start, 1) <= 0) {
       // fprintf(stderr, "Timeout waiting for start byte\n");
-      errors[error_count++] = STATUS_INVALID_START;
       return STATUS_ERROR;
     }
     // fprintf(stderr, "Got start byte: 0x%02X\n", packet->start);
@@ -111,7 +103,6 @@ ymodem_status_t read_packet(ymodem_packet_t *packet) {
   if (packet->id + complementary_packet_id != 0xFF) {
     // fprintf(stderr, "Packet ID and its complement do not match\n");
     flush_stdin();
-    errors[error_count++] = STATUS_INVALID_COMPLEMENTARY;
     return STATUS_ERROR;
   }
 
@@ -127,7 +118,6 @@ ymodem_status_t read_packet(ymodem_packet_t *packet) {
   } else {
     // fprintf(stderr, "Invalid start byte: 0x%02X\n", packet->start);
     flush_stdin();
-    errors[error_count++] = STATUS_INVALID_START;
     return STATUS_ERROR;
   }
 
@@ -141,7 +131,6 @@ ymodem_status_t read_packet(ymodem_packet_t *packet) {
     // }
     // fprintf(stderr, "\n");
     if (rc <= 0) {
-      errors[error_count++] = STATUS_TIMEOUT;
       // fprintf(stderr, "Timeout reading packet data\n");
       return STATUS_ERROR;
     }
@@ -149,16 +138,12 @@ ymodem_status_t read_packet(ymodem_packet_t *packet) {
   }
   packet->crc[0] = read_byte();
   packet->crc[1] = read_byte();
-  if (frame_count < MAX_FRAMES)
-  memcpy(&frames[frame_count++], packet,
-         sizeof(ymodem_packet_t));
   uint16_t computed_crc = crc16_ccitt(packet->data, packet_size);
 
   if (packet->crc[0] != computed_crc >> 8 ||
       packet->crc[1] != (computed_crc & 0xFF)) {
     // fprintf(stderr, "CRC mismatch: received 0x%02X%02X, computed 0x%04X\n",
             // packet->crc[0], packet->crc[1], computed_crc);
-    errors[error_count++] = STATUS_CRC_ERROR;
     return STATUS_ERROR;
   }
   return STATUS_OK;
@@ -276,21 +261,6 @@ int main(int argc, char *argv[]) {
   flush_stdin();
   fprintf(stderr, "Starting YMODEM receiver...\n");
   ymodem_receiver_loop();
-
-  int i = 0;
-  for (i = 0; i < error_count; i++) {
-    fprintf(stderr, "Error %d: %d\n", i, errors[i]);
-  }
-  int j = 0;
-  for (j = 0; j < frame_count; j++) {
-    fprintf(stderr, "Frame %d: start=0x%02X, id=0x%02X\n", j, frames[j].start,
-            frames[j].id);
-    for (int k = 0; k < 128; k++) {
-      fprintf(stderr, "%02X,", frames[j].data[k]);
-    }
-    fprintf(stderr, "\n");
-  }
-
   restore_terminal();
   return 0;
 }

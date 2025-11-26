@@ -31,7 +31,7 @@ pub export fn irq_systick() void {
     // modify from core 0 only
     const tick_counter_ptr: *volatile u64 = &tick_counter;
     tick_counter_ptr.* += 1;
-    if (tick_counter_ptr.* - last_time >= config.process.context_switch_period) {
+    if (tick_counter_ptr.* - last_time >= 100) { //config.process.context_switch_period) {
         hal.irq.trigger(.pendsv);
         last_time = tick_counter_ptr.*;
     }

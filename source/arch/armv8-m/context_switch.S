@@ -36,6 +36,8 @@ switch_to_next_task:
   push {r0, r1}
   bl get_stack_bottom // no arguments - r0 = sp bottom
   msr psplim, r0
+  isb
+  dsb
   pop {r0, r1}
   pop {r2, r1}
   // load task context
@@ -55,6 +57,8 @@ arm_load_registers_from_stack:
   vldmia r0!, {s16-s31}
 load_no_fpu:
   msr psp, r0
+  isb
+  dsb
   mov r0, r2
   pop {pc}
 
@@ -66,6 +70,7 @@ arch_store_registers_on_stack:
   push {lr}
   mov r2, r1
   mrs r1, psp
+  isb
   cmp r0, #0
   beq store_no_fpu
   vstmdb r1!, {s16-s31}
@@ -107,9 +112,12 @@ dispatch_syscall:
 .thumb_func
 irq_svcall:
   // this is processed in irq
+  cmp r0, #1
+  beq process_syscall_unblock_context_switch
   cmp r0, #0
   bne process_syscall_entry
   mrs r2, psp
+  isb
     // let's check if fpu is used by current task
   tst lr, #0x10
   bne process_syscall_return_without_fpu
@@ -120,11 +128,14 @@ process_syscall_return_without_fpu:
   add r2, r2, #4
   ldmia r2!, {r1}
   msr psp, r2
+  dsb
+  isb
   bx r1
 
 process_syscall_entry:
   push {r4, r5, r6}
   mrs r4, psp
+  isb
   ldr r6, [r4, #28] // get psr
   ldr r3, =return_from_syscall
   ldr r5, =dispatch_syscall
@@ -132,13 +143,22 @@ process_syscall_entry:
   stmdb r4!, {r3, r5, r6}
   stmdb r4!, {r0-r3, r12}
   msr psp, r4
+  isb
+  dsb
   mrs r4, control
+  isb
   bic r4, r4, #1
   msr control, r4
+  isb
+  dsb
   ldr r3, =0xfffffffd
   pop {r4, r5, r6}
   // process stack is modified, but not yet ready to be switched, block context switch till prepared
   bx r3 // we are taking back context from 134
+process_syscall_unblock_context_switch:
+  push {r0, lr}
+  bl process_unblock_context_switch
+  pop {r0, pc}
 .thumb_func
 return_from_syscall:
   @ we are no longer in exception, restore stack manually
@@ -155,8 +175,11 @@ arch_get_stack_pointer:
 .thumb_func:
 switch_to_main_task:
   mrs r0, control
+  isb
   bic r0, r0, #3
   msr control, r0
+  isb
+  dsb
   pop {r0, pc}
 
 // caller saved registers are already saved by exception entry
@@ -168,6 +191,7 @@ irq_pendsv:
   moveq r0, #1
   movne r0, #0
   push {r0, lr}
+  bl print_process_loaded
   bl do_context_switch
   cmp r0, #3
   beq pendsv_ignore
@@ -183,10 +207,20 @@ pendsv_exit:
 pendsv_store_and_switch:
   pop {r0, r1}
   bl store_and_switch_to_next_task
+  push {r0, r1}
+  mrs r0, psp
+  isb
+  bl print_process_loaded
+  pop {r0, r1}
   bx r0
 pendsv_switch_to_next_task:
   pop {r0, r1}
   bl switch_to_next_task
+  push {r0, r1}
+  mrs r0, psp
+  isb
+  bl print_process_loaded
+  pop {r0, r1}
   bx r0
 pendsv_ignore:
   pop {r0, pc}
@@ -199,8 +233,11 @@ switch_to_the_first_task:
   mov r1, lr
   bl switch_to_next_task
   mrs r1, control
+  isb
   orr r1, r1, #3 // unprivileged + psp
   msr control, r1
+  isb
+  dsb
   bx r0
 
 
@@ -213,15 +250,22 @@ process_get_back_to_parent_vfork:
   mov sp, r1
   bx r2
 
-// r0 - pointer to child r11 value
+// r0 - pointer to child sp value (to rescue registers)
 // r1 - pointer to child got value
 // r2 - pointer to child return
+// r3 - is fpu used
 .global process_vfork_child
 .thumb_func
 process_vfork_child:
   push {r4-r12, lr}
+  cmp r3, #1
   mov r3, sp
-  mov r11, r0
+  mov sp, r0
+  pop {r4-r12, lr}
+  bne vfork_child_no_fpu
+  vpop {s0-s31}
+vfork_child_no_fpu:
+  mov sp, r3
   push {r1, r2} // r9 for child, other for alignment
   ldr r0, =process_vfork_back_here
   mov r1, r3

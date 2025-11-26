@@ -112,7 +112,6 @@ pub const MmcIo = struct {
         while (i < num_blocks) : (i += 1) {
             self.block_read_impl(17, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch |err| {
                 if (retransmissions < max_retransmissions) {
-                    log.err("Read error on block {d}, retransmitting... ({d}/{d})", .{ i, retransmissions + 1, max_retransmissions });
                     retransmissions += 1;
                     i -= 1; // retry the same block
                     continue;

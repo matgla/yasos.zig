@@ -50,7 +50,7 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 _ = self;
                 uart.flush();
                 uart.init(.{
-                    .baudrate = 115200,
+                    .baudrate = 921600,
                 }) catch |err| {
                     return err;
                 };
