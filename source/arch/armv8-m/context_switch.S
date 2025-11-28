@@ -99,10 +99,16 @@ store_and_switch_to_next_task:
 .thumb_func
 dispatch_syscall:
   // this is not in IRQ, so can be interrupted
-  push {r0, r1}
+  push {r7, lr}
+  add r7, sp, #0
+  @ push {r0, r1}
   bl _irq_svcall
+  pop {r7, lr}
+  push {r0, r1}
   mov r0, #0
   svc #1 // this pushes another context
+  @ pop {r0, r1}
+  @ pop {r7, pc}
 
 // r0 - syscall number
 // r1 - arg pointer
@@ -125,20 +131,25 @@ irq_svcall:
 process_syscall_return_without_fpu:
   add r2, r2, #32 // skip general purpose registers
   ldmia r2!, {r0, r3}
-  add r2, r2, #4
-  ldmia r2!, {r1}
+  ldmia r2!, {r3, lr}
   msr psp, r2
-  dsb
   isb
-  bx r1
+  dmb
+  bx lr
+  //ldmia r2!, {r1}
+  // msr psp, r2
+  // dsb
+  // isb
+
 
 process_syscall_entry:
-  push {r4, r5, r6}
+  push {r4, r5, r6, r7}
   mrs r4, psp
   isb
   ldr r6, [r4, #28] // get psr
   ldr r3, =return_from_syscall
   ldr r5, =dispatch_syscall
+  // simulated exception frame
   stmdb r4!, {r0, lr}
   stmdb r4!, {r3, r5, r6}
   stmdb r4!, {r0-r3, r12}
@@ -152,7 +163,7 @@ process_syscall_entry:
   isb
   dsb
   ldr r3, =0xfffffffd
-  pop {r4, r5, r6}
+  pop {r4, r5, r6, r7}
   // process stack is modified, but not yet ready to be switched, block context switch till prepared
   bx r3 // we are taking back context from 134
 process_syscall_unblock_context_switch:
@@ -161,7 +172,6 @@ process_syscall_unblock_context_switch:
   pop {r0, pc}
 .thumb_func
 return_from_syscall:
-  @ we are no longer in exception, restore stack manually
   pop {r1, pc}
 
 .global arch_get_stack_pointer
@@ -191,7 +201,7 @@ irq_pendsv:
   moveq r0, #1
   movne r0, #0
   push {r0, lr}
-  bl print_process_loaded
+  // bl print_process_loaded
   bl do_context_switch
   cmp r0, #3
   beq pendsv_ignore
@@ -207,20 +217,20 @@ pendsv_exit:
 pendsv_store_and_switch:
   pop {r0, r1}
   bl store_and_switch_to_next_task
-  push {r0, r1}
-  mrs r0, psp
-  isb
-  bl print_process_loaded
-  pop {r0, r1}
+  //push {r0, r1}
+  //mrs r0, psp
+  //isb
+  //bl print_process_loaded
+  //pop {r0, r1}
   bx r0
 pendsv_switch_to_next_task:
   pop {r0, r1}
   bl switch_to_next_task
-  push {r0, r1}
-  mrs r0, psp
-  isb
-  bl print_process_loaded
-  pop {r0, r1}
+  //push {r0, r1}
+  //mrs r0, psp
+  //isb
+  //bl print_process_loaded
+  //pop {r0, r1}
   bx r0
 pendsv_ignore:
   pop {r0, pc}
@@ -272,6 +282,10 @@ vfork_child_no_fpu:
   bl arch_store_vfork_back_point
   ldr r1, [sp, #4]
   mov r0, #0
+  push {r0, r1}
+  bl process_unblock_context_switch
+  pop {r0, r1}
+  cpsie i
   bx r1
 
 .thumb_func

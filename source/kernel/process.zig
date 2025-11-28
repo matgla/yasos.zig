@@ -337,7 +337,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .node = std.DoublyLinkedList.Node{},
             };
             self._blocked_by.append(&blocked_data.node);
-            kernel.log.err("Waiting for process {d} in pid {d}", .{ process.pid, self.pid });
             self.reevaluate_state();
         }
 
@@ -351,7 +350,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             }
 
             if (self._blocked_by.first != null) {
-                kernel.log.err("I am blocked by other process in pid {d}", .{self.pid});
                 self.state = Process.State.Blocked;
                 return;
             }

@@ -75,8 +75,7 @@ pub fn RingBuffer(BufferType: type, BufferSize: usize) type {
         }
 
         pub fn clear(self: *Self) linksection(".time_critical") void {
-            self.head = 0;
-            self.tail = 0;
+            self.head = self.tail;
         }
     };
 }

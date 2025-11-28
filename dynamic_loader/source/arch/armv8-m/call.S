@@ -34,9 +34,6 @@ r3 - std::size_t *got
 .type call_main, %function
 call_main:
   push {r4, lr}
-  push {r0-r3}
-  bl print_main_call
-  pop {r0-r3}
   mov r4, r9
   push {r4, r5}
   mov r9, r3

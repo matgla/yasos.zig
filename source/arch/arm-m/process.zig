@@ -208,7 +208,7 @@ pub fn initialize_context_switching() void {
     std.log.err("Initializing ARM Cortex-M context switching...", .{});
     hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
     hal.irq.set_priority(.pendsv, 0xfe);
-    hal.irq.set_priority(.systick, 0x00);
+    hal.irq.set_priority(.systick, 0xff);
 }
 
 pub const ArmProcess = struct {
@@ -281,7 +281,6 @@ pub const ArmProcess = struct {
         };
 
         self.stack_position = prepare_process_stack(self.stack, exit_handler_impl, process_entry, args[0..4], false);
-        std.log.err("Reinitialized stack, current sp={x}, start={x}, size={x}", .{ @intFromPtr(self.stack_position), @intFromPtr(self.stack.ptr), self.stack.len });
     }
 
     pub fn validate_stack(self: *const Self) bool {
@@ -291,10 +290,6 @@ pub const ArmProcess = struct {
 
 pub fn get_offset_of_hardware_stored_registers(use_fpu: bool) isize {
     return if (use_fpu) -@sizeOf(HardwareStoredRegisters) else -(@sizeOf(HardwareStoredRegisters) - @sizeOf(u32) * 18);
-}
-
-export fn print_main_call(argc: u32, _: *const anyopaque, main_address: usize, got: usize) callconv(.c) void {
-    std.log.err("Calling main function at address: {x} with argc={d}, got={x}", .{ main_address, argc, got });
 }
 
 fn test_entry() void {}

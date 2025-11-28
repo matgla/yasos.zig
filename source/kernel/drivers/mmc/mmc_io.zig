@@ -69,6 +69,8 @@ pub const MmcIo = struct {
     }
 
     pub fn init(self: *Self) anyerror!void {
+        asm volatile ("cpsid i");
+        defer asm volatile ("cpsie i");
         try self._mmc.init();
         const config = self._mmc.get_config();
         switch (config.mode) {
@@ -86,6 +88,8 @@ pub const MmcIo = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        asm volatile ("cpsid i");
+        defer asm volatile ("cpsie i");
         log.info("Deleting MMC driver, waiting for card to reach idle state", .{});
         const buffer: [1]u8 = [_]u8{0xff};
         while (self._mmc.is_busy()) {
@@ -94,6 +98,8 @@ pub const MmcIo = struct {
     }
 
     pub fn read(self: *const Self, address: usize, buf: []u8) isize {
+        asm volatile ("cpsid i");
+        defer asm volatile ("cpsie i");
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;
@@ -125,6 +131,8 @@ pub const MmcIo = struct {
     }
 
     pub fn write(self: *const Self, address: usize, buf: []const u8) isize {
+        asm volatile ("cpsid i");
+        defer asm volatile ("cpsie i");
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;

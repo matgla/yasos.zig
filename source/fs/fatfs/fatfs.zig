@@ -217,6 +217,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn read(interface: *fatfs.Disk, buff: [*]u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            asm volatile ("cpsid i");
+            defer asm volatile ("cpsie i");
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             const position = self.device.interface.seek(@as(c.off_t, @intCast(sector * sector_size)), c.SEEK_SET) catch return error.IoError;
             if (position < 0) return error.IoError;
@@ -226,6 +228,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn write(interface: *fatfs.Disk, buff: [*]const u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            asm volatile ("cpsid i");
+            defer asm volatile ("cpsie i");
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             log.debug("Writing to sector {d}, count {d}", .{ sector, count });
             const position = self.device.interface.seek(@as(c.off_t, @intCast(sector * sector_size)), c.SEEK_SET) catch return error.IoError;
@@ -236,6 +240,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn ioctl(interface: *fatfs.Disk, cmd: fatfs.IoCtl, buff: [*]u8) fatfs.Disk.Error!void {
+            asm volatile ("cpsid i");
+            defer asm volatile ("cpsie i");
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             switch (cmd) {
                 .sync => {

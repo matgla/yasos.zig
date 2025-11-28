@@ -264,7 +264,6 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch(@src());
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    log.err("sys_exit called for: {d}", .{process.pid});
     if (process._parent) |parent| {
         parent.child_exit_code = context.*;
     }
@@ -426,7 +425,7 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    return process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
+    return process_manager.instance.prepare_exec(std.mem.span(context.filename.?), context.argv.?, context.envp.?);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
@@ -439,6 +438,7 @@ pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     context.result.* = process.mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset) catch {
+        context.result.* = c.MAP_FAILED;
         return -1;
     };
     return 0;

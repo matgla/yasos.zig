@@ -261,6 +261,8 @@ int main(int argc, char *argv[]) {
   flush_stdin();
   fprintf(stderr, "Starting YMODEM receiver...\n");
   ymodem_receiver_loop();
+  flush_stdin();
+  fprintf(stderr, "YMODEM transfer completed...\n");
   restore_terminal();
   return 0;
 }

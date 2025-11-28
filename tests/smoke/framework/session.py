@@ -63,10 +63,12 @@ class Session:
 
     def wait_for_prompt_except_logs(self):
         while True:
-            lines = self.serial.read_until(b"$ ").decode('utf-8').splitlines()
+            lines = self.serial.read_until(b"$ ")
+            self.file.write(lines.decode('utf-8', 'ignore'))
+            self.file.flush()
+            lines = lines.decode('utf-8').splitlines()
             filtered_lines = []
             for line in lines:
-                self.file.write(line + "\n")
                 if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
                     continue
                 filtered_lines.append(line.strip())
@@ -76,6 +78,7 @@ class Session:
     def wait_for_data(self, data):
         line = self.serial.read_until(data.encode('utf-8')).decode('utf-8')
         self.file.write(line)
+        self.file.flush()
         line = line.strip()
         if not line.endswith(data.strip()):
             raise RuntimeError("Prompt not found on serial port: '" + data + "'")
@@ -106,6 +109,7 @@ class Session:
     def read_line(self):
         line = self.serial.readline().decode('utf-8')
         self.file.write(line)
+        self.file.flush()
         line = line.strip()
         return line
 
@@ -115,6 +119,7 @@ class Session:
             line = self.serial.readline().decode('utf-8')
             self.file.write(line)
             line = line.strip()
+            self.file.flush()
             if not re.search(regex, line):
                 return line
         return ""
@@ -126,6 +131,7 @@ class Session:
             if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
                 continue
             return line.strip()
+            self.file.flush()
 
     def reset_target(self):
         self.file.write("Resetting target with command: " + current_dir + "/reset_target.sh\n")
@@ -133,6 +139,7 @@ class Session:
         if (output.returncode != 0):
             output = subprocess.run("./reset_target.sh", shell=True, cwd=current_dir, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
         self.file.write(output.stdout.decode('utf-8'))
+        self.file.flush()
 
 
     def close(self):

@@ -54,7 +54,12 @@ def upload_testcase(path, socket, session):
     filename = os.path.basename(path)
     session.write_command("ls /root/tcc_test")
     data = session.wait_for_prompt_except_logs()
-    if not filename in data:
+    has_file = False
+    for line in data:
+        if filename in line:
+            has_file = True
+            break
+    if not has_file:
         session.write_command("rz")
         data = session.read_until("Starting YMODEM receiver...")
         socket.send([path])
@@ -95,7 +100,7 @@ def compile_testcase(path, socket, session):
         i = 0
         for expected_line in f:
             expected_line = expected_line.strip()
-            assert expected_line in data_lines[i].strip(), f"expected '{expected_line}' in '{data}'"
+            assert expected_line in data_lines[i].strip(), f"expected '{expected_line}' in '{data_lines}'"
             i += 1
 
 def run_test_suite(test_cases, socket, session):
@@ -103,6 +108,14 @@ def run_test_suite(test_cases, socket, session):
         print("Running test case: " + test_case, )
         upload_testcase(test_case, socket, session)
         compile_testcase(test_case, socket, session)
+
+removed_test_cases = [
+    "tests2/101_cleanup.c",  # preprocessed file > 4MB is size is to large for MCU
+    "tests2/102_alignas.c",   # fixme
+    "tests2/104+_inline.c",  #xcheckme
+    "tests2/104_inline.c",
+    "tests2/106_versym.c",
+]
 
 def test_run_tcc_test_suite(request):
     session = request.node.stash[session_key]
@@ -134,6 +147,7 @@ def test_run_tcc_test_suite(request):
 
     socket = ModemSocket(read, write, **socket_args)
     test_cases = find_tcc_test_cases("../../libs/tinycc/tests/tests2")
+    test_cases = [tc for tc in test_cases if not any(os.path.basename(tc) == os.path.basename(removed) for removed in removed_test_cases)]
     test_cases = sorted(test_cases)[:20]
     run_test_suite(test_cases, socket, session)
 

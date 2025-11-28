@@ -21,6 +21,7 @@ const std = @import("std");
 const config = @import("config");
 
 const hal = @import("hal");
+const arch = @import("arch");
 
 const process_manager = @import("../process_manager.zig");
 
@@ -28,7 +29,9 @@ var tick_counter: u64 = 0;
 var last_time: u64 = 0;
 
 pub export fn irq_systick() void {
-    // modify from core 0 only
+    arch.disable_interrupts();
+    defer arch.enable_interrupts();
+
     const tick_counter_ptr: *volatile u64 = &tick_counter;
     tick_counter_ptr.* += 1;
     if (tick_counter_ptr.* - last_time >= 100) { //config.process.context_switch_period) {

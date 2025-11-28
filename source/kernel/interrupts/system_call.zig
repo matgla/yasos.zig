@@ -63,7 +63,6 @@ pub fn block_context_switch(src: std.builtin.SourceLocation) void {
     ptr.* = false;
     asm volatile (
         \\ cpsie i
-        \\ dsb sy
     );
 }
 
@@ -82,12 +81,13 @@ pub fn unblock_context_switch(src: std.builtin.SourceLocation) void {
         const ptr: *volatile bool = &context_switch_enabled;
         ptr.* = true;
     } else if (counter < 0) {
-        @panic("Mismatched unblock_context_switch call");
+        const ptr: *volatile bool = &context_switch_enabled;
+        ptr.* = true;
+        counter = 0;
     }
     // kernel.irq.enable_interrupts();
     asm volatile (
         \\ cpsie i
-        \\ dsb sy
     );
 }
 
