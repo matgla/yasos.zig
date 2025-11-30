@@ -28,6 +28,8 @@ from ymodem.Protocol import ProtocolType
 
 import os
 
+import pytest
+
 current_session = None
 
 def read(size: int, timeout: Optional[float] = 3) -> any:
@@ -83,8 +85,7 @@ def upload_testcase(path, socket, session):
     local_hash = subprocess.check_output(["sha256sum", path]).decode().split()[0]
     assert local_hash == data.split()[0], "file upload failed, hash mismatch"
 
-def compile_testcase(path, socket, session):
-    filename = os.path.basename(path)
+def compile_testcase(filename, socket, session):
     filename_without_extension = filename.replace(".c", "")
     session.write_command(f"tcc /root/tcc_test/{filename} -o {filename_without_extension}")
     data_lines = session.wait_for_prompt_except_logs()
@@ -94,7 +95,8 @@ def compile_testcase(path, socket, session):
     run_lines = session.wait_for_prompt_except_logs()[:-1]
     data_lines += run_lines
     print("Test case output:\n", data_lines)
-    expect = path.replace(".c", ".expect")
+    expect_path = path + "/" + filename
+    expect = expect_path.replace(".c", ".expect")
     assert os.path.exists(expect), f"expect file not found: {expect}"
     with open(expect, "r") as f:
         i = 0
@@ -103,21 +105,24 @@ def compile_testcase(path, socket, session):
             assert expected_line in data_lines[i].strip(), f"expected '{expected_line}' in '{data_lines}'"
             i += 1
 
-def run_test_suite(test_cases, socket, session):
-    for test_case in test_cases:
-        print("Running test case: " + test_case, )
-        upload_testcase(test_case, socket, session)
-        compile_testcase(test_case, socket, session)
-
 removed_test_cases = [
-    "tests2/101_cleanup.c",  # preprocessed file > 4MB is size is to large for MCU
-    "tests2/102_alignas.c",   # fixme
-    "tests2/104+_inline.c",  #xcheckme
-    "tests2/104_inline.c",
-    "tests2/106_versym.c",
+    "101_cleanup.c",  # preprocessed file > 4MB is size is to large for MCU
+    "102_alignas.c",   # fixme
+    "104+_inline.c",  #xcheckme
+    "104_inline.c",
+    "106_versym.c",
 ]
 
-def test_run_tcc_test_suite(request):
+path = "../../libs/tinycc/tests/tests2"
+
+test_cases = [os.path.basename(tc) for tc in find_tcc_test_cases(path)]
+test_cases = [tc for tc in test_cases if not any(os.path.basename(tc) == os.path.basename(removed) for removed in removed_test_cases)]
+test_cases = sorted(test_cases)[:1]
+
+
+ 
+@pytest.mark.parametrize('testcase', test_cases)
+def test_run_tcc_test_suite(request, testcase):
     session = request.node.stash[session_key]
     global current_session
     current_session = session
@@ -146,10 +151,10 @@ def test_run_tcc_test_suite(request):
     logger.setLevel(logging.DEBUG)
 
     socket = ModemSocket(read, write, **socket_args)
-    test_cases = find_tcc_test_cases("../../libs/tinycc/tests/tests2")
-    test_cases = [tc for tc in test_cases if not any(os.path.basename(tc) == os.path.basename(removed) for removed in removed_test_cases)]
-    test_cases = sorted(test_cases)[:20]
-    run_test_suite(test_cases, socket, session)
+    print("Uploading testcase:", testcase)
+    upload_testcase(path + "/" + testcase, socket, session)
+    compile_testcase(testcase, socket, session)
+
 
 
 
