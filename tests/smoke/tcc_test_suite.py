@@ -111,16 +111,38 @@ removed_test_cases = [
     "104+_inline.c",  #xcheckme
     "104_inline.c",
     "106_versym.c",
+    "107_stack_safe.c",
+    "109_float_struct_calling.c",
+    "110_average.c",
+    "111_conversion.c",
+    "112_backtrace.c",
+    "113_btdll.c",
+    "114_bound_signal.c",
+    "119_random_stuff.c",
+    "117_builtins.c",
+    "120_alias.c",
+    "120+_alias.c",
+    "121_struct_return.c",
+    "124_atomic_counter.c",
+    "125_atomic_misc.c",
+    "126_bound_globals.c",
+    "127_asm_goto.c",
+    "131_return_struct_in_reg.c",
+    "132_bound_test.c",
+    "134_double_signed.c",
+    "115_bound_setjmp.c",
+    "116_bound_setjmp2.c",
+    "108_constructor.c",
 ]
 
 path = "../../libs/tinycc/tests/tests2"
 
 test_cases = [os.path.basename(tc) for tc in find_tcc_test_cases(path)]
 test_cases = [tc for tc in test_cases if not any(os.path.basename(tc) == os.path.basename(removed) for removed in removed_test_cases)]
-test_cases = sorted(test_cases)[:1]
+test_cases = sorted(test_cases)
 
 
- 
+
 @pytest.mark.parametrize('testcase', test_cases)
 def test_run_tcc_test_suite(request, testcase):
     session = request.node.stash[session_key]

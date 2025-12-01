@@ -30,7 +30,7 @@ const DumpHardware = kernel.DumpHardware;
 
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
-const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
+const LittleFs = @import("fs/littlefs/littlefs.zig").LittleFs;
 
 const panic_helper = @import("arch").panic;
 
@@ -216,7 +216,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         if (maybe_mmcpart0) |*mmcnode| {
             const maybe_file = mmcnode.as_file();
             if (maybe_file) |file| {
-                const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file)) catch null;
+                const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, LittleFs.InstanceType.init(allocator, file)) catch null;
                 if (maybe_rootfs) |rootfs| {
                     mount_filesystem(rootfs, "/root") catch {};
                 }

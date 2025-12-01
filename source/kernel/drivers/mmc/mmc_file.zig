@@ -55,29 +55,32 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return self._driver.write(self._current_block << 9, buf);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+    pub fn seek(self: *Self, offset: u64, whence: i32) anyerror!u64 {
+        log.err("Seeking MMC file: offset={d}, whence={d}", .{ offset, whence });
+        log.err("Current block before seek: {d}", .{self._current_block});
+        log.err("MMC size in sectors: {d}", .{self._driver.size_in_sectors()});
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0 or (offset >> 9) > self._driver.size_in_sectors()) {
-                    return -1;
+                    return kernel.errno.ErrnoSet.IllegalSeek;
                 }
 
                 self._current_block = @intCast(offset >> 9);
             },
             c.SEEK_END => {
                 log.err("SEEK_END is not implemented for MMC disk", .{});
-                return -1;
+                return kernel.errno.ErrnoSet.IllegalSeek;
             },
             c.SEEK_CUR => {
-                const new_position: isize = @as(isize, @intCast(self._current_block)) + (offset >> 9);
+                const new_position: isize = @as(isize, @intCast(self._current_block)) + @as(isize, @intCast(offset >> 9));
                 if (new_position < 0) {
-                    return -1;
+                    return kernel.errno.ErrnoSet.IllegalSeek;
                 }
                 self._current_block = @intCast(new_position);
             },
-            else => return -1,
+            else => return kernel.errno.ErrnoSet.InvalidArgument,
         }
-        return @as(c.off_t, @intCast(self._current_block)) << 9;
+        return @as(u64, @intCast(self._current_block)) << 9;
     }
 
     pub fn sync(self: *Self) i32 {
@@ -85,7 +88,7 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn tell(self: *Self) c.off_t {
+    pub fn tell(self: *Self) u64 {
         _ = self;
         return 0;
     }
@@ -108,8 +111,8 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn size(self: *const Self) usize {
-        return @intCast(self._driver.size_in_sectors() << 9);
+    pub fn size(self: *const Self) u64 {
+        return @as(u64, @intCast(self._driver.size_in_sectors())) << 9;
     }
 
     pub fn filetype(self: *const Self) kernel.fs.FileType {

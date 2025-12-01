@@ -141,7 +141,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return @intCast(result);
             }
 
-            pub fn seek(self: *Self, _: c.off_t, _: i32) anyerror!c.off_t {
+            pub fn seek(self: *Self, _: u64, _: i32) anyerror!u64 {
                 _ = self;
                 return 0;
             }
@@ -151,7 +151,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return 0;
             }
 
-            pub fn tell(self: *Self) c.off_t {
+            pub fn tell(self: *Self) u64 {
                 _ = self;
                 return 0;
             }
@@ -243,7 +243,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return -1;
             }
 
-            pub fn size(self: *const Self) usize {
+            pub fn size(self: *const Self) u64 {
                 _ = self;
                 return uart.bytes_to_read();
             }

@@ -53,30 +53,30 @@ pub fn BufferedFile(comptime BufferSize: usize) type {
                 return @intCast(read_length);
             }
 
-            pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+            pub fn seek(self: *Self, offset: u64, whence: i32) anyerror!u64 {
                 var new_position: isize = 0;
                 switch (whence) {
                     c.SEEK_SET => {
                         new_position = @as(isize, @intCast(offset));
                     },
                     c.SEEK_CUR => {
-                        new_position = @as(c.off_t, @intCast(self._position)) + offset;
+                        new_position = @as(isize, @intCast(self._position)) + @as(isize, @intCast(offset));
                     },
                     c.SEEK_END => {
                         new_position = @as(isize, @intCast(self._end)) + @as(isize, @intCast(offset));
                     },
                     else => {
-                        return -1;
+                        return kernel.errno.ErrnoSet.InvalidArgument;
                     },
                 }
                 if (new_position < 0) {
-                    return -1;
+                    return kernel.errno.ErrnoSet.IllegalSeek;
                 }
-                self._position = @as(usize, @intCast(new_position));
+                self._position = @intCast(new_position);
                 return @intCast(self._position);
             }
 
-            pub fn tell(self: *Self) c.off_t {
+            pub fn tell(self: *Self) u64 {
                 return @intCast(self._position);
             }
 
@@ -98,7 +98,7 @@ pub fn BufferedFile(comptime BufferSize: usize) type {
                 return 0;
             }
 
-            pub fn size(self: *const Self) usize {
+            pub fn size(self: *const Self) u64 {
                 return self._end;
             }
 

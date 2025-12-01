@@ -117,9 +117,12 @@ pub const MmcIo = struct {
         const max_retransmissions: usize = 3;
         while (i < num_blocks) : (i += 1) {
             self.block_read_impl(17, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                log.err("Reading block {d} failed with error: {s}, size: {d}", .{ i, @errorName(err), buf.len });
                 if (retransmissions < max_retransmissions) {
                     retransmissions += 1;
-                    i -= 1; // retry the same block
+                    if (i > 0) {
+                        i -= 1;
+                    }
                     continue;
                 }
                 log.err("Permanent read error on block {d}: {s}", .{ i, @errorName(err) });

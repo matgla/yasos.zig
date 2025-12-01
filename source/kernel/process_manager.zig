@@ -206,8 +206,10 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             }
 
-            kernel.process.unblock_context_switch(@src());
-            hal.irq.trigger(.pendsv);
+            while (true) {
+                kernel.process.unblock_context_switch(@src());
+                hal.irq.trigger(.pendsv);
+            }
         }
 
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {

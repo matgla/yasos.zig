@@ -157,12 +157,16 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         _ = follow_links;
         var node = try self.get(path);
         defer node.delete();
-        data.st_blksize = 1;
+        data.st_blksize = 512;
         data.st_rdev = 1;
         if (node.is_directory()) {
             data.st_mode = c.S_IFDIR;
         } else if (node.is_file()) {
             data.st_mode = c.S_IFREG;
+            const size = node.as_file().?.interface.size();
+            data.st_size = @truncate(size);
+            data.st_blocks = @intCast((size + 511) / 512);
+            log.err("Stat called on device file: size={d}", .{data.st_size});
         }
     }
 

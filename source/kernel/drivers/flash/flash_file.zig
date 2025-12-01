@@ -70,15 +70,15 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return @intCast(data.len);
             }
 
-            pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+            pub fn seek(self: *Self, offset: u64, whence: i32) anyerror!u64 {
                 switch (whence) {
                     c.SEEK_SET => {
                         if (offset < 0) {
-                            return -1;
+                            return kernel.errno.ErrnoSet.IllegalSeek;
                         }
                         self._current_address = @intCast(offset);
                     },
-                    else => return -1,
+                    else => return kernel.errno.ErrnoSet.IllegalSeek,
                 }
                 return 0;
             }
@@ -88,7 +88,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn tell(self: *Self) c.off_t {
+            pub fn tell(self: *Self) u64 {
                 _ = self;
                 return 0;
             }
@@ -121,7 +121,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return -1;
             }
 
-            pub fn size(self: *const Self) usize {
+            pub fn size(self: *const Self) u64 {
                 return FlashType.BlockSize * self._flash.get_number_of_blocks();
             }
 

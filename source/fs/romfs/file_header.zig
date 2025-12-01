@@ -57,7 +57,7 @@ pub const FileHeader = struct {
     _specinfo: u32,
 
     pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) !FileHeader {
-        var reader = try FileReader.init(device_file, start_offset);
+        var reader = try FileReader.init(device_file, @intCast(start_offset));
         const fileheader = try reader.read(u32, 0);
         const ft = FileHeader.convert_filetype(@enumFromInt(fileheader & 0x7));
         const name_buffer = reader.read_string(allocator, 16) catch "";

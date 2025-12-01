@@ -21,6 +21,8 @@ const std = @import("std");
 const hal = @import("yasos_hal");
 var gcc: ?[]const u8 = null;
 
+const littlefs = @import("source/fs/littlefs/build.zig");
+
 fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
     const create_venv_args = [_][]const u8{ "python3", "-m", "venv", "yasos_venv" };
     const create_venv_command = b.addSystemCommand(&create_venv_args);
@@ -334,6 +336,7 @@ pub fn build(b: *std.Build) !void {
             const kernel_exec = boardDep.artifact("yasos_kernel");
             kernel_exec.addIncludePath(b.path("source/sys/include"));
             kernel_exec.addIncludePath(b.path("."));
+            kernel_exec.addIncludePath(b.path("libs/littlefs"));
             // kernel_exec.addIncludePath(b.path("rootfs/usr/include"));
 
             const yasld = b.dependency("yasld", .{
@@ -403,6 +406,18 @@ pub fn build(b: *std.Build) !void {
             boardDep.artifact("yasos_kernel").root_module.addImport("arch", arch_module);
             boardDep.artifact("yasos_kernel").root_module.addImport("interface", oop.module("interface"));
             kernel_module.addImport("interface", oop.module("interface"));
+            const littlefs_lib = littlefs.build_littlefs(b, optimize, kernel_exec.root_module.resolved_target.?);
+            for (kernel_exec.root_module.include_dirs.items) |include_dir| {
+                switch (include_dir) {
+                    .path_system => |path| {
+                        littlefs_lib.addSystemIncludePath(path);
+                    },
+
+                    else => {},
+                }
+            }
+            kernel_module.addIncludePath(b.path("libs/littlefs"));
+            kernel_module.linkLibrary(littlefs_lib);
 
             const date_data = "2025-10-10";
 

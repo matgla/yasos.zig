@@ -368,7 +368,7 @@ pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
     defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    context.result.* = try file.interface.seek(context.offset, context.whence);
+    context.result.* = @intCast(try file.interface.seek(@intCast(context.offset), context.whence));
     return 0;
 }
 
@@ -382,6 +382,8 @@ pub fn sys_times(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch(@src());
+    defer kernel.process.unblock_context_switch(@src());
     const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
 
     context.result.* = -1;

@@ -33,15 +33,15 @@ pub const MmcPartitionFile =
         _dev: kernel.fs.IFile,
         _start_lba: u32,
         _size_in_sectors: u32,
-        _current_position: c.off_t,
+        _current_position: u64,
 
-        pub fn create(filename: []const u8, dev: kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
+        pub fn create(filename: []const u8, dev: kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) !MmcPartitionFile {
             return MmcPartitionFile.init(.{
                 ._name = filename,
-                ._dev = dev,
+                ._dev = try dev.clone(),
                 ._start_lba = start_lba,
                 ._size_in_sectors = size_in_sectors,
-                ._current_position = @as(c.off_t, @intCast(start_lba)) << 9,
+                ._current_position = @as(u64, @intCast(start_lba)) << 9,
             });
         }
 
@@ -54,34 +54,34 @@ pub const MmcPartitionFile =
         }
 
         pub fn create_node(allocator: std.mem.Allocator, dev: kernel.fs.IFile, filename: []const u8, start_lba: u32, size_in_sectors: u32) anyerror!kernel.fs.Node {
-            const file = try create(filename, dev, start_lba, size_in_sectors).interface.new(allocator);
+            const file = try (try create(filename, dev, start_lba, size_in_sectors)).interface.new(allocator);
             return kernel.fs.Node.create_file(file);
         }
 
         pub fn read(self: *Self, buf: []u8) isize {
             _ = self._dev.interface.seek(self._current_position, c.SEEK_SET) catch return 0;
             const readed = self._dev.interface.read(buf);
-            self._current_position += readed;
+            self._current_position += @as(u64, @intCast(readed));
             return readed;
         }
 
         pub fn write(self: *Self, buf: []const u8) isize {
             _ = self._dev.interface.seek(self._current_position, c.SEEK_SET) catch return 0;
             const written = self._dev.interface.write(buf);
-            self._current_position += written;
+            self._current_position += @as(u64, @intCast(written));
             return written;
         }
 
-        pub fn seek(self: *Self, offset: c.off_t, base: i32) anyerror!c.off_t {
-            if (@as(c.off_t, @intCast(self._start_lba << 9)) + offset > (self._start_lba + self._size_in_sectors) << 9) {
-                kernel.log.err("Seek offset {d} is out of bounds for MMC partition file", .{offset});
+        pub fn seek(self: *Self, offset: u64, base: i32) anyerror!u64 {
+            if (self._start_lba + (offset >> 9) > self._start_lba + self._size_in_sectors) {
+                kernel.log.err("Seek offset {d} is out of bounds for MMC partition file with start lba: {d}, size: {d}", .{ offset, self._start_lba, self._size_in_sectors });
                 return kernel.errno.ErrnoSet.InvalidArgument;
             }
-            if (@as(c.off_t, @intCast(self._start_lba)) + (offset >> 9) < @as(c.off_t, @intCast(self._start_lba))) {
+            if (@as(u64, @intCast(self._start_lba)) + (offset >> 9) < @as(u64, @intCast(self._start_lba))) {
                 kernel.log.err("Seek offset {d} is before the start of MMC partition file", .{offset});
                 return kernel.errno.ErrnoSet.InvalidArgument;
             }
-            const seek_offset = (@as(c.off_t, @intCast(self._start_lba)) << 9) + offset;
+            const seek_offset: u64 = (@as(u64, @intCast(self._start_lba)) << 9) + offset;
             self._current_position = try self._dev.interface.seek(seek_offset, base);
             return self._current_position;
         }
@@ -91,7 +91,7 @@ pub const MmcPartitionFile =
             return 0;
         }
 
-        pub fn tell(self: *Self) c.off_t {
+        pub fn tell(self: *Self) u64 {
             _ = self;
             return 0;
         }
@@ -114,8 +114,8 @@ pub const MmcPartitionFile =
             return 0;
         }
 
-        pub fn size(self: *const Self) usize {
-            return @as(usize, @intCast(self._size_in_sectors)) << 9;
+        pub fn size(self: *const Self) u64 {
+            return @as(u64, @intCast(self._size_in_sectors)) << 9;
         }
 
         pub fn filetype(self: *const Self) kernel.fs.FileType {

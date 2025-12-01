@@ -73,18 +73,18 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return @intCast(length);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+    pub fn seek(self: *Self, offset: u64, whence: i32) anyerror!u64 {
         var new_position: c.off_t = 0;
         const file_size: c.off_t = @intCast(self.header.size());
         switch (whence) {
             c.SEEK_SET => {
-                new_position = offset;
+                new_position = @intCast(offset);
             },
             c.SEEK_END => {
-                new_position = file_size + offset;
+                new_position = file_size + @as(c.off_t, @intCast(offset));
             },
             c.SEEK_CUR => {
-                new_position = @as(c.off_t, @intCast(self.position)) + offset;
+                new_position = @as(c.off_t, @intCast(self.position)) + @as(c.off_t, @intCast(offset));
             },
             else => return kernel.errno.ErrnoSet.InvalidArgument,
         }
@@ -95,7 +95,7 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return @intCast(self.position);
     }
 
-    pub fn tell(self: *Self) c.off_t {
+    pub fn tell(self: *Self) u64 {
         return @intCast(self.position);
     }
 
@@ -140,7 +140,7 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         self.header.deinit();
     }
 
-    pub fn size(self: *const Self) usize {
-        return @as(usize, @intCast(self.header.size()));
+    pub fn size(self: *const Self) u64 {
+        return @as(u64, @intCast(self.header.size()));
     }
 });

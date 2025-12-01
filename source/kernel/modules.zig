@@ -137,7 +137,7 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
         if (attr.mapped_address_r) |address| {
             header_address = address;
         } else {
-            var memory: []align(16) u8 = try process_allocator.alignedAlloc(u8, .@"16", f.interface.size());
+            var memory: []align(16) u8 = try process_allocator.alignedAlloc(u8, .@"16", @intCast(f.interface.size()));
             header_address = @ptrCast(&memory[0]);
             entry.memory = memory;
             _ = f.interface.read(memory);
