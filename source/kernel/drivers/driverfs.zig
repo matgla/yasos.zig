@@ -38,27 +38,27 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     base: kernel.fs.ReadOnlyFile,
     _allocator: std.mem.Allocator,
     _container: std.StringHashMap(IDriver),
+    _refcount: *i16,
 
-    var refcounter: i16 = 0;
-
-    pub fn init(allocator: std.mem.Allocator) DriverDirectory {
-        refcounter += 1;
+    pub fn init(allocator: std.mem.Allocator) !DriverDirectory {
+        const refcount: *i16 = try allocator.create(i16);
+        refcount.* = 1;
         return DriverDirectory.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
             ._allocator = allocator,
             ._container = std.StringHashMap(IDriver).init(allocator),
+            ._refcount = refcount,
         });
     }
 
     pub fn __clone(self: *Self, other: *const Self) void {
-        _ = self;
-        _ = other;
-        @panic("DriverDirectory can't be cloned");
+        self.* = other.*;
+        self._refcount.* += 1;
     }
 
     pub fn delete(self: *Self) void {
-        refcounter -= 1;
-        if (refcounter > 0) {
+        self._refcount.* -= 1;
+        if (self._refcount.* > 0) {
             return;
         }
         var it = self._container.iterator();
@@ -68,6 +68,7 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
             driver.value_ptr.interface.delete();
         }
         self._container.deinit();
+        self._allocator.destroy(self._refcount);
     }
 
     pub fn append(self: *Self, driver: IDriver, node_name: []const u8) !void {
@@ -121,7 +122,7 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return DriverFs.init(.{
             .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
-            ._root = try DriverDirectory.InstanceType.init(allocator).interface.new(allocator),
+            ._root = try (try DriverDirectory.InstanceType.init(allocator)).interface.new(allocator),
         });
     }
 
@@ -144,8 +145,7 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            const root_clone = try self._root.clone();
-            return kernel.fs.Node.create_directory(root_clone);
+            return kernel.fs.Node.create_directory(try self._root.clone());
         }
         var result: kernel.fs.Node = undefined;
         const trimmed_path = std.mem.trim(u8, path, "/ ");
