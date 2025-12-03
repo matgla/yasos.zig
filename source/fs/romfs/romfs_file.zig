@@ -73,7 +73,7 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return @intCast(length);
     }
 
-    pub fn seek(self: *Self, offset: u64, whence: i32) anyerror!u64 {
+    pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
         var new_position: c.off_t = 0;
         const file_size: c.off_t = @intCast(self.header.size());
         switch (whence) {
@@ -95,7 +95,7 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
         return @intCast(self.position);
     }
 
-    pub fn tell(self: *Self) u64 {
+    pub fn tell(self: *Self) i64 {
         return @intCast(self.position);
     }
 

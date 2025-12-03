@@ -191,6 +191,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     kernel_tests.root_module.addImport("c", c_for_tests);
+    c_for_tests.addIncludePath(b.path("libs/libc"));
 
     const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
     generate_defconfig_for_tests.step.dependOn(&venv.step);
@@ -206,8 +207,8 @@ pub fn build(b: *std.Build) !void {
     run_tests_step.dependOn(&install_fs_tests.step);
     run_tests_step.dependOn(&install_kernel_tests.step);
     kernel_tests.linkLibC();
-    fs_tests.linkLibC();
-    arch_tests.linkLibC();
+    // fs_tests.linkLibC();
+    // arch_tests.linkLibC();
 
     const test_config_module = b.addModule("test_config", .{
         .root_source_file = b.path("config/tests/config.zig"),
@@ -219,6 +220,8 @@ pub fn build(b: *std.Build) !void {
     const arch_for_tests = b.addModule("arch_for_tests", .{
         .root_source_file = b.path("source/arch/ut/arch.zig"),
     });
+
+    fs_tests.root_module.addImport("arch", arch_for_tests);
 
     const hal_interface = b.addModule("hal_interface", .{
         .root_source_file = b.path("hal/interface/hal.zig"),
@@ -244,6 +247,7 @@ pub fn build(b: *std.Build) !void {
 
     hal_for_tests.addImport("libc_imports", libc_imports_for_tests);
     libc_imports_for_tests.addIncludePath(b.path("."));
+    libc_imports_for_tests.addIncludePath(b.path("libs/libc"));
 
     kernel_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
     fs_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
@@ -258,6 +262,7 @@ pub fn build(b: *std.Build) !void {
     run_tests_step.dependOn(&run_arch_tests.step);
 
     kernel_tests.root_module.addIncludePath(b.path("."));
+    kernel_tests.root_module.addIncludePath(b.path("libs/libc"));
     fs_tests.root_module.addIncludePath(b.path("."));
     arch_tests.root_module.addIncludePath(b.path("."));
 

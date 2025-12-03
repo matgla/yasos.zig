@@ -14,52 +14,44 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
-
-const fatfs = @import("zfat");
 const kernel = @import("kernel");
+const littlefs = @import("littlefs_cimport.zig").littlefs;
 
-pub fn fatfs_error_to_errno(err: fatfs.GlobalError) kernel.errno.ErrnoSet {
-    switch (err) {
-        fatfs.GlobalError.DiskErr => return kernel.errno.ErrnoSet.InputOutputError,
-        fatfs.GlobalError.IntErr => return kernel.errno.ErrnoSet.InputOutputError,
-        fatfs.GlobalError.NotReady => return kernel.errno.ErrnoSet.InputOutputError,
-        fatfs.GlobalError.NoFile => return kernel.errno.ErrnoSet.NoEntry,
-        fatfs.GlobalError.NoPath => return kernel.errno.ErrnoSet.NoEntry,
-        fatfs.GlobalError.InvalidName => return kernel.errno.ErrnoSet.InvalidArgument,
-        fatfs.GlobalError.Denied => return kernel.errno.ErrnoSet.PermissionDenied,
-        fatfs.GlobalError.Exist => return kernel.errno.ErrnoSet.FileExists,
-        fatfs.GlobalError.InvalidObject => return kernel.errno.ErrnoSet.InvalidArgument,
-        fatfs.GlobalError.WriteProtected => return kernel.errno.ErrnoSet.ReadOnlyFileSystem,
-        fatfs.GlobalError.InvalidDrive => return kernel.errno.ErrnoSet.NoEntry,
-        fatfs.GlobalError.NotEnabled => return kernel.errno.ErrnoSet.PermissionDenied,
-        fatfs.GlobalError.NoFilesystem => return kernel.errno.ErrnoSet.NoEntry,
-        fatfs.GlobalError.MkfsAborted => return kernel.errno.ErrnoSet.InputOutputError,
-        fatfs.GlobalError.Timeout => return kernel.errno.ErrnoSet.InputOutputError,
-        fatfs.GlobalError.Locked => return kernel.errno.ErrnoSet.TextFileBusy,
-        fatfs.GlobalError.OutOfMemory => return kernel.errno.ErrnoSet.OutOfMemory,
-        fatfs.GlobalError.TooManyOpenFiles => return kernel.errno.ErrnoSet.TooManyOpenFiles,
-        fatfs.GlobalError.InvalidParameter => return kernel.errno.ErrnoSet.InvalidArgument,
-    }
+pub fn lfs_error_to_errno(err: c_int) kernel.errno.ErrnoSet {
+    return switch (err) {
+        littlefs.LFS_ERR_IO, littlefs.LFS_ERR_CORRUPT => kernel.errno.ErrnoSet.InputOutputError,
+        littlefs.LFS_ERR_NOENT => kernel.errno.ErrnoSet.NoEntry,
+        littlefs.LFS_ERR_EXIST => kernel.errno.ErrnoSet.FileExists,
+        littlefs.LFS_ERR_NOTDIR => kernel.errno.ErrnoSet.NotADirectory,
+        littlefs.LFS_ERR_ISDIR => kernel.errno.ErrnoSet.IsADirectory,
+        littlefs.LFS_ERR_NOTEMPTY => kernel.errno.ErrnoSet.DeviceOrResourceBusy,
+        littlefs.LFS_ERR_BADF => kernel.errno.ErrnoSet.BadFileDescriptor,
+        littlefs.LFS_ERR_FBIG => kernel.errno.ErrnoSet.FileTooLarge,
+        littlefs.LFS_ERR_INVAL => kernel.errno.ErrnoSet.InvalidArgument,
+        littlefs.LFS_ERR_NOSPC => kernel.errno.ErrnoSet.NoSpaceLeftOnDevice,
+        littlefs.LFS_ERR_NOMEM => kernel.errno.ErrnoSet.OutOfMemory,
+        littlefs.LFS_ERR_NOATTR => kernel.errno.ErrnoSet.NoEntry,
+        littlefs.LFS_ERR_NAMETOOLONG => kernel.errno.ErrnoSet.InvalidArgument,
+        0 => kernel.errno.ErrnoSet.Invalid,
+        else => kernel.errno.ErrnoSet.InvalidArgument,
+    };
 }
 
-test "FatFs.ErrnoConverter" {
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InputOutputError, fatfs_error_to_errno(fatfs.GlobalError.DiskErr));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InputOutputError, fatfs_error_to_errno(fatfs.GlobalError.IntErr));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InputOutputError, fatfs_error_to_errno(fatfs.GlobalError.NotReady));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.NoEntry, fatfs_error_to_errno(fatfs.GlobalError.NoFile));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.NoEntry, fatfs_error_to_errno(fatfs.GlobalError.NoPath));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InvalidArgument, fatfs_error_to_errno(fatfs.GlobalError.InvalidName));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.PermissionDenied, fatfs_error_to_errno(fatfs.GlobalError.Denied));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.FileExists, fatfs_error_to_errno(fatfs.GlobalError.Exist));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InvalidArgument, fatfs_error_to_errno(fatfs.GlobalError.InvalidObject));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.ReadOnlyFileSystem, fatfs_error_to_errno(fatfs.GlobalError.WriteProtected));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.NoEntry, fatfs_error_to_errno(fatfs.GlobalError.InvalidDrive));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.PermissionDenied, fatfs_error_to_errno(fatfs.GlobalError.NotEnabled));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.NoEntry, fatfs_error_to_errno(fatfs.GlobalError.NoFilesystem));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InputOutputError, fatfs_error_to_errno(fatfs.GlobalError.MkfsAborted));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InputOutputError, fatfs_error_to_errno(fatfs.GlobalError.Timeout));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.TextFileBusy, fatfs_error_to_errno(fatfs.GlobalError.Locked));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.OutOfMemory, fatfs_error_to_errno(fatfs.GlobalError.OutOfMemory));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.TooManyOpenFiles, fatfs_error_to_errno(fatfs.GlobalError.TooManyOpenFiles));
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.InvalidArgument, fatfs_error_to_errno(fatfs.GlobalError.InvalidParameter));
+test "LittleFs.ErrnoConverter" {
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.InputOutputError, lfs_error_to_errno(littlefs.LFS_ERR_IO));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.InputOutputError, lfs_error_to_errno(littlefs.LFS_ERR_CORRUPT));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.NoEntry, lfs_error_to_errno(littlefs.LFS_ERR_NOENT));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.FileExists, lfs_error_to_errno(littlefs.LFS_ERR_EXIST));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.NotADirectory, lfs_error_to_errno(littlefs.LFS_ERR_NOTDIR));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.IsADirectory, lfs_error_to_errno(littlefs.LFS_ERR_ISDIR));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.DeviceOrResourceBusy, lfs_error_to_errno(littlefs.LFS_ERR_NOTEMPTY));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.BadFileDescriptor, lfs_error_to_errno(littlefs.LFS_ERR_BADF));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.FileTooLarge, lfs_error_to_errno(littlefs.LFS_ERR_FBIG));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.InvalidArgument, lfs_error_to_errno(littlefs.LFS_ERR_INVAL));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.NoSpaceLeftOnDevice, lfs_error_to_errno(littlefs.LFS_ERR_NOSPC));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.OutOfMemory, lfs_error_to_errno(littlefs.LFS_ERR_NOMEM));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.NoEntry, lfs_error_to_errno(littlefs.LFS_ERR_NOATTR));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.InvalidArgument, lfs_error_to_errno(littlefs.LFS_ERR_NAMETOOLONG));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.Invalid, lfs_error_to_errno(0));
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.InvalidArgument, lfs_error_to_errno(-12345));
 }

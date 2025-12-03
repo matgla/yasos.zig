@@ -44,38 +44,21 @@ comptime {
 extern fn store_and_switch_to_next_task(is_fpu_used: usize) void;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
-var context_switch_enabled: bool = true;
 
+var context_switch_enabled: bool = true;
 var counter: i32 = 0;
 
-pub fn block_context_switch(src: std.builtin.SourceLocation) void {
-    // kernel.irq.disable_interrupts();
-    asm volatile (
-        \\ cpsid i
-    );
-    const number_ptr: *volatile usize = &number_of_context_switches_print;
-    if (number_ptr.* > 0) {
-        log.err("Blocking context switch called: {d}, from: {s}:{d}", .{ number_ptr.*, src.file, src.line });
-        number_ptr.* -= 1;
-    }
+pub fn block_context_switch() void {
+    const blocked: usize = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(blocked);
     counter += 1;
     const ptr: *volatile bool = &context_switch_enabled;
     ptr.* = false;
-    asm volatile (
-        \\ cpsie i
-    );
 }
 
-pub fn unblock_context_switch(src: std.builtin.SourceLocation) void {
-    // kernel.irq.disable_interrupts();
-    asm volatile (
-        \\ cpsid i
-    );
-    const number_ptr: *volatile usize = &number_of_context_switches_print;
-    if (number_ptr.* > 0) {
-        log.err("Unblocking context switch called: from: {s}:{d}", .{ src.file, src.line });
-        number_ptr.* -= 1;
-    }
+pub fn unblock_context_switch() void {
+    const blocked: usize = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(blocked);
     counter -= 1;
     if (counter == 0) {
         const ptr: *volatile bool = &context_switch_enabled;
@@ -85,51 +68,20 @@ pub fn unblock_context_switch(src: std.builtin.SourceLocation) void {
         ptr.* = true;
         counter = 0;
     }
-    // kernel.irq.enable_interrupts();
-    asm volatile (
-        \\ cpsie i
-    );
-}
-
-pub export fn get_context_switch_state() callconv(.c) bool {
-    const ptr: *volatile bool = &context_switch_enabled;
-    return ptr.*;
-}
-
-var number_of_context_switches_print: usize = 0;
-pub fn print_context_switches(count: usize) void {
-    kernel.log.err("Context switch printing enabled for {d} switches", .{count});
-    const ptr: *volatile usize = &number_of_context_switches_print;
-    ptr.* = count;
 }
 
 export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") usize {
     _ = is_fpu_used;
     const ptr: *volatile bool = &context_switch_enabled;
-    const number_ptr: *volatile usize = &number_of_context_switches_print;
 
     if (!ptr.*) {
-        if (number_ptr.* > 0) {
-            log.err("Context switch skipped, context switching is blocked", .{});
-            number_ptr.* -= 1;
-        }
         return 3;
     }
     switch (process_manager.instance.schedule_next()) {
         .Switch => {
-            // switch_to_the_next_task(is_fpu_used);
-            if (number_ptr.* > 0) {
-                log.err("Context switch performed", .{});
-                number_ptr.* -= 1;
-            }
             return 2;
         },
         .StoreAndSwitch => {
-            if (number_ptr.* > 0) {
-                log.err("Context switch with storing current task performed", .{});
-                number_ptr.* -= 1;
-            }
-            // store_and_switch_to_next_task(is_fpu_used);
             return 1;
         },
         .ReturnToMain => return 0,

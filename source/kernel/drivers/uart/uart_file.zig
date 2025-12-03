@@ -141,7 +141,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return @intCast(result);
             }
 
-            pub fn seek(self: *Self, _: u64, _: i32) anyerror!u64 {
+            pub fn seek(self: *Self, _: i64, _: i32) anyerror!i64 {
                 _ = self;
                 return 0;
             }
@@ -151,7 +151,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return 0;
             }
 
-            pub fn tell(self: *Self) u64 {
+            pub fn tell(self: *Self) i64 {
                 _ = self;
                 return 0;
             }

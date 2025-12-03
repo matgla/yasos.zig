@@ -87,7 +87,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return @intCast(data.len);
     }
 
-    pub fn seek(self: *Self, offset: u64, whence: i32) anyerror!u64 {
+    pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0) {
@@ -96,14 +96,14 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
                 self._position = @intCast(offset);
             },
             c.SEEK_END => {
-                const new_position: isize = @as(isize, @intCast(self._data.data.items.len)) + @as(isize, @intCast(offset));
+                const new_position: i64 = @as(i64, @intCast(self._data.data.items.len)) + offset;
                 if (new_position < 0) {
                     return kernel.errno.ErrnoSet.InvalidArgument;
                 }
                 self._position = @as(isize, @intCast(new_position));
             },
             c.SEEK_CUR => {
-                const new_position = @as(c.off_t, @intCast(self._position)) + @as(isize, @intCast(offset));
+                const new_position = @as(i64, @intCast(self._position)) + offset;
                 if (new_position < 0) {
                     return kernel.errno.ErrnoSet.InvalidArgument;
                 }
@@ -112,7 +112,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
             },
             else => return kernel.errno.ErrnoSet.InvalidArgument,
         }
-        const outside_of_buffer = @as(isize, @intCast(self._position)) - @as(isize, @intCast(self._data.data.items.len));
+        const outside_of_buffer = @as(i64, @intCast(self._position)) - @as(i64, @intCast(self._data.data.items.len));
         if (outside_of_buffer > 0) {
             _ = self._data.data.appendNTimes(self._allocator, ' ', @as(usize, @intCast(outside_of_buffer))) catch {
                 // set errno
@@ -135,7 +135,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return 0;
     }
 
-    pub fn tell(self: *Self) u64 {
+    pub fn tell(self: *Self) i64 {
         return @intCast(self._position);
     }
 

@@ -37,3 +37,16 @@ pub const exc_return = struct {
 
 pub fn disable_interrupts() void {}
 pub fn enable_interrupts() void {}
+
+pub fn memory_barrier_release() void {}
+pub fn memory_barrier_acquire() void {}
+
+pub const sync = struct {
+    pub inline fn save_and_disable_interrupts() usize {
+        return 0;
+    }
+
+    pub inline fn restore_interrupts(primask: usize) void {
+        _ = primask;
+    }
+};

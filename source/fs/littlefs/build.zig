@@ -30,9 +30,10 @@ pub fn build_littlefs(b: *std.Build, optimize: std.builtin.OptimizeMode, target:
             "-DLFS_NO_DEBUG",
             "-DLFS_NO_WARN",
             "-DLFS_NO_ERROR",
-            "-DLFS_NO_ASSERT",
+            "-DLFS_YES_ASSERT",
         },
     });
+    lib.root_module.sanitize_c = .trap;
 
     // Add include path
     lib.addIncludePath(b.path(littlefs_path));

@@ -328,8 +328,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn wait_for_process(self: *Self, process: *Self, action: UnblockAction, context: ?*anyopaque) !void {
             // this process will be unblocked until other processes are finished
-            kernel.process.block_context_switch(@src());
-            defer kernel.process.unblock_context_switch(@src());
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             const blocked_data = try self._kernel_allocator.create(BlockedByProcess);
             try process.blocks_process(self, action, context);
             blocked_data.* = .{
@@ -419,8 +419,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, _: i32, _: i32, _: i32) !*anyopaque {
-            kernel.process.block_context_switch(@src());
-            defer kernel.process.unblock_context_switch(@src());
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             if (addr == null) {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
@@ -439,8 +439,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
-            kernel.process.block_context_switch(@src());
-            defer kernel.process.unblock_context_switch(@src());
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
             if (maybe_address) |addr| {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {

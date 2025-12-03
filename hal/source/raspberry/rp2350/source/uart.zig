@@ -63,7 +63,7 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             _ = picosdk.uart_init(Register, @intCast(config.baudrate.?));
             picosdk.gpio_set_function(@intCast(pins.tx.?), picosdk.GPIO_FUNC_UART);
             picosdk.gpio_set_function(@intCast(pins.rx.?), picosdk.GPIO_FUNC_UART);
-            picosdk.uart_set_fifo_enabled(Register, false);
+            picosdk.uart_set_fifo_enabled(Register, true);
             picosdk.uart_set_translate_crlf(Register, false);
             picosdk.uart_set_hw_flow(Register, false, false);
             picosdk.uart_set_format(Register, 8, 1, picosdk.UART_PARITY_NONE);
@@ -96,11 +96,13 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         }
 
         pub fn write(self: Self, data: []const u8) !usize {
+            asm volatile ("cpsid i" ::: .{ .memory = true });
             const derived_ptr = &RegisterVolatile.*.dr;
             for (data) |byte| {
                 while (!self.is_writable()) {}
                 derived_ptr.* = byte;
             }
+            asm volatile ("cpsie i" ::: .{ .memory = true });
             return data.len;
         }
 

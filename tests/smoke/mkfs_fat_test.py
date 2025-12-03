@@ -17,16 +17,17 @@
 
 from .conftest import session_key
 
-def test_mmc_card_fat(request):
-    session = request.node.stash[session_key]
-    session.write_command("mkfs.fat /dev/mmc0p0")
-    session.write_command("cd /root")
-    session.write_command("pwd")
-    line = session.read_until_prompt()
-    assert "/root" in line
-    session.write_command("ls")
-    line = session.read_until_prompt()
-    session.write_command("touch test.txt")
-    session.write_command("ls")
-    line = session.read_until_prompt()
-    assert set(["test.txt"]).issubset(line.split())
+# let's skip this test, because it will remove data for tcc_test_suite
+# def test_mmc_card_fat(request):
+#     session = request.node.stash[session_key]
+#     session.write_command("mkfs.fat /dev/mmc0p0")
+#     session.write_command("cd /root")
+#     session.write_command("pwd")
+#     line = session.read_until_prompt()
+#     assert "/root" in line
+#     session.write_command("ls")
+#     line = session.read_until_prompt()
+#     session.write_command("touch test.txt")
+#     session.write_command("ls")
+#     line = session.read_until_prompt()
+#     assert set(["test.txt"]).issubset(line.split())

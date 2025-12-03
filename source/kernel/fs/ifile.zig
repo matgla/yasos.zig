@@ -80,16 +80,16 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "write", .{buf}, isize);
     }
 
-    pub fn seek(self: *Self, offset: u64, base: i32) anyerror!u64 {
-        return interface.CountingInterfaceVirtualCall(self, "seek", .{ offset, base }, anyerror!u64);
+    pub fn seek(self: *Self, offset: i64, base: i32) anyerror!i64 {
+        return interface.CountingInterfaceVirtualCall(self, "seek", .{ offset, base }, anyerror!i64);
     }
 
     pub fn sync(self: *Self) i32 {
         return interface.CountingInterfaceVirtualCall(self, "sync", .{}, i32);
     }
 
-    pub fn tell(self: *Self) u64 {
-        return interface.CountingInterfaceVirtualCall(self, "tell", .{}, u64);
+    pub fn tell(self: *Self) i64 {
+        return interface.CountingInterfaceVirtualCall(self, "tell", .{}, i64);
     }
 
     pub fn name(self: *const Self) []const u8 {

@@ -81,7 +81,7 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
         return @as(isize, @intCast(length));
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+    pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
         switch (whence) {
             c.SEEK_SET => {
                 self.position = @as(isize, @intCast(offset));
@@ -94,11 +94,11 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
             },
             else => return -1,
         }
-        return @as(c.off_t, @intCast(self.position));
+        return @intCast(self.position);
     }
 
-    pub fn tell(self: *Self) c.off_t {
-        return @as(c.off_t, @intCast(self.position));
+    pub fn tell(self: *Self) i64 {
+        return @intCast(self.position);
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -141,7 +141,7 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
         return kernel.fs.FileType.BlockDevice;
     }
 
-    pub fn size(self: *const Self) usize {
+    pub fn size(self: *const Self) u64 {
         return self.data.capacity;
     }
 

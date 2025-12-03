@@ -39,7 +39,7 @@ pub const FileSystemHeader = struct {
     _offset: u64,
     _size: u32,
 
-    pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: u64) !FileSystemHeader {
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: i64) !FileSystemHeader {
         var marker: [8]u8 = undefined;
         var df = device_file;
 
@@ -59,14 +59,14 @@ pub const FileSystemHeader = struct {
         if (attr.mapped_address_r) |address| {
             mapped_memory_address = @ptrFromInt(@intFromPtr(address) + @as(usize, @intCast(offset)));
         }
-        var reader = try FileReader.init(df, offset);
+        var reader = try FileReader.init(df, @intCast(offset));
         const filesize = try reader.read(u32, 8);
         return .{
             ._allocator = allocator,
             ._reader = reader,
             ._device_file = df,
             ._mapped_memory = mapped_memory_address,
-            ._offset = offset,
+            ._offset = @intCast(offset),
             ._size = filesize,
         };
     }

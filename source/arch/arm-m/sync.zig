@@ -39,3 +39,28 @@ pub inline fn disable_interrupts() void {
 pub inline fn enable_interrupts() void {
     asm volatile ("cpsie i" ::: .{ .memory = true });
 }
+
+pub inline fn memory_barrier_release() void {
+    asm volatile ("dmb" ::: .{ .memory = true });
+}
+
+pub inline fn memory_barrier_acquire() void {
+    asm volatile ("dmb" ::: .{ .memory = true });
+}
+
+pub inline fn save_and_disable_interrupts() usize {
+    return asm volatile (
+        \\ mrs %[ret], PRIMASK
+        \\ cpsid i
+        : [ret] "=r" (-> usize),
+        :
+        : .{ .memory = true });
+}
+
+pub inline fn restore_interrupts(primask: usize) void {
+    asm volatile (
+        \\ msr PRIMASK, %[mask]
+        :
+        : [mask] "r" (primask),
+        : .{ .memory = true });
+}

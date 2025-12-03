@@ -1,5 +1,5 @@
 //
-// ramfs.zig
+// littlefs.zig
 //
 // Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
 //
@@ -31,6 +31,7 @@ const kernel = @import("kernel");
 const log = std.log.scoped(.@"fs/littlefs");
 const LittleFsFile = @import("littlefs_file.zig").LittleFsFile;
 const LittleFsDirectory = @import("littlefs_directory.zig").LittleFsDirectory;
+const errno_converter = @import("errno_converter.zig");
 
 pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     const Self = @This();
@@ -46,10 +47,7 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         buffer: ?*anyopaque,
         size: littlefs.lfs_size_t,
     ) callconv(.c) c_int {
-        if (buffer == null) {
-            return -1;
-        }
-        if (cfg == null) {
+        if (buffer == null or cfg == null) {
             return -1;
         }
         const self: *Self = @ptrCast(@alignCast(cfg.?.*.context));
@@ -119,7 +117,7 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return LittleFs.init(.{
             ._allocator = allocator,
             ._device = try device.clone(),
-            ._lfs = undefined,
+            ._lfs = littlefs.lfs_t{},
             ._lfs_config = littlefs.lfs_config{
                 .context = null,
                 .read_size = 512,
@@ -128,6 +126,7 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                 .block_count = @intCast(device.interface.size() / 512),
                 .cache_size = 512,
                 .lookahead_size = 16,
+                .block_cycles = 500,
                 .read = &read_block,
                 .prog = &prog_block,
                 .erase = &erase_block,
@@ -137,11 +136,9 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn mount(self: *Self) i32 {
-        log.debug("Mounting LittleFS filesystem", .{});
         self._lfs_config.context = self;
         const result = littlefs.lfs_mount(&self._lfs, &self._lfs_config);
         if (result != 0) {
-            log.err("Failed to mount LittleFS filesystem: {d}", .{result});
             return -1;
         }
         return result;
@@ -149,6 +146,7 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn delete(self: *Self) void {
         _ = self.umount();
+        log.err("Deleting LittleFS filesystem instance", .{});
         self._device.interface.delete();
     }
 
@@ -158,33 +156,34 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
-        _ = self;
-        _ = path;
-        // log.info("Creating file at path: {s}", .{path});
-        // const filepath = try self._allocator.dupeZ(u8, path);
-        // defer self._allocator.free(filepath);
-        // var file = try fatfs.File.create(filepath);
-        // file.close();
+        const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
+        defer self._allocator.free(path_c);
+
+        var file: littlefs.lfs_file_t = .{};
+        const result = littlefs.lfs_file_open(&self._lfs, &file, path_c, littlefs.LFS_O_WRONLY | littlefs.LFS_O_CREAT);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
+        _ = littlefs.lfs_file_close(&self._lfs, &file);
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) anyerror!void {
-        log.info("Creating directory at path: {s}", .{path});
         const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
         defer self._allocator.free(path_c);
         const result = littlefs.lfs_mkdir(&self._lfs, path_c);
-        if (result != 0) {
-            log.err("Failed to create directory: {d}", .{result});
-            return kernel.errno.ErrnoSet.InputOutputError;
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
         }
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        // log.info("Removing file or directory at path: {s}", .{path});
-        // const filepath = try self._allocator.dupeZ(u8, path);
-        // defer self._allocator.free(filepath);
-        // try fatfs.unlink(filepath);
-        _ = self;
-        _ = path;
+        log.debug("Removing file or directory at path: {s}", .{path});
+        const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
+        defer self._allocator.free(path_c);
+        const result = littlefs.lfs_remove(&self._lfs, path_c);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -193,18 +192,16 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
-        log.err("Get called for path: {s}", .{path});
-        const path_c = std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0) catch {
-            return kernel.errno.ErrnoSet.NoEntry;
-        };
+        const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
+        errdefer self._allocator.free(path_c);
+
         var lfs_info: littlefs.lfs_info = undefined;
-        if (littlefs.lfs_stat(&self._lfs, path_c, &lfs_info) != 0) {
-            log.err("File not found: {s}", .{path});
-            return kernel.errno.ErrnoSet.NoEntry;
+        const stat_result = littlefs.lfs_stat(&self._lfs, path_c, &lfs_info);
+        if (stat_result < 0) {
+            return errno_converter.lfs_error_to_errno(stat_result);
         }
 
         if (lfs_info.type == littlefs.LFS_TYPE_DIR) {
-            log.err("Creating directory node for path: {s}", .{path});
             return try LittleFsDirectory.InstanceType.create_node(self._allocator, path_c, &self._lfs);
         } else if (lfs_info.type == littlefs.LFS_TYPE_REG) {
             return try LittleFsFile.InstanceType.create_node(self._allocator, path_c, &self._lfs);
@@ -215,22 +212,29 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn format(self: *Self) anyerror!void {
         log.info("Formatting LittleFS filesystem", .{});
-        _ = self;
+        self._lfs_config.context = self;
+        const result = littlefs.lfs_format(&self._lfs, &self._lfs_config);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         _ = follow_symlinks;
-        // _ = follow_symlinks;
-        var lfs_info: littlefs.lfs_info = undefined;
+
         const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
         defer self._allocator.free(path_c);
-        if (littlefs.lfs_stat(&self._lfs, path_c, &lfs_info) != 0) {
-            return kernel.errno.ErrnoSet.NoEntry;
+
+        var lfs_info: littlefs.lfs_info = undefined;
+        const result = littlefs.lfs_stat(&self._lfs, path_c, &lfs_info);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
         }
-        data.st_blksize = 512;
+
+        data.st_blksize = @intCast(self._lfs_config.block_size);
         data.st_size = @intCast(lfs_info.size);
         data.st_mode = if (lfs_info.type == littlefs.LFS_TYPE_DIR) c.S_IFDIR else c.S_IFREG;
-        data.st_blocks = @intCast((lfs_info.size + 511) / 512);
+        data.st_blocks = @intCast((lfs_info.size + self._lfs_config.block_size - 1) / self._lfs_config.block_size);
     }
 
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
@@ -241,18 +245,16 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
-        // _ = flags;
-        // var node = try self.get(path);
-        // node.delete();
-        // if ((mode & c.W_OK) != 0 or (mode & c.X_OK) != 0) {
-        //     if (node.filetype() == kernel.fs.FileType.Directory) {
-        //         return kernel.errno.ErrnoSet.IsADirectory;
-        //     }
-        // }
-        _ = self;
-        _ = path;
-        _ = mode;
         _ = flags;
+
+        var node = try self.get(path);
+        defer node.delete();
+
+        if ((mode & c.W_OK) != 0 or (mode & c.X_OK) != 0) {
+            if (node.filetype() == kernel.fs.FileType.Directory) {
+                return kernel.errno.ErrnoSet.IsADirectory;
+            }
+        }
     }
 });
 

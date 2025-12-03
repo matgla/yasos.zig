@@ -30,7 +30,7 @@ const DumpHardware = kernel.DumpHardware;
 
 const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
-const LittleFs = @import("fs/littlefs/littlefs.zig").LittleFs;
+const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
 
 const panic_helper = @import("arch").panic;
 
@@ -151,7 +151,7 @@ fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Alloc
                     part.size_in_sectors,
                 });
                 const partname = std.fmt.comptimePrint("mmc{d}p{d}", .{ 0, i });
-                const partition_driver_data = try kernel.driver.MmcPartitionDriver.InstanceType.create(allocator, mmcfile.share(), partname, part.start_lba, part.size_in_sectors);
+                const partition_driver_data = try kernel.driver.MmcPartitionDriver.InstanceType.create(allocator, mmcfile.*, partname, part.start_lba, part.size_in_sectors);
                 const partition_driver = partition_driver_data.interface.new(allocator) catch |err| {
                     kernel.log.err("Can't create partition driver: {s}", .{@errorName(err)});
                     return;
@@ -214,9 +214,10 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, 0x100000)), "/");
         var maybe_mmcpart0 = driverfs.data().get("mmc0p0") catch null;
         if (maybe_mmcpart0) |*mmcnode| {
-            const maybe_file = mmcnode.as_file();
-            if (maybe_file) |file| {
-                const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, LittleFs.InstanceType.init(allocator, file)) catch null;
+            var maybe_file = mmcnode.as_file();
+            if (maybe_file) |*file| {
+                const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*)) catch null;
+                file.interface.delete();
                 if (maybe_rootfs) |rootfs| {
                     mount_filesystem(rootfs, "/root") catch {};
                 }

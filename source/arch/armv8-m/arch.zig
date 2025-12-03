@@ -29,6 +29,8 @@ pub const get_lr = @import("arm-m").get_lr;
 pub const exc_return = @import("arm-m").exc_return;
 pub const disable_interrupts = @import("arm-m").disable_interrupts;
 pub const enable_interrupts = @import("arm-m").enable_interrupts;
+pub const memory_barrier_acquire = @import("arm-m").memory_barrier_acquire;
+pub const memory_barrier_release = @import("arm-m").memory_barrier_release;
 pub const sync = @import("arm-m").sync;
 
 export fn irq_memmanage() void {

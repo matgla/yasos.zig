@@ -29,10 +29,11 @@ const c = @import("libc_imports").c;
 const kernel = @import("kernel");
 
 const log = kernel.log;
+const errno_converter = @import("errno_converter.zig");
 
 pub const LittleFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     const Self = @This();
-    _file: littlefs.lfs_file_t,
+    _file: *littlefs.lfs_file_t,
     _lfs: *littlefs.lfs_t,
     _allocator: std.mem.Allocator,
     _is_open: bool,
@@ -42,9 +43,13 @@ pub const LittleFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
 
     pub fn create(allocator: std.mem.Allocator, path: [:0]const u8, lfs: *littlefs.lfs_t) !LittleFsFile {
         const filename = std.fs.path.basename(path);
-
+        const file = try allocator.create(littlefs.lfs_file_t);
+        const result = littlefs.lfs_file_open(lfs, file, path, littlefs.LFS_O_RDWR);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
         return LittleFsFile.init(.{
-            ._file = undefined,
+            ._file = file,
             ._lfs = lfs,
             ._allocator = allocator,
             ._is_open = true,
@@ -60,23 +65,23 @@ pub const LittleFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
-        return littlefs.lfs_file_read(self._lfs, &self._file, buffer.ptr, buffer.len);
+        return littlefs.lfs_file_read(self._lfs, self._file, buffer.ptr, buffer.len);
     }
 
     pub fn write(self: *Self, buffer: []const u8) isize {
-        return littlefs.lfs_file_write(self._lfs, &self._file, buffer.ptr, buffer.len);
+        return littlefs.lfs_file_write(self._lfs, self._file, buffer.ptr, buffer.len);
     }
 
     pub fn seek(self: *Self, offset: u64, whence: i32) anyerror!u64 {
-        return @intCast(littlefs.lfs_file_seek(self._lfs, &self._file, @intCast(offset), whence));
+        return @intCast(littlefs.lfs_file_seek(self._lfs, self._file, @intCast(offset), whence));
     }
 
     pub fn sync(self: *Self) i32 {
-        return littlefs.lfs_file_sync(self._lfs, &self._file);
+        return littlefs.lfs_file_sync(self._lfs, self._file);
     }
 
     pub fn tell(self: *Self) u64 {
-        return @intCast(littlefs.lfs_file_tell(self._lfs, &self._file));
+        return @intCast(littlefs.lfs_file_tell(self._lfs, self._file));
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -110,23 +115,20 @@ pub const LittleFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        if (!self._is_open) {
-            return;
+        if (self._is_open) {
+            _ = littlefs.lfs_file_close(self._lfs, self._file);
         }
         self._is_open = false;
         self._allocator.free(self._path);
-        _ = littlefs.lfs_file_close(self._lfs, &self._file);
-        self._allocator.free(self._name);
+        self._allocator.destroy(self._file);
     }
 
     pub fn size(self: *const Self) u64 {
-        // var info: littlefs.lfs_info = undefined;
-        // if (littlefs.lfs_stat(self._lfs, self._path, &info) < 0) {
-        //     return 0;
-        // }
+        var info: littlefs.lfs_info = undefined;
+        if (littlefs.lfs_stat(self._lfs, self._path, &info) < 0) {
+            return 0;
+        }
 
-        // return info.size;
-        _ = self;
-        return 0;
+        return info.size;
     }
 });

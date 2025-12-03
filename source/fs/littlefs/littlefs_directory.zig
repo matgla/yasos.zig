@@ -20,60 +20,87 @@ const interface = @import("interface");
 const kernel = @import("kernel");
 
 const littlefs = @import("littlefs_cimport.zig").littlefs;
+const errno_converter = @import("errno_converter.zig");
 
-// pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
-//     const Self = @This();
-//     _dir: littlefs.lfs_dir_t,
-//     _allocator: std.mem.Allocator,
-//     _name: ?[]const u8,
+const log = std.log.scoped(.littlefs_directory);
 
-//     pub fn create(path: , allocator: std.mem.Allocator) FatFsIterator {
-//         return FatFsIterator.init(.{
-//             ._dir = dir,
-//             ._allocator = allocator,
-//             ._name = null,
-//         });
-//     }
+pub const LittleFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
+    const Self = @This();
+    _lfs: *littlefs.lfs_t,
+    _dir: *littlefs.lfs_dir_t,
+    _allocator: std.mem.Allocator,
+    _name: ?[]const u8,
 
-//     pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
-//         const maybe_entry = self._dir.next() catch return null;
-//         if (maybe_entry) |entry| {
-//             if (self._name) |old_name| {
-//                 self._allocator.free(old_name);
-//             }
-//             self._name = self._allocator.dupe(u8, entry.name()) catch return null;
-//             return .{
-//                 .name = self._name.?,
-//                 .kind = if (entry.kind == .Directory) .Directory else .File,
-//             };
-//         }
-//         return null;
-//     }
+    pub fn create(lfs: *littlefs.lfs_t, path: [:0]const u8, allocator: std.mem.Allocator) !LittleFsIterator {
+        const dir = try allocator.create(littlefs.lfs_dir_t);
+        const result = littlefs.lfs_dir_open(lfs, dir, path);
+        if (result < 0) {
+            allocator.destroy(dir);
+            return errno_converter.lfs_error_to_errno(result);
+        }
+        return LittleFsIterator.init(.{
+            ._lfs = lfs,
+            ._dir = dir,
+            ._allocator = allocator,
+            ._name = null,
+        });
+    }
 
-//     pub fn delete(self: *Self) void {
-//         if (self._name) |name| {
-//             self._allocator.free(name);
-//         }
-//         self._dir.close();
-//     }
-// });
+    pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
+        var info: littlefs.lfs_info = undefined;
+        const result = littlefs.lfs_dir_read(self._lfs, self._dir, &info);
+
+        if (result <= 0) {
+            return null;
+        }
+
+        // Skip "." and ".." entries
+        const name_slice = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+        if (std.mem.eql(u8, name_slice, ".") or std.mem.eql(u8, name_slice, "..")) {
+            return self.next();
+        }
+
+        // Free previous name if exists
+        if (self._name) |old_name| {
+            self._allocator.free(old_name);
+        }
+
+        // Duplicate the name
+        self._name = self._allocator.dupe(u8, name_slice) catch return null;
+
+        return .{
+            .name = self._name.?,
+            .kind = if (info.type == littlefs.LFS_TYPE_DIR)
+                kernel.fs.FileType.Directory
+            else
+                kernel.fs.FileType.File,
+        };
+    }
+
+    pub fn delete(self: *Self) void {
+        _ = littlefs.lfs_dir_close(self._lfs, self._dir);
+        if (self._name) |name| {
+            self._allocator.free(name);
+        }
+        self._allocator.destroy(self._dir);
+    }
+});
 
 pub const LittleFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     _allocator: std.mem.Allocator,
     _name: []const u8,
     _path: [:0]const u8,
     _lfs: *littlefs.lfs_t,
-    _lfs_dir: littlefs.lfs_dir_t,
 
     const Self = @This();
 
     pub fn create(allocator: std.mem.Allocator, path: [:0]const u8, lfs: *littlefs.lfs_t) !LittleFsDirectory {
+        const basename = std.fs.path.basename(path);
         return LittleFsDirectory.init(.{
             ._allocator = allocator,
-            ._name = std.fs.path.basename(path),
-            ._path = try allocator.dupeZ(u8, path),
+            ._name = basename,
+            ._path = path,
             ._lfs = lfs,
-            ._lfs_dir = littlefs.lfs_dir_t{},
         });
     }
 
@@ -83,20 +110,32 @@ pub const LittleFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, str
     }
 
     pub fn get(self: *Self, nodename: []const u8, node: *kernel.fs.Node) anyerror!void {
-        _ = nodename;
-        _ = self;
-        _ = node;
-        return error.NotImplemented;
+        // Build the full path
+        const full_path = if (std.mem.eql(u8, self._path, "/"))
+            try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{nodename}, 0)
+        else
+            try std.fmt.allocPrintSentinel(self._allocator, "{s}/{s}", .{ self._path, nodename }, 0);
+        defer self._allocator.free(full_path);
+
+        // Get info about the entry
+        var info: littlefs.lfs_info = undefined;
+        const result = littlefs.lfs_stat(self._lfs, full_path, &info);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
+
+        // Create appropriate node based on type
+        const node_path = try self._allocator.dupeZ(u8, full_path);
+        if (info.type == littlefs.LFS_TYPE_DIR) {
+            node.* = try create_node(self._allocator, node_path, self._lfs);
+        } else {
+            const LittleFsFile = @import("littlefs_file.zig").LittleFsFile;
+            node.* = try LittleFsFile.InstanceType.create_node(self._allocator, node_path, self._lfs);
+        }
     }
 
     pub fn iterator(self: *const Self) anyerror!kernel.fs.IDirectoryIterator {
-        // var dir = try fatfs.Dir.open(self._path);
-        // return FatFsIterator.InstanceType.create(dir, self._allocator).interface.new(self._allocator) catch {
-        // dir.close();
-        // return error.OutOfMemory;
-        // };
-        _ = self;
-        return kernel.errno.ErrnoSet.NotImplemented;
+        return try (try LittleFsIterator.InstanceType.create(self._lfs, self._path, self._allocator)).interface.new(self._allocator);
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -104,7 +143,6 @@ pub const LittleFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, str
     }
 
     pub fn delete(self: *Self) void {
-        self._allocator.free(self._name);
         self._allocator.free(self._path);
     }
 });
