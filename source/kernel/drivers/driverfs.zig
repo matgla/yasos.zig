@@ -144,7 +144,7 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
-            const root_clone = self._root.share();
+            const root_clone = try self._root.clone();
             return kernel.fs.Node.create_directory(root_clone);
         }
         var result: kernel.fs.Node = undefined;
