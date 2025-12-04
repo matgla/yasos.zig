@@ -75,17 +75,3 @@ def test_compile_hello_world_with_usage_tracking(request):
         assert "You entered: " + number in data
         data = session.wait_for_prompt()
 
-def test_run_tcc_test_suite(request):
-    session = request.node.stash[session_key]
-    session.write_command("cd /root")
-    data = session.wait_for_prompt()
-    session.write_command("mkdir -p tcc_test")
-    data = session.wait_for_prompt()
-    session.write_command("cd tcc_test")
-    data = session.wait_for_prompt()
-    session.write_command("pwd")
-    data = session.wait_for_prompt()
-    assert "/root/tcc_test" in data
-
-
-

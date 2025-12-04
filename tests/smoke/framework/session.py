@@ -54,9 +54,9 @@ class Session:
         log_file = f"logs/{log_file}_{date}.txt"
         self.file = open(log_file, 'w')
         self.reset_target()
-        self.wait_for_prompt()
+        self.wait_for_prompt_except_logs()
         while self.serial.inWaiting() > 0:
-            self.wait_for_prompt()
+            self.wait_for_prompt_except_logs()
 
     def wait_for_prompt(self):
         return self.wait_for_data("$ ")

@@ -195,6 +195,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         const parent = p._parent.?;
                         self._scheduler.set_next(&parent.node);
                         self.core[hal.cpu.coreid()] = parent;
+                        arch.disable_interrupts();
                         _ = process_get_back_to_parent_vfork(pid, ctx.?.sp, ctx.?.lr);
                         return;
                     }
@@ -202,11 +203,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     break;
                 }
             }
-            // while (true) {
-            kernel.process.unblock_context_switch();
-            arch.memory_barrier_release();
-            hal.irq.trigger(.pendsv);
-            // }
+            while (true) {
+                kernel.process.unblock_context_switch();
+                arch.memory_barrier_release();
+                hal.irq.trigger(.pendsv);
+            }
         }
 
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
@@ -251,6 +252,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             self.core[hal.cpu.coreid()] = new_process;
             // child is now running without context switch, but uses parent stack until exec
             // switch without context switch, just to represent correct state
+            arch.disable_interrupts();
             return process_vfork_child(@intFromPtr(context.sp.?), got, @intFromPtr(context.lr.?), context.is_fpu_used);
         }
 
@@ -306,6 +308,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 const ctx = current_process._vfork_context.?;
                 current_process._vfork_context = null;
                 current_process.unblock_parent();
+                arch.disable_interrupts();
                 kernel.process.unblock_context_switch();
                 return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
             }
@@ -373,21 +376,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         // Synchronization
         // this must be synchronized across interrupts and cores
         pub fn is_empty(self: *Self) bool {
-            self.lock_access();
-            defer self.unlock_access();
             return self.processes.first == null;
-        }
-
-        fn lock_access(self: *Self) void {
-            // self.mutex.lock();
-            _ = self;
-            // kernel.irq.disable_interrupts();
-        }
-
-        fn unlock_access(self: *Self) void {
-            _ = self;
-            // kernel.irq.enable_interrupts();
-            // self.mutex.unlock();
         }
     };
 }

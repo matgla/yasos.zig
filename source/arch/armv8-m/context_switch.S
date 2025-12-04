@@ -258,6 +258,10 @@ switch_to_the_first_task:
 .thumb_func
 process_get_back_to_parent_vfork:
   mov sp, r1
+  push {r0, r2}
+  bl process_unblock_context_switch
+  pop {r0, r2}
+  cpsie i
   bx r2
 
 // r0 - pointer to child sp value (to rescue registers)
