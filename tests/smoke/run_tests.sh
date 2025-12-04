@@ -2,6 +2,8 @@
 
 python3 -m venv venv
 source venv/bin/activate
+pwd 
+ls
 pip install -r requirements.txt
 
 SCRIPT_DIR=$(dirname "$0")
