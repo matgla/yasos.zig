@@ -208,7 +208,7 @@ pub fn initialize_context_switching() void {
     std.log.err("Initializing ARM Cortex-M context switching...", .{});
     hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
     hal.irq.set_priority(.pendsv, 0xfe);
-    hal.irq.set_priority(.systick, 0x00);
+    hal.irq.set_priority(.systick, 0xff);
 }
 
 pub const ArmProcess = struct {

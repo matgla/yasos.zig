@@ -36,10 +36,10 @@ pub const FileSystemHeader = struct {
     _reader: FileReader,
     _device_file: IFile,
     _mapped_memory: ?*const anyopaque,
-    _offset: c.off_t,
+    _offset: u64,
     _size: u32,
 
-    pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: c.off_t) !FileSystemHeader {
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, offset: i64) !FileSystemHeader {
         var marker: [8]u8 = undefined;
         var df = device_file;
 
@@ -59,14 +59,14 @@ pub const FileSystemHeader = struct {
         if (attr.mapped_address_r) |address| {
             mapped_memory_address = @ptrFromInt(@intFromPtr(address) + @as(usize, @intCast(offset)));
         }
-        var reader = try FileReader.init(df, offset);
+        var reader = try FileReader.init(df, @intCast(offset));
         const filesize = try reader.read(u32, 8);
         return .{
             ._allocator = allocator,
             ._reader = reader,
             ._device_file = df,
             ._mapped_memory = mapped_memory_address,
-            ._offset = offset,
+            ._offset = @intCast(offset),
             ._size = filesize,
         };
     }
@@ -105,7 +105,7 @@ pub const FileSystemHeader = struct {
     }
 
     pub fn create_file_header_with_offset(self: *FileSystemHeader, offset: c.off_t) !FileHeader {
-        return try FileHeader.init(self._device_file, self._reader.get_offset() + offset, self._offset, self._mapped_memory, self._allocator);
+        return try FileHeader.init(self._device_file, self._reader.get_offset() + offset, @intCast(self._offset), self._mapped_memory, self._allocator);
     }
 
     pub fn first_file_header(self: *FileSystemHeader) !?FileHeader {

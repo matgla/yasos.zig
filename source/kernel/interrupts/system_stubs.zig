@@ -91,6 +91,10 @@ pub export fn _read(fd: c_int, data: *anyopaque, size: usize) isize {
 }
 
 pub export fn _write(fd: c_int, data: *const anyopaque, size: usize) isize {
+    if (fd == 1 or fd == 2) {
+        kernel.stdout.get().print("{s}", .{@as([*]const u8, @ptrCast(data))[0..size]}) catch {};
+        return @intCast(size);
+    }
     const maybe_file = get_file_from_process(@intCast(fd));
     if (maybe_file) |file| {
         return file.interface.write(@as([*:0]const u8, @ptrCast(data))[0..size]);

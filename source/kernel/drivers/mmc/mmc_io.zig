@@ -17,6 +17,8 @@ const std = @import("std");
 
 const kernel = @import("../../kernel.zig");
 
+const arch = @import("arch");
+
 const hal = @import("hal");
 
 const log = std.log.scoped(.@"mmc/driver");
@@ -56,7 +58,7 @@ pub const MmcIo = struct {
     const Self = @This();
     _mmc: *hal.mmc.Mmc,
     _card_type: ?CardType,
-    _size: u32,
+    _size: u64,
     _initialized: bool,
 
     pub fn create(mmc: *hal.mmc.Mmc) MmcIo {
@@ -69,6 +71,8 @@ pub const MmcIo = struct {
     }
 
     pub fn init(self: *Self) anyerror!void {
+        const state = arch.sync.save_and_disable_interrupts();
+        defer arch.sync.restore_interrupts(state);
         try self._mmc.init();
         const config = self._mmc.get_config();
         switch (config.mode) {
@@ -93,7 +97,9 @@ pub const MmcIo = struct {
         }
     }
 
-    pub fn read(self: *const Self, address: usize, buf: []u8) isize {
+    pub fn read(self: *const Self, address: u64, buf: []u8) isize {
+        const state = arch.sync.save_and_disable_interrupts();
+        defer arch.sync.restore_interrupts(state);
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;
@@ -107,14 +113,27 @@ pub const MmcIo = struct {
         const block_address = address >> 9;
         const num_blocks = buf.len / 512;
         var i: usize = 0;
-        while (i < num_blocks) : (i += 1) {
-            self.block_read_impl(17, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch return -1;
+        var retransmissions: usize = 0;
+        const max_retransmissions: usize = 3;
+        while (i < num_blocks) {
+            self.block_read_impl(17, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                log.warn("Reading block {d} failed with error: {s}, size: {d}", .{ i, @errorName(err), buf.len });
+                if (retransmissions < max_retransmissions) {
+                    retransmissions += 1;
+                    continue;
+                }
+                log.err("Permanent read error on block {d}: {s}", .{ i, @errorName(err) });
+                return -1;
+            };
+            i += 1;
         }
 
         return @intCast(buf.len);
     }
 
-    pub fn write(self: *const Self, address: usize, buf: []const u8) isize {
+    pub fn write(self: *const Self, address: u64, buf: []const u8) isize {
+        const state = arch.sync.save_and_disable_interrupts();
+        defer arch.sync.restore_interrupts(state);
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;
@@ -128,14 +147,26 @@ pub const MmcIo = struct {
         const block_address = address >> 9;
         const num_blocks = buf.len / 512;
         var i: usize = 0;
-        while (i < num_blocks) : (i += 1) {
-            self.block_write_impl(24, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch return -1;
+        var retransmissions: usize = 0;
+        while (i < num_blocks) {
+            self.block_write_impl(24, @intCast(block_address + i), buf[512 * i .. 512 * (i + 1)]) catch |err|
+                {
+                    log.err("Writing block {d} failed with error: {s}, size: {d}", .{ i, @errorName(err), buf.len });
+                    if (retransmissions < 3) {
+                        retransmissions += 1;
+                        continue;
+                    } else {
+                        log.err("Permanent write error on block {d}: {s}", .{ i, @errorName(err) });
+                        return -1;
+                    }
+                };
+            i += 1;
         }
 
         return @intCast(buf.len);
     }
 
-    pub fn size_in_sectors(self: *const Self) u32 {
+    pub fn size_in_sectors(self: *const Self) u64 {
         return self._size;
     }
 
@@ -199,22 +230,26 @@ pub const MmcIo = struct {
     fn initiate_intitialization_process(self: *const Self, argument: u32) anyerror!?CardType {
         log.debug("starting initialization with ACMD41", .{});
         var retries: i32 = 0;
-        while (retries < 10) {
-            hal.time.sleep_ms(150);
+        const max_retries: i32 = 100;
+        while (retries < max_retries) : (retries += 1) {
             const cmd55_resp = self.send_command(55, 0, R1, true);
-            if (cmd55_resp.r1 != 0x1) {
+            if ((cmd55_resp.r1 & 0xfe) != 0) {
+                log.warn("CMD55 returned error bits: 0x{x}", .{cmd55_resp.r1});
                 return error.CardInitializationFailure;
             }
             const acmd41_resp = self.send_command(41, argument, R1, true);
-            if (acmd41_resp.r1 == 0x00) {
-                return CardType.SDv1;
-            } else if (acmd41_resp.r1 != 0x01) {
-                log.debug("Incorrect initialization response received ({x})", .{acmd41_resp.r1});
-                return null;
+            switch (acmd41_resp.r1) {
+                0x00 => return CardType.SDv1,
+                0x01 => {
+                    hal.time.sleep_ms(50);
+                },
+                else => {
+                    log.debug("Incorrect initialization response received ({x})", .{acmd41_resp.r1});
+                    return null;
+                },
             }
-            retries += 1;
         }
-        log.debug("Card didn't respond to ACMD41", .{});
+        log.debug("Card didn't respond to ACMD41 after {d} retries", .{max_retries});
         return null;
     }
 
@@ -233,19 +268,19 @@ pub const MmcIo = struct {
     fn receive_data_packet(self: *const Self, comptime cmd: u6, output: []u8) !void {
         const token = try get_data_token(cmd);
         var buffer: [2]u8 = [_]u8{ 0x00, 0x00 };
-        var repeat: i32 = 1000;
-        while (repeat > 0) {
+        var repeat: usize = 100_000;
+        while (repeat > 0) : (repeat -= 1) {
             hal.time.sleep_us(1);
             self._mmc.receive_blocking(buffer[0..1]);
             if (buffer[0] == token) break;
             if ((buffer[0] & 0xe0) == 0) {
                 return error.GotErrorToken;
             }
-            repeat -= 1;
         }
 
-        if (token != buffer[0] and repeat == 0) {
+        if (token != buffer[0]) {
             log.err("Invalid token received, expected: 0x{x}, got: 0x{x}", .{ token, buffer[0] });
+            return error.InvalidToken;
         }
 
         self._mmc.receive_blocking(output);
@@ -287,11 +322,27 @@ pub const MmcIo = struct {
         }
     }
 
+    fn wait_for_card_ready(self: *const Self) !void {
+        var timeout: usize = 50_000;
+        const dummy: [1]u8 = [_]u8{0xff};
+        var resp: [1]u8 = [_]u8{0x00};
+        while (timeout > 0) : (timeout -= 1) {
+            self._mmc.transmit_blocking(dummy[0..], resp[0..]);
+            if (resp[0] == 0xff) {
+                return;
+            }
+            hal.time.sleep_us(10);
+        }
+        log.err("Timed out waiting for card ready after write", .{});
+        return error.CardBusyTimeout;
+    }
+
     fn block_read_impl(self: *const Self, comptime cmd: u6, argument: u32, output: []u8) anyerror!void {
         const cmd_resp = self.send_command(cmd, argument, R1, false);
         errdefer self._mmc.chip_select(false);
         if (cmd_resp.r1 != 0x00) {
             self._mmc.chip_select(false);
+            log.err("Received incorrect command response: 0x{x}", .{cmd_resp.r1});
             return error.IncorrectResponse;
         }
         try self.receive_data_packet(cmd, output);
@@ -332,9 +383,11 @@ pub const MmcIo = struct {
         // self._mmc.transmit_blocking(dummy[0..], null);
 
         try self.transmit_data_packet(cmd, input);
+        try self.wait_for_card_ready();
         self._mmc.chip_select(false);
 
-        // self._mmc.transmit_blocking(dummy[0..], null);
+        const dummy: [1]u8 = [_]u8{0xff};
+        self._mmc.transmit_blocking(dummy[0..], null);
     }
 
     fn read_cid(self: *Self) !card_parser.CID {
@@ -376,7 +429,7 @@ pub const MmcIo = struct {
                     if (cmd1_resp.r1 == 0x00) {
                         self._card_type = CardType.MMCv3;
                     } else if (cmd1_resp.r1 != 0x01) {
-                        log.warn("CMD1 responded with response code ({x})", .{cmd1_resp.r1});
+                        log.err("CMD1 responded with response code ({x})", .{cmd1_resp.r1});
                         return error.UnknownCard;
                     }
                     retries += 1;
@@ -394,14 +447,15 @@ pub const MmcIo = struct {
                             self._card_type = CardType.SDv2Block;
                         }
                     } else {
-                        log.warn("incorrect R1 for CMD58: 0x{x}", .{cmd58_resp.r1});
+                        log.err("incorrect R1 for CMD58: 0x{x}", .{cmd58_resp.r1});
                         return error.UnknownCard;
                     }
                 } else {
+                    log.err("Card didn't respond to ACMD41 during SDv2 initialization", .{});
                     return error.UnknownCard;
                 }
             } else {
-                log.warn("Unknown card type, CMD8 R1({x}) R7({x})", .{ cmd8_resp.r1, cmd8_resp.ocr });
+                log.err("Unknown card type, CMD8 R1({x}) R7({x})", .{ cmd8_resp.r1, cmd8_resp.ocr });
                 return error.UnknownCard;
             }
         }
@@ -416,7 +470,7 @@ pub const MmcIo = struct {
         const csd = try self.read_csd();
         self._size = csd.get_size() / csd.get_sector_size();
         dump_struct(csd);
-        self._mmc.change_speed_to(csd.get_speed() / 4);
+        self._mmc.change_speed_to(csd.get_speed() / 4); // increase me after retransmission implementation
         self._initialized = true;
     }
 };
@@ -496,7 +550,7 @@ test "MmcIo.ShouldInitializeInterface" {
     try mmc_stub.impl.verify();
     try std.testing.expect(sut.initialized());
 
-    try std.testing.expectEqual(29900, sut.size_in_sectors());
+    try std.testing.expectEqual(30617600, sut.size_in_sectors());
     try std.testing.expectEqual(sut._card_type.?, CardType.SDv2Block);
 }
 
@@ -557,7 +611,7 @@ test "MmcIo.ShouldInitializeInterfaceWithSDV2Byte" {
     try mmc_stub.impl.verify();
     try std.testing.expect(sut.initialized());
 
-    try std.testing.expectEqual(29900, sut.size_in_sectors());
+    try std.testing.expectEqual(30617600, sut.size_in_sectors());
     try std.testing.expectEqual(sut._card_type.?, CardType.SDv2Byte);
 }
 
@@ -637,6 +691,6 @@ test "MmcIo.ShouldInitializeWithACMD41" {
     try mmc_stub.impl.verify();
     try std.testing.expect(sut.initialized());
 
-    try std.testing.expectEqual(29900, sut.size_in_sectors());
+    try std.testing.expectEqual(30617600, sut.size_in_sectors());
     try std.testing.expectEqual(sut._card_type.?, CardType.SDv1);
 }

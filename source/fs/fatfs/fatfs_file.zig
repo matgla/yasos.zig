@@ -79,10 +79,10 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
-        var new_position: c.off_t = 0;
+    pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
+        var new_position: i64 = 0;
         if (self._file) |*file| {
-            const file_size: c.off_t = @intCast(file.size());
+            const file_size: i64 = @intCast(file.size());
             switch (whence) {
                 c.SEEK_SET => {
                     new_position = offset;
@@ -91,7 +91,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
                     new_position = file_size + offset;
                 },
                 c.SEEK_CUR => {
-                    const current_pos: c.off_t = @intCast(file.tell());
+                    const current_pos: i64 = @intCast(file.tell());
                     new_position = current_pos + offset;
                 },
                 else => return kernel.errno.ErrnoSet.InvalidArgument,
@@ -112,7 +112,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn tell(self: *Self) c.off_t {
+    pub fn tell(self: *Self) i64 {
         if (self._file) |*file| {
             return @intCast(file.tell());
         }
@@ -161,9 +161,9 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         self._allocator.free(self._name);
     }
 
-    pub fn size(self: *const Self) usize {
+    pub fn size(self: *const Self) u64 {
         if (self._file) |*file| {
-            return @as(usize, @intCast(file.size()));
+            return @as(u64, @intCast(file.size()));
         }
         return 0;
     }

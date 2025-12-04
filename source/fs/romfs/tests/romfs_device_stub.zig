@@ -51,7 +51,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         return @intCast(self.file.?.read(buffer) catch return -1);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+    pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
         switch (whence) {
             c.SEEK_SET => {
                 self.file.?.seekTo(@intCast(offset)) catch return -1;
@@ -71,11 +71,11 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
         self.file.?.close();
     }
 
-    pub fn tell(self: *Self) c.off_t {
+    pub fn tell(self: *Self) i64 {
         return @intCast(self.file.?.getPos() catch return 0);
     }
 
-    pub fn size(self: *const Self) usize {
+    pub fn size(self: *const Self) u64 {
         return @intCast(self.file.?.getEndPos() catch return 0);
     }
 

@@ -14,7 +14,10 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 pub inline fn data_synchronization_barrier() void {
-    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile (
+        \\ dsb sy
+        \\ dmb sy
+    );
 }
 
 pub inline fn instruction_synchronization_barrier() void {
@@ -29,18 +32,35 @@ pub inline fn wait_for_interrupt() void {
     asm volatile ("wfi" ::: .{ .memory = true });
 }
 
-var nested_counter: i32 = 0;
-
 pub inline fn disable_interrupts() void {
     asm volatile ("cpsid i" ::: .{ .memory = true });
-    nested_counter += 1;
 }
 
 pub inline fn enable_interrupts() void {
-    if (nested_counter > 0) nested_counter -= 1;
-    if (nested_counter == 0) {
-        asm volatile ("cpsie i" ::: .{ .memory = true });
-    } else if (nested_counter < 0) {
-        @panic("Mismatched enable_interrupts call");
-    }
+    asm volatile ("cpsie i" ::: .{ .memory = true });
+}
+
+pub inline fn memory_barrier_release() void {
+    asm volatile ("dmb" ::: .{ .memory = true });
+}
+
+pub inline fn memory_barrier_acquire() void {
+    asm volatile ("dmb" ::: .{ .memory = true });
+}
+
+pub inline fn save_and_disable_interrupts() usize {
+    return asm volatile (
+        \\ mrs %[ret], PRIMASK
+        \\ cpsid i
+        : [ret] "=r" (-> usize),
+        :
+        : .{ .memory = true });
+}
+
+pub inline fn restore_interrupts(primask: usize) void {
+    asm volatile (
+        \\ msr PRIMASK, %[mask]
+        :
+        : [mask] "r" (primask),
+        : .{ .memory = true });
 }

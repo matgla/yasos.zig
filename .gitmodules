@@ -31,3 +31,9 @@
 [submodule "apps/zork"]
 	path = apps/zork
 	url = https://github.com/devshane/zork.git
+[submodule "apps/make"]
+	path = apps/make
+	url = https://github.com/mirror/make.git
+[submodule "libs/littlefs"]
+	path = libs/littlefs
+	url = https://github.com/littlefs-project/littlefs.git

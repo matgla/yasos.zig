@@ -31,7 +31,7 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     _allocator: std.mem.Allocator,
     _name: []const u8,
     _driver: *MmcIo,
-    _current_block: u32,
+    _current_block: u64,
 
     pub fn create(allocator: std.mem.Allocator, driver: *MmcIo, filename: []const u8) MmcFile {
         return MmcFile.init(.{
@@ -55,29 +55,29 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return self._driver.write(self._current_block << 9, buf);
     }
 
-    pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+    pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
         switch (whence) {
             c.SEEK_SET => {
                 if (offset < 0 or (offset >> 9) > self._driver.size_in_sectors()) {
-                    return -1;
+                    return kernel.errno.ErrnoSet.IllegalSeek;
                 }
 
                 self._current_block = @intCast(offset >> 9);
             },
             c.SEEK_END => {
                 log.err("SEEK_END is not implemented for MMC disk", .{});
-                return -1;
+                return kernel.errno.ErrnoSet.IllegalSeek;
             },
             c.SEEK_CUR => {
-                const new_position: isize = @as(isize, @intCast(self._current_block)) + (offset >> 9);
+                const new_position: i64 = @as(i64, @intCast(self._current_block)) + (offset >> 9);
                 if (new_position < 0) {
-                    return -1;
+                    return kernel.errno.ErrnoSet.IllegalSeek;
                 }
                 self._current_block = @intCast(new_position);
             },
-            else => return -1,
+            else => return kernel.errno.ErrnoSet.InvalidArgument,
         }
-        return @as(c.off_t, @intCast(self._current_block)) << 9;
+        return @as(i64, @intCast(self._current_block)) << 9;
     }
 
     pub fn sync(self: *Self) i32 {
@@ -85,9 +85,8 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn tell(self: *Self) c.off_t {
-        _ = self;
-        return 0;
+    pub fn tell(self: *Self) i64 {
+        return @as(i64, @intCast(self._current_block)) << 9;
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -108,8 +107,8 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return 0;
     }
 
-    pub fn size(self: *const Self) usize {
-        return @intCast(self._driver.size_in_sectors() << 9);
+    pub fn size(self: *const Self) u64 {
+        return @as(u64, @intCast(self._driver.size_in_sectors())) << 9;
     }
 
     pub fn filetype(self: *const Self) kernel.fs.FileType {
@@ -135,7 +134,6 @@ var mmcio_sut: ?MmcIo = null;
 fn create_sut() !kernel.fs.IFile {
     mmcio_sut = MmcIo.create(&mmc_stub);
     try std.testing.expectError(error.CardInitializationFailure, mmcio_sut.?.init());
-
     return try MmcFile.InstanceType.create(std.testing.allocator, &mmcio_sut.?, "mmc0").interface.new(std.testing.allocator);
 }
 
@@ -207,9 +205,9 @@ test "MmcFile.Seek.SEEK_SET.ShouldSetPosition" {
     defer file.interface.delete();
 
     // Seek to block 10 (offset 5120 = 10 * 512)
-    const result = try file.interface.seek(5120, c.SEEK_SET);
+    const result = file.interface.seek(5120, c.SEEK_SET);
     // device is uninitialized
-    try std.testing.expectEqual(-1, result);
+    try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, result);
 }
 
 test "MmcFile.Seek.SEEK_SET.ShouldRejectNegativeOffset" {
@@ -217,8 +215,8 @@ test "MmcFile.Seek.SEEK_SET.ShouldRejectNegativeOffset" {
     defer mmc_stub.impl.reset();
     defer file.interface.delete();
 
-    const result = try file.interface.seek(-100, c.SEEK_SET);
-    try std.testing.expectEqual(@as(c.off_t, -1), result);
+    const result = file.interface.seek(-100, c.SEEK_SET);
+    try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, result);
 }
 
 test "MmcFile.Seek.SEEK_CUR.ShouldSeekRelatively" {
@@ -252,8 +250,8 @@ test "MmcFile.Seek.SEEK_CUR.ShouldRejectNegativePosition" {
     file.as(MmcFile).data()._current_block = 5;
 
     // Try to seek before start
-    const result = try file.interface.seek(-10240, c.SEEK_CUR);
-    try std.testing.expectEqual(@as(c.off_t, -1), result);
+    const result = file.interface.seek(-10240, c.SEEK_CUR);
+    try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, result);
 }
 
 test "MmcFile.Seek.SEEK_END.ShouldReturnError" {
@@ -261,8 +259,8 @@ test "MmcFile.Seek.SEEK_END.ShouldReturnError" {
     defer mmc_stub.impl.reset();
     defer file.interface.delete();
 
-    const result = try file.interface.seek(0, c.SEEK_END);
-    try std.testing.expectEqual(@as(c.off_t, -1), result);
+    const result = file.interface.seek(0, c.SEEK_END);
+    try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, result);
 }
 
 test "MmcFile.Seek.InvalidWhence.ShouldReturnError" {
@@ -270,8 +268,8 @@ test "MmcFile.Seek.InvalidWhence.ShouldReturnError" {
     defer mmc_stub.impl.reset();
     defer file.interface.delete();
 
-    const result = try file.interface.seek(0, 999);
-    try std.testing.expectEqual(@as(c.off_t, -1), result);
+    const result = file.interface.seek(0, 999);
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, result);
 }
 
 test "MmcFile.Size.ShouldReturnSizeInBytes" {

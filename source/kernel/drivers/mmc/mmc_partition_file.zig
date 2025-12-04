@@ -1,4 +1,3 @@
-// Copyright (c) 2025 Mateusz Stadnik
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -33,15 +32,15 @@ pub const MmcPartitionFile =
         _dev: kernel.fs.IFile,
         _start_lba: u32,
         _size_in_sectors: u32,
-        _current_position: c.off_t,
+        _current_position: i64,
 
-        pub fn create(filename: []const u8, dev: kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) MmcPartitionFile {
+        pub fn create(filename: []const u8, dev: kernel.fs.IFile, start_lba: u32, size_in_sectors: u32) !MmcPartitionFile {
             return MmcPartitionFile.init(.{
                 ._name = filename,
-                ._dev = dev,
+                ._dev = try dev.clone(),
                 ._start_lba = start_lba,
                 ._size_in_sectors = size_in_sectors,
-                ._current_position = @as(c.off_t, @intCast(start_lba)) << 9,
+                ._current_position = @as(i64, @intCast(start_lba)) << 9,
             });
         }
 
@@ -54,36 +53,53 @@ pub const MmcPartitionFile =
         }
 
         pub fn create_node(allocator: std.mem.Allocator, dev: kernel.fs.IFile, filename: []const u8, start_lba: u32, size_in_sectors: u32) anyerror!kernel.fs.Node {
-            const file = try create(filename, dev, start_lba, size_in_sectors).interface.new(allocator);
+            const file = try (try create(filename, dev, start_lba, size_in_sectors)).interface.new(allocator);
             return kernel.fs.Node.create_file(file);
         }
 
         pub fn read(self: *Self, buf: []u8) isize {
-            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET) catch return 0;
+            _ = self._dev.interface.seek(@intCast(self._current_position), c.SEEK_SET) catch return 0;
             const readed = self._dev.interface.read(buf);
-            self._current_position += readed;
+            self._current_position += @as(i64, @intCast(readed));
             return readed;
         }
 
         pub fn write(self: *Self, buf: []const u8) isize {
-            _ = self._dev.interface.seek(self._current_position, c.SEEK_SET) catch return 0;
+            _ = self._dev.interface.seek(@intCast(self._current_position), c.SEEK_SET) catch return 0;
             const written = self._dev.interface.write(buf);
-            self._current_position += written;
+            self._current_position += @as(i64, @intCast(written));
             return written;
         }
 
-        pub fn seek(self: *Self, offset: c.off_t, base: i32) anyerror!c.off_t {
-            if (@as(c.off_t, @intCast(self._start_lba << 9)) + offset > (self._start_lba + self._size_in_sectors) << 9) {
-                kernel.log.err("Seek offset {d} is out of bounds for MMC partition file", .{offset});
+        pub fn seek(self: *Self, offset: i64, base: i32) anyerror!i64 {
+            const part_start: i64 = @as(i64, @intCast(self._start_lba)) << 9;
+            const part_size: i64 = @as(i64, @intCast(self._size_in_sectors)) << 9;
+
+            var new_pos: i64 = 0;
+            switch (base) {
+                c.SEEK_SET => {
+                    // offset is relative to partition start
+                    new_pos = part_start + offset;
+                },
+                c.SEEK_CUR => {
+                    // offset is relative to current logical position within partition
+                    const current_rel = self._current_position - part_start;
+                    new_pos = part_start + current_rel + offset;
+                },
+                c.SEEK_END => {
+                    // offset is relative to partition end (one past last byte)
+                    new_pos = part_start + part_size + offset;
+                },
+                else => return kernel.errno.ErrnoSet.InvalidArgument,
+            }
+
+            // Enforce partition boundaries: [part_start, part_start + part_size]
+            if (new_pos < part_start or new_pos > part_start + part_size) {
                 return kernel.errno.ErrnoSet.InvalidArgument;
             }
-            if (@as(c.off_t, @intCast(self._start_lba)) + (offset >> 9) < @as(c.off_t, @intCast(self._start_lba))) {
-                kernel.log.err("Seek offset {d} is before the start of MMC partition file", .{offset});
-                return kernel.errno.ErrnoSet.InvalidArgument;
-            }
-            const seek_offset = (@as(c.off_t, @intCast(self._start_lba)) << 9) + offset;
-            self._current_position = try self._dev.interface.seek(seek_offset, base);
-            return self._current_position;
+
+            self._current_position = @intCast(try self._dev.interface.seek(new_pos, c.SEEK_SET));
+            return self._current_position - part_start;
         }
 
         pub fn sync(self: *Self) i32 {
@@ -91,9 +107,8 @@ pub const MmcPartitionFile =
             return 0;
         }
 
-        pub fn tell(self: *Self) c.off_t {
-            _ = self;
-            return 0;
+        pub fn tell(self: *Self) i64 {
+            return @as(i64, @intCast(self._current_position)) - @as(i64, @intCast(self._start_lba << 9));
         }
 
         pub fn name(self: *const Self) []const u8 {
@@ -114,8 +129,8 @@ pub const MmcPartitionFile =
             return 0;
         }
 
-        pub fn size(self: *const Self) usize {
-            return @as(usize, @intCast(self._size_in_sectors)) << 9;
+        pub fn size(self: *const Self) u64 {
+            return @as(u64, @intCast(self._size_in_sectors)) << 9;
         }
 
         pub fn filetype(self: *const Self) kernel.fs.FileType {
@@ -132,8 +147,9 @@ const FileMock = @import("../../fs/tests/file_mock.zig").FileMock;
 
 fn create_sut(start_lba: u32, size_in_sectors: u32) !struct { file: kernel.fs.IFile, mock: *FileMock } {
     var mock_dev = try FileMock.create(std.testing.allocator);
-    const dev_interface = mock_dev.get_interface();
-    const partition_file = try MmcPartitionFile.InstanceType.create("partition0", dev_interface, start_lba, size_in_sectors).interface.new(std.testing.allocator);
+    var dev_interface = mock_dev.get_interface();
+    defer dev_interface.interface.delete();
+    const partition_file = try (try MmcPartitionFile.InstanceType.create("partition0", dev_interface, start_lba, size_in_sectors)).interface.new(std.testing.allocator);
     return .{ .file = partition_file, .mock = mock_dev };
 }
 
@@ -141,15 +157,17 @@ test "MmcPartitionFile.Create.ShouldInitializeCorrectly" {
     const result = try create_sut(100, 200);
     var sut = result.file;
     defer sut.interface.delete();
+    defer result.mock.interface.interface.delete();
 
     try std.testing.expectEqualStrings("partition0", sut.interface.name());
     try std.testing.expectEqual(@as(u32, 100), sut.as(MmcPartitionFile).data()._start_lba);
     try std.testing.expectEqual(@as(u32, 200), sut.as(MmcPartitionFile).data()._size_in_sectors);
-    try std.testing.expectEqual(@as(c.off_t, 100 << 9), sut.as(MmcPartitionFile).data()._current_position);
+    try std.testing.expectEqual(@as(i64, 100 << 9), sut.as(MmcPartitionFile).data()._current_position);
 }
 
 test "MmcPartitionFile.CreateNode.ShouldCreateFileNode" {
     var mock_dev = try FileMock.create(std.testing.allocator);
+    defer mock_dev.interface.interface.delete();
     const dev_interface = mock_dev.get_interface();
 
     var sut = try MmcPartitionFile.InstanceType.create_node(std.testing.allocator, dev_interface, "partition1", 50, 100);
@@ -183,16 +201,16 @@ test "MmcPartitionFile.Size.ShouldReturnSizeInBytes" {
 
 test "MmcPartitionFile.Read.ShouldReadFromPartitionOffset" {
     const result = try create_sut(100, 200);
-    var file = result.file;
     const mock = result.mock;
+    var file = result.file;
     defer file.interface.delete();
 
     _ = mock.expectCall("seek")
-        .withArgs(.{ @as(c.off_t, 100 << 9), c.SEEK_SET })
-        .willReturn(@as(c.off_t, 100 << 9));
+        .withArgs(.{ @as(i64, 100 << 9), c.SEEK_SET })
+        .willReturn(@as(i64, 100 << 9));
 
     _ = mock.expectCall("read")
-        .willReturn(@as(isize, 512));
+        .willReturn(@as(i64, 512));
 
     var buffer: [512]u8 = undefined;
     const bytes_read = file.interface.read(&buffer);
@@ -235,7 +253,7 @@ test "MmcPartitionFile.Seek.SEEK_SET.ShouldSeekRelativeToPartitionStart" {
 
     // Should be at partition_start (100) + offset (10) = block 110
     // Which is 110 * 512 = 56320 bytes from device start
-    try std.testing.expectEqual(@as(c.off_t, 56320), result);
+    try std.testing.expectEqual(@as(c.off_t, 5120), result);
 }
 
 test "MmcPartitionFile.Seek.SEEK_SET.ShouldRejectOffsetBeyondPartition" {
@@ -280,8 +298,7 @@ test "MmcPartitionFile.Seek.SEEK_CUR.ShouldSeekRelatively" {
     // Then seek forward by 1024 bytes
     const result = try file.interface.seek(1024, c.SEEK_CUR);
 
-    // Should be at partition start (100*512=51200) + initial(2048) + offset(1024) = 54272
-    try std.testing.expectEqual(@as(c.off_t, 54272), result);
+    try std.testing.expectEqual(@as(c.off_t, 3072), result);
 }
 
 test "MmcPartitionFile.ReadWrite.ShouldMaintainPosition" {
@@ -302,7 +319,7 @@ test "MmcPartitionFile.ReadWrite.ShouldMaintainPosition" {
     _ = file.interface.write(write_data);
 
     // Position should have advanced
-    const pos_after_write = @as(c.off_t, @intCast((100 << 9) + write_data.len));
+    const pos_after_write = @as(i64, @intCast((100 << 9) + write_data.len));
     try std.testing.expectEqual(pos_after_write, file.as(MmcPartitionFile).data()._current_position);
 
     _ = mock.expectCall("seek")
@@ -372,7 +389,7 @@ test "MmcPartitionFile.Clone.ShouldCreateIndependentCopy" {
     var file2 = try file1.clone();
     defer file2.interface.delete();
 
-    try std.testing.expectEqual(@as(c.off_t, 0), file2.as(MmcPartitionFile).data()._current_position);
+    try std.testing.expectEqual(@as(i64, 0), file2.as(MmcPartitionFile).data()._current_position);
     try std.testing.expectEqual(@as(u32, 100), file2.as(MmcPartitionFile).data()._start_lba);
     try std.testing.expectEqual(@as(u32, 200), file2.as(MmcPartitionFile).data()._size_in_sectors);
 }
@@ -387,12 +404,12 @@ test "MmcPartitionFile.PartitionBoundaries.ShouldEnforceStartAndEnd" {
     // Valid offsets are 0 to (50*512 - 1) = 0 to 25599
 
     _ = mock.expectCall("seek")
-        .withArgs(.{ @as(c.off_t, (100 + 49) << 9), c.SEEK_SET })
-        .willReturn(@as(c.off_t, (100 + 49) << 9));
+        .withArgs(.{ @as(i64, (100 + 49) << 9), c.SEEK_SET })
+        .willReturn(@as(i64, (100 + 49) << 9));
 
     // Test at boundary
     const result1 = try file.interface.seek(25088, c.SEEK_SET); // 49 blocks
-    try std.testing.expectEqual(@as(c.off_t, (100 + 49) << 9), result1);
+    try std.testing.expectEqual(@as(c.off_t, (49) << 9), result1);
 
     // Test beyond boundary
     const result2 = file.interface.seek(26000, c.SEEK_SET);

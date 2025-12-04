@@ -61,6 +61,10 @@ pub const MockUart = struct {
         return to_write;
     }
 
+    pub fn bytes_to_read() usize {
+        return read_length - read_index;
+    }
+
     pub fn is_readable() bool {
         return readable;
     }

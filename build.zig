@@ -21,6 +21,8 @@ const std = @import("std");
 const hal = @import("yasos_hal");
 var gcc: ?[]const u8 = null;
 
+const littlefs = @import("source/fs/littlefs/build.zig");
+
 fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
     const create_venv_args = [_][]const u8{ "python3", "-m", "venv", "yasos_venv" };
     const create_venv_command = b.addSystemCommand(&create_venv_args);
@@ -189,6 +191,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     kernel_tests.root_module.addImport("c", c_for_tests);
+    c_for_tests.addIncludePath(b.path("libs/libc"));
 
     const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
     generate_defconfig_for_tests.step.dependOn(&venv.step);
@@ -204,8 +207,8 @@ pub fn build(b: *std.Build) !void {
     run_tests_step.dependOn(&install_fs_tests.step);
     run_tests_step.dependOn(&install_kernel_tests.step);
     kernel_tests.linkLibC();
-    fs_tests.linkLibC();
-    arch_tests.linkLibC();
+    // fs_tests.linkLibC();
+    // arch_tests.linkLibC();
 
     const test_config_module = b.addModule("test_config", .{
         .root_source_file = b.path("config/tests/config.zig"),
@@ -217,6 +220,8 @@ pub fn build(b: *std.Build) !void {
     const arch_for_tests = b.addModule("arch_for_tests", .{
         .root_source_file = b.path("source/arch/ut/arch.zig"),
     });
+
+    fs_tests.root_module.addImport("arch", arch_for_tests);
 
     const hal_interface = b.addModule("hal_interface", .{
         .root_source_file = b.path("hal/interface/hal.zig"),
@@ -242,6 +247,7 @@ pub fn build(b: *std.Build) !void {
 
     hal_for_tests.addImport("libc_imports", libc_imports_for_tests);
     libc_imports_for_tests.addIncludePath(b.path("."));
+    libc_imports_for_tests.addIncludePath(b.path("libs/libc"));
 
     kernel_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
     fs_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
@@ -256,6 +262,7 @@ pub fn build(b: *std.Build) !void {
     run_tests_step.dependOn(&run_arch_tests.step);
 
     kernel_tests.root_module.addIncludePath(b.path("."));
+    kernel_tests.root_module.addIncludePath(b.path("libs/libc"));
     fs_tests.root_module.addIncludePath(b.path("."));
     arch_tests.root_module.addIncludePath(b.path("."));
 
@@ -334,6 +341,7 @@ pub fn build(b: *std.Build) !void {
             const kernel_exec = boardDep.artifact("yasos_kernel");
             kernel_exec.addIncludePath(b.path("source/sys/include"));
             kernel_exec.addIncludePath(b.path("."));
+            kernel_exec.addIncludePath(b.path("libs/littlefs"));
             // kernel_exec.addIncludePath(b.path("rootfs/usr/include"));
 
             const yasld = b.dependency("yasld", .{
@@ -403,6 +411,18 @@ pub fn build(b: *std.Build) !void {
             boardDep.artifact("yasos_kernel").root_module.addImport("arch", arch_module);
             boardDep.artifact("yasos_kernel").root_module.addImport("interface", oop.module("interface"));
             kernel_module.addImport("interface", oop.module("interface"));
+            const littlefs_lib = littlefs.build_littlefs(b, optimize, kernel_exec.root_module.resolved_target.?);
+            for (kernel_exec.root_module.include_dirs.items) |include_dir| {
+                switch (include_dir) {
+                    .path_system => |path| {
+                        littlefs_lib.addSystemIncludePath(path);
+                    },
+
+                    else => {},
+                }
+            }
+            kernel_module.addIncludePath(b.path("libs/littlefs"));
+            kernel_module.linkLibrary(littlefs_lib);
 
             const date_data = "2025-10-10";
 

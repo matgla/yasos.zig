@@ -267,7 +267,6 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     if (process._parent) |parent| {
         parent.child_exit_code = context.*;
     }
-    kernel.process.unblock_context_switch();
     process_manager.instance.delete_process(process.pid, context.*);
 
     return context.*;
@@ -286,6 +285,7 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
             context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
+
             return 0;
         }
     }
@@ -293,6 +293,7 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
 }
 pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
     _ = arg;
+    kernel.process.block_context_switch();
     const process = process_manager.instance.get_current_process();
     process_manager.instance.delete_process(process.pid, -1);
     return 0;
@@ -366,7 +367,7 @@ pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
     defer kernel.process.unblock_context_switch();
     const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    context.result.* = try file.interface.seek(context.offset, context.whence);
+    context.result.* = @intCast(try file.interface.seek(@intCast(context.offset), context.whence));
     return 0;
 }
 
@@ -380,6 +381,8 @@ pub fn sys_times(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
     const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
 
     context.result.* = -1;
@@ -423,7 +426,7 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    return process_manager.instance.prepare_exec(std.mem.span(context.filename), context.argv, context.envp);
+    return process_manager.instance.prepare_exec(std.mem.span(context.filename.?), context.argv.?, context.envp.?);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
@@ -436,6 +439,7 @@ pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     context.result.* = process.mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset) catch {
+        context.result.* = c.MAP_FAILED;
         return -1;
     };
     return 0;
@@ -458,7 +462,7 @@ pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
     const cwd = current_process.get_current_directory();
     const cwd_len = @min(cwd.len, context.size);
     std.mem.copyForwards(u8, context.buf[0..cwd_len], cwd[0..cwd_len]);
-    var last_index = cwd.len;
+    var last_index = cwd_len;
     if (last_index > context.size) {
         last_index = context.size - 1;
     }

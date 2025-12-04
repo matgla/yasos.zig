@@ -54,16 +54,31 @@ class Session:
         log_file = f"logs/{log_file}_{date}.txt"
         self.file = open(log_file, 'w')
         self.reset_target()
-        self.wait_for_prompt()
+        self.wait_for_prompt_except_logs()
         while self.serial.inWaiting() > 0:
-            self.wait_for_prompt()
+            self.wait_for_prompt_except_logs()
 
     def wait_for_prompt(self):
         return self.wait_for_data("$ ")
 
+    def wait_for_prompt_except_logs(self):
+        while True:
+            lines = self.serial.read_until(b"$ ")
+            self.file.write(lines.decode('utf-8', 'ignore'))
+            self.file.flush()
+            lines = lines.decode('utf-8').splitlines()
+            filtered_lines = []
+            for line in lines:
+                if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
+                    continue
+                filtered_lines.append(line.strip())
+
+            return filtered_lines
+
     def wait_for_data(self, data):
         line = self.serial.read_until(data.encode('utf-8')).decode('utf-8')
         self.file.write(line)
+        self.file.flush()
         line = line.strip()
         if not line.endswith(data.strip()):
             raise RuntimeError("Prompt not found on serial port: '" + data + "'")
@@ -72,8 +87,18 @@ class Session:
     def read_until(self, data):
         return self.wait_for_data(data)
 
+    def read_raw(self, size, timeout=3):
+        old_timeout = self.serial.timeout
+        self.serial.timeout = timeout
+        data = self.serial.read(size)
+        self.serial.timeout = old_timeout
+        return data
+
     def read_until_prompt(self):
         return self.read_until("$")
+
+    def write_raw(self, data, timeout):
+        self.serial.write(data)
 
     def write_command(self, command):
         self.serial.write((command + '\n').encode('utf-8'))
@@ -84,6 +109,7 @@ class Session:
     def read_line(self):
         line = self.serial.readline().decode('utf-8')
         self.file.write(line)
+        self.file.flush()
         line = line.strip()
         return line
 
@@ -93,6 +119,7 @@ class Session:
             line = self.serial.readline().decode('utf-8')
             self.file.write(line)
             line = line.strip()
+            self.file.flush()
             if not re.search(regex, line):
                 return line
         return ""
@@ -104,6 +131,7 @@ class Session:
             if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
                 continue
             return line.strip()
+            self.file.flush()
 
     def reset_target(self):
         self.file.write("Resetting target with command: " + current_dir + "/reset_target.sh\n")
@@ -111,6 +139,7 @@ class Session:
         if (output.returncode != 0):
             output = subprocess.run("./reset_target.sh", shell=True, cwd=current_dir, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
         self.file.write(output.stdout.decode('utf-8'))
+        self.file.flush()
 
 
     def close(self):

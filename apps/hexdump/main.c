@@ -44,7 +44,8 @@ int main(int argc, char *argv[]) {
   }
   int readed = 1;
   while (readed != 0) {
-    printf("%08x ", offset);
+    printf("%07x ", offset);
+    memset(buffer, 0, sizeof(buffer));
     readed = read(fd, buffer, 0x10);
     for (int i = 0; i < readed; i += 2) {
       printf("%04x ", (*(uint16_t *)(&buffer[i]) & 0xffff));

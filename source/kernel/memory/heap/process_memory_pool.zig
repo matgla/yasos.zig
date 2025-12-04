@@ -18,6 +18,8 @@ const std = @import("std");
 const memory = @import("hal").memory;
 const c = @import("libc_imports").c;
 
+const kernel = @import("../../kernel.zig");
+
 const log = std.log.scoped(.@"kernel/memory_pool");
 // Only one process is owner of memory chunk
 // shared memory will be implemented as seperate structure
@@ -87,7 +89,7 @@ pub const ProcessMemoryPool = struct {
         }
 
         if (start >= self.page_count) {
-            return std.posix.MMapError.OutOfMemory;
+            return kernel.errno.ErrnoSet.OutOfMemory;
         }
 
         var end_index = start;
@@ -98,6 +100,11 @@ pub const ProcessMemoryPool = struct {
             end_index += 1;
             pages -= 1;
         }
+
+        if (end_index - start_index < @as(usize, @intCast(pages_number - 1))) {
+            return kernel.errno.ErrnoSet.OutOfMemory;
+        }
+
         if (end_index >= self.page_count or self.page_bitmap.isSet(end_index)) {
             return .{ start, end_index - 1 };
         }

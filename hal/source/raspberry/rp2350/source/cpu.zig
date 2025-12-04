@@ -24,7 +24,8 @@ const clock = @cImport({
     @cInclude("hardware/clocks.h");
 });
 
-const RegistersImplementation = @import("cortex-m33").Registers;
+const ArchRegisters = @import("arch").Registers;
+
 const sio_impl = @import("sio.zig").sio;
 
 pub const Cpu = struct {
@@ -44,5 +45,5 @@ pub const Cpu = struct {
         return @intCast(sio_impl.cpuid.read());
     }
 
-    pub const Registers = RegistersImplementation;
+    pub const Registers = ArchRegisters;
 };

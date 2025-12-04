@@ -44,40 +44,44 @@ comptime {
 extern fn store_and_switch_to_next_task(is_fpu_used: usize) void;
 
 const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
-var context_switch_enabled: bool = true;
 
+var context_switch_enabled: bool = true;
 var counter: i32 = 0;
 
-pub export fn block_context_switch() callconv(.c) void {
-    kernel.irq.disable_interrupts();
+pub fn block_context_switch() void {
+    const blocked: usize = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(blocked);
     counter += 1;
-    context_switch_enabled = false;
-    kernel.irq.enable_interrupts();
+    const ptr: *volatile bool = &context_switch_enabled;
+    ptr.* = false;
 }
 
-pub export fn unblock_context_switch() callconv(.c) void {
-    kernel.irq.disable_interrupts();
+pub fn unblock_context_switch() void {
+    const blocked: usize = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(blocked);
     counter -= 1;
     if (counter == 0) {
-        context_switch_enabled = true;
+        const ptr: *volatile bool = &context_switch_enabled;
+        ptr.* = true;
     } else if (counter < 0) {
-        @panic("Mismatched unblock_context_switch call");
+        const ptr: *volatile bool = &context_switch_enabled;
+        ptr.* = true;
+        counter = 0;
     }
-    kernel.irq.enable_interrupts();
 }
 
 export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") usize {
     _ = is_fpu_used;
-    if (!context_switch_enabled) {
+    const ptr: *volatile bool = &context_switch_enabled;
+
+    if (!ptr.*) {
         return 3;
     }
     switch (process_manager.instance.schedule_next()) {
         .Switch => {
-            // switch_to_the_next_task(is_fpu_used);
             return 2;
         },
         .StoreAndSwitch => {
-            // store_and_switch_to_next_task(is_fpu_used);
             return 1;
         },
         .ReturnToMain => return 0,

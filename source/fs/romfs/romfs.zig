@@ -58,8 +58,8 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     // RomFs interface
-    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: c.off_t) !RomFs {
-        const fs = try FileSystemHeader.init(allocator, device_file, start_offset);
+    pub fn init(allocator: std.mem.Allocator, device_file: IFile, start_offset: u64) !RomFs {
+        const fs = try FileSystemHeader.init(allocator, device_file, @intCast(start_offset));
         return RomFs.init(.{
             .base = ReadOnlyFileSystem.init(.{}),
             .root = fs,

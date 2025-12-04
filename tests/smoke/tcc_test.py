@@ -64,7 +64,7 @@ def test_compile_hello_world_with_usage_tracking(request):
                 assert (stats["MemProcessUsed"] == prevusage["MemProcessUsed"]) or allowed_increases > 0, "process memory should not raise after compiling a file"
 
         prevusage = stats
-        session.write_command("/tmp/hello")
+        session.write_command(output_file)
         data = session.read_line_except_logs()
         assert "Hello, World!" in data
         data = session.read_line_except_logs()
@@ -74,5 +74,4 @@ def test_compile_hello_world_with_usage_tracking(request):
         data = session.read_line_except_logs()
         assert "You entered: " + number in data
         data = session.wait_for_prompt()
-
 

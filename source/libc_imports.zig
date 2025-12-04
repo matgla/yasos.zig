@@ -25,4 +25,5 @@ pub const c = @cImport({
     @cInclude("libs/libc/errno.h");
     @cInclude("libs/libc/sys/stat.h");
     @cInclude("libs/libc/sys/sysinfo.h");
+    @cInclude("libs/libc/sys/mman.h");
 });

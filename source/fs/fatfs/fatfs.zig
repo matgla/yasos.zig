@@ -25,6 +25,7 @@ const fatfs = @import("zfat");
 const c = @import("libc_imports").c;
 
 const kernel = @import("kernel");
+const arch = @import("arch");
 
 const log = std.log.scoped(.@"fs/fatfs");
 
@@ -43,12 +44,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     _disk_wrapper: DiskWrapper,
 
     pub fn init(allocator: std.mem.Allocator, device: kernel.fs.IFile) !FatFs {
-        var d = device;
         return FatFs.init(.{
             ._allocator = allocator,
-            ._device = device,
+            ._device = try device.clone(),
             ._disk_wrapper = DiskWrapper{
-                .device = try d.clone(),
+                .device = try device.clone(),
             },
         });
     }
@@ -217,8 +217,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn read(interface: *fatfs.Disk, buff: [*]u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            const state = arch.sync.save_and_disable_interrupts();
+            defer arch.sync.restore_interrupts(state);
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
-            const position = self.device.interface.seek(@as(c.off_t, @intCast(sector * sector_size)), c.SEEK_SET) catch return error.IoError;
+            const position = self.device.interface.seek(@as(i64, @intCast(sector)) * sector_size, c.SEEK_SET) catch return error.IoError;
             if (position < 0) return error.IoError;
             if (self.device.interface.read(buff[0 .. sector_size * count]) != sector_size * count) {
                 return error.IoError;
@@ -226,9 +228,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn write(interface: *fatfs.Disk, buff: [*]const u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            const state = arch.sync.save_and_disable_interrupts();
+            defer arch.sync.restore_interrupts(state);
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             log.debug("Writing to sector {d}, count {d}", .{ sector, count });
-            const position = self.device.interface.seek(@as(c.off_t, @intCast(sector * sector_size)), c.SEEK_SET) catch return error.IoError;
+            const position = self.device.interface.seek(@as(i64, @intCast(sector)) * sector_size, c.SEEK_SET) catch return error.IoError;
             if (position < 0) return error.IoError;
             if (self.device.interface.write(buff[0 .. sector_size * count]) != sector_size * count) {
                 return error.IoError;
@@ -236,14 +240,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn ioctl(interface: *fatfs.Disk, cmd: fatfs.IoCtl, buff: [*]u8) fatfs.Disk.Error!void {
+            const state = arch.sync.save_and_disable_interrupts();
+            defer arch.sync.restore_interrupts(state);
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             switch (cmd) {
-                .sync => {
-                    // log.info("Syncing disk", .{self.device.interface.sync() catch |err| {
-                    //     log.err("Failed to sync disk: {s}", .{@errorName(err)});
-                    //     return error.IoError;
-                    // }});
-                },
+                .sync => {},
                 .get_sector_count => {
                     const size = self.device.interface.size();
                     @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(size >> 9);
@@ -259,7 +260,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
 pub fn create_fs_for_test() !kernel.fs.IFileSystem {
     const FatFsDeviceFileStub = @import("tests/device_stub.zig").FatFsDeviceFileStub;
-    const device_file = try (try FatFsDeviceFileStub.InstanceType.create(std.testing.allocator, null)).interface.new(std.testing.allocator);
+    var device_file = try (try FatFsDeviceFileStub.InstanceType.create(std.testing.allocator, null)).interface.new(std.testing.allocator);
+    defer device_file.interface.delete();
     return try (try FatFs.InstanceType.init(std.testing.allocator, device_file)).interface.new(std.testing.allocator);
 }
 

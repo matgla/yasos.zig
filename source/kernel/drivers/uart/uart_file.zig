@@ -21,6 +21,8 @@
 const std = @import("std");
 const c = @import("libc_imports").c;
 
+const hal = @import("hal");
+
 const kernel = @import("../../kernel.zig");
 
 const IFile = @import("../../fs/ifile.zig").IFile;
@@ -29,6 +31,8 @@ const FileType = @import("../../fs/ifile.zig").FileType;
 
 const interface = @import("interface");
 
+var readbuf: [1024]u8 = undefined;
+
 pub fn UartFile(comptime UartType: anytype) type {
     const Internal = struct {
         const UartFileImpl = interface.DeriveFromBase(IFile, struct {
@@ -36,9 +40,12 @@ pub fn UartFile(comptime UartType: anytype) type {
             const uart = UartType;
             _icanonical: bool,
             _echo: bool,
+            _raw_mode: bool,
             _nonblock: bool,
             _allocator: std.mem.Allocator,
             _name: []const u8,
+            _read_timeout: u8,
+            _minimum_bytes_to_read: usize,
 
             pub fn delete(self: *Self) void {
                 _ = self;
@@ -49,8 +56,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                     ._icanonical = true,
                     ._echo = true,
                     ._nonblock = false,
+                    ._raw_mode = false,
                     ._allocator = allocator,
                     ._name = filename,
+                    ._read_timeout = 0,
+                    ._minimum_bytes_to_read = 1,
                 });
             }
 
@@ -62,24 +72,40 @@ pub fn UartFile(comptime UartType: anytype) type {
             pub fn read(self: *Self, buffer: []u8) isize {
                 var index: usize = 0;
                 var ch: [1]u8 = .{0};
+                var start_time: u64 = 0;
+                if (self._read_timeout != 0) {
+                    start_time = hal.time.get_time_us() / 1000;
+                }
                 while (index < buffer.len) {
-                    if (self._nonblock) {
-                        if (!Self.uart.is_readable()) {
-                            return @intCast(index);
+                    if (self._read_timeout != 0) {
+                        const current_time = hal.time.get_time_us() / 1000;
+                        if (current_time - start_time >= @as(u64, self._read_timeout) * 100) {
+                            break;
                         }
                     }
-                    const result = Self.uart.read(ch[0..1]) catch {
+
+                    if (!Self.uart.is_readable()) {
+                        if (self._nonblock) {
+                            return @intCast(index);
+                        } else if (self._raw_mode and index >= self._minimum_bytes_to_read) {
+                            return @intCast(index);
+                        }
+                        continue;
+                    }
+
+                    const result = Self.uart.read(ch[0..]) catch {
                         continue;
                     };
+
                     if (result == 0) {
                         return @intCast(index);
                     }
 
-                    if (ch[0] == '\r') {
+                    if (ch[0] == '\r' and !self._raw_mode) {
                         ch[0] = '\n';
                     }
 
-                    if (ch[0] == 8 or ch[0] == 127 and self._icanonical) {
+                    if ((ch[0] == 8 or ch[0] == 127) and self._icanonical) {
                         if (index > 0) {
                             buffer[index] = 0;
                             index -= 1;
@@ -115,7 +141,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return @intCast(result);
             }
 
-            pub fn seek(self: *Self, _: c.off_t, _: i32) anyerror!c.off_t {
+            pub fn seek(self: *Self, _: i64, _: i32) anyerror!i64 {
                 _ = self;
                 return 0;
             }
@@ -125,7 +151,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return 0;
             }
 
-            pub fn tell(self: *Self) c.off_t {
+            pub fn tell(self: *Self) i64 {
                 _ = self;
                 return 0;
             }
@@ -141,6 +167,13 @@ pub fn UartFile(comptime UartType: anytype) type {
                         c.TCSETS => {
                             self._icanonical = (termios.c_lflag & c.ICANON) != 0;
                             self._echo = (termios.c_lflag & c.ECHO) != 0;
+                            self._read_timeout = @intCast(termios.c_cc[c.VTIME]);
+                            self._minimum_bytes_to_read = @intCast(termios.c_cc[c.VMIN]);
+                            if (termios.c_oflag == 0) {
+                                self._raw_mode = true;
+                            } else {
+                                self._raw_mode = false;
+                            }
                             return 0;
                         },
                         c.TCSETSW => {
@@ -159,6 +192,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                             termios.c_cc[1] = 0;
                             termios.c_cc[2] = 0;
                             termios.c_cc[3] = 0;
+                            termios.c_cc[c.VTIME] = self._read_timeout;
+                            termios.c_cc[c.VMIN] = @intCast(self._minimum_bytes_to_read);
                             if (self._icanonical) {
                                 termios.c_lflag |= c.ICANON;
                             }
@@ -171,6 +206,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                             const ws: *c.struct_winsize = @ptrCast(@alignCast(termios_arg));
                             ws.*.ws_row = 24;
                             ws.*.ws_col = 80;
+                            return 0;
+                        },
+                        c.FIONREAD => {
+                            const readable: *c_int = @ptrCast(@alignCast(termios_arg));
+                            readable.* = @intCast(self.size());
                             return 0;
                         },
                         else => {
@@ -203,9 +243,9 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return -1;
             }
 
-            pub fn size(self: *const Self) usize {
+            pub fn size(self: *const Self) u64 {
                 _ = self;
-                return 0;
+                return uart.bytes_to_read();
             }
 
             pub fn filetype(self: *const Self) FileType {

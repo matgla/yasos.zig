@@ -86,9 +86,9 @@ test "MmcPartitionDriver.Create.ShouldInitializeCorrectly" {
     var filemock = try FileMock.create(std.testing.allocator);
     defer filemock.interface.interface.delete();
 
-    var driver = try (try MmcPartitionDriver.InstanceType.create(std.testing.allocator, filemock.interface.share(), "mmc0", 0, 100)).interface.new(std.testing.allocator);
+    var driver = try (try MmcPartitionDriver.InstanceType.create(std.testing.allocator, filemock.interface, "mmc0", 0, 100)).interface.new(std.testing.allocator);
     defer driver.interface.delete();
-    var driver2 = try (try MmcPartitionDriver.InstanceType.create(std.testing.allocator, filemock.interface.share(), "mmc1", 0, 100)).interface.new(std.testing.allocator);
+    var driver2 = try (try MmcPartitionDriver.InstanceType.create(std.testing.allocator, filemock.interface, "mmc1", 0, 100)).interface.new(std.testing.allocator);
     defer driver2.interface.delete();
     var driver3 = try driver2.clone();
     defer driver3.interface.delete();

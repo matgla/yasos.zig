@@ -22,14 +22,14 @@ const c = @import("libc_imports").c;
 
 pub const FileReader = struct {
     _device_file: IFile,
-    _offset: c.off_t,
-    _data_offset: c.off_t,
+    _offset: u64,
+    _data_offset: u64,
 
-    pub fn init(device_file: IFile, offset: c.off_t) !FileReader {
-        var data_offset_value: c.off_t = 32;
+    pub fn init(device_file: IFile, offset: u64) !FileReader {
+        var data_offset_value: u64 = 32;
         var buffer: [16]u8 = undefined;
         var df = device_file;
-        _ = try df.interface.seek(offset + 16, c.SEEK_SET);
+        _ = try df.interface.seek(@intCast(offset + 16), c.SEEK_SET);
         _ = df.interface.read(buffer[0..]);
         while (std.mem.lastIndexOfScalar(u8, buffer[0..], 0) == null) {
             data_offset_value += 16;
@@ -44,22 +44,22 @@ pub const FileReader = struct {
     }
 
     pub fn get_offset(self: *const FileReader) c.off_t {
-        return self._offset;
+        return @intCast(self._offset);
     }
 
     pub fn get_data_offset(self: *const FileReader) c.off_t {
-        return self._data_offset;
+        return @intCast(self._data_offset);
     }
 
-    pub fn read(self: *FileReader, comptime T: type, offset: c.off_t) !T {
+    pub fn read(self: *FileReader, comptime T: type, offset: u64) !T {
         var buffer: [@sizeOf(T)]u8 = undefined;
-        _ = try self._device_file.interface.seek(self._offset + offset, c.SEEK_SET);
+        _ = try self._device_file.interface.seek(@intCast(self._offset + offset), c.SEEK_SET);
         _ = self._device_file.interface.read(buffer[0..]);
         return std.mem.bigToNative(T, std.mem.bytesToValue(T, buffer[0..]));
     }
 
     pub fn read_string(self: *FileReader, allocator: std.mem.Allocator, offset: c.off_t) ![]u8 {
-        _ = try self._device_file.interface.seek(self._offset + offset, c.SEEK_SET);
+        _ = try self._device_file.interface.seek(@as(i64, @intCast(self._offset)) + @as(i64, @intCast(offset)), c.SEEK_SET);
         var name_buffer: [16]u8 = undefined;
         var output_buffer: []u8 = &.{};
         var finished: bool = false;
@@ -81,7 +81,7 @@ pub const FileReader = struct {
     }
 
     pub fn read_bytes(self: *FileReader, buffer: []u8, offset: c.off_t) !void {
-        _ = try self._device_file.interface.seek(self._offset + offset, c.SEEK_SET);
+        _ = try self._device_file.interface.seek(@as(i64, @intCast(self._offset)) + @as(i64, @intCast(offset)), c.SEEK_SET);
         _ = self._device_file.interface.read(buffer[0..]);
     }
 };

@@ -128,8 +128,8 @@ pub const CSDv2 = packed struct {
         return @as(u32, @intCast(@as(u32, 1) << self.read_bl_len));
     }
 
-    pub fn get_size(self: CSDv2) u32 {
-        return @as(u32, @intCast(self.c_size + 1)) * self.get_sector_size();
+    pub fn get_size(self: CSDv2) u64 {
+        return @as(u64, @intCast(self.c_size + 1)) * self.get_sector_size() * 1024;
     }
 };
 

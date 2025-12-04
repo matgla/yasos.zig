@@ -70,15 +70,15 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return @intCast(data.len);
             }
 
-            pub fn seek(self: *Self, offset: c.off_t, whence: i32) anyerror!c.off_t {
+            pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
                 switch (whence) {
                     c.SEEK_SET => {
                         if (offset < 0) {
-                            return -1;
+                            return kernel.errno.ErrnoSet.IllegalSeek;
                         }
                         self._current_address = @intCast(offset);
                     },
-                    else => return -1,
+                    else => return kernel.errno.ErrnoSet.IllegalSeek,
                 }
                 return 0;
             }
@@ -88,7 +88,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return 0;
             }
 
-            pub fn tell(self: *Self) c.off_t {
+            pub fn tell(self: *Self) i64 {
                 _ = self;
                 return 0;
             }
@@ -121,7 +121,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return -1;
             }
 
-            pub fn size(self: *const Self) usize {
+            pub fn size(self: *const Self) u64 {
                 return FlashType.BlockSize * self._flash.get_number_of_blocks();
             }
 
@@ -220,21 +220,12 @@ test "FlashFile.Seek.SEEK_SET.ShouldSetPosition" {
     try std.testing.expectEqual(@as(u32, 100), file.as(TestFlashFile).data()._current_address);
 }
 
-test "FlashFile.Seek.SEEK_SET.ShouldRejectNegativeOffset" {
-    var file = try create_sut();
-    defer file.interface.delete();
-
-    const result = try file.interface.seek(-100, c.SEEK_SET);
-    try std.testing.expectEqual(@as(c.off_t, -1), result);
-    try std.testing.expectEqual(@as(u32, 0), file.as(TestFlashFile).data()._current_address);
-}
-
 test "FlashFile.Seek.InvalidWhence.ShouldReturnError" {
     var file = try create_sut();
     defer file.interface.delete();
 
-    const result = try file.interface.seek(100, c.SEEK_CUR);
-    try std.testing.expectEqual(@as(c.off_t, -1), result);
+    const result = file.interface.seek(100, c.SEEK_CUR);
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.IllegalSeek, result);
 }
 
 test "FlashFile.Read.ShouldAdvancePosition" {

@@ -18,4 +18,4 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-comptime {}
+pub const utils = @import("utils/utils.zig");

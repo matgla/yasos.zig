@@ -1,5 +1,9 @@
 #!/bin/bash
 
+python3 -m venv venv
+source venv/bin/activate
+pip install -r tests/smoke/requirements.txt
+
 SCRIPT_DIR=$(dirname "$0")
 cd $SCRIPT_DIR
 
@@ -11,5 +15,6 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+deactivate
 cd `pwd`
  
