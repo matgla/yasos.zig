@@ -1,9 +1,5 @@
 #!/bin/bash
 
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
 SCRIPT_DIR=$(dirname "$0")
 ROOT_DIR=$(realpath "$SCRIPT_DIR/../..")
 cd $SCRIPT_DIR
