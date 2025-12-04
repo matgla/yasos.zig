@@ -1,5 +1,7 @@
 #!/bin/bash
 
+source venv/bin/activate
+
 SCRIPT_DIR=$(dirname "$0")
 cd $SCRIPT_DIR
 

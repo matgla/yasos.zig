@@ -203,7 +203,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     break;
                 }
             }
-            while (true) {
+            if (!std.mem.eql(u8, "host", config.cpu.arch)) {
+                while (true) {
+                    kernel.process.unblock_context_switch();
+                    arch.memory_barrier_release();
+                    hal.irq.trigger(.pendsv);
+                }
+            } else {
                 kernel.process.unblock_context_switch();
                 arch.memory_barrier_release();
                 hal.irq.trigger(.pendsv);
