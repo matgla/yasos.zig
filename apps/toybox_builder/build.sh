@@ -25,7 +25,8 @@ CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="-I$1/usr/include -g" LDFLAG
 mv -f ../toybox/toybox ../toybox/toybox.elf
 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="-I$1/usr/include -g" LDFLAGS="-lm" make toybox
 PREFIX=$1 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t make install
-mv $1/usr/bin/cal $1/bin/cal
-rm -rf $1/usr
+if [ -f "$1/bin/cal" ]; then
+  mv "$1/bin/cal" "$(dirname "$1")/bin/cal"
+fi
 # cp ../toybox/toybox $1/bin/toybox
 

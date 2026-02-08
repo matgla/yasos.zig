@@ -103,7 +103,19 @@ build_cross_compiler()
   echo "Building cross compiler..."
   cd tinycc
   mkdir -p bin
-  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="$SCRIPT_DIR/rootfs" --libpaths="{B}:{R}/usr/lib:{R}/lib" --sysincludepaths="{B}/include:{R}/usr/include"
+  # Use explicit workspace paths to avoid system newlib
+  YASOS_SYSROOT="$SCRIPT_DIR/rootfs"
+  YASOS_LIBPATHS="{B}:$SCRIPT_DIR/rootfs/usr/lib:$SCRIPT_DIR/rootfs/lib"
+  YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
+  YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
+
+  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror" \
+    --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes \
+    --prefix="$PREFIX" \
+    --sysroot="$YASOS_SYSROOT" \
+    --libpaths="$YASOS_LIBPATHS" \
+    --crtprefix="$YASOS_CRTPREFIX" \
+    --sysincludepaths="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -124,11 +136,29 @@ build_c_compiler()
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   # gcc -o armv8m-tcc.o -c tcc.c -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM_ARCHV8M -DCONFIG_TCC_CROSSPREFIX="\"armv8m-\"" -I. -DTCC_GITHASH="\"2025-05-11 armv8m@ec701fe2*\"" -DTCC_DEBUG=2 -g -O0 -Wdeclaration-after-statement -Wno-unused-result
 
-  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm -L../../rootfs/lib" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
+  # Use the workspace rootfs as sysroot to avoid linking against system newlib
+  YASOS_SYSROOT="$SCRIPT_DIR/rootfs"
+  YASOS_LIBPATHS="{B}:$SCRIPT_DIR/rootfs/usr/lib:$SCRIPT_DIR/rootfs/lib"
+  YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
+  YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
+
+  ./configure --cc=tcc --cpu=armv8m \
+    --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
+    --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
+    --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
+    --prefix="$PREFIX" \
+    --sysroot="$YASOS_SYSROOT" \
+    --libpaths="$YASOS_LIBPATHS" \
+    --crtprefix="$YASOS_CRTPREFIX" \
+    --sysincludepaths="$YASOS_SYSINCLUDES" \
+    --cross-prefix=armv8m-
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  VERBOSE=1 make armv8m-tcc -j8
+  # Link against YasOS libraries, not host libraries
+  # libtcc1.a is added automatically by tcc, but we need libc/libm for tcc's own code
+  YASOS_LIBS="-lpthread -ldl -lc -lm"
+  VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
 
   if [ $? -ne 0 ]; then
     exit -1;
@@ -136,15 +166,25 @@ build_c_compiler()
   mv armv8m-tcc bin/armv8m-tcc.elf
   make clean
 
-  ./configure --cc=tcc --cpu=armv8m -B=/ --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP  -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -L../../rootfs/lib" --extra-ldflags="-fpie -fPIE -fvisiblity=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4   -DTCC_ARM_VFP -DTCC_TARGET_ARM  -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -L../../rootfs/lib" --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --prefix="$PREFIX" --sysroot="/"  --sysincludepaths="/usr/include" --cross-prefix=armv8m-
+  # Second stage build with same YasOS paths
+  ./configure --cc=tcc --cpu=armv8m \
+    --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
+    --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
+    --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
+    --prefix="$PREFIX" \
+    --sysroot="$YASOS_SYSROOT" \
+    --libpaths="$YASOS_LIBPATHS" \
+    --crtprefix="$YASOS_CRTPREFIX" \
+    --sysincludepaths="$YASOS_SYSINCLUDES" \
+    --cross-prefix=armv8m-
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  VERBOSE=1 make armv8m-tcc -j8
+  VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make install armv8m-tcc PREFIX=$PREFIX
+  make install armv8m-tcc PREFIX=$PREFIX LIBS="$YASOS_LIBS"
   mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
   cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
   cd ..
@@ -227,6 +267,14 @@ build_zork_makefile()
 
 build_cross_compiler
 
+# ---- Stage 1: Build and install core libraries into rootfs ----
+# The cross-compiler (armv8m-tcc) is configured to look for headers in
+# rootfs/usr/include and libraries in rootfs/usr/lib + rootfs/lib.
+# Libraries are built with -nostdlib/-nostdinc so they do not depend on
+# a pre-existing libc.  Once installed, every subsequent compilation
+# (including the target C compiler and all applications) will
+# automatically pick them up from rootfs.
+
 echo "Building libc..."
 build_makefile libc
 
@@ -244,6 +292,10 @@ build_makefile libm
 
 echo "Building termcap..."
 build_makefile termcap
+
+# ---- Stage 2: Build the target (on-device) C compiler ----
+# At this point rootfs/usr/lib contains libc.a, libdl.so, libpthread.so,
+# etc., so the target tcc can link against them.
 
 echo "Building target C compiler..."
 build_c_compiler

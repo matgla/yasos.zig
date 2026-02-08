@@ -22,13 +22,26 @@
 #include <stddef.h>
 
 double ldexp(double x, int exp) {
-  if (x == 0.0)
-    return 0.0;
-  if (exp < -1022)
-    return 0.0;
-  if (exp > 1023)
-    return x * (1 << exp);
-  return x * (1 << exp);
+  // Load exponent: multiply x by 2^exp
+  // Handle special cases
+  if (x == 0.0 || exp == 0)
+    return x;
+  
+  // Use exponent manipulation for correct IEEE 754 behavior
+  // ldexp(x, n) = x * 2^n
+  
+  // Split exp into manageable chunks to avoid overflow
+  while (exp > 0) {
+    int step = (exp > 1023) ? 1023 : exp;
+    x *= (double)(1L << step);
+    exp -= step;
+  }
+  while (exp < 0) {
+    int step = (exp < -1023) ? -1023 : exp;
+    x /= (double)(1L << (-step));
+    exp -= step;
+  }
+  return x;
 }
 
 double fabs(double x) {
