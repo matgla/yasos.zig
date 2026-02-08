@@ -1,6 +1,6 @@
 CC ?= armv8m-tcc
 CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
-LDFLAGS = -g -fvisibility=hidden -g 
+LDFLAGS = -g -fvisibility=hidden -g -L../../rootfs/lib
 SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 
@@ -20,7 +20,7 @@ build/%.o: %.c
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) $^ -o $@
 
-install: $(TARGET) 
+install: $(TARGET)
 	mkdir -p $(BINDIR)
 	cp $(TARGET) $(BINDIR)
 

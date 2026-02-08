@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib -Ilibs/fatfs/source -I../../libs/littlefs -I. -DLFS_NO_INTRINSICS -DLFS_NO_WARN
-LDFLAGS = -fvisibility=hidden -g
+LDFLAGS = -fvisibility=hidden -g -L../../rootfs/lib
 FAT_SRCS = mkfs_fat.c platform.c libs/fatfs/source/ff.c libs/fatfs/source/ffsystem.c libs/fatfs/source/ffunicode.c
 FAT_OBJS = $(patsubst %.c, build/%.o, $(FAT_SRCS))
 
