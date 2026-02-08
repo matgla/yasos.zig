@@ -1,14 +1,15 @@
-From f5e5cce766fa84d8e9937b2daa1cb1d2733b329d Mon Sep 17 00:00:00 2001
+From 682d342e73d72ef220e24314be4adfb3f28849a8 Mon Sep 17 00:00:00 2001
 From: Mateusz Stadnik <matgla@live.com>
-Date: Tue, 9 Sep 2025 21:17:38 +0200
-Subject: [PATCH] Fixed few bugs
+Date: Sun, 8 Feb 2026 22:46:11 +0100
+Subject: [PATCH] Fixed bugs for new tcc
 
 ---
  main.c                 | 2 +-
+ scripts/make.sh        | 2 +-
  scripts/portability.sh | 2 +-
  toys/pending/sh.c      | 5 +++--
  toys/posix/echo.c      | 1 -
- 4 files changed, 5 insertions(+), 5 deletions(-)
+ 5 files changed, 6 insertions(+), 6 deletions(-)
 
 diff --git a/main.c b/main.c
 index aa6a52cb..8dc2426d 100644
@@ -23,6 +24,19 @@ index aa6a52cb..8dc2426d 100644
      setvbuf(stdout, buf, btype, buf ? 4096 : 0);
    }
  }
+diff --git a/scripts/make.sh b/scripts/make.sh
+index c2e79c42..7da3bbf0 100755
+--- a/scripts/make.sh
++++ b/scripts/make.sh
+@@ -185,7 +185,7 @@ then
+     # turn any non-quoted opstring (NULL or 0) into " " (because fscanf can't
+     # handle "" with nothing in it, and mkflags uses that).
+ 
+-    ) | ${CROSS_COMPILE}${CC} -E - | \
++    ) | ${CROSS_COMPILE}${CC} -E - | grep -v '__builtin_\|__asm__' | \
+     $SED -n -e 's/" *"//g;/^#/d;t clear;:clear;s/"/"/p;t;s/\( [AB] \).*/\1 " "/p'
+ 
+   # Sort resulting line pairs and glue them together into triplets of
 diff --git a/scripts/portability.sh b/scripts/portability.sh
 index 570d9e29..d5d6df3b 100644
 --- a/scripts/portability.sh
@@ -37,10 +51,10 @@ index 570d9e29..d5d6df3b 100644
  
  # Disable pointless warnings only clang produces
 diff --git a/toys/pending/sh.c b/toys/pending/sh.c
-index 63026b99..ceac5f4d 100644
+index bebe7bd5..40d14f5d 100644
 --- a/toys/pending/sh.c
 +++ b/toys/pending/sh.c
-@@ -489,7 +489,7 @@ static long get_lineno(struct sh_fcall **fff)
+@@ -508,7 +508,7 @@ static long get_lineno(struct sh_fcall **fff)
  {
    struct sh_fcall *ff;
  
@@ -49,7 +63,7 @@ index 63026b99..ceac5f4d 100644
    if (fff) *fff = ff;
  
    return ff->pl ? ff->pl->lineno : ff->lineno;
-@@ -3040,7 +3040,8 @@ if (DEBUG) { dprintf(2, "%d run command %p %s\n", getpid(), TT.ff, *pp->arg.v);
+@@ -3038,7 +3038,8 @@ if (DEBUG) { dprintf(2, "%d run command %p %s\n", getpid(), TT.ff, *pp->arg.v);
  // TODO: when to prioritize $PATH over MAYFORK?
      if (jj&(TOYFLAG_NOFORK|TOYFLAG_MAYFORK)) {
        sigjmp_buf rebound, *prebound = toys.rebound;
@@ -72,5 +86,5 @@ index 702efee6..53dac7d5 100644
      if (i++) putchar(' ');
  
 -- 
-2.51.0
+2.53.0
 
