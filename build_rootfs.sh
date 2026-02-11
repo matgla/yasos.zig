@@ -102,6 +102,9 @@ build_cross_compiler()
 {
   echo "Building cross compiler..."
   cd tinycc
+  # Clean any stale configs from previous builds
+  make distclean 2>/dev/null || true
+  rm -f config.h config.mak *.o
   mkdir -p bin
   # Use explicit workspace paths to avoid system newlib
   YASOS_SYSROOT="$SCRIPT_DIR/rootfs"
@@ -111,7 +114,7 @@ build_cross_compiler()
 
   ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes \
-    --prefix="$PREFIX" \
+    --prefix="$SCRIPT_DIR/libs/tinycc" \
     --sysroot="$YASOS_SYSROOT" \
     --libpaths="$YASOS_LIBPATHS" \
     --crtprefix="$YASOS_CRTPREFIX" \
@@ -124,7 +127,13 @@ build_cross_compiler()
   echo "Installing cross compiler..."
   make install
 
-  cp armv8m-tcc bin
+  # Verify cross-compiler was installed
+  if [ ! -f "$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc" ]; then
+    echo "ERROR: Cross-compiler armv8m-tcc not found after install!"
+    exit 1
+  fi
+  echo "Cross-compiler installed at: $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc"
+
   cd ..
 }
 
@@ -142,11 +151,12 @@ build_c_compiler()
   YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
   YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
 
+  # First stage: build with host paths to get working binary
   ./configure --cc=tcc --cpu=armv8m \
     --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
     --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
-    --prefix="$PREFIX" \
+    --prefix="$SCRIPT_DIR/libs/tinycc" \
     --sysroot="$YASOS_SYSROOT" \
     --libpaths="$YASOS_LIBPATHS" \
     --crtprefix="$YASOS_CRTPREFIX" \
@@ -164,19 +174,33 @@ build_c_compiler()
     exit -1;
   fi
   mv armv8m-tcc bin/armv8m-tcc.elf
-  make clean
+  # Save the cross-compiler and FP libraries before distclean removes them
+  cp $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.saved
+  mkdir -p /tmp/yasos-fp-libs-save
+  cp $SCRIPT_DIR/libs/tinycc/lib/fp/lib*.{a,so} /tmp/yasos-fp-libs-save/ 2>/dev/null || true
+  make distclean
+  rm -f *.o armv8m-*.o
+  # Restore the cross-compiler and FP libraries
+  mv $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.saved $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc
+  mkdir -p $SCRIPT_DIR/libs/tinycc/lib/fp
+  cp /tmp/yasos-fp-libs-save/* $SCRIPT_DIR/libs/tinycc/lib/fp/ 2>/dev/null || true
+  rm -rf /tmp/yasos-fp-libs-save
 
-  # Second stage build with same YasOS paths
+  # Second stage build with target prefix for correct embedded paths
+  # Use target-relative paths for the native compiler
+  NATIVE_LIBPATHS="{B}:/usr/lib:/lib"
+  NATIVE_CRTPREFIX="/usr/lib"
+  NATIVE_SYSINCLUDES="{B}/include:/usr/include"
   ./configure --cc=tcc --cpu=armv8m \
     --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
     --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
-    --prefix="$PREFIX" \
-    --sysroot="$YASOS_SYSROOT" \
-    --libpaths="$YASOS_LIBPATHS" \
-    --crtprefix="$YASOS_CRTPREFIX" \
-    --sysincludepaths="$YASOS_SYSINCLUDES" \
-    --cross-prefix=armv8m-
+    --prefix=/usr \
+    --libpaths="$NATIVE_LIBPATHS" \
+    --crtprefix="$NATIVE_CRTPREFIX" \
+    --sysincludepaths="$NATIVE_SYSINCLUDES" \
+    --cross-prefix=armv8m- \
+    --sysroot=/
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -184,9 +208,21 @@ build_c_compiler()
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make install armv8m-tcc PREFIX=$PREFIX LIBS="$YASOS_LIBS"
+  # Copy the libtcc1.a files from cross-compiler install to build dir for make install
+  cp $SCRIPT_DIR/libs/tinycc/lib/tcc/armv8m-libtcc1.a .
+  make install armv8m-tcc DESTDIR=$SCRIPT_DIR/rootfs LIBS="$YASOS_LIBS"
   mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
   cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
+  # Install FP libraries (shared .so for dynamic linking, .a for static)
+  for fplib in $SCRIPT_DIR/libs/tinycc/lib/fp/libsoftfp.{a,so} \
+               $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv4sp.{a,so} \
+               $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv5dp.{a,so} \
+               $SCRIPT_DIR/libs/tinycc/lib/fp/librp2350fp.{a,so}; do
+    if [ -f "$fplib" ]; then
+      cp "$fplib" $PREFIX/lib/
+      echo "Installed $(basename $fplib) to $PREFIX/lib/"
+    fi
+  done
   cd ..
 }
 

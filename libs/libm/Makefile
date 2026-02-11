@@ -1,7 +1,7 @@
 CC ?= tcc 
 CFLAGS = -std=c11 -Wall -gdwarf -fpic -pedantic -nostdlib -nostdinc -I. -I../../rootfs/usr/include -L../../rootfs/lib -Iinclude
 LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nostdlib -Wl,-oformat=yaff
-LDFLAGS = -shared -fPIC -gdwarf ${LDFLAGS_STATIC} 
+LDFLAGS = -shared -fPIC -gdwarf ${LDFLAGS_STATIC}
 
 SRCS = $(wildcard *.c)
 
