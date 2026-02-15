@@ -23,10 +23,14 @@
 .thumb_func
 .type indirect_call_thunk_template_start, %function
 indirect_call_thunk_template_start:
+    push {r4, lr}
+    mov r4, r9
     ldr r9, r9_value
     ldr ip, original_function_address
-    bx ip
-    nop
+    blx ip
+    mov r9, r4
+    pop {r4, pc}
+    .align 2
 r9_value: .word 0xffffffff
 original_function_address: .word 0xffffffff
 

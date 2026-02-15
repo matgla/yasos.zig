@@ -1,6 +1,8 @@
-CC ?= tcc 
+CC ?= tcc
 CFLAGS = -std=c11 -Wall -gdwarf -fpic -pedantic -nostdlib -nostdinc -I. -I../../rootfs/usr/include -L../../rootfs/lib -Iinclude
 LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nostdlib -Wl,-oformat=yaff
+# -nostdlib skips standard libs (libc, etc.) but tcc still auto-links
+# compiler runtime (libtcc1, libsoftfp) which provide __aeabi_* helpers.
 LDFLAGS = -shared -fPIC -gdwarf ${LDFLAGS_STATIC}
 
 SRCS = $(wildcard *.c)
@@ -17,7 +19,7 @@ INCLUDEDIR ?= $(PREFIX)/include
 # Rules
 all: $(TARGET_SHARED) $(TARGET_STATIC)
 
-prepare: 
+prepare:
 	mkdir -p build
 
 build/%.o: %.c prepare
@@ -29,7 +31,7 @@ $(TARGET_SHARED): $(OBJS)
 $(TARGET_STATIC): $(OBJS)
 	ar rcs $@ $^
 
-install: $(TARGET_SHARED) $(TARGET_STATIC) 
+install: $(TARGET_SHARED) $(TARGET_STATIC)
 	mkdir -p $(LIBDIR)
 	cp $(TARGET_SHARED) $(LIBDIR)
 	cp $(TARGET_STATIC) $(LIBDIR)

@@ -167,9 +167,9 @@ pub const LoadedUniqueData = struct {
             const thunk_template: [*]const u8 = @ptrFromInt(@intFromPtr(&indirect_call_thunk_template_start) - 1);
             const thunk_slice: []const u8 = thunk_template[0..indirect_call_thunk_template_size];
             @memcpy(thunks.data[position .. position + indirect_call_thunk_template_size], thunk_slice[0..]);
-            @memcpy(thunks.data[position + 12 .. position + 12 + @sizeOf(usize)], std.mem.asBytes(&r9));
-            @memcpy(thunks.data[position + 16 .. position + 16 + @sizeOf(usize)], std.mem.asBytes(&symbol));
-            return @intFromPtr(&thunks.data[position]);
+            @memcpy(thunks.data[position + 20 .. position + 20 + @sizeOf(usize)], std.mem.asBytes(&r9));
+            @memcpy(thunks.data[position + 24 .. position + 24 + @sizeOf(usize)], std.mem.asBytes(&symbol));
+            return @intFromPtr(&thunks.data[position]) | 1;
         }
         return error.ThunksNotAllocated;
     }
@@ -180,7 +180,7 @@ pub const LoadedUniqueData = struct {
             if (position + indirect_call_thunk_template_size > thunks.data.len) {
                 return error.IndexOutOfBounds;
             }
-            return @intFromPtr(&thunks.data[position]);
+            return @intFromPtr(&thunks.data[position]) | 1;
         }
         return error.ThunksNotAllocated;
     }

@@ -143,14 +143,44 @@ pub const Loader = struct {
         const init_ptr: [*]const u8 = @ptrFromInt(parser.init_address);
         try module.relocate_init(init_ptr[0..header.init_length], header);
         module.process_initializers();
+
+        // Pre-count function pointer thunks needed for both symbol table and local relocations
+        var symbol_table_fn_ptr_count: usize = 0;
+        for (parser.symbol_table_relocations.relocations) |rel| {
+            if (rel.function_pointer == 1) {
+                symbol_table_fn_ptr_count += 1;
+            }
+        }
+        var local_fn_ptr_count: usize = 0;
+        for (parser.local_relocations.relocations) |rel| {
+            if (@as(Section, @enumFromInt(rel.section)) == .Code) {
+                local_fn_ptr_count += 1;
+            }
+        }
+        const total_fn_ptr_thunks = symbol_table_fn_ptr_count + local_fn_ptr_count;
+        log.debug("Total function pointer thunks needed: {d} (symbol_table: {d}, local: {d})", .{ total_fn_ptr_thunks, symbol_table_fn_ptr_count, local_fn_ptr_count });
+        if (total_fn_ptr_thunks > 0) {
+            if (module.unique_data) |unique| {
+                try unique.allocate_thunks(total_fn_ptr_thunks);
+            }
+        }
+
         try self.process_symbol_table_relocations(&parser, module, header);
-        try self.process_local_relocations(&parser, module);
+        try self.process_local_relocations(&parser, module, symbol_table_fn_ptr_count);
         try self.process_data_relocations(&parser, module);
+
+        // Mark thunks as generated after all relocation processing is complete
+        if (module.unique_data) |unique| {
+            if (unique.thunks) |thunks| {
+                thunks.generated = true;
+            }
+        }
+
         log.err(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
-        log.debug(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
+        log.err(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
         log.err(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
         log.err(".bss  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
-        log.debug(".got  loaded at 0x{x}, entr: {x} for: {s}", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
+        log.err(".got  loaded at 0x{x}, entr: {x} for: {s}", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
 
         if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
             var section: Section = .Unknown;
@@ -262,6 +292,13 @@ pub const Loader = struct {
                 continue;
             } // skip first three entries, they are reserved for the loader itself
 
+            // GOT entries with offset 0 are unresolved external symbols that
+            // will be patched by symbol table relocations (Phase B below).
+            // Converting offset 0 here would incorrectly map them to _start.
+            if (got[i].symbol_offset == 0) {
+                continue;
+            }
+
             const section_start = Loader.get_section_address_for_offset(module, header, got[i].symbol_offset) catch |err| {
                 log.err("[yasld] Can't find section for GOT[{d}]: {s}", .{ i, @errorName(err) });
                 return err;
@@ -272,22 +309,17 @@ pub const Loader = struct {
             got[i].symbol_offset = address;
         }
 
-        var number_of_function_pointer_relocations: usize = 0;
         var current_function_pointer_relocation_index: usize = 0;
-        for (parser.symbol_table_relocations.relocations) |rel| {
-            if (rel.function_pointer == 1) {
-                number_of_function_pointer_relocations += 1;
-            }
-        }
         const maybe_unique_data = module.unique_data;
-        if (maybe_unique_data) |unique| {
-            try unique.allocate_thunks(number_of_function_pointer_relocations);
-        }
 
         for (parser.symbol_table_relocations.relocations) |rel| {
             var maybe_symbol: ?*const Symbol = null;
             if (rel.function_pointer == 1) {
-                maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
+                if (rel.is_exported_symbol == 1) {
+                    maybe_symbol = parser.exported_symbols.element_at(rel.symbol_index);
+                } else {
+                    maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
+                }
                 if (maybe_symbol == null) {
                     log.err("[yasld] Can't find symbol at index: {d}, size: {d}, exported: {d}", .{ rel.symbol_index, parser.imported_symbols.number_of_items, rel.is_exported_symbol });
                     return LoaderError.SymbolNotFound;
@@ -297,12 +329,16 @@ pub const Loader = struct {
                         if (!thunks.generated) {
                             const maybe_symbol_entry = self.find_symbol(module, maybe_symbol.?.name());
                             if (maybe_symbol_entry) |symbol_entry| {
-                                const address = unique.generate_thunk(current_function_pointer_relocation_index, @intFromPtr(got.ptr), symbol_entry.address) catch |err| {
+                                const address = unique.generate_thunk(current_function_pointer_relocation_index, symbol_entry.target_got_address, symbol_entry.address) catch |err| {
                                     log.err("[yasld] Can't generate thunk for symbol: '{s}': {s}", .{ maybe_symbol.?.name(), @errorName(err) });
                                     return err;
                                 };
+                                log.debug("Setting GOT[{d}] to thunk: 0x{x} [{s}], target: 0x{x}, r9: 0x{x}", .{ rel.index, address, maybe_symbol.?.name(), symbol_entry.address, symbol_entry.target_got_address });
                                 current_function_pointer_relocation_index += 1;
                                 got[rel.index].symbol_offset = address;
+                            } else {
+                                log.err("[yasld] Can't find function pointer symbol: '{s}'", .{maybe_symbol.?.name()});
+                                return LoaderError.SymbolNotFound;
                             }
                         }
                     } else {
@@ -337,10 +373,6 @@ pub const Loader = struct {
                 return LoaderError.SymbolNotFound;
             }
         }
-
-        if (maybe_unique_data) |shared| {
-            shared.thunks.?.generated = true;
-        }
     }
 
     fn find_symbol(_: Loader, module: *Module, name: []const u8) ?SymbolEntry {
@@ -351,16 +383,52 @@ pub const Loader = struct {
         return null;
     }
 
-    fn process_local_relocations(_: Loader, parser: *const Parser, module: *Module) !void {
+    fn process_local_relocations(_: Loader, parser: *const Parser, module: *Module, thunk_start_index: usize) !void {
         var got = module.get_got();
         log.debug("Processing local relocations for GOT: 0x{x}", .{@intFromPtr(got.ptr)});
-        for (parser.local_relocations.relocations) |rel| {
-            const relocated_start_address: usize = try module.get_base_address(@enumFromInt(rel.section));
-            const relocated = relocated_start_address + rel.target_offset;
-            got[rel.index].symbol_offset = relocated;
-            got[rel.index].base_register = @intFromPtr(got.ptr);
+        var thunk_index = thunk_start_index;
+        const maybe_unique_data = module.unique_data;
 
-            log.debug("Patching GOT[{d}] to: 0x{x}, section: {s}, target_offset: 0x{x}", .{ rel.index, got[rel.index].symbol_offset, @tagName(@as(Section, @enumFromInt(rel.section))), rel.target_offset });
+        for (parser.local_relocations.relocations) |rel| {
+            const section: Section = @enumFromInt(rel.section);
+            const relocated_start_address: usize = try module.get_base_address(section);
+            const relocated = relocated_start_address + rel.target_offset;
+
+            if (section == .Code) {
+                // Code section local relocations are function pointers.
+                // Wrap them in thunks so that r9 is set to the owning module's
+                // GOT when the function is called back from another module.
+                if (maybe_unique_data) |unique| {
+                    if (unique.thunks) |thunks| {
+                        if (!thunks.generated) {
+                            // Ensure Thumb bit is set for Cortex-M function pointers
+                            var fn_address = relocated;
+                            if (fn_address & 1 == 0) {
+                                fn_address |= 1;
+                            }
+                            const address = unique.generate_thunk(thunk_index, @intFromPtr(got.ptr), fn_address) catch |err| {
+                                log.err("[yasld] Can't generate local thunk for GOT[{d}]: {s}", .{ rel.index, @errorName(err) });
+                                return err;
+                            };
+                            log.debug("Setting GOT[{d}] to local thunk: 0x{x}, target: 0x{x}, r9: 0x{x}", .{ rel.index, address, fn_address, @intFromPtr(got.ptr) });
+                            got[rel.index].symbol_offset = address;
+                            thunk_index += 1;
+                        } else {
+                            const address = unique.get_thunk_address(thunk_index) catch |err| {
+                                log.err("[yasld] Can't get local thunk for GOT[{d}]: {s}", .{ rel.index, @errorName(err) });
+                                return err;
+                            };
+                            got[rel.index].symbol_offset = address;
+                            thunk_index += 1;
+                        }
+                    }
+                }
+            } else {
+                got[rel.index].symbol_offset = relocated;
+            }
+
+            got[rel.index].base_register = @intFromPtr(got.ptr);
+            log.debug("Patching GOT[{d}] to: 0x{x}, section: {s}, target_offset: 0x{x}", .{ rel.index, got[rel.index].symbol_offset, @tagName(section), rel.target_offset });
         }
     }
 
@@ -386,7 +454,16 @@ pub const Loader = struct {
             const address_to_change: usize = data_memory_address + rel_to;
             const target: *usize = @ptrFromInt(address_to_change);
             const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));
-            const address_from: usize = base_address_from + rel.from;
+            var address_from: usize = base_address_from + rel.from;
+            const from_section: Section = @enumFromInt(rel.section);
+
+            // Cortex-M executes only Thumb code. Some relocation producers emit
+            // even code symbol addresses for function pointers (for example
+            // entrypoint symbols), which causes faults on indirect branches.
+            // Normalize code/init pointers to Thumb entry addresses.
+            if ((from_section == .Code or from_section == .Init) and (address_from & 1) == 0) {
+                address_from += 1;
+            }
             log.debug("Patching from: 0x{x} to: 0x{x}, address_from: {x}, target: {x}", .{ rel.from, rel.to, address_from, @intFromPtr(target) });
 
             target.* = address_from;

@@ -1,7 +1,7 @@
-CC ?= tcc 
+CC ?= tcc
 CFLAGS = -std=c11 -Wall -gdwarf -fpic -pedantic -nostdlib -nostdinc -I. -I../../rootfs/usr/include -L../../rootfs/lib
-LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nostdlib
-LDFLAGS = -shared -fPIC -gdwarf ${LDFLAGS_STATIC} 
+LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nodefaultlibs
+LDFLAGS = -shared -fPIC -gdwarf ${LDFLAGS_STATIC}
 
 SRCS = $(wildcard *.c)
 
@@ -17,7 +17,7 @@ INCLUDEDIR ?= $(PREFIX)/include
 # Rules
 all: $(TARGET_SHARED) $(TARGET_STATIC) $(TARGET_SHARED).elf
 
-prepare: 
+prepare:
 	mkdir -p build
 
 build/%.o: %.c prepare
@@ -32,7 +32,7 @@ $(TARGET_SHARED): $(OBJS)
 $(TARGET_STATIC): $(OBJS)
 	ar rcs $@ $^
 
-install: $(TARGET_SHARED) $(TARGET_STATIC) 
+install: $(TARGET_SHARED) $(TARGET_STATIC)
 	mkdir -p $(LIBDIR)
 	cp $(TARGET_SHARED) $(LIBDIR)
 	cp $(TARGET_STATIC) $(LIBDIR)

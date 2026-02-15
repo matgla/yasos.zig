@@ -159,7 +159,7 @@ pub const Parser = struct {
         log.debug("symbol table relocations: {d}", .{self.symbol_table_relocations.relocations.len});
         for (self.symbol_table_relocations.relocations) |rel| {
             log.debug("  address: 0x{x}", .{@intFromPtr(&rel)});
-            log.debug("  index: 0x{x}, symbol index: 0x{x}", .{ rel.index, rel.symbol_index });
+            log.debug("  index: 0x{x}, symbol index: 0x{x}, fn_ptr: {d}, exported: {d}", .{ rel.index, rel.symbol_index, rel.function_pointer, rel.is_exported_symbol });
         }
         log.debug("local relocations: {d}", .{self.local_relocations.relocations.len});
         for (self.local_relocations.relocations) |rel| {
