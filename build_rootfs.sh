@@ -5,8 +5,8 @@ GETOPT_CMD="/opt/homebrew/Cellar/gnu-getopt/2.41/bin/getopt"
 else
 GETOPT_CMD="/usr/bin/getopt"
 fi
-OPTIONS=co:
-LONGOPTIONS=clear,output:
+OPTIONS=co:d
+LONGOPTIONS=clear,output:,debug-regalloc
 
 PARSED=$($GETOPT_CMD --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
 if [[ $? -ne 0 ]]; then
@@ -24,6 +24,7 @@ fi
 # Default value
 CLEAR=false
 BUILD_IMAGE=false
+DEBUG_REGALLOC=false
 
 # Process the options
 while true; do
@@ -36,6 +37,10 @@ while true; do
             BUILD_IMAGE=true
             OUTPUT_FILE=$2
             shift 2
+            ;;
+        -d|--debug-regalloc)
+            DEBUG_REGALLOC=true
+            shift
             ;;
         --)
             shift
@@ -112,7 +117,11 @@ build_cross_compiler()
   YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
   YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
 
-  ./configure --extra-cflags="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror" \
+  CROSS_EXTRA_CFLAGS="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror"
+  if $DEBUG_REGALLOC; then
+    CROSS_EXTRA_CFLAGS="$CROSS_EXTRA_CFLAGS -DTCC_REGALLOC_DEBUG"
+  fi
+  ./configure --extra-cflags="$CROSS_EXTRA_CFLAGS" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes \
     --prefix="$SCRIPT_DIR/libs/tinycc" \
     --sysroot="$YASOS_SYSROOT" \
