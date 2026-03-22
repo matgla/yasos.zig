@@ -1,9 +1,12 @@
-CC ?= tcc
+# Command-line CC still overrides this, but plain `make` should use TinyCC.
+CC = tcc
 CFLAGS = -std=c11 -Wall -gdwarf -fpic -pedantic -nostdlib -nostdinc -I. -I../../rootfs/usr/include -L../../rootfs/lib -Iinclude
 LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nostdlib -Wl,-oformat=yaff
 # -nostdlib skips standard libs (libc, etc.) but tcc still auto-links
 # compiler runtime (libtcc1, libsoftfp) which provide __aeabi_* helpers.
 LDFLAGS = -shared -fPIC -gdwarf ${LDFLAGS_STATIC}
+LIBTCC1_PATH = $(firstword $(wildcard ../tinycc/armv8m-libtcc1.a ../tinycc/lib/tcc/armv8m-libtcc1.a))
+RUNTIME_LIBS = ../tinycc/lib/fp/libsoftfp.a $(LIBTCC1_PATH)
 
 SRCS = $(wildcard *.c)
 
@@ -26,7 +29,7 @@ build/%.o: %.c prepare
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(TARGET_SHARED): $(OBJS)
-	$(CC) $(LDFLAGS) $^ -o $@
+	$(CC) $(LDFLAGS) $^ $(RUNTIME_LIBS) -o $@
 
 $(TARGET_STATIC): $(OBJS)
 	ar rcs $@ $^

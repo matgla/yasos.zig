@@ -6,7 +6,7 @@ else
 GETOPT_CMD="/usr/bin/getopt"
 fi
 OPTIONS=co:d
-LONGOPTIONS=clear,output:,debug-regalloc
+LONGOPTIONS=clear,output:,debug-regalloc,debug
 
 PARSED=$($GETOPT_CMD --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
 if [[ $? -ne 0 ]]; then
@@ -25,6 +25,7 @@ fi
 CLEAR=false
 BUILD_IMAGE=false
 DEBUG_REGALLOC=false
+DEBUG_TCC=false
 
 # Process the options
 while true; do
@@ -42,6 +43,10 @@ while true; do
             DEBUG_REGALLOC=true
             shift
             ;;
+        --debug)
+          DEBUG_TCC=true
+          shift
+          ;;
         --)
             shift
             break
@@ -78,6 +83,7 @@ if $CLEAR; then
   rm -rf apps/yasvi/build
   rm -rf apps/mkfs/build
   rm -rf apps/longjump_tester/build
+  rm -rf apps/test_ll/build
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
@@ -97,6 +103,8 @@ pwd
 cd ..
 mkdir -p rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
+cp $SCRIPT_DIR/test_ll.c rootfs/usr
+cp $SCRIPT_DIR/test_struct.c rootfs/usr
 cp $SCRIPT_DIR/hello_script.sh rootfs/usr
 
 mkdir -p rootfs/dev
@@ -117,12 +125,20 @@ build_cross_compiler()
   YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
   YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
 
-  CROSS_EXTRA_CFLAGS="-DTCC_DEBUG=0 -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror"
+  CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
+  CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror"
+  CROSS_CONFIG_DEBUG=""
+  if $DEBUG_TCC; then
+    CROSS_CONFIG_DEBUG="--debug --enable-O0"
+    CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
+    CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror"
+  fi
   if $DEBUG_REGALLOC; then
     CROSS_EXTRA_CFLAGS="$CROSS_EXTRA_CFLAGS -DTCC_REGALLOC_DEBUG"
   fi
   ./configure --extra-cflags="$CROSS_EXTRA_CFLAGS" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes \
+    $CROSS_CONFIG_DEBUG \
     --prefix="$SCRIPT_DIR/libs/tinycc" \
     --sysroot="$YASOS_SYSROOT" \
     --libpaths="$YASOS_LIBPATHS" \
@@ -160,11 +176,21 @@ build_c_compiler()
   YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
   YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
 
+  NATIVE_TCC_DEBUG_CONFIG=""
+  NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
+  NATIVE_TCC_DEBUG_OPT="-O1"
+  if $DEBUG_TCC; then
+    NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O0"
+    NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
+    NATIVE_TCC_DEBUG_OPT="-O0"
+  fi
+
   # First stage: build with host paths to get working binary
   ./configure --cc=tcc --cpu=armv8m \
-    --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
+    --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE -g $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
     --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
+    $NATIVE_TCC_DEBUG_CONFIG \
     --prefix="$SCRIPT_DIR/libs/tinycc" \
     --sysroot="$YASOS_SYSROOT" \
     --libpaths="$YASOS_LIBPATHS" \
@@ -174,9 +200,9 @@ build_c_compiler()
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  # Link against YasOS libraries, not host libraries
-  # libtcc1.a is added automatically by tcc, but we need libc/libm for tcc's own code
-  YASOS_LIBS="-lpthread -ldl -lc -lm"
+  # Link against YasOS libraries, not host libraries.
+  # The native armv8m bootstrap also needs the target runtime helpers archive explicitly.
+  YASOS_LIBS="$SCRIPT_DIR/libs/tinycc/lib/tcc/armv8m-libtcc1.a -lpthread -ldl -lc -lm"
   VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
 
   if [ $? -ne 0 ]; then
@@ -201,9 +227,10 @@ build_c_compiler()
   NATIVE_CRTPREFIX="/usr/lib"
   NATIVE_SYSINCLUDES="{B}/include:/usr/include"
   ./configure --cc=tcc --cpu=armv8m \
-    --extra-cflags="-Wall -Werror -DTCC_DEBUG=0 -g -O1 -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
+    --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE -g $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
     --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
+    $NATIVE_TCC_DEBUG_CONFIG \
     --prefix=/usr \
     --libpaths="$NATIVE_LIBPATHS" \
     --crtprefix="$NATIVE_CRTPREFIX" \
@@ -345,6 +372,12 @@ build_makefile termcap
 echo "Building target C compiler..."
 build_c_compiler
 
+if $DEBUG_TCC; then
+  echo "TCC debug mode enabled. Native and cross compilers include CONFIG_TCC_DEBUG."
+  echo "Use: tcc -dump-ir -c your_file.c"
+  echo "Use: armv8m-tcc -dump-ir -c your_file.c"
+fi
+
 cd ..
 
 cd apps
@@ -358,6 +391,7 @@ build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs
 build_makefile longjump_tester
+build_makefile test_ll
 build_zork_makefile zork
 build_makefile rzsz
 build_makefile sha

@@ -446,7 +446,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
-
                 self._process_memory_allocator.release_pages(addr, number_of_pages);
             }
         }
