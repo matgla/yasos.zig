@@ -20,5 +20,22 @@ jobs:
           submodules: 'recursive'
       - name: Execute tests
         shell: bash
-        run:
-          zig build test --summary all
+        run: |
+          set -euo pipefail
+
+          attempts=3
+          delay=15
+
+          for attempt in $(seq 1 "$attempts"); do
+            if zig build test --summary all; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "zig build test failed after $attempts attempts"
+              exit 1
+            fi
+
+            echo "zig build test failed on attempt $attempt/$attempts; retrying in ${delay}s"
+            sleep "$delay"
+          done

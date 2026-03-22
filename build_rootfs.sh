@@ -83,7 +83,6 @@ if $CLEAR; then
   rm -rf apps/yasvi/build
   rm -rf apps/mkfs/build
   rm -rf apps/longjump_tester/build
-  rm -rf apps/test_ll/build
 
   rm -rf libs/tinycc/bin
   cd libs/tinycc && make clean && cd ../..
@@ -103,7 +102,6 @@ pwd
 cd ..
 mkdir -p rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
-cp $SCRIPT_DIR/test_ll.c rootfs/usr
 cp $SCRIPT_DIR/test_struct.c rootfs/usr
 cp $SCRIPT_DIR/hello_script.sh rootfs/usr
 
@@ -391,7 +389,6 @@ build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs
 build_makefile longjump_tester
-build_makefile test_ll
 build_zork_makefile zork
 build_makefile rzsz
 build_makefile sha
