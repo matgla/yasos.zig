@@ -246,6 +246,10 @@ pub const ArmProcess = struct {
         return @ptrCast(self.stack.ptr);
     }
 
+    pub fn get_stack_top(self: *const Self) *const u8 {
+        return @ptrFromInt(@intFromPtr(self.stack.ptr) + self.stack.len);
+    }
+
     pub fn set_stack_pointer(self: *Self, ptr: *u8, blocked_by_process: ?*Self) void {
         _ = blocked_by_process;
         self.stack_position = ptr;

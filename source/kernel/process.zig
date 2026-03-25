@@ -300,6 +300,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return self.impl.get_stack_bottom();
         }
 
+        pub fn get_stack_top(self: Self) *const u8 {
+            return self.impl.get_stack_top();
+        }
+
         pub fn set_stack_pointer(self: *Self, ptr: *u8) void {
             var blocked_by_process: ?*ImplType = null;
             if (self._stack_shared_with_parent) {
@@ -448,6 +452,25 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 }
                 self._process_memory_allocator.release_pages(addr, number_of_pages);
             }
+        }
+
+        /// Try to extend an existing mmap allocation in-place.
+        /// Returns the same address on success (with extended size), or error.
+        pub fn mremap(self: *Self, addr: *anyopaque, old_length: i32, new_length: i32) !*anyopaque {
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
+            var old_pages = @divTrunc(old_length, ProcessMemoryPoolType.page_size);
+            if (@rem(old_length, ProcessMemoryPoolType.page_size) != 0) {
+                old_pages += 1;
+            }
+            var new_pages = @divTrunc(new_length, ProcessMemoryPoolType.page_size);
+            if (@rem(new_length, ProcessMemoryPoolType.page_size) != 0) {
+                new_pages += 1;
+            }
+            if (self._process_memory_allocator.try_extend_pages(addr, old_pages, new_pages)) |extended| {
+                return extended.ptr;
+            }
+            return kernel.errno.ErrnoSet.OutOfMemory;
         }
 
         pub fn get_free_fd(self: *Self) u16 {

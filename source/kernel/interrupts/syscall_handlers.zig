@@ -184,6 +184,9 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
     var prefix: []const u8 = "";
     if (maybe_path) |cpath| {
         const path = std.mem.span(@as([*:0]const u8, @ptrCast(cpath)));
+        if (path.len > 0 and path[0] == '/') {
+            return try allocator.dupe(u8, path);
+        }
         if (fd >= 0) {
             const current_process = process_manager.instance.get_current_process();
             prefix = current_process.get_current_directory();
@@ -200,7 +203,7 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
             const real = try std.fs.path.resolve(allocator, &.{full_path});
             return real;
         } else {
-            if (path.len > 0 and path[0] != '/') {
+            if (path.len > 0) {
                 const current_process = process_manager.instance.get_current_process();
                 const pwd = current_process.get_current_directory();
                 const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ pwd, prefix, path });
@@ -426,7 +429,10 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    return process_manager.instance.prepare_exec(std.mem.span(context.filename.?), context.argv.?, context.envp.?);
+    const path = try determine_path_for_file(kernel_allocator, context.filename, -1);
+    // Path is freed inside prepare_exec after load_executable, because
+    // prepare_exec may not return normally (vfork context switch bypasses defers).
+    return process_manager.instance.prepare_exec(path, context.argv.?, context.envp.?, kernel_allocator);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
@@ -451,6 +457,18 @@ pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process.munmap(context.addr, context.length);
+    return 0;
+}
+
+pub fn sys_mremap(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+    const context: *const volatile c.mremap_context = @ptrCast(@alignCast(arg));
+    const process = process_manager.instance.get_current_process();
+    context.result.* = process.mremap(context.addr.?, context.old_length, context.new_length) catch {
+        context.result.* = c.MAP_FAILED;
+        return -1;
+    };
     return 0;
 }
 
@@ -621,4 +639,38 @@ pub fn sys_access(arg: *const volatile anyopaque) !i32 {
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.access(path, context.mode, context.flags);
     return 0;
+}
+
+fn test_process_entry() void {}
+
+test "DeterminePathForFile.ShouldResolveRelativePathAgainstCurrentWorkingDirectory" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+
+    init(std.testing.allocator);
+    try process_manager.instance.create_root_process(4096, &test_process_entry, null, "/mnt/bin");
+
+    const path = try std.testing.allocator.dupeZ(u8, "./a.out");
+    defer std.testing.allocator.free(path);
+
+    const resolved_path = try determine_path_for_file(std.testing.allocator, path.ptr, -1);
+    defer std.testing.allocator.free(resolved_path);
+
+    try std.testing.expectEqualStrings("/mnt/bin/a.out", resolved_path);
+}
+
+test "DeterminePathForFile.ShouldKeepAbsolutePathUnchanged" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+
+    init(std.testing.allocator);
+    try process_manager.instance.create_root_process(4096, &test_process_entry, null, "/mnt/bin");
+
+    const path = try std.testing.allocator.dupeZ(u8, "/usr/bin/a.out");
+    defer std.testing.allocator.free(path);
+
+    const resolved_path = try determine_path_for_file(std.testing.allocator, path.ptr, -1);
+    defer std.testing.allocator.free(resolved_path);
+
+    try std.testing.expectEqualStrings("/usr/bin/a.out", resolved_path);
 }

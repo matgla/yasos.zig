@@ -179,6 +179,8 @@ pub const ProcessMemoryPool = struct {
                 }
             }
             _ = self.memory_map.remove(pid);
+        } else {
+            log.warn("release_pages_for: pid={d} not found in memory_map", .{pid});
         }
     }
 
@@ -211,6 +213,54 @@ pub const ProcessMemoryPool = struct {
 
     pub fn get_used_size(self: ProcessMemoryPool) usize {
         return self.page_bitmap.count() * page_size;
+    }
+
+    /// Try to extend an existing allocation in-place by claiming free pages
+    /// immediately after it. Returns the new total slice on success, null on failure.
+    pub fn try_extend_pages(self: *ProcessMemoryPool, address: *anyopaque, old_pages: i32, new_pages: i32, pid: c.pid_t) ?[]u8 {
+        if (new_pages <= old_pages) return null;
+        const addr_int = @intFromPtr(address);
+        if (addr_int < self.start_address or addr_int >= self.start_address + self.memory_size) {
+            return null;
+        }
+
+        const start_index = (addr_int - self.start_address) / page_size;
+        const old_end = start_index + @as(usize, @intCast(old_pages));
+        const new_end = start_index + @as(usize, @intCast(new_pages));
+
+        // Check that all extension pages are within bounds and free
+        if (new_end > self.page_count) return null;
+        for (old_end..new_end) |i| {
+            if (self.page_bitmap.isSet(i)) return null;
+        }
+
+        // Mark extension pages as used
+        for (old_end..new_end) |i| {
+            self.page_bitmap.set(i);
+        }
+
+        // Update the entity in the memory map to reflect new size
+        const maybe_mapping = self.memory_map.getEntry(pid);
+        if (maybe_mapping) |*mapping| {
+            var next = mapping.value_ptr.first;
+            while (next) |entity_node| {
+                const entity: *ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
+                if (@as(*anyopaque, entity.address.ptr) == address) {
+                    entity.address = slicify(
+                        @as([*]u8, @ptrFromInt(addr_int)),
+                        @as(usize, @intCast(new_pages)) * page_size,
+                    );
+                    return entity.address;
+                }
+                next = entity_node.next;
+            }
+        }
+
+        // Entity not found — shouldn't happen, undo bitmap changes
+        for (old_end..new_end) |i| {
+            self.page_bitmap.unset(i);
+        }
+        return null;
     }
 };
 

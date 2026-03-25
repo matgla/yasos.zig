@@ -134,6 +134,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_nanosleep => return handlers.sys_nanosleep,
             c.sys_mmap => return handlers.sys_mmap,
             c.sys_munmap => return handlers.sys_munmap,
+            c.sys_mremap => return handlers.sys_mremap,
             c.sys_getcwd => return handlers.sys_getcwd,
             c.sys_chdir => return handlers.sys_chdir,
             c.sys_time => return handlers.sys_time,

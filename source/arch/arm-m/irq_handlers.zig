@@ -24,18 +24,24 @@
 const std = @import("std");
 const hal = @import("hal");
 const arch = @import("assembly.zig");
-
-const c = @cImport({
-    @cInclude("libs/libc/sys/syscall.h");
-});
+const arch_process = @import("process.zig");
+const c = @import("libc_imports").c;
 
 const log = std.log.scoped(.hardfault);
 const CpuRegisters = @TypeOf(hal.cpu).Registers;
+const HardwareStoredRegisters = arch_process.HardwareStoredRegisters;
+
+extern fn get_stack_top() *const u8;
+extern fn _exit(code: c_int) void;
+
+const usage_fault_stkof_mask: u32 = 1 << 20;
+const stack_overflow_exit_code: c_int = -1;
 
 export fn irq_hard_fault() void {
     const exc_return = read_exception_return();
     const active_stack_address = read_fault_stack_pointer();
-    const frame = FaultFrame.from_pointer(@ptrFromInt(active_stack_address));
+    const frame_ptr: *volatile FaultFrame = @ptrFromInt(active_stack_address);
+    const frame = frame_ptr.*;
 
     const scb = CpuRegisters.scb;
     const cfsr_raw: u32 = @as(u32, @bitCast(scb.cfsr.read()));
@@ -56,6 +62,14 @@ export fn irq_hard_fault() void {
     );
     log.err("  PSP=0x{X:0>8} MSP=0x{X:0>8} PSPLIM=0x{X:0>8} MSPLIM=0x{X:0>8}", .{ psp, msp, psplim, msplim });
     log.err("  CFSR=0x{X:0>8} HFSR=0x{X:0>8} MMFAR=0x{X:0>8} BFAR=0x{X:0>8}", .{ cfsr_raw, hfsr_raw, mmfar, bfar });
+
+    if (is_psplim_overflow(exc_return, cfsr_raw)) {
+        log.err("Process stack overflow detected, terminating current process", .{});
+        scb.cfsr.write_raw(cfsr_raw);
+        scb.hfsr.write_raw(hfsr_raw);
+        write_psp(prepare_stack_overflow_exit_frame());
+        return;
+    }
 
     @panic("Hard fault occured");
     // while (true) {
@@ -161,4 +175,36 @@ inline fn read_msplim() usize {
         \\ mrs %[out], msplim
         : [out] "=r" (-> usize),
     );
+}
+
+inline fn write_psp(value: usize) void {
+    asm volatile (
+        \\ msr psp, %[value]
+        \\ isb
+        \\ dsb
+        :
+        : [value] "r" (value),
+    );
+}
+
+fn is_psplim_overflow(exc_return: usize, cfsr_raw: u32) bool {
+    return uses_process_stack(exc_return) and (cfsr_raw & usage_fault_stkof_mask) != 0;
+}
+
+fn uses_process_stack(exc_return: usize) bool {
+    return (exc_return & 0x4) != 0;
+}
+
+fn prepare_stack_overflow_exit_frame() usize {
+    const stack_top = @intFromPtr(get_stack_top());
+    const stack_frame_address = (stack_top - @sizeOf(HardwareStoredRegisters)) & ~@as(usize, 0x7);
+    const recovery_frame: *volatile HardwareStoredRegisters = @ptrFromInt(stack_frame_address);
+
+    recovery_frame.* = std.mem.zeroInit(HardwareStoredRegisters, .{});
+    recovery_frame.r0 = @bitCast(@as(i32, stack_overflow_exit_code));
+    recovery_frame.lr = 0;
+    recovery_frame.pc = @intCast(@intFromPtr(&_exit));
+    recovery_frame.psr = 0x21000000;
+
+    return stack_frame_address;
 }

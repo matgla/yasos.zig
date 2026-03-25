@@ -84,6 +84,10 @@ menu "Logging & Instrumentation"
   config CONFIG_INSTRUMENTATION_ENABLE_MEMORY_LEAK_DETECTION
     prompt "Enable leak detection"
     def_bool "false"
+  config CONFIG_INSTRUMENTATION_LEAK_REPORT_DEAD_ONLY
+    prompt "Report leaks only from dead processes"
+    def_bool "true"
+    depends on CONFIG_INSTRUMENTATION_ENABLE_MEMORY_LEAK_DETECTION
   config CONFIG_INSTRUMENTATION_VERBOSE_ALLOCATORS
     prompt "Enable verbose kernel allocator"
     def_bool "false"

@@ -24,9 +24,20 @@ pub fn dump_stack_trace(log: anytype, address: usize) void {
     }
 }
 
+pub const max_stack_depth: usize = 16;
+
+pub fn is_valid_stack_ptr(addr: usize) bool {
+    // SRAM: 0x20000000 - 0x2005FFFF, PSRAM: 0x11000000 - 0x117FFFFF
+    return (addr >= 0x11000000 and addr < 0x11800000) or
+        (addr >= 0x20000000 and addr < 0x20060000);
+}
+
 pub fn get_stack_trace_depth(address: usize) usize {
     var index: usize = 0;
     var stack = std.debug.StackIterator.init(address, @frameAddress());
-    while (stack.next()) |_| : (index += 1) {}
+    while (index < max_stack_depth) : (index += 1) {
+        if (!is_valid_stack_ptr(stack.fp)) break;
+        if (stack.next() == null) break;
+    }
     return index;
 }

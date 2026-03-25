@@ -385,6 +385,7 @@ pub fn build(b: *std.Build) !void {
             });
             arch_module.addIncludePath(b.path("."));
             arch_module.addIncludePath(b.path("libs/libc"));
+            arch_module.addImport("libc_imports", libc_imports_module);
 
             const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
             const board_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("board").?;
@@ -402,6 +403,7 @@ pub fn build(b: *std.Build) !void {
 
                 arch_module.addImport("config", config_module);
                 arch_arm_m.addImport("config", config_module);
+                arch_arm_m.addImport("libc_imports", libc_imports_module);
                 kernel_module.addImport("config", config_module);
                 kernel_module.addImport("yasld", yasld.module("yasld"));
                 kernel_module.addImport("arch", arch_module);

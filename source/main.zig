@@ -241,11 +241,12 @@ fn attach_default_filedescriptors_to_root_process(process: *kernel.process.Proce
         _ = try process.attach_file_with_fd(2, "/dev/stderr", stderr);
     }
 }
-const KernelAllocator = kernel.memory.heap.malloc.MallocAllocator(.{
-    .leak_detection = config.instrumentation.enable_memory_leak_detection,
-    .verbose = config.instrumentation.verbose_allocators,
-    .dump_stats = config.instrumentation.print_memory_usage,
-});
+const KernelAllocator = kernel.memory.heap.malloc.KernelAllocatorType;
+
+fn get_current_pid() i32 {
+    const process = kernel.process.process_manager.instance.get_current_process();
+    return @intCast(process.pid);
+}
 
 export fn kernel_process() void {
     const process = kernel.process.process_manager.instance.get_current_process();
@@ -282,6 +283,8 @@ pub export fn main() void {
 
         kernel.process.process_manager.initialize_process_manager(allocator);
         defer kernel.process.process_manager.deinitialize_process_manager();
+
+        kernel.memory.heap.malloc.set_get_current_pid(&get_current_pid);
 
         kernel.irq.system_call.init(kernel_allocator.allocator());
         kernel.dynamic_loader.init(allocator);

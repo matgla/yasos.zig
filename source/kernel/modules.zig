@@ -118,6 +118,7 @@ pub fn deinit() void {
 }
 
 pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Executable {
+    log.debug("load_executable: pid={d} path={s}", .{ pid, path });
     var node = try fs.get_ivfs().interface.get(path);
     defer node.delete();
     var maybe_file = node.as_file();
@@ -216,8 +217,12 @@ pub fn release_executable(pid: c.pid_t) void {
                     next = list.pop();
                 }
             }
+        } else {
+            log.warn("release_executable: pid={d} has entry but no executable", .{pid});
         }
         _ = libraries_list.remove(pid);
+    } else {
+        log.warn("release_executable: pid={d} not found in modules_list", .{pid});
     }
 }
 
@@ -242,6 +247,84 @@ pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
         return exec;
     }
     return null;
+}
+
+const SectionBackup = struct {
+    original: []u8,
+    copy: []u8,
+};
+
+pub const VForkSnapshot = struct {
+    backups: []SectionBackup,
+    allocator: std.mem.Allocator,
+
+    pub fn restore_and_free(self: *VForkSnapshot) void {
+        for (self.backups) |backup| {
+            @memcpy(backup.original, backup.copy);
+            self.allocator.free(backup.copy);
+        }
+        self.allocator.free(self.backups);
+        self.allocator.destroy(self);
+    }
+};
+
+var active_vfork_snapshot: ?*VForkSnapshot = null;
+
+pub fn save_parent_writable_sections(pid: c.pid_t) void {
+    const exec = get_executable_for_pid(pid) orelse return;
+
+    // Count modules with unique_data (executable + its library children)
+    var count: usize = 0;
+    if (exec.module.unique_data != null) count += 1;
+    var it = exec.module.children.first;
+    while (it) |node| : (it = node.next) {
+        const child: *yasld.Module = @fieldParentPtr("child_list_node", node);
+        if (child.unique_data != null) count += 1;
+    }
+    if (count == 0) return;
+
+    const snapshot = kernel_allocator.create(VForkSnapshot) catch return;
+    const backups = kernel_allocator.alloc(SectionBackup, count) catch {
+        kernel_allocator.destroy(snapshot);
+        return;
+    };
+
+    var idx: usize = 0;
+
+    if (exec.module.unique_data) |ud| {
+        const copy = kernel_allocator.dupe(u8, ud._underlaying_memory) catch {
+            kernel_allocator.free(backups);
+            kernel_allocator.destroy(snapshot);
+            return;
+        };
+        backups[idx] = .{ .original = ud._underlaying_memory, .copy = copy };
+        idx += 1;
+    }
+
+    it = exec.module.children.first;
+    while (it) |node| : (it = node.next) {
+        const child: *yasld.Module = @fieldParentPtr("child_list_node", node);
+        if (child.unique_data) |ud| {
+            const copy = kernel_allocator.dupe(u8, ud._underlaying_memory) catch {
+                for (backups[0..idx]) |b| kernel_allocator.free(b.copy);
+                kernel_allocator.free(backups);
+                kernel_allocator.destroy(snapshot);
+                return;
+            };
+            backups[idx] = .{ .original = ud._underlaying_memory, .copy = copy };
+            idx += 1;
+        }
+    }
+
+    snapshot.* = .{ .backups = backups[0..idx], .allocator = kernel_allocator };
+    active_vfork_snapshot = snapshot;
+}
+
+pub fn restore_parent_writable_sections() void {
+    if (active_vfork_snapshot) |snapshot| {
+        snapshot.restore_and_free();
+        active_vfork_snapshot = null;
+    }
 }
 
 test "Modules.ShouldInitializeAndDeinitialize" {

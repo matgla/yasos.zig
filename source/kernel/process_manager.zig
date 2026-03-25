@@ -94,6 +94,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             var next = self.terminate_list.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                log.info("schedule_next: reaping pid={d}", .{p.pid});
                 self._scheduler.remove_process(&p.node);
                 self.terminate_list.remove(&p.node);
                 self.release_pid(p.pid);
@@ -175,6 +176,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
+
+            // If a vfork child exits without calling exec, restore parent's
+            // writable sections that may have been corrupted
+            dynamic_loader.restore_parent_writable_sections();
+
             var next = self.processes.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -253,6 +259,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
             context.pid.* = new_process.pid;
 
+            // Save parent's writable sections before child runs on shared memory
+            dynamic_loader.save_parent_writable_sections(current_process.pid);
+
             self.processes.append(&new_process.node);
             self._scheduler.set_next(&new_process.node);
             self.core[hal.cpu.coreid()] = new_process;
@@ -283,11 +292,23 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         // TODO: exec on currently running process is not supported yet
-        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
+        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator) !i32 {
             kernel.process.block_context_switch();
             const current_process = self.get_current_process();
+
+            // Restore parent's writable sections that may have been corrupted
+            // by the vfork child running on shared memory before exec
+            dynamic_loader.restore_parent_writable_sections();
+
             // TODO: move loader to struct, pass allocator to loading functions
             const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
+
+            // Free the path now — it's no longer needed, and this function may
+            // not return normally (process_get_back_to_parent_vfork bypasses
+            // all defers in the caller).
+            if (path_allocator) |alloc| {
+                alloc.free(path);
+            }
             var argc: usize = 0;
             while (argv[argc] != null) : (argc += 1) {}
 
@@ -411,6 +432,10 @@ pub export fn process_set_next_task() *const u8 {
 
 export fn get_stack_bottom() *const u8 {
     return instance.core[hal.cpu.coreid()].get_stack_bottom();
+}
+
+export fn get_stack_top() *const u8 {
+    return instance.core[hal.cpu.coreid()].get_stack_top();
 }
 
 export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
@@ -654,7 +679,7 @@ test "ProcessManager.ShouldForkProcess" {
     _ = sut.schedule_next();
     _ = process_set_next_task();
 
-    _ = try sut.prepare_exec("/test", argv, envp);
+    _ = try sut.prepare_exec("/test", argv, envp, null);
 
     const p = sut.get_process_for_pid(4).?;
     p.unblock_parent();

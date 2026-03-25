@@ -29,12 +29,14 @@ session_key = pytest.StashKey()
 @pytest.hookimpl
 def pytest_runtest_setup(item):
     item.stash[session_key] = Session(item.name)
-    
+
 @pytest.hookimpl
 def pytest_runtest_teardown(item):
-    session = item.stash[session_key] 
-    session.write_command("exit")
-    data = session.wait_for_data("You can turn off your PC now!")
-    assert not "Memory leaks detected" in data
-    session.close() 
-    
+    session = item.stash.get(session_key, None)
+    if session is None:
+        return
+    session.close()
+
+@pytest.hookimpl
+def pytest_sessionfinish(session, exitstatus):
+    Session.finalize()

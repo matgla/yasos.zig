@@ -17,6 +17,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CACHE_PATH = REPO_ROOT / ".cache" / "remote_smoke_runner.json"
+REMOTE_SMOKE_LOGS_DIR = REPO_ROOT / ".cache" / "remote_smoke_logs"
 KERNEL_ARTIFACT = REPO_ROOT / "zig-out" / "bin" / "yasos_kernel"
 ROOTFS_ARTIFACT = REPO_ROOT / "rootfs.img"
 
@@ -62,6 +63,7 @@ DEFAULT_CONFIG = {
     "remote_work_dir": "~/.cache/yasos-remote-smoke",
     "serial_device": "",
     "optimize": "ReleaseFast",
+    "test_retries": 1,
     "pytest_args": "tests/smoke",
 }
 
@@ -90,6 +92,10 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
         merged["openocd_adapter_speed"] = int(merged.get("openocd_adapter_speed", 20000))
     except (TypeError, ValueError):
         merged["openocd_adapter_speed"] = 20000
+    try:
+        merged["test_retries"] = int(merged.get("test_retries", 1))
+    except (TypeError, ValueError):
+        merged["test_retries"] = 1
     return merged
 
 
@@ -142,6 +148,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise RunnerError("SSH port must be a positive integer")
     if validated["openocd_adapter_speed"] <= 0:
         raise RunnerError("OpenOCD adapter speed must be a positive integer in kHz")
+    if validated["test_retries"] < 0:
+        raise RunnerError("Test retries must be zero or greater")
 
     identity = str(validated["ssh_identity_file"]).strip()
     if identity:
@@ -241,6 +249,7 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
             ("Remote work dir", "remote_work_dir"),
             ("Serial device", "serial_device"),
             ("Optimize", "optimize"),
+            ("Test retries", "test_retries"),
             ("Pytest args", "pytest_args"),
         ]
         selected = 0
@@ -325,8 +334,14 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), 1)
                     continue
                 edited = edit_value(stdscr, label, str(config[selected_key]))
-                if selected_key in ("ssh_port", "openocd_adapter_speed"):
-                    config[selected_key] = edited.strip() or ("22" if selected_key == "ssh_port" else "20000")
+                if selected_key in ("ssh_port", "openocd_adapter_speed", "test_retries"):
+                    if selected_key == "ssh_port":
+                        default_value = "22"
+                    elif selected_key == "openocd_adapter_speed":
+                        default_value = "20000"
+                    else:
+                        default_value = "1"
+                    config[selected_key] = edited.strip() or default_value
                 else:
                     config[selected_key] = edited
 
@@ -447,6 +462,9 @@ def load_yasld_elf_map() -> dict[str, str]:
 
 def debug_sync_paths() -> list[str]:
     paths = ["scripts/yasld_gdb.py", KERNEL_ARTIFACT.relative_to(REPO_ROOT).as_posix()]
+    # Include any GDB script files (e.g. gdb_debug_plan.gdb)
+    for gdb_file in (REPO_ROOT / "libs" / "tinycc").glob("*.gdb"):
+        paths.append(gdb_file.relative_to(REPO_ROOT).as_posix())
     for rel_path in load_yasld_elf_map().values():
         candidate = REPO_ROOT / rel_path
         if candidate.exists():
@@ -501,15 +519,28 @@ fi
 
 
 def smoke_sync_paths(config: dict[str, Any]) -> list[str]:
-    paths = ["tests/smoke"]
+    paths: set[str] = set()
+
+    def add_path(rel_path: str) -> None:
+        rel_path = rel_path.split("::", 1)[0]
+        candidate = REPO_ROOT / rel_path
+        if not candidate.exists():
+            return
+        if candidate.is_dir():
+            for file_path in candidate.rglob("*"):
+                if file_path.is_file():
+                    paths.add(file_path.relative_to(REPO_ROOT).as_posix())
+            return
+        paths.add(candidate.relative_to(REPO_ROOT).as_posix())
+
+    add_path("tests/smoke")
+    add_path("libs/tinycc/tests/tests2")
     pytest_args = shlex.split(str(config["pytest_args"]).strip() or "tests/smoke")
     for arg in pytest_args:
         if arg.startswith("-"):
             continue
-        candidate = REPO_ROOT / arg
-        if candidate.exists():
-            paths.append(arg)
-    return sorted(set(paths))
+        add_path(arg)
+    return sorted(paths)
 
 
 def sync_smoke_support(config: dict[str, Any]) -> None:
@@ -550,6 +581,55 @@ def scp_base(config: dict[str, Any]) -> list[str]:
     if identity:
         command.extend(["-i", identity])
     return command
+
+
+def safe_path_component(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
+
+
+def remote_directory_exists(config: dict[str, Any], remote_path: str) -> bool:
+    remote_script = """set -euo pipefail
+remote_path=$1
+
+[[ -d "$remote_path" ]]
+"""
+    completed = subprocess.run(
+        ssh_base(config) + ["bash", "-s", "--", remote_path],
+        input=remote_script,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def fetch_remote_smoke_logs(config: dict[str, Any]) -> Path | None:
+    remote_repo = str(config["remote_repo_path"]).rstrip("/")
+    remote_logs_dir = f"{remote_repo}/logs"
+    local_logs_dir = REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
+
+    if local_logs_dir.exists():
+        shutil.rmtree(local_logs_dir)
+
+    if not remote_directory_exists(config, remote_logs_dir):
+        return None
+
+    require_local_rsync()
+    verify_remote_rsync(config)
+
+    local_logs_dir.mkdir(parents=True, exist_ok=True)
+
+    rsync_cmd = [
+        "rsync",
+        "-az",
+        "-e",
+        command_string(ssh_transport_base(config)),
+        f"{config['ssh_target']}:{remote_logs_dir.rstrip('/')}/",
+        str(local_logs_dir) + "/",
+    ]
+    run_command(rsync_cmd, cwd=REPO_ROOT)
+    return local_logs_dir
 
 
 def prepare_remote_work_dir(config: dict[str, Any]) -> str:
@@ -655,6 +735,7 @@ def upload_artifacts(config: dict[str, Any]) -> tuple[str, str, str]:
 def run_remote_smoke(config: dict[str, Any], remote_work_dir: str, remote_kernel: str, remote_rootfs: str, flash_only: bool) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
+    test_retries = int(config.get("test_retries", 0))
     pytest_args = shlex.split(str(config["pytest_args"]).strip() or "tests/smoke")
     remote_script = """set -euo pipefail
 remote_repo=$1
@@ -667,7 +748,8 @@ serial_device=$7
 remote_kernel=$8
 remote_rootfs=$9
 flash_only=${10}
-shift 10
+test_retries=${11}
+shift 11
 
 mkdir -p "$remote_work_dir"
 
@@ -678,18 +760,24 @@ if [[ "$flash_only" == "1" ]]; then
 fi
 
 cd "$remote_repo"
+rm -rf "$remote_repo/logs"
 
 if [[ ! -x "$remote_work_dir/venv/bin/python3" ]]; then
     python3 -m venv "$remote_work_dir/venv"
 fi
 
-"$remote_work_dir/venv/bin/pip" install -r tests/smoke/requirements.txt
+"$remote_work_dir/venv/bin/pip" install -r "$remote_repo/tests/smoke/requirements.txt"
 
 if [[ -n "$serial_device" ]]; then
   export SERIAL_DEVICE="$serial_device"
 fi
 
-"$remote_work_dir/venv/bin/pytest" -W error -s "$@"
+pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -s)
+if (( test_retries > 0 )); then
+    pytest_cmd+=(--reruns "$test_retries" --reruns-delay 1)
+fi
+
+"${pytest_cmd[@]}" "$@"
 """
     cmd = ssh_base(config) + [
         "bash",
@@ -705,9 +793,28 @@ fi
         remote_kernel,
         remote_rootfs,
         "1" if flash_only else "0",
+        str(test_retries),
         *pytest_args,
     ]
-    run_command(cmd, input_text=remote_script)
+    run_error: RunnerError | None = None
+    try:
+        run_command(cmd, input_text=remote_script)
+    except RunnerError as error:
+        run_error = error
+    finally:
+        if not flash_only:
+            try:
+                fetched_logs_dir = fetch_remote_smoke_logs(config)
+            except RunnerError as fetch_error:
+                if run_error is None:
+                    raise
+                print(f"warning: failed to fetch remote smoke logs: {fetch_error}", file=sys.stderr)
+            else:
+                if fetched_logs_dir is not None:
+                    print(f"Fetched remote smoke logs to {fetched_logs_dir}")
+
+    if run_error is not None:
+        raise run_error
 
 
 def run_remote_reset(config: dict[str, Any]) -> None:
@@ -803,19 +910,279 @@ fi
     run_remote_tty_script(config, remote_script)
 
 
+def run_remote_gdb_debug(
+    config: dict[str, Any],
+    remote_kernel: str,
+    gdb_bin: str,
+    target_command: str,
+    gdb_script: str | None = None,
+) -> None:
+    """Automated GDB debug workflow:
+
+    1. Reset target (via OpenOCD) with serial port open
+    2. Wait for shell prompt on serial
+    3. Send *target_command* over serial
+    4. Capture all serial output (including yasld section-load log)
+    5. Reset-halt target
+    6. Start OpenOCD + GDB
+    7. Source yasld_gdb.py, load symbols from the captured log
+    8. Optionally source/run a GDB script
+    9. Drop into interactive GDB (or return output if scripted)
+    """
+    board = BOARD_PROFILES[config["board"]]
+    adapter_speed = str(config["openocd_adapter_speed"])
+    serial_device = str(config.get("serial_device", "")).strip()
+
+    gdb_script_arg = ""
+    if gdb_script:
+        gdb_script_arg = shlex.quote(gdb_script)
+
+    # Build the serial capture Python script as a separate string to avoid
+    # nested triple-quote issues inside the bash f-string.
+    serial_capture_py = r'''
+import serial
+import sys
+import time
+import subprocess
+
+serial_device = sys.argv[1]
+target_command = sys.argv[2]
+log_path = sys.argv[3]
+
+PROMPT = "$ "
+TIMEOUT_BOOT = 15
+TIMEOUT_CMD = 30
+
+def drain(ser, timeout=0.5):
+    old_timeout = ser.timeout
+    ser.timeout = timeout
+    data = b""
+    while True:
+        chunk = ser.read(4096)
+        if not chunk:
+            break
+        data += chunk
+    ser.timeout = old_timeout
+    return data
+
+print(f"Opening {serial_device} at 921600 baud...", file=sys.stderr)
+ser = serial.Serial(serial_device, 921600, timeout=TIMEOUT_BOOT)
+ser.reset_input_buffer()
+
+print("Resetting target via OpenOCD...", file=sys.stderr)
+result = subprocess.run(
+    ["openocd",
+     "-f", "interface/cmsis-dap.cfg",
+     "-f", "target/rp2350.cfg",
+     "-c", "adapter speed 20000",
+     "-c", "init",
+     "-c", "reset run",
+     "-c", "exit"],
+    capture_output=True, text=True, timeout=10
+)
+if result.returncode != 0:
+    print(f"OpenOCD reset failed: {result.stderr}", file=sys.stderr)
+    sys.exit(1)
+print("Target reset. Waiting for boot prompt...", file=sys.stderr)
+
+boot_output = b""
+start = time.time()
+while time.time() - start < TIMEOUT_BOOT:
+    chunk = ser.read(1)
+    if chunk:
+        boot_output += chunk
+        if boot_output.endswith(PROMPT.encode()):
+            break
+else:
+    print(f"WARNING: Boot prompt not found within {TIMEOUT_BOOT}s", file=sys.stderr)
+    print(f"Captured so far: {boot_output[-200:]}", file=sys.stderr)
+
+print("Boot prompt received. Sending command...", file=sys.stderr)
+ser.write((target_command + "\n").encode())
+
+cmd_output = b""
+start = time.time()
+while time.time() - start < TIMEOUT_CMD:
+    chunk = ser.read(1)
+    if chunk:
+        cmd_output += chunk
+        if cmd_output.endswith(PROMPT.encode()):
+            break
+else:
+    print(f"WARNING: Prompt not found after command within {TIMEOUT_CMD}s", file=sys.stderr)
+
+remaining = drain(ser, timeout=0.5)
+cmd_output += remaining
+ser.close()
+
+all_output = boot_output + cmd_output
+with open(log_path, "wb") as f:
+    f.write(all_output)
+
+try:
+    text = all_output.decode("utf-8", "ignore")
+    for line in text.splitlines():
+        print(f"  [serial] {line}", file=sys.stderr)
+except Exception:
+    pass
+
+print(f"\nSerial log saved to {log_path} ({len(all_output)} bytes)", file=sys.stderr)
+'''
+
+    # Write the capture script to a temp file on the remote, then invoke it
+    # This avoids heredoc/f-string quoting issues entirely
+    import base64
+    serial_script_b64 = base64.b64encode(serial_capture_py.encode()).decode()
+
+    remote_script = f"""set -euo pipefail
+remote_repo={shlex.quote(str(config["remote_repo_path"]))}
+interface_cfg={shlex.quote(board.interface_cfg)}
+target_cfg={shlex.quote(board.target_cfg)}
+adapter_speed={shlex.quote(adapter_speed)}
+gdb_bin={shlex.quote(gdb_bin)}
+remote_kernel={shlex.quote(remote_kernel)}
+serial_device={shlex.quote(serial_device)}
+target_command={shlex.quote(target_command)}
+gdb_script={gdb_script_arg}
+
+cd "$remote_repo"
+
+UART_LOG=/tmp/yasos-gdb-debug-uart.log
+SERIAL_PY=/tmp/yasos-gdb-serial-capture.py
+
+cleanup() {{
+    if [[ -n "${{openocd_pid:-}}" ]]; then
+        kill "$openocd_pid" 2>/dev/null || true
+        wait "$openocd_pid" 2>/dev/null || true
+    fi
+}}
+
+trap cleanup EXIT INT TERM
+
+# -- Detect serial device if not specified --
+if [[ -z "$serial_device" ]]; then
+    serial_device=$(python3 -c "
+import serial.tools.list_ports
+for p in serial.tools.list_ports.comports(include_links=False):
+    print(p.device)
+    break
+" 2>/dev/null || true)
+fi
+
+if [[ -z "$serial_device" ]]; then
+    echo "ERROR: No serial device found. Set serial_device in config." >&2
+    exit 1
+fi
+
+echo "Using serial device: $serial_device"
+echo "Target command: $target_command"
+
+# -- Phase 1: Reset target, run command, capture serial output --
+echo "Phase 1: Resetting target and capturing serial output..."
+
+# Deploy the serial capture script
+echo "{serial_script_b64}" | base64 -d > "$SERIAL_PY"
+
+python3 "$SERIAL_PY" "$serial_device" "$target_command" "$UART_LOG"
+
+echo ""
+echo "Phase 2: Resetting target (halt) and starting GDB..."
+
+# -- Phase 2: Reset-halt via OpenOCD, then start GDB with symbol loading --
+openocd -f "$interface_cfg" -f "$target_cfg" \\
+    -c "adapter speed $adapter_speed" \\
+    -c "init" \\
+    -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
+openocd_pid=$!
+
+ready=0
+for _ in $(seq 1 50); do
+    if python3 - <<'PY'
+import socket
+sock = socket.socket()
+sock.settimeout(0.2)
+try:
+    sock.connect(("127.0.0.1", 3333))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+raise SystemExit(0)
+PY
+    then
+    ready=1
+    break
+    fi
+
+    if ! kill -0 "$openocd_pid" 2>/dev/null; then
+    echo "OpenOCD terminated unexpectedly. Log follows:" >&2
+    cat /tmp/yasos-openocd.log >&2 || true
+    exit 1
+    fi
+    sleep 0.2
+done
+
+if [[ "$ready" != "1" ]]; then
+    echo "Timed out waiting for OpenOCD GDB server on port 3333. Log follows:" >&2
+    cat /tmp/yasos-openocd.log >&2 || true
+    exit 1
+fi
+
+echo "OpenOCD ready. Starting GDB with symbol loading..."
+echo "UART log: $UART_LOG"
+
+# Build GDB command with yasld-load from captured log
+gdb_args=(
+    "$gdb_bin" "$remote_kernel"
+    -ex "source scripts/yasld_gdb.py"
+    -ex "target extended-remote :3333"
+    -ex "yasld-load $UART_LOG"
+)
+
+if [[ -n "$gdb_script" ]]; then
+    gdb_args+=(-x "$gdb_script")
+fi
+
+"${{gdb_args[@]}}"
+"""
+    run_remote_tty_script(config, remote_script)
+
+
 def list_boards() -> None:
     for profile in BOARD_PROFILES.values():
         print(f"{profile.key}: {profile.label}")
 
 
+def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    runtime_config = dict(config)
+
+    if args.test_retries is not None:
+        runtime_config["test_retries"] = args.test_retries
+
+    if args.pytest_args:
+        runtime_config["pytest_args"] = str(args.pytest_args)
+        return runtime_config
+
+    if args.tests:
+        runtime_config["pytest_args"] = " ".join(shlex.quote(test) for test in args.tests)
+
+    return runtime_config
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build YasOS locally and run smoke tests on a remote board host.")
-    parser.add_argument("--run-cached", action="store_true", help="Run immediately using cached settings without opening the TUI.")
-    parser.add_argument("--configure", action="store_true", help="Open the TUI even if a cache file already exists.")
+    parser.add_argument("--run-cached", action="store_true", help="Run immediately using cached settings without opening the TUI. This is now the default when a cache file exists.")
+    parser.add_argument("--reconfigure", "--configure", dest="reconfigure", action="store_true", help="Open the TUI and update cached settings before running.")
     parser.add_argument("--debug", action="store_true", help="Build the kernel with Zig Debug optimization and pass --debug to build_rootfs.sh.")
     parser.add_argument("--gdb", action="store_true", help="Build locally, sync debug artifacts to the remote repository, then start an interactive remote GDB attach session over SSH without flashing. Combine with --reset to reset-halt before attaching.")
     parser.add_argument("--flash-only", action="store_true", help="Upload and flash artifacts on the remote host, then stop without running pytest.")
     parser.add_argument("--reset", action="store_true", help="Reset the configured target through OpenOCD on the remote host before exiting, or reset-halt before attaching when combined with --gdb.")
+    parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
+    parser.add_argument("--pytest-args", help="Override cached pytest arguments for this run only. Example: --pytest-args 'tests/smoke -k shell_test'.")
+    parser.add_argument("--tests", nargs="+", help="Run an explicit list of pytest paths or nodeids for this run only.")
+    parser.add_argument("--gdb-debug", action="store_true", help="Automated GDB debug: reset target, run a command via serial, capture yasld log, reset-halt, start GDB with symbols loaded. Requires --cmd.")
+    parser.add_argument("--cmd", help="Target command to execute over serial before GDB attach (used with --gdb-debug). Example: --cmd 'tcc 15_recursion.c'")
+    parser.add_argument("--gdb-script", help="Path to a GDB script file to source after connecting and loading symbols (used with --gdb-debug).")
     parser.add_argument("--list-boards", action="store_true", help="Print supported board identifiers and exit.")
     return parser.parse_args()
 
@@ -828,25 +1195,57 @@ def main() -> int:
 
     try:
         cached = load_cache()
+        cache_exists = CACHE_PATH.exists()
         if args.flash_only and args.gdb:
             raise RunnerError("--flash-only and --gdb cannot be used together")
-        if args.run_cached:
-            config = validate_config(cached)
-            save_cache(config)
-        else:
-            config = run_tui(cached if args.configure or CACHE_PATH.exists() else dict(DEFAULT_CONFIG))
+        if args.gdb_debug and args.gdb:
+            raise RunnerError("--gdb-debug and --gdb cannot be used together")
+        if args.gdb_debug and not args.cmd:
+            raise RunnerError("--gdb-debug requires --cmd to specify the target command")
+
+        if args.reconfigure or not cache_exists:
+            initial_config = cached if cache_exists else dict(DEFAULT_CONFIG)
+            config = run_tui(initial_config)
             if config is None:
                 return 1
             config = validate_config(config)
             save_cache(config)
+        else:
+            config = validate_config(cached)
+            save_cache(config)
 
-        runtime_config = dict(config)
+        runtime_config = apply_runtime_pytest_overrides(config, args)
         runtime_config["remote_repo_path"] = prepare_remote_repo_path(config)
 
         if args.reset and not args.gdb:
             print("Running remote OpenOCD reset with cached configuration.")
             run_remote_reset(runtime_config)
             print("Remote reset completed successfully.")
+            return 0
+
+        if args.gdb_debug:
+            print("Detecting remote debug tools.")
+            gdb_bin = detect_remote_debug_tools(runtime_config)
+            print(f"Using remote GDB binary: {gdb_bin}")
+            print(f"Target command: {args.cmd}")
+            if args.gdb_script:
+                print(f"GDB script: {args.gdb_script}")
+            build_local_artifacts(runtime_config, debug=args.debug, build_rootfs=False)
+            print("Syncing debug artifacts and symbol files to the remote repository with rsync.")
+            synced_remote_kernel = sync_debug_artifacts(runtime_config)
+            remote_kernel, using_flashed_kernel = select_remote_gdb_kernel(runtime_config, synced_remote_kernel)
+            if using_flashed_kernel:
+                print(f"Using flashed remote kernel symbol file: {remote_kernel}")
+            else:
+                print(f"Using synced remote kernel symbol file: {remote_kernel}")
+            run_remote_gdb_debug(
+                runtime_config,
+                remote_kernel,
+                gdb_bin,
+                target_command=args.cmd,
+                gdb_script=args.gdb_script,
+            )
+            print("Remote GDB debug session finished.")
             return 0
 
         if args.gdb:

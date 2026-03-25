@@ -19,7 +19,7 @@ from .conftest import session_key
 import random
 
 import logging
-import subprocess
+import hashlib
 
 from typing import Optional, Union, Any
 
@@ -31,6 +31,26 @@ import os
 import pytest
 
 current_session = None
+logger = logging.getLogger(__name__)
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class ProgressLine:
+    def __init__(self, testcase):
+        _ = testcase
+
+    def update(self, state):
+        _ = state
+
+    def finish(self, state="done"):
+        _ = state
 
 def read(size: int, timeout: Optional[float] = 3) -> any:
         return current_session.read_raw(size, timeout)
@@ -52,46 +72,55 @@ def send_file(filename, socket, session):
     socket.send([filename])
     session.wait_for_prompt_except_logs()
 
+def get_remote_hash(filename, session):
+    session.write_command("sha256sum /root/tcc_test/" + filename)
+    data = session.wait_for_prompt_except_logs()
+    if not data:
+        return None
+
+    first_line = data[0].strip()
+    if "No such file or directory" in first_line:
+        return None
+    return first_line.split()[0]
+
 def upload_testcase(path, socket, session):
     filename = os.path.basename(path)
-    session.write_command("ls /root/tcc_test")
-    data = session.wait_for_prompt_except_logs()
-    has_file = False
-    for line in data:
-        if filename in line:
-            has_file = True
-            break
-    if not has_file:
+    remote_hash = get_remote_hash(filename, session)
+    upload_state = "checking hash"
+    if remote_hash is None:
+        upload_state = "uploading"
         session.write_command("rz")
         data = session.read_until("Starting YMODEM receiver...")
         socket.send([path])
         session.wait_for_prompt_except_logs()
 
-    session.write_command("sha256sum /root/tcc_test/" + filename)
-    data = session.read_line_except_logs()
-    subprocess.run(["sha256sum", path], check=True)
-    local_hash = subprocess.check_output(["sha256sum", path]).decode().split()[0]
-    remote_hash = data.split()[0]
+    local_hash = sha256_file(path)
+    if remote_hash is None:
+        remote_hash = get_remote_hash(filename, session)
+        assert remote_hash is not None, "file upload failed, missing remote hash"
+
     if local_hash != remote_hash:
+        upload_state = "re-uploading"
         session.write_command("rm /root/tcc_test/" + filename)
         session.write_command("rz")
         data = session.read_until("Starting YMODEM receiver...")
         socket.send([path])
         session.wait_for_prompt_except_logs()
 
-        session.write_command("sha256sum /root/tcc_test/" + filename)
-        data = session.read_line_except_logs()
-        subprocess.run(["sha256sum", path], check=True)
-        local_hash = subprocess.check_output(["sha256sum", path]).decode().split()[0]
-        assert local_hash == data.split()[0], "file upload failed, hash mismatch"
+        remote_hash = get_remote_hash(filename, session)
+        assert remote_hash is not None, "file upload failed, missing remote hash"
+        assert local_hash == remote_hash, "file upload failed, hash mismatch"
+
+    if upload_state == "checking hash":
+        return "cached"
+    return upload_state
 
 def compile_testcase(filename, socket, session):
     filename_without_extension = filename.replace(".c", "")
     session.write_command(f"tcc /root/tcc_test/{filename} -o {filename_without_extension}")
     data_lines = session.wait_for_prompt_except_logs()
     session.write_command("/root/tcc_test/" + filename_without_extension)
-    data_lines = data_lines[:-1]
-    run_lines = session.wait_for_prompt_except_logs()[:-1]
+    run_lines = session.wait_for_prompt_except_logs()
     data_lines += run_lines
     expect_path = path + "/" + filename
     expect = expect_path.replace(".c", ".expect")
@@ -100,6 +129,8 @@ def compile_testcase(filename, socket, session):
         i = 0
         for expected_line in f:
             expected_line = expected_line.strip()
+            if not expected_line:
+                continue
             assert expected_line in data_lines[i].strip(), f"expected '{expected_line}' in '{data_lines}'"
             i += 1
 
@@ -175,7 +206,7 @@ removed_test_cases = [
     "98_al_ax_extend.c"
 ]
 
-path = "../../libs/tinycc/tests/tests2"
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../libs/tinycc/tests/tests2")
 
 test_cases = [os.path.basename(tc) for tc in find_tcc_test_cases(path)]
 test_cases = [tc for tc in test_cases if not any(os.path.basename(tc) == os.path.basename(removed) for removed in removed_test_cases)]
@@ -197,14 +228,19 @@ def test_run_tcc_test_suite(request, testcase):
         "protocol_type": ProtocolType.YMODEM,
     }
 
-    logging.basicConfig(level=logging.DEBUG, format='%(message)s')
-    logger = logging.getLogger('YMODEM')
-    logger.setLevel(logging.DEBUG)
+    logging.getLogger("YMODEM").setLevel(logging.WARNING)
 
     socket = ModemSocket(read, write, **socket_args)
-    print("Uploading testcase:", testcase)
-    upload_testcase(path + "/" + testcase, socket, session)
-    compile_testcase(testcase, socket, session)
+    progress = ProgressLine(testcase)
+    try:
+        upload_state = upload_testcase(path + "/" + testcase, socket, session)
+        progress.update(upload_state)
+        progress.update("compiling")
+        compile_testcase(testcase, socket, session)
+    except Exception:
+        progress.finish("failed")
+        raise
+    progress.finish("ok")
 
 
 

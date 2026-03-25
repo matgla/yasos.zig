@@ -63,6 +63,10 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
             self._pool.free_pages(address, number_of_pages, self._pid);
         }
 
+        pub fn try_extend_pages(self: *Self, address: *anyopaque, old_pages: i32, new_pages: i32) ?[]u8 {
+            return self._pool.try_extend_pages(address, old_pages, new_pages, self._pid);
+        }
+
         fn calculate_number_of_pages(len: usize) i32 {
             return @as(i32, @intCast((len + MemoryPoolType.page_size - 1) / MemoryPoolType.page_size));
         }

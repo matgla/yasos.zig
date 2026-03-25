@@ -39,6 +39,8 @@ const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
 const MaxProcFile = @import("maxproc_file.zig").MaxProcFile;
+const LeakStartFile = @import("leakdetect_file.zig").LeakStartFile;
+const LeakDumpFile = @import("leakdetect_file.zig").LeakDumpFile;
 
 const ProcFsDirectory = @import("procfs_directory.zig").ProcFsDirectory;
 
@@ -74,6 +76,11 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
         try root_directory.data().append(meminfo);
         try root_directory.data().append(sys_directory_node);
+
+        const leakstart = try LeakStartFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(leakstart);
+        const leakdump = try LeakDumpFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(leakdump);
         return procfs;
     }
 

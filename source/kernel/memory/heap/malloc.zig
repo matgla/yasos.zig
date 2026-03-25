@@ -25,19 +25,96 @@ const c = @import("c").c;
 const log = std.log.scoped(.malloc);
 
 const arch = @import("arch");
+const config = @import("config");
+
+pub const KernelAllocatorType = MallocAllocator(.{
+    .leak_detection = config.instrumentation.enable_memory_leak_detection,
+    .verbose = config.instrumentation.verbose_allocators,
+    .dump_stats = config.instrumentation.print_memory_usage,
+});
 
 var memory_in_use: isize = 0;
 var surpressed_memory: isize = 0;
 var counter: isize = 0;
 
+// Size-bucketed net allocation counters for leak diagnosis
+pub var bucket_1_4: isize = 0;
+pub var bucket_5: isize = 0;
+pub var bucket_6: isize = 0;
+pub var bucket_7: isize = 0;
+pub var bucket_8: isize = 0;
+pub var bucket_9_10: isize = 0;
+pub var bucket_11_12: isize = 0;
+pub var bucket_13_16: isize = 0;
+pub var bucket_17_plus: isize = 0;
+
+fn bucket_inc(len: usize) void {
+    if (len <= 4) {
+        bucket_1_4 += 1;
+    } else if (len == 5) {
+        bucket_5 += 1;
+    } else if (len == 6) {
+        bucket_6 += 1;
+    } else if (len == 7) {
+        bucket_7 += 1;
+    } else if (len == 8) {
+        bucket_8 += 1;
+    } else if (len <= 10) {
+        bucket_9_10 += 1;
+    } else if (len <= 12) {
+        bucket_11_12 += 1;
+    } else if (len <= 16) {
+        bucket_13_16 += 1;
+    } else {
+        bucket_17_plus += 1;
+    }
+}
+
+fn bucket_dec(len: usize) void {
+    if (len <= 4) {
+        bucket_1_4 -= 1;
+    } else if (len == 5) {
+        bucket_5 -= 1;
+    } else if (len == 6) {
+        bucket_6 -= 1;
+    } else if (len == 7) {
+        bucket_7 -= 1;
+    } else if (len == 8) {
+        bucket_8 -= 1;
+    } else if (len <= 10) {
+        bucket_9_10 -= 1;
+    } else if (len <= 12) {
+        bucket_11_12 -= 1;
+    } else if (len <= 16) {
+        bucket_13_16 -= 1;
+    } else {
+        bucket_17_plus -= 1;
+    }
+}
+
 pub fn get_usage() usize {
     return if (memory_in_use < 0) 0 else @intCast(memory_in_use);
+}
+
+pub fn get_counter() isize {
+    return counter;
 }
 
 pub fn reset() void {
     memory_in_use = 0;
     surpressed_memory = 0;
     counter = 0;
+}
+
+var get_current_pid_fn: ?*const fn () i32 = null;
+
+pub fn set_get_current_pid(f: *const fn () i32) void {
+    get_current_pid_fn = f;
+}
+
+fn current_pid() i32 {
+    if (get_current_pid_fn) |f| return f();
+    return -1;
 }
 
 const Tracker = extern struct {
@@ -47,8 +124,14 @@ const Tracker = extern struct {
     data_len: usize,
     data: [*]usize,
     allocated_length: usize,
+    owner_pid: i32 = -1,
+
+    var push_count: usize = 0;
+    var remove_ok_count: usize = 0;
+    var remove_fail_count: usize = 0;
 
     pub fn push(self: *Tracker, next: *Tracker) void {
+        push_count += 1;
         var node: ?*Tracker = self;
         while (node != null) {
             if (node) |n| {
@@ -63,11 +146,11 @@ const Tracker = extern struct {
     }
 
     pub fn remove(self: *Tracker, ptr: *anyopaque, alloc_len: usize) void {
-        var node: ?*Tracker = self;
+        var node: ?*Tracker = self.next;
         while (node != null) {
             if (node) |n| {
                 node = n.next;
-                if (n.data_len > 0 and n.data[0] == @intFromPtr(ptr)) {
+                if (n.data[0] == @intFromPtr(ptr)) {
                     if (n.prev) |p| {
                         p.next = n.next;
                     }
@@ -79,11 +162,13 @@ const Tracker = extern struct {
                     }
                     c.free(n.data);
                     c.free(n);
+                    remove_ok_count += 1;
                     return;
                 }
             }
         }
-        log.err("Invalid free for: 0x{x}", .{@intFromPtr(ptr)});
+        remove_fail_count += 1;
+        log.err("Invalid free for: 0x{x} len={d}", .{ @intFromPtr(ptr), alloc_len });
     }
 
     pub fn suppress_all(self: *Tracker) void {
@@ -96,19 +181,29 @@ const Tracker = extern struct {
         }
     }
 
-    pub fn print_leaks(self: *Tracker) void {
-        var node: ?*Tracker = self;
+    pub fn print_leaks(self: *Tracker, is_pid_alive: ?*const fn (i32) bool) void {
+        const dead_only = config.instrumentation.leak_report_dead_only;
+        var node: ?*Tracker = self.next;
+        var printed: usize = 0;
+        var leaked_bytes: usize = 0;
         while (node != null) {
             if (node) |n| {
-                if (n.data_len > 0 and !n.surpressed) {
-                    log.err("---------------------------------", .{});
-                    log.err("leaked memory allocated at: ", .{});
-                    var index: usize = 0;
-                    while (index < n.data_len) {
-                        log.err("{d}: 0x{x}", .{ index, n.data[index + 1] });
-                        index += 1;
+                if (!n.surpressed) {
+                    const should_print = if (dead_only)
+                        (if (is_pid_alive) |alive_fn| !alive_fn(n.owner_pid) else true)
+                    else
+                        true;
+                    if (should_print) {
+                        printed += 1;
+                        leaked_bytes += n.allocated_length;
+                        log.err("----- pid={d} -----", .{n.owner_pid});
+                        log.err("leaked {d}B at 0x{x}", .{ n.allocated_length, n.data[0] });
+                        var index: usize = 0;
+                        while (index < n.data_len) {
+                            log.err("{d}: 0x{x}", .{ index, n.data[index + 1] });
+                            index += 1;
+                        }
                     }
-                    log.err("--------------------------------", .{});
                 }
                 node = n.next;
             }
@@ -144,12 +239,16 @@ pub fn MallocAllocator(comptime options: anytype) type {
         }
 
         pub fn detect_leaks() isize {
+            return detect_leaks_filter(null);
+        }
+
+        pub fn detect_leaks_filter(is_pid_alive: ?*const fn (i32) bool) isize {
             if (comptime is_leaks_detection_enabled()) {
                 const leaked_memory = memory_in_use - surpressed_memory;
                 if (leaked_memory > 0) {
                     log.err("Memory leaks detected '{d}' bytes were left", .{leaked_memory});
                 }
-                tracker.print_leaks();
+                tracker.print_leaks(is_pid_alive);
                 return leaked_memory;
             }
             return 0;
@@ -182,29 +281,34 @@ pub fn MallocAllocator(comptime options: anytype) type {
             const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
             memory_in_use += @as(isize, @intCast(len));
             counter += 1;
+            bucket_inc(len);
             if (comptime is_leaks_detection_enabled()) {
                 log.debug("allocating {d}B at 0x{x}", .{ len, @intFromPtr(ptr) });
-                const stack_trace_depth = arch.panic.get_stack_trace_depth(return_address);
-                const stack_trace_size = @sizeOf(usize) * (stack_trace_depth);
+                const max_trace = arch.panic.max_stack_depth;
                 log.debug("allocating tracker object with size: {d}", .{@sizeOf(Tracker)});
                 const tracker_object = @as(*Tracker, @ptrCast(@alignCast(c.malloc(@sizeOf(Tracker)) orelse return null)));
                 tracker_object.next = null;
                 tracker_object.prev = null;
-                tracker_object.data_len = stack_trace_depth;
                 tracker_object.surpressed = false;
-                tracker_object.data = @as([*]usize, @ptrCast(@alignCast(c.malloc(@sizeOf(usize) * (stack_trace_size + 1)) orelse return null)));
+                tracker_object.data = @as([*]usize, @ptrCast(@alignCast(c.malloc(@sizeOf(usize) * (max_trace + 2)) orelse return null)));
                 tracker_object.data[0] = @intFromPtr(ptr);
+                tracker_object.data[1] = return_address; // always capture caller
                 tracker_object.allocated_length = len;
-                tracker.push(tracker_object);
-                var index: usize = 1;
+                tracker_object.owner_pid = current_pid();
+                var index: usize = 2;
                 var stack = std.debug.StackIterator.init(return_address, @frameAddress());
-                while (stack.next()) |ret| {
+                _ = stack.next(); // skip first (already stored as data[1])
+                while (index <= max_trace + 1) {
+                    if (!arch.panic.is_valid_stack_ptr(stack.fp)) break;
+                    const ret = stack.next() orelse break;
                     if (@hasField(@TypeOf(options), "verbose") and options.verbose) {
                         log.debug("{d}: 0x{x}", .{ index - 1, ret });
                     }
                     tracker_object.data[index] = ret;
                     index += 1;
                 }
+                tracker_object.data_len = index - 1;
+                tracker.push(tracker_object);
             }
             if (@hasField(@TypeOf(options), "dump_stats") and options.dump_stats) {
                 log.info("usage: {d}B", .{memory_in_use});
@@ -245,20 +349,14 @@ pub fn MallocAllocator(comptime options: anytype) type {
             return_address: usize,
         ) void {
             _ = log2_buf_align;
+            _ = return_address;
             c.free(buf.ptr);
             memory_in_use -= @as(isize, @intCast(buf.len));
             counter -= 1;
+            bucket_dec(buf.len);
 
             if (comptime is_leaks_detection_enabled()) {
                 tracker.remove(buf.ptr, buf.len);
-                var index: usize = 1;
-                var stack = std.debug.StackIterator.init(return_address, @frameAddress());
-                while (stack.next()) |ret| {
-                    if (@hasField(@TypeOf(options), "verbose") and options.verbose) {
-                        log.debug("{d}: 0x{x}", .{ index - 1, ret });
-                    }
-                    index += 1;
-                }
 
                 log.debug("releasing {d}B at 0x{x}, usage: {d}B", .{ buf.len, @intFromPtr(buf.ptr), memory_in_use });
             }

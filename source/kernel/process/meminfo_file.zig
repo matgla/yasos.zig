@@ -31,7 +31,7 @@ const MemoryInfo = struct {
     total: usize,
 };
 
-const BufferSize = 128;
+const BufferSize = 512;
 const BufferedFileForMeminfo = kernel.fs.BufferedFile(BufferSize);
 pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct {
     const Self = @This();
@@ -62,6 +62,28 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
         buf = std.fmt.bufPrint(buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
         written_length += buf.len;
         buf = std.fmt.bufPrint(buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch buf;
+        written_length += buf.len;
+        const alloc_count = kernel.memory.heap.malloc.get_counter();
+        buf = std.fmt.bufPrint(buffer[written_length..], "AllocCount:      {d: >8}\n", .{alloc_count}) catch buf;
+        written_length += buf.len;
+        const m = kernel.memory.heap.malloc;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B1_4:            {d: >8}\n", .{m.bucket_1_4}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B5:              {d: >8}\n", .{m.bucket_5}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B6:              {d: >8}\n", .{m.bucket_6}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B7:              {d: >8}\n", .{m.bucket_7}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B8:              {d: >8}\n", .{m.bucket_8}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B9_10:           {d: >8}\n", .{m.bucket_9_10}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B11_12:          {d: >8}\n", .{m.bucket_11_12}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B13_16:          {d: >8}\n", .{m.bucket_13_16}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B17p:            {d: >8}\n", .{m.bucket_17_plus}) catch buf;
         written_length += buf.len;
         interface.base(self)._end = written_length;
         return 0;

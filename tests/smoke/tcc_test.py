@@ -45,8 +45,16 @@ def test_compile_hello_world_with_usage_tracking(request):
     allowed_increases = 4
     for i in range(10):
         output_file = '/tmp/hello' if i < 6 else f'/tmp/hello_{i}'
+        # Start leak detection before second iteration to capture steady-state leaks
+        if i == 1:
+            session.write_command("cat /proc/leakstart")
+            session.wait_for_prompt()
         session.write_command("tcc /usr/hello_world.c -o " + output_file)
         data = session.wait_for_prompt()
+        # Dump leaks after second iteration
+        if i == 1:
+            session.write_command("cat /proc/leakdump")
+            session.wait_for_prompt()
         session.write_command("cat /proc/meminfo")
         usage = session.wait_for_prompt()
         stats = parse_memory_stats(usage)
