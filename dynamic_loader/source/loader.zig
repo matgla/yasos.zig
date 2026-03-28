@@ -157,8 +157,14 @@ pub const Loader = struct {
                 local_fn_ptr_count += 1;
             }
         }
-        const total_fn_ptr_thunks = symbol_table_fn_ptr_count + local_fn_ptr_count;
-        log.debug("Total function pointer thunks needed: {d} (symbol_table: {d}, local: {d})", .{ total_fn_ptr_thunks, symbol_table_fn_ptr_count, local_fn_ptr_count });
+        var data_fn_ptr_count: usize = 0;
+        for (parser.data_relocations.relocations) |rel| {
+            if (@as(Section, @enumFromInt(rel.section)) == .Unknown) {
+                data_fn_ptr_count += 1;
+            }
+        }
+        const total_fn_ptr_thunks = symbol_table_fn_ptr_count + local_fn_ptr_count + data_fn_ptr_count;
+        log.debug("Total function pointer thunks needed: {d} (symbol_table: {d}, local: {d}, data: {d})", .{ total_fn_ptr_thunks, symbol_table_fn_ptr_count, local_fn_ptr_count, data_fn_ptr_count });
         if (total_fn_ptr_thunks > 0) {
             if (module.unique_data) |unique| {
                 try unique.allocate_thunks(total_fn_ptr_thunks);
@@ -167,7 +173,7 @@ pub const Loader = struct {
 
         try self.process_symbol_table_relocations(&parser, module, header);
         try self.process_local_relocations(&parser, module, symbol_table_fn_ptr_count);
-        try self.process_data_relocations(&parser, module);
+        try self.process_data_relocations(&parser, module, symbol_table_fn_ptr_count + local_fn_ptr_count);
 
         // Mark thunks as generated after all relocation processing is complete
         if (module.unique_data) |unique| {
@@ -176,11 +182,38 @@ pub const Loader = struct {
             }
         }
 
-        log.err(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
-        log.err(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
-        log.err(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
-        log.err(".bss  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
-        log.err(".got  loaded at 0x{x}, entr: {x} for: {s}", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
+        // const suppress_log = if (module.name) |name|
+        //     std.mem.eql(u8, name, "libc.so") or
+        //         std.mem.eql(u8, name, "libm.so") or
+        //         std.mem.eql(u8, name, "libpthread.so") or
+        //         std.mem.eql(u8, name, "libdl.so") or
+        //         std.mem.eql(u8, name, "toybox")
+        // else
+        //     false;
+
+        // if (!suppress_log) {
+        // log.err(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
+        // log.err(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
+        // log.err(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
+        // log.err(".bss  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
+        // log.err(".got  loaded at 0x{x}, entr: {x} for: {s}", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
+        // }
+
+        // Dump GOT entries and .data words for debugging function pointer resolution
+        // {
+        //     const got = module.get_got();
+        //     const max_dump = if (got.len < 20) got.len else 20;
+        //     for (0..max_dump) |gi| {
+        //         log.err("  GOT[{d}]: sym=0x{x} base=0x{x} [{s}]", .{ gi, got[gi].symbol_offset, got[gi].base_register, module.name.? });
+        //     }
+        //     const data = module.get_data();
+        //     const data_words = data.len / 4;
+        //     const max_data = if (data_words < 16) data_words else 16;
+        //     const data_as_u32: [*]const u32 = @ptrCast(@alignCast(data.ptr));
+        //     for (0..max_data) |di| {
+        //         log.err("  .data[{d}]: 0x{x} [{s}]", .{ di, data_as_u32[di], module.name.? });
+        //     }
+        // }
 
         if (header.entry != 0xffffffff and header.module_type == @intFromEnum(Type.Executable)) {
             var section: Section = .Unknown;
@@ -444,8 +477,73 @@ pub const Loader = struct {
         }
     }
 
-    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module) !void {
+    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module, thunk_start_index: usize) !void {
+        var thunk_index = thunk_start_index;
+        const maybe_unique_data = module.unique_data;
+
         for (parser.data_relocations.relocations) |rel| {
+            const from_section: Section = @enumFromInt(rel.section);
+
+            if (from_section == .Unknown) {
+                // GOT-indirect: imported function pointer.
+                // rel.from is a GOT entry index.  The GOT entry was already
+                // resolved by process_symbol_table_relocations.
+                const got = module.get_got();
+                if (rel.from >= got.len) {
+                    log.err("DataReloc GOT-indirect: from={d} exceeds GOT len={d}", .{ rel.from, got.len });
+                    return LoaderError.DataProcessingFailure;
+                }
+                const got_entry = got[rel.from];
+
+                var data_memory_address: usize = @intFromPtr(module.get_data().ptr);
+                var rel_to = rel.to;
+                if (rel_to > module.get_data().len) {
+                    rel_to -= module.get_data().len;
+                    data_memory_address = @intFromPtr(module.get_bss().ptr);
+                    if (rel_to > module.get_bss().len) {
+                        rel_to -= module.get_bss().len;
+                        data_memory_address = @intFromPtr(module.get_got().ptr);
+                        if (rel_to > module.get_got().len * 8) {
+                            return LoaderError.DataProcessingFailure;
+                        }
+                    }
+                }
+                const address_to_change: usize = data_memory_address + rel_to;
+                const target: *usize = @ptrFromInt(address_to_change);
+
+                if (got_entry.base_register != @intFromPtr(got.ptr)) {
+                    // Cross-module function pointer: create a thunk that
+                    // switches r9 to the target module's GOT.
+                    if (maybe_unique_data) |unique| {
+                        if (unique.thunks) |thunks| {
+                            var fn_address = got_entry.symbol_offset;
+                            if (fn_address & 1 == 0) {
+                                fn_address |= 1;
+                            }
+                            if (!thunks.generated) {
+                                const address = unique.generate_thunk(thunk_index, got_entry.base_register, fn_address) catch |err| {
+                                    log.err("[yasld] Can't generate data thunk for GOT[{d}]: {s}", .{ rel.from, @errorName(err) });
+                                    return err;
+                                };
+                                target.* = address;
+                                thunk_index += 1;
+                            } else {
+                                const address = unique.get_thunk_address(thunk_index) catch |err| {
+                                    log.err("[yasld] Can't get data thunk for GOT[{d}]: {s}", .{ rel.from, @errorName(err) });
+                                    return err;
+                                };
+                                target.* = address;
+                                thunk_index += 1;
+                            }
+                        }
+                    }
+                } else {
+                    // Same module: write function address directly (no thunk needed)
+                    target.* = got_entry.symbol_offset;
+                }
+                continue;
+            }
+
             var data_memory_address: usize = @intFromPtr(module.get_data().ptr);
             var rel_to = rel.to;
             log.debug("Processing data relocation: relto: {x} -> data: {x}", .{ rel_to, module.get_data().len });
@@ -465,9 +563,8 @@ pub const Loader = struct {
 
             const address_to_change: usize = data_memory_address + rel_to;
             const target: *usize = @ptrFromInt(address_to_change);
-            const base_address_from: usize = try module.get_base_address(@enumFromInt(rel.section));
+            const base_address_from: usize = try module.get_base_address(from_section);
             var address_from: usize = base_address_from + rel.from;
-            const from_section: Section = @enumFromInt(rel.section);
 
             // Cortex-M executes only Thumb code. Some relocation producers emit
             // even code symbol addresses for function pointers (for example
@@ -476,11 +573,6 @@ pub const Loader = struct {
             if ((from_section == .Code or from_section == .Init) and (address_from & 1) == 0) {
                 address_from += 1;
             }
-            log.debug("Patching from: 0x{x} to: 0x{x}, address_from: {x}, target: {x}", .{ rel.from, rel.to, address_from, @intFromPtr(target) });
-            if (rel.to >= module.get_data().len) {
-                log.err("DataReloc targeting GOT area: to=0x{x} from=0x{x} section={s} addr=0x{x} -> 0x{x}", .{ rel.to, rel.from, @tagName(from_section), @intFromPtr(target), address_from });
-            }
-
             target.* = address_from;
         }
     }

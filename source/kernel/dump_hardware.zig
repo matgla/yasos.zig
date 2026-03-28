@@ -36,6 +36,10 @@ pub const DumpHardware = struct {
         kernel.stdout.print("| Cores: {d: <2}                                 |\n", .{
             cpu.number_of_cores(),
         });
+        if (cpu.vreg_vsel()) |vsel| {
+            const mv = vselToMv(vsel);
+            kernel.stdout.print("|  VREG: {d}mV (vsel={d})                     |\n", .{ mv, vsel });
+        }
         DumpHardware.print_memory();
         kernel.stdout.print("---------------------------------------------\n", .{});
     }
@@ -52,6 +56,17 @@ pub const DumpHardware = struct {
                 @tagName(entry.speed),
             });
         }
+    }
+
+    fn vselToMv(vsel: u8) u16 {
+        // VSEL 0-15: 550 + 50*n mV (linear), above 15 non-linear
+        const lut = [_]u16{
+            550, 600, 650, 700, 750, 800, 850, 900, // 0-7
+            950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, // 8-15
+            1350, 1400, 1500, 1600, 1650, 1700, 1800, 1900, // 16-23
+            2000, 2100, 2200, 2300, 2400, 2500, 2600, 3300, // 24-31
+        };
+        return lut[vsel];
     }
 
     fn format_size(size: u64, buffer: []u8) []const u8 {

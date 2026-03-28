@@ -33,19 +33,49 @@ if BOARD_PIMORONI_PICO_PLUS2_DISCARD_IN_CONF
   endchoice
 
   config CONFIG_BUILD_LINKER_SCRIPT_PATH
-    default "${hal_root}/source/raspberry/rp2350/linker_script.ld" 
+    default "${hal_root}/source/raspberry/rp2350/linker_script.ld"
 
   config FLASH_MEMORY_ADDRESS
     default "0x10000000"
-  
+
   config FLASH_MEMORY_SIZE
     default "2MB"
 
-  config CONFIG_PSRAM_CS_PIN 
+  config CONFIG_PSRAM_CS_PIN
     default 47
 
-  config CONFIG_BUILD_USE_NEWLIB 
+  config CONFIG_CPU_CLOCK_FREQUENCY_MHZ
+    default 618
+
+  config CONFIG_FLASH_XIP_MAX_FREQUENCY_HZ
+    default 133000000
+
+  config CONFIG_FLASH_XIP_MAX_SELECT_US
+    default 8
+
+  config CONFIG_PSRAM_MAX_FREQUENCY_HZ
+    default 133000000
+
+  config CONFIG_PSRAM_CE_MAX_LOW_US
+    default 8
+
+  config CONFIG_PSRAM_CE_MIN_DESELECT_NS
+    default 50
+
+  config CONFIG_PSRAM_RXDELAY_LO
+    default 2
+
+  config CONFIG_PSRAM_RXDELAY_HI
+    default 3
+
+  config CONFIG_PSRAM_RXDELAY_HI_FREQ_THRESHOLD_HZ
+    default 90000000
+
+  config CONFIG_BUILD_USE_NEWLIB
     default y
 
-endif
+  choice CONFIG_MMC_BUS_MODE
+    default CONFIG_MMC_BUS_MODE_SDIO
+  endchoice
 
+endif

@@ -44,6 +44,18 @@ const LeakDumpFile = @import("leakdetect_file.zig").LeakDumpFile;
 
 const ProcFsDirectory = @import("procfs_directory.zig").ProcFsDirectory;
 
+fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
+    data.* = std.mem.zeroes(c.struct_stat);
+
+    const normalized_path = if (path.len == 0) "/" else path;
+    const device_hash = std.hash.Wyhash.hash(0, "procfs") | 1;
+    const inode_hash = std.hash.Wyhash.hash(device_hash, normalized_path) | 1;
+
+    data.st_dev = @truncate(device_hash);
+    data.st_ino = @truncate(inode_hash);
+    data.st_nlink = 1;
+}
+
 pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     const Self = @This();
     base: ReadOnlyFileSystem,
@@ -159,6 +171,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         _ = follow_links;
+        initialize_stat_identity(data, path);
         var node = try self.get(path);
         defer node.delete();
         if (node.is_directory()) {

@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const kernel = @import("../kernel.zig");
+const hal = @import("hal");
 
 const c = @import("libc_imports").c;
 const fs = @import("../fs/vfs.zig");
@@ -131,11 +132,11 @@ pub export fn _nanosleep(ts: c.timespec) c_int {
 }
 
 pub fn _time(t: ?*c.time_t) c.time_t {
-    const ticks: c.time_t = @intCast(systick.get_system_ticks().*);
+    const now_seconds: c.time_t = @intCast(hal.time.get_time());
     if (t) |time_ptr| {
-        time_ptr.* = ticks;
+        time_ptr.* = now_seconds;
     }
-    return ticks;
+    return now_seconds;
 }
 
 extern var end: u8;

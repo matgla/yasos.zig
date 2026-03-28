@@ -35,6 +35,18 @@ const FatFsIterator = @import("fatfs_directory.zig").FatFsIterator;
 
 const fatfs_error_to_errno = @import("errno_converter.zig").fatfs_error_to_errno;
 
+fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
+    data.* = std.mem.zeroes(c.struct_stat);
+
+    const normalized_path = if (path.len == 0) "/" else path;
+    const device_hash = std.hash.Wyhash.hash(0, "fatfs") | 1;
+    const inode_hash = std.hash.Wyhash.hash(device_hash, normalized_path) | 1;
+
+    data.st_dev = @truncate(device_hash);
+    data.st_ino = @truncate(inode_hash);
+    data.st_nlink = 1;
+}
+
 var global_fs: fatfs.FileSystem = undefined;
 var workspace_buffer: [4096]u8 = undefined;
 pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
@@ -80,7 +92,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
-        log.info("Creating file at path: {s}", .{path});
         const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
         var file = try fatfs.File.create(filepath);
@@ -88,7 +99,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) anyerror!void {
-        log.info("Creating directory at path: {s}", .{path});
         const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
         _ = fatfs.mkdir(filepath) catch |err| {
@@ -97,7 +107,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        log.info("Removing file or directory at path: {s}", .{path});
         const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
         try fatfs.unlink(filepath);
@@ -124,8 +133,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn format(self: *Self) anyerror!void {
-        log.info("Formatting FAT filesystem", .{});
-
         fatfs.disks[0] = &self._disk_wrapper.interface;
         fatfs.mkfs(
             "0:",
@@ -141,34 +148,22 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         _ = follow_symlinks;
+        initialize_stat_identity(data, path);
         if (std.mem.eql(u8, path, "/") or path.len == 0) {
-            data.st_blksize = 512;
-            data.st_size = 0;
             data.st_mode = c.S_IFDIR;
-            data.st_nlink = 0; // Number of links,
-            data.st_uid = 0;
-            data.st_gid = 0; // Group ID
-            data.st_dev = 0; // Device ID
-            data.st_ino = 0; // Inode number
-            data.st_rdev = 0; // Device type (for special files)
-            data.st_blocks = 0;
+            data.st_blksize = 512;
             return;
         }
         var path_c = try std.fmt.allocPrintSentinel(self._allocator, "0:/{s} ", .{path}, 0);
         path_c[path_c.len - 1] = 0; // Null-terminate
         defer self._allocator.free(path_c);
         const finfo = fatfs.stat(path_c) catch |err| {
+            log.err("Failed to stat path: {s}, error: {s}", .{ path, @errorName(err) });
             return fatfs_error_to_errno(err);
         };
         data.st_blksize = 512;
         data.st_size = @intCast(finfo.size);
         data.st_mode = if (finfo.kind == .Directory) c.S_IFDIR else c.S_IFREG;
-        data.st_nlink = 0; // Number of links,
-        data.st_uid = 0;
-        data.st_gid = 0; // Group ID
-        data.st_dev = 0; // Device ID
-        data.st_ino = 0; // Inode number
-        data.st_rdev = 0; // Device type (for special files)
         data.st_blocks = @intCast((finfo.size + 511) / 512);
     }
 

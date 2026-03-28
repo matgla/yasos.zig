@@ -45,5 +45,12 @@ pub const Cpu = struct {
         return @intCast(sio_impl.cpuid.read());
     }
 
+    /// Read the VREG VSEL value from the POWMAN register.
+    /// Returns the raw 5-bit VSEL field (e.g. 11 = 1.10V, 14 = 1.25V, 21 = 1.70V).
+    pub fn vreg_vsel() u8 {
+        const POWMAN_VREG: *volatile u32 = @ptrFromInt(0x4010000c);
+        return @intCast((POWMAN_VREG.* >> 4) & 0x1f);
+    }
+
     pub const Registers = ArchRegisters;
 };

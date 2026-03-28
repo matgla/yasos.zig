@@ -54,6 +54,12 @@ const R3 = struct {
 };
 const R7 = R3;
 
+const sd_switch_check: u32 = 0;
+const sd_switch_set: u32 = 1;
+const sd_switch_group_access: u32 = 0;
+const sd_switch_access_default: u32 = 0;
+const sd_switch_access_high_speed: u32 = 1;
+
 pub const MmcIo = struct {
     const Self = @This();
     _mmc: *hal.mmc.Mmc,
@@ -79,6 +85,12 @@ pub const MmcIo = struct {
             .SPI => {
                 self.initialize_spi_mmc() catch |err| {
                     log.info("initialization failed with an error: {s}", .{@errorName(err)});
+                    return err;
+                };
+            },
+            .SDIO => {
+                self.initialize_sdio_mmc() catch |err| {
+                    log.info("SDIO initialization failed with an error: {s}", .{@errorName(err)});
                     return err;
                 };
             },
@@ -108,6 +120,11 @@ pub const MmcIo = struct {
         if (buf.len % 512 != 0 or buf.len == 0) {
             log.err("Buffer must be aligned to 512 bytes, got: {d}", .{buf.len});
             return -1;
+        }
+
+        const config = self._mmc.get_config();
+        if (config.mode == .SDIO) {
+            return self.sdio_read(address, buf);
         }
 
         const block_address = address >> 9;
@@ -142,6 +159,11 @@ pub const MmcIo = struct {
         if (buf.len % 512 != 0 or buf.len == 0) {
             log.err("Buffer must be aligned to 512 bytes, got: {d}", .{buf.len});
             return -1;
+        }
+
+        const config = self._mmc.get_config();
+        if (config.mode == .SDIO) {
+            return self.sdio_write(address, buf);
         }
 
         const block_address = address >> 9;
@@ -288,7 +310,7 @@ pub const MmcIo = struct {
         const crc = std.mem.bigToNative(u16, std.mem.bytesToValue(u16, &buffer));
         const received_crc = std.hash.crc.Crc16Xmodem.hash(output);
         if (crc != received_crc) {
-            log.err("Incorrect crc, received: 0x{x}, calculated: 0x{x}", .{ crc, received_crc });
+            log.debug("Incorrect crc, received: 0x{x}, calculated: 0x{x}", .{ crc, received_crc });
             return error.CrcVerificationFailure;
         }
     }
@@ -412,6 +434,244 @@ pub const MmcIo = struct {
                 log.debug("  {s}: {x}", .{ f.name, @field(t, f.name) });
             }
         }
+    }
+
+    fn initialize_sdio_mmc(self: *Self) anyerror!void {
+        log.info("initializing MMC using SDIO (native) mode", .{});
+
+        _ = self._mmc.send_sdio_command(0, 0);
+        hal.time.sleep_ms(10);
+
+        const cmd8_resp = self._mmc.send_sdio_command(8, 0x000001aa);
+        if ((cmd8_resp.card_status & 0xfff) != 0x1aa) {
+            log.err("CMD8 voltage check failed, response: 0x{x}", .{cmd8_resp.card_status});
+            return error.CardInitializationFailure;
+        }
+
+        var retries: u32 = 0;
+        const max_retries: u32 = 1000;
+        while (retries < max_retries) : (retries += 1) {
+            _ = self._mmc.send_sdio_command(55, 0);
+            const acmd41_resp = self._mmc.send_sdio_command(41, 0x40ff8000);
+            if ((acmd41_resp.card_status & 0x80000000) != 0) {
+                if ((acmd41_resp.card_status & 0x40000000) != 0) {
+                    self._card_type = CardType.SDv2Block;
+                } else {
+                    self._card_type = CardType.SDv2Byte;
+                }
+                break;
+            }
+            hal.time.sleep_ms(10);
+        }
+
+        if (self._card_type == null) {
+            log.err("Card did not respond to ACMD41 after {d} retries", .{max_retries});
+            return error.CardInitializationFailure;
+        }
+
+        log.info("Found card with type: {s}", .{@tagName(self._card_type.?)});
+
+        const cid_resp = self._mmc.send_sdio_command_long(2, 0);
+        if (!cid_resp.valid) {
+            log.warn("CID response invalid", .{});
+        }
+
+        const cmd3_resp = self._mmc.send_sdio_command(3, 0);
+        const rca: u16 = @intCast(cmd3_resp.card_status >> 16);
+        log.info("Card RCA: 0x{x}", .{rca});
+
+        const csd_resp = self._mmc.send_sdio_command_long(9, @as(u32, rca) << 16);
+        if (csd_resp.valid) {
+            const csd = card_parser.CardParser.parse_csdv2(&csd_resp.data) catch |err| {
+                log.err("Failed to parse CSD: {s}", .{@errorName(err)});
+                return err;
+            };
+            self._size = csd.get_size() / csd.get_sector_size();
+            dump_struct(csd);
+        }
+
+        const cmd7_resp = self._mmc.send_sdio_command(7, @as(u32, rca) << 16);
+        if (cmd7_resp.command_index != 7) {
+            log.warn("Unexpected CMD7 response index: {d}", .{cmd7_resp.command_index});
+        }
+
+        _ = self._mmc.send_sdio_command(55, @as(u32, rca) << 16);
+        _ = self._mmc.send_sdio_command(6, 0x00000002);
+        self._mmc.set_wide_bus(true);
+
+        const high_speed_enabled = hs: {
+            const enabled = self.try_enable_sdio_high_speed(rca) catch |err| {
+                log.warn("CMD6 high-speed switch failed: {s}", .{@errorName(err)});
+                break :hs false;
+            };
+            break :hs enabled;
+        };
+        self._mmc.change_speed_to(if (high_speed_enabled) 50 * 1000 * 1000 else 25 * 1000 * 1000);
+
+        const cmd16_resp = self._mmc.send_sdio_command(16, 512);
+        if (cmd16_resp.command_index != 16) {
+            log.err("CMD16 SET_BLOCKLEN failed during init", .{});
+            return error.CardInitializationFailure;
+        }
+
+        self._initialized = true;
+        log.info("SDIO initialization complete, size: {d} sectors", .{self._size});
+    }
+
+    fn build_sd_switch_arg(mode: u32, group: u32, value: u32) u32 {
+        var arg: u32 = (mode << 31) | 0x00ff_ffff;
+        arg &= ~(@as(u32, 0xf) << @intCast(group * 4));
+        arg |= value << @intCast(group * 4);
+        return arg;
+    }
+
+    fn verify_sdio_transfer_mode(self: *Self, rca: u16) bool {
+        const status_resp = self._mmc.send_sdio_command(13, @as(u32, rca) << 16);
+        if (status_resp.command_index != 13) {
+            log.warn("CMD13 failed after SDIO speed change, falling back", .{});
+            return false;
+        }
+        return true;
+    }
+
+    fn try_enable_sdio_high_speed(self: *Self, rca: u16) !bool {
+        var status: [64]u8 align(4) = [_]u8{0} ** 64;
+
+        const check_arg = build_sd_switch_arg(sd_switch_check, sd_switch_group_access, sd_switch_access_default);
+        const check_resp = self._mmc.send_sdio_data_command(6, check_arg);
+        if (check_resp.command_index != 6) {
+            return error.CardInitializationFailure;
+        }
+        try self._mmc.read_sdio_data(status[0..]);
+        if ((status[13] & 0x02) == 0) {
+            log.info("SD card does not advertise high-speed mode support", .{});
+            return false;
+        }
+
+        const switch_arg = build_sd_switch_arg(sd_switch_set, sd_switch_group_access, sd_switch_access_high_speed);
+        const switch_resp = self._mmc.send_sdio_data_command(6, switch_arg);
+        if (switch_resp.command_index != 6) {
+            return error.CardInitializationFailure;
+        }
+        try self._mmc.read_sdio_data(status[0..]);
+        if ((status[16] & 0x0f) != sd_switch_access_high_speed) {
+            log.warn("SD card rejected CMD6 high-speed switch (status=0x{x})", .{status[16]});
+            return false;
+        }
+
+        self._mmc.change_speed_to(50 * 1000 * 1000);
+        if (!self.verify_sdio_transfer_mode(rca)) {
+            self._mmc.change_speed_to(25 * 1000 * 1000);
+            return false;
+        }
+
+        log.info("SD card switched to high-speed mode via CMD6", .{});
+        return true;
+    }
+
+    const sdio_io_retry_limit: usize = 6;
+
+    fn sdio_read(self: *const Self, address: u64, buf: []u8) isize {
+        const block_address: u32 = @intCast(address >> 9);
+        const num_blocks = buf.len / 512;
+        const max_blocks_per_req = 128;
+
+        var i: usize = 0;
+        var retransmissions: usize = 0;
+        while (i < num_blocks) {
+            const remaining = num_blocks - i;
+            const chunk: u32 = @intCast(if (remaining > max_blocks_per_req) max_blocks_per_req else remaining);
+
+            if (chunk == 1) {
+                const resp = self._mmc.send_sdio_command(17, @intCast(block_address + i));
+                if (resp.command_index != 17) {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO read failed permanently: CMD17 did not respond for block {d} after {d} retries", .{ i, retransmissions });
+                    return -1;
+                }
+
+                self._mmc.read_sdio_data(buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO read failed permanently: block {d} returned {s} after {d} retries", .{ i, @errorName(err), retransmissions });
+                    return -1;
+                };
+                i += 1;
+            } else {
+                const resp = self._mmc.send_sdio_command(18, @intCast(block_address + i));
+                if (resp.command_index != 18) {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO multi-read failed permanently: CMD18 did not respond at block {d} after {d} retries", .{ i, retransmissions });
+                    return -1;
+                }
+
+                self._mmc.read_sdio_data(buf[512 * i .. 512 * (i + chunk)]) catch |err| {
+                    _ = self._mmc.send_sdio_command(12, 0);
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO multi-read failed permanently: {d} blocks at {d} returned {s} after {d} retries", .{ chunk, i, @errorName(err), retransmissions });
+                    return -1;
+                };
+
+                _ = self._mmc.send_sdio_command(12, 0);
+                i += chunk;
+            }
+            retransmissions = 0;
+        }
+
+        return @intCast(buf.len);
+    }
+
+    fn sdio_write(self: *const Self, address: u64, buf: []const u8) isize {
+        const block_address: u32 = @intCast(address >> 9);
+        const num_blocks = buf.len / 512;
+
+        var i: usize = 0;
+        var retransmissions: usize = 0;
+        while (i < num_blocks) {
+            const resp = self._mmc.send_sdio_command(24, @intCast(block_address + i));
+            if (resp.command_index != 24) {
+                if (retransmissions < sdio_io_retry_limit) {
+                    retransmissions += 1;
+                    continue;
+                }
+                log.err("SDIO write failed permanently: CMD24 response mismatch for block {d} after {d} retries", .{ i, retransmissions });
+                return -1;
+            }
+
+            self._mmc.write_sdio_data(buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                _ = self._mmc.send_sdio_command(12, 0);
+                if (retransmissions < sdio_io_retry_limit) {
+                    retransmissions += 1;
+                    continue;
+                }
+                log.err("SDIO write failed permanently: block {d} returned {s} after {d} retries", .{ i, @errorName(err), retransmissions });
+                return -1;
+            };
+
+            var timeout: u32 = 100_000;
+            while (self._mmc.is_busy() and timeout > 0) : (timeout -= 1) {
+                hal.time.sleep_us(10);
+            }
+            if (timeout == 0) {
+                log.err("Card busy timeout after write block {d}", .{i});
+                return -1;
+            }
+
+            i += 1;
+        }
+
+        return @intCast(buf.len);
     }
 
     fn initialize_spi_mmc(self: *Self) anyerror!void {

@@ -167,11 +167,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             var next = self.terminate_list.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
-                log.info("schedule_next: reaping pid={d}", .{p.pid});
+                const pool = self.get_process_memory_pool();
+                log.info("schedule_next: reaping pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
                 self._scheduler.remove_process(&p.node);
                 self.terminate_list.remove(&p.node);
                 self.release_pid(p.pid);
                 p.deinit();
+                log.info("schedule_next: reaped pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
                 next = node.next;
             }
 
@@ -370,6 +372,36 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             current_process._vfork_context = ctx;
         }
 
+        fn clone_exec_args(allocator: std.mem.Allocator, argv: [*c][*c]u8) !struct {
+            argc: usize,
+            argv: [*c][*c]u8,
+        } {
+            var argc: usize = 0;
+            while (argv[argc] != null) : (argc += 1) {}
+
+            const argv_copy = try allocator.alloc([*c]u8, argc + 1);
+            errdefer allocator.free(argv_copy);
+
+            var cloned: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < cloned) : (i += 1) {
+                    allocator.free(std.mem.span(argv_copy[i].?));
+                }
+            }
+
+            while (cloned < argc) : (cloned += 1) {
+                const source = std.mem.span(argv[cloned]);
+                argv_copy[cloned] = @ptrCast(try allocator.dupeZ(u8, source));
+            }
+            argv_copy[argc] = null;
+
+            return .{
+                .argc = argc,
+                .argv = @ptrCast(argv_copy.ptr),
+            };
+        }
+
         // TODO: exec on currently running process is not supported yet
         pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator) !i32 {
             kernel.process.block_context_switch();
@@ -388,8 +420,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             if (path_allocator) |alloc| {
                 alloc.free(path);
             }
-            var argc: usize = 0;
-            while (argv[argc] != null) : (argc += 1) {}
+            const exec_allocator = current_process.get_process_memory_allocator();
+            const argv_copy = try clone_exec_args(exec_allocator, argv);
+            const argc = argv_copy.argc;
 
             var envpc: usize = 0;
             while (envp[envpc] != null) : (envpc += 1) {}
@@ -406,7 +439,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 
             try current_process.reallocate_stack();
 
-            try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
+            try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv_copy.argv), symbol.address, symbol.target_got_address);
             self._scheduler.set_next(&current_process._parent.?.node);
             self.core[hal.cpu.coreid()] = current_process._parent.?;
 

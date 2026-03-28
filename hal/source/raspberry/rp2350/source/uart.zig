@@ -36,7 +36,7 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         const Register = get_register_address(index);
         const RegisterVolatile = get_volatile_register_address(index);
 
-        var rx_buffer: common.utils.RingBuffer(u8, 1024) = common.utils.RingBuffer(u8, 1024).init();
+        var rx_buffer: common.utils.RingBuffer(u8, 4096) = common.utils.RingBuffer(u8, 4096).init();
         var is_initialized: bool = false;
 
         fn uart_is_readable() linksection(".time_critical") bool {
@@ -75,6 +75,10 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             rx_buffer.clear();
             self.flush();
             is_initialized = true;
+        }
+
+        pub fn set_baudrate(_: Self, baudrate: u32) void {
+            _ = picosdk.uart_set_baudrate(Register, baudrate);
         }
 
         pub fn is_writable(_: Self) bool {

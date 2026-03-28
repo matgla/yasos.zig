@@ -203,6 +203,7 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
 }
 
 pub fn release_executable(pid: c.pid_t) void {
+    log.info("release_executable: pid={d} kernel_used={d} alloc_count={d}", .{ pid, kernel.memory.heap.malloc.get_usage(), kernel.memory.heap.malloc.get_counter() });
     var maybe_entry = modules_list.getPtr(pid);
     if (maybe_entry) |*entry| {
         if (entry.*.executable) |*executable| {
@@ -224,6 +225,7 @@ pub fn release_executable(pid: c.pid_t) void {
     } else {
         log.warn("release_executable: pid={d} not found in modules_list", .{pid});
     }
+    log.info("release_executable: pid={d} done kernel_used={d} alloc_count={d}", .{ pid, kernel.memory.heap.malloc.get_usage(), kernel.memory.heap.malloc.get_counter() });
 }
 
 pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {

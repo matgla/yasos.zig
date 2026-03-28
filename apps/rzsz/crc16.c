@@ -49,12 +49,17 @@ static const uint16_t crc16_table[256] = {
     0xDF7C, 0xAF9B, 0xBFBA, 0x8FD9, 0x9FF8, 0x6E17, 0x7E36, 0x4E55, 0x5E74,
     0x2E93, 0x3EB2, 0x0ED1, 0x1EF0};
 
+// Incremental CRC-16 update (single byte)
+uint16_t crc16_ccitt_update(uint16_t crc, uint8_t byte) {
+  return (crc << 8) ^ crc16_table[((crc >> 8) ^ byte) & 0xFF];
+}
+
 // Fast CRC-16 calculation using lookup table
 uint16_t crc16_ccitt(const uint8_t *data, size_t len) {
   uint16_t crc = 0x0000;
 
   for (size_t i = 0; i < len; i++) {
-    crc = (crc << 8) ^ crc16_table[((crc >> 8) ^ data[i]) & 0xFF];
+    crc = crc16_ccitt_update(crc, data[i]);
   }
 
   return crc;

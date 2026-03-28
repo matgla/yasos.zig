@@ -143,6 +143,20 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
     }
 
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        const len: usize = @intCast(length);
+        if (len > self._data.data.items.len) {
+            _ = self._data.data.appendNTimes(self._allocator, 0, len - self._data.data.items.len) catch {
+                return kernel.errno.ErrnoSet.OutOfMemory;
+            };
+        } else {
+            self._data.data.shrinkRetainingCapacity(len);
+        }
+        if (self._position > @as(isize, @intCast(len))) {
+            self._position = @intCast(len);
+        }
+    }
+
     pub fn name(self: *const Self) []const u8 {
         return self._name;
     }
@@ -238,4 +252,40 @@ test "RamFsFile.ShouldSeekFile" {
     try std.testing.expectEqual(132, file.interface.tell());
 
     try std.testing.expectEqual(132 + @sizeOf(RamFsData), file.interface.size());
+}
+
+test "RamFsFile.ShouldTruncateFile" {
+    const data = std.testing.allocator.create(RamFsData) catch unreachable;
+    data.* = try RamFsData.create(std.testing.allocator);
+
+    var file = try RamFsFile.InstanceType.create(std.testing.allocator, data, "trunc_file").interface.new(std.testing.allocator);
+    defer file.interface.delete();
+
+    // Write some data
+    try std.testing.expectEqual(11, file.interface.write("hello world"));
+
+    // Truncate to shorter length
+    try file.interface.truncate(5);
+    try std.testing.expectEqual(5 + @sizeOf(RamFsData), file.interface.size());
+
+    // Read back truncated data
+    _ = try file.interface.seek(0, c.SEEK_SET);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqual(5, file.interface.read(&buf));
+    try std.testing.expectEqualStrings("hello", buf[0..5]);
+
+    // Truncate to larger length (extends with zeros)
+    try file.interface.truncate(8);
+    try std.testing.expectEqual(8 + @sizeOf(RamFsData), file.interface.size());
+    _ = try file.interface.seek(0, c.SEEK_SET);
+    try std.testing.expectEqual(8, file.interface.read(&buf));
+    try std.testing.expectEqualStrings("hello", buf[0..5]);
+    try std.testing.expectEqual(0, buf[5]);
+    try std.testing.expectEqual(0, buf[6]);
+    try std.testing.expectEqual(0, buf[7]);
+
+    // Truncate to zero
+    try file.interface.truncate(0);
+    try std.testing.expectEqual(@sizeOf(RamFsData), file.interface.size());
+    try std.testing.expectEqual(0, file.interface.tell());
 }

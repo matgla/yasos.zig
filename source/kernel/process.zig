@@ -169,6 +169,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         vfork_sp: usize = 0,
         vfork_fp: usize = 0,
         child_exit_code: i32 = 0,
+        _last_tty_output_fd: ?u16 = null,
+        _pending_tty_newline_on_exit: bool = false,
         resource_limits: [c.RLIM_NLIMITS]c.rlimit,
 
         pub const State = enum(u3) {
@@ -241,10 +243,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn deinit(self: *Self) void {
+            const pool = kernel.process.process_manager.instance.get_process_memory_pool();
+            log.info("deinit pid={d}: kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             self.impl.deinit(self._process_memory_allocator.allocator());
+            log.info("deinit pid={d}: after impl.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             self.clear_fds();
+            log.info("deinit pid={d}: after clear_fds kernel_used={d} process_pages={d} alloc_count={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
             self._kernel_allocator.free(self.cwd);
             self._process_memory_allocator.deinit();
+            log.info("deinit pid={d}: after proc_mem.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             var it = self._blocked_by.first;
             while (it) |blocked| {
                 const blocker: *BlockedByProcess = @fieldParentPtr("node", blocked);
@@ -472,7 +479,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn reallocate_stack(self: *Self) !void {
             const stack_limit = try self.get_resource_limit(c.RLIMIT_STACK);
             const requested_stack_size = std.math.cast(u32, stack_limit.rlim_cur) orelse return kernel.errno.ErrnoSet.InvalidArgument;
-            log.err("Reallocating stack to new size: {d}", .{requested_stack_size});
+            log.debug("Reallocating stack to new size: {d}", .{requested_stack_size});
             try self.impl.reallocate_stack(requested_stack_size);
         }
 
@@ -612,6 +619,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn release_file(self: *Self, fd: i32) void {
             const maybe_handle = self._fds.getPtr(@intCast(fd));
             if (maybe_handle) |handle| {
+                if (self._last_tty_output_fd != null and self._last_tty_output_fd.? == @as(u16, @intCast(fd))) {
+                    self._last_tty_output_fd = null;
+                    self._pending_tty_newline_on_exit = false;
+                }
                 handle.close();
                 _ = self._fds.remove(@intCast(fd));
             }
@@ -623,6 +634,39 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 return handle;
             }
             return null;
+        }
+
+        pub fn record_tty_output(self: *Self, fd: i32, data: []const u8) void {
+            if (fd < 0 or data.len == 0) {
+                return;
+            }
+            self._last_tty_output_fd = @intCast(fd);
+            self._pending_tty_newline_on_exit = data[data.len - 1] != '\n';
+        }
+
+        pub fn should_append_tty_newline_on_exit(self: *const Self) bool {
+            return self._last_tty_output_fd != null and self._pending_tty_newline_on_exit;
+        }
+
+        pub fn append_tty_newline_on_exit(self: *Self) void {
+            if (!self.should_append_tty_newline_on_exit()) {
+                return;
+            }
+
+            const fd = self._last_tty_output_fd.?;
+            const maybe_handle = self._fds.getPtr(fd);
+            if (maybe_handle) |handle| {
+                if (handle.node.is_file()) {
+                    var maybe_file = handle.node.as_file();
+                    if (maybe_file) |*file| {
+                        if (file.interface.filetype() == kernel.fs.FileType.CharDevice) {
+                            _ = file.interface.write("\n");
+                        }
+                    }
+                }
+            }
+
+            self._pending_tty_newline_on_exit = false;
         }
     };
 }
@@ -1030,6 +1074,41 @@ test "Process.ShouldDuplicateFileHandlesOnVfork" {
     parent.release_file(fd1);
     try std.testing.expect(parent.get_file_handle(fd1) == null);
     try std.testing.expect(child.get_file_handle(fd1) != null);
+}
+
+test "Process.ShouldTrackPendingTtyNewlineOnExit" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 0;
+    hal.time.impl.set_time(0);
+
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 220, false);
+    defer sut.deinit();
+
+    sut.record_tty_output(1, "17");
+    try std.testing.expect(sut.should_append_tty_newline_on_exit());
+
+    sut.record_tty_output(1, "\n");
+    try std.testing.expect(!sut.should_append_tty_newline_on_exit());
+}
+
+test "Process.ShouldClearPendingTtyNewlineWhenFdReleased" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 0;
+    hal.time.impl.set_time(0);
+
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 221, false);
+    defer sut.deinit();
+
+    var file_mock = try FileMock.create(std.testing.allocator);
+    defer file_mock.delete();
+    const node = kernel.fs.Node.create_file(file_mock.interface);
+
+    const fd = try sut.attach_file("/dev/stdout", node);
+    sut.record_tty_output(fd, "17");
+    try std.testing.expect(sut.should_append_tty_newline_on_exit());
+
+    sut.release_file(fd);
+    try std.testing.expect(!sut.should_append_tty_newline_on_exit());
 }
 
 const DirectoryMock = @import("fs/tests/directory_mock.zig").DirectoryMock;

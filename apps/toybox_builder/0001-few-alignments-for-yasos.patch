@@ -1,17 +1,17 @@
-From 2fc33cc297e82a4bb96106e5fc92200640fb83f3 Mon Sep 17 00:00:00 2001
+From d0180b6b31dd17bb6104bb1d7846edcc931c859e Mon Sep 17 00:00:00 2001
 From: Mateusz Stadnik <matgla@live.com>
 Date: Sat, 28 Mar 2026 16:09:56 +0100
 Subject: [PATCH] few alignments for yasos
 
 ---
  lib/args.c             | 277 +++++++++++++++++++++++++----------------
- main.c                 |   2 +-
+ main.c                 |   6 +-
  scripts/make.sh        |   2 +-
  scripts/portability.sh |   2 +-
  toys/pending/sh.c      |   5 +-
  toys/posix/echo.c      |   1 -
  toys/posix/ulimit.c    | 138 +++++++++++++-------
- 7 files changed, 271 insertions(+), 156 deletions(-)
+ 7 files changed, 273 insertions(+), 158 deletions(-)
 
 diff --git a/lib/args.c b/lib/args.c
 index 9b94521d..2fbd6ef9 100644
@@ -560,9 +560,20 @@ index 9b94521d..2fbd6ef9 100644
  
      help_exit("Needs %s-%s", s[1] ? "one of " : "", needs);
 diff --git a/main.c b/main.c
-index aa6a52cb..8dc2426d 100644
+index aa6a52cb..5a2972b6 100644
 --- a/main.c
 +++ b/main.c
+@@ -207,8 +207,8 @@ void toy_singleinit(struct toy_list *which, char *argv[])
+     for (toys.optc = 0; toys.optargs[toys.optc]; toys.optc++);
+   }
+ 
+-  // Setup we only want to do once: skip for multiplexer or NOFORK reentry
+-  if (!(CFG_TOYBOX && which == toy_list) && !(which->flags & TOYFLAG_NOFORK)) {
++  // Setup we only want to do once: skip for multiplexer or NOFORK/MAYFORK reentry
++  if (!(CFG_TOYBOX && which == toy_list) && !(which->flags & (TOYFLAG_NOFORK|TOYFLAG_MAYFORK))) {
+     char *buf = 0;
+     int btype = _IOFBF;
+ 
 @@ -224,7 +224,7 @@ void toy_singleinit(struct toy_list *which, char *argv[])
  
      if (which->flags & TOYFLAG_LINEBUF) btype = _IOLBF;

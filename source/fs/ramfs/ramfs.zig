@@ -39,6 +39,18 @@ const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 
 const RamFsDirectory = @import("ramfs_directory.zig").RamFsDirectory;
 
+fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
+    data.* = std.mem.zeroes(c.struct_stat);
+
+    const normalized_path = if (path.len == 0) "/" else path;
+    const device_hash = std.hash.Wyhash.hash(0, "ramfs") | 1;
+    const inode_hash = std.hash.Wyhash.hash(device_hash, normalized_path) | 1;
+
+    data.st_dev = @truncate(device_hash);
+    data.st_ino = @truncate(inode_hash);
+    data.st_nlink = 1;
+}
+
 pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     const Self = @This();
     _allocator: std.mem.Allocator,
@@ -172,6 +184,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         _ = follow_symlinks;
+        initialize_stat_identity(data, path);
         var node = try self.get(path);
         defer node.delete();
         data.st_mode = switch (node.filetype()) {

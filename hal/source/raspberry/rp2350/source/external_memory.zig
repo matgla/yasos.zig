@@ -137,48 +137,44 @@ const PsramCommands = struct {
     const KdgPass: u32 = 0x5d;
 };
 
-const microsecond_to_femtosecond: u64 = 1000000000;
-const nanosecond_to_femtosecond: u64 = 1000000;
-const second_to_femtosecond: u64 = 1000000000000000;
+fn div_ceil_u64(numerator: u64, denominator: u64) u64 {
+    return (numerator + denominator - 1) / denominator;
+}
 
-// move this into config
-const psram_max_frequency: u64 = 109000000;
-// 8us in datasheet
-const psram_ce_max_low_pulse_width_us: u64 = 8;
-const psram_ce_min_deselect_ns: u64 = 50;
-
-const qpi_ce_max_low_pulse_width_us: u64 = 125000000; //;psram_ce_max_low_pulse_width_us * microsecond_to_femtosecond / 64;
-const qpi_ce_min_deselect_ns: u64 = 50000000; //psram_ce_min_deselect_ns * nanosecond_to_femtosecond;
-
-// const config = @import("config").external_memory;
+fn clamp_int(comptime T: type, value: u64) T {
+    return @intCast(@min(value, std.math.maxInt(T)));
+}
 
 fn qmi_configure_timings() void {
-    const system_clock = c.clock_get_hz(c.clk_sys);
-    const clock_divider: u8 = @intCast((system_clock + psram_max_frequency - 1) / psram_max_frequency);
-    // delay is in femtoseconds
-    // const femtoseconds_per_cycle = second_to_femtosecond / system_clock;
-    const max_select: u32 = 0x10; //@intCast(qpi_ce_max_low_pulse_width_us / femtoseconds_per_cycle);
-    const min_deselect: u32 = 0x7; ////@intCast((qpi_ce_min_deselect_ns + femtoseconds_per_cycle - 1) / femtoseconds_per_cycle);
-    // const max_select: u32 = 0x10;
-    // const min_deselect: u32 = 0x7;
-    const cooldown: u32 = 1;
-    const select_hold: u32 = 3;
-    const rx_delay: u32 = 1;
-    const page_break = c.QMI_M1_TIMING_PAGEBREAK_VALUE_1024;
+    const system_clock: u64 = c.clock_get_hz(c.clk_sys);
 
-    // if (system_clock > 266000000) rx_delay = 3;
+    // M0 (flash) timing is managed by apply_overclock() in crt.zig — do not touch it here.
+
+    const psram_clock_divider = clamp_int(u8, @max(2, div_ceil_u64(system_clock, config.psram.max_frequency_hz)));
+    const psram_frequency = system_clock / psram_clock_divider;
+    const psram_half_sck_ns = 500_000_000 / psram_frequency;
+    const psram_extra_deselect_ns = if (config.psram.ce_min_deselect_ns > psram_half_sck_ns)
+        config.psram.ce_min_deselect_ns - psram_half_sck_ns
+    else
+        0;
+    const psram_extra_deselect_cycles = div_ceil_u64(psram_extra_deselect_ns * system_clock, 1_000_000_000);
+    const psram_max_select_cycles = (config.psram.ce_max_low_us * system_clock) / (4 * 1_000_000);
+    const psram_rx_delay: u3 = if (psram_frequency >= config.psram.rxdelay_hi_freq_threshold_hz)
+        clamp_int(u3, config.psram.rxdelay_hi)
+    else
+        clamp_int(u3, config.psram.rxdelay_lo);
 
     qmi.*.m[1].timing.write(.{
-        .clkdiv = @intCast(clock_divider),
-        .rxdelay = @intCast(rx_delay),
+        .clkdiv = psram_clock_divider,
+        .rxdelay = psram_rx_delay,
         ._reserved0 = 0,
-        .min_deselect = @intCast(min_deselect),
-        .max_select = @intCast(max_select),
-        .select_hold = select_hold,
+        .min_deselect = clamp_int(u5, psram_extra_deselect_cycles),
+        .max_select = clamp_int(u6, psram_max_select_cycles / 64),
+        .select_hold = 3,
         .select_setup = 0,
         ._reserved1 = 0,
-        .pagebreak = page_break,
-        .cooldown = cooldown,
+        .pagebreak = c.QMI_M1_TIMING_PAGEBREAK_VALUE_NONE,
+        .cooldown = 1,
     });
 }
 

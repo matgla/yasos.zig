@@ -102,6 +102,15 @@ menu "Logging & Instrumentation"
     prompt "Enable kernel allocator memory usage"
     def_bool "false"
 
+  config CONFIG_INSTRUMENTATION_PERF_PROFILING
+    prompt "Enable performance profiling"
+    def_bool "false"
+    help
+      Enable per-syscall cycle counting and performance profiling.
+      When enabled the kernel accumulates DWT cycle counts per syscall type
+      and exposes a sys_perf_dump syscall to retrieve the results.
+      TCC will also emit a detailed bench breakdown when this is active.
+
   choice "Log level"
     prompt "Log level"
     config CONFIG_INSTRUMENTATION_LOG_ERROR

@@ -1,0 +1,6 @@
+tests/smoke/tcc_suite_test.py:649: AssertionError
+=========================== short test summary info ============================
+FAILED tests/smoke/tcc_suite_test.py::test_run_ir_test_suite[ir_tests/test_llong_relops.c]
+FAILED tests/smoke/tcc_suite_test.py::test_run_ir_test_suite[ir_tests/test_tcc_i64_ir_bug.c]
+FAILED tests/smoke/tcc_suite_test.py::test_run_ir_test_suite[ir_tests/test_tcc_volatile_reg.c]
+================== 3 failed, 361 passed in 812.55s (0:13:32) ===================

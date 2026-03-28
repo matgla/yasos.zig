@@ -100,6 +100,12 @@ pub fn build(b: *std.Build) !void {
     });
     hal.addIncludePath(mmc_spi_pio.dirname());
 
+    const mmc_sdio_pio = try generate_pio(b, "mmc/mmc_sdio.pio", picosdk);
+    hal.addAnonymousImport("mmc_sdio_pio", .{
+        .root_source_file = mmc_sdio_pio,
+    });
+    hal.addIncludePath(mmc_sdio_pio.dirname());
+
     hal.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated" }) });
 
     const halInterface = b.dependency("hal_interface", .{ .optimize = optimize, .target = target });
@@ -170,6 +176,7 @@ pub fn build(b: *std.Build) !void {
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_irq/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_gpio/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_pio/include"));
+    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_dma/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_sync/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_vreg/include"));
 
@@ -213,11 +220,17 @@ pub fn build(b: *std.Build) !void {
             "../../../libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_ticks/ticks.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_pio/pio.c",
+            "../../../libs/pico-sdk/src/rp2_common/hardware_dma/dma.c",
+            "../../../libs/pico-sdk/src/rp2_common/hardware_vreg/vreg.c",
+            "source/mmc/sdio_rp2350.c",
+            "startup/overclock.c",
             // "../../../libs/pico-sdk/src/common/pico_time/time.c",
             // "../../../libs/pico-sdk/src/common/pico_sync/lock_core.c",
         },
         .flags = &.{"-std=c23"},
     });
+    hal.addIncludePath(b.path("source/mmc"));
+    hal.addIncludePath(b.path("startup"));
     hal.addAssemblyFile(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_irq/irq_handler_chain.S"));
     hal.addAssemblyFile(b.path("startup/startup.S"));
     hal.addAssemblyFile(b.path("source/external_memory.S"));

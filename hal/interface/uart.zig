@@ -61,6 +61,10 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
             return self.impl.flush();
         }
 
+        pub fn set_baudrate(self: Self, baudrate: u32) void {
+            self.impl.set_baudrate(baudrate);
+        }
+
         pub fn is_readable(self: Self) bool {
             return self.impl.is_readable();
         }

@@ -27,6 +27,7 @@ const Config = struct {
     cpu: ?[]const u8 = null,
     build_linker_script_path: ?[]const u8 = null,
     build_bundle_compiler_rt: ?bool = false,
+    cpu_clock_frequency_mhz: ?u32 = null,
 };
 
 fn load_config(b: *std.Build, config_file: []const u8) !Config {
@@ -45,6 +46,50 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
         },
     );
     return parsed.value;
+}
+
+const PllParams = struct {
+    vco_freq_hz: u32,
+    postdiv1: u32,
+    postdiv2: u32,
+    actual_freq_khz: u32,
+};
+
+/// Find the highest achievable PLL frequency <= requested_mhz.
+/// XOSC = 12 MHz, VCO range 750–1600 MHz, postdiv1/2 in [1..7], pd2 <= pd1.
+/// Must match the comptime computation in crt.zig exactly.
+fn computePllParams(requested_mhz: u32) ?PllParams {
+    const xosc_khz: u32 = 12_000;
+    const vco_min_khz: u32 = 750_000;
+    const vco_max_khz: u32 = 1_600_000;
+    const max_khz: u32 = requested_mhz * 1_000;
+
+    var best: PllParams = .{ .vco_freq_hz = 0, .postdiv1 = 0, .postdiv2 = 0, .actual_freq_khz = 0 };
+
+    var fbdiv: u32 = 320;
+    while (fbdiv >= 16) : (fbdiv -= 1) {
+        const vco_khz = fbdiv * xosc_khz;
+        if (vco_khz < vco_min_khz or vco_khz > vco_max_khz) continue;
+        var pd1: u32 = 7;
+        while (pd1 >= 1) : (pd1 -= 1) {
+            var pd2: u32 = pd1;
+            while (pd2 >= 1) : (pd2 -= 1) {
+                if ((vco_khz % (pd1 * pd2)) != 0) continue;
+                const out_khz = vco_khz / (pd1 * pd2);
+                if (out_khz > max_khz) continue;
+                if (out_khz > best.actual_freq_khz) {
+                    best = .{
+                        .vco_freq_hz = vco_khz * 1_000,
+                        .postdiv1 = pd1,
+                        .postdiv2 = pd2,
+                        .actual_freq_khz = out_khz,
+                    };
+                }
+            }
+        }
+    }
+    if (best.actual_freq_khz == 0) return null;
+    return best;
 }
 
 pub fn build(b: *std.Build) !void {
@@ -99,6 +144,25 @@ pub const Builder = struct {
         const halDependency = try std.fmt.allocPrint(b.allocator, "mcu/{s}", .{config.cpu.?});
         defer b.allocator.free(halDependency);
         const mcu = b.dependency(halDependency, .{});
+
+        // Propagate clock configuration as C macros for the pico-sdk.
+        // Always boot at 150 MHz — the actual overclock is applied later by
+        // apply_overclock() after UART init, with proper VREG + QMI setup.
+        // We still compute PLL params for the target frequency but only use
+        // them in Zig (crt.zig), NOT for runtime_init_clocks().
+        if (config.cpu_clock_frequency_mhz) |freq_mhz| {
+            if (computePllParams(freq_mhz)) |_| {
+                const hal_mod = mcu.module("hal");
+                // Force SDK to boot at 150 MHz (stock RP2350 clock)
+                const boot_pll = computePllParams(150).?;
+                hal_mod.addCMacro("SYS_CLK_KHZ", b.fmt("{d}", .{boot_pll.actual_freq_khz}));
+                hal_mod.addCMacro("PLL_SYS_VCO_FREQ_HZ", b.fmt("{d}", .{boot_pll.vco_freq_hz}));
+                hal_mod.addCMacro("PLL_SYS_POSTDIV1", b.fmt("{d}", .{boot_pll.postdiv1}));
+                hal_mod.addCMacro("PLL_SYS_POSTDIV2", b.fmt("{d}", .{boot_pll.postdiv2}));
+            } else {
+                std.log.err("Cannot find valid PLL parameters for {d} MHz", .{freq_mhz});
+            }
+        }
 
         const root_path = std.Build.LazyPath{ .src_path = .{
             .sub_path = root_file,
@@ -155,6 +219,7 @@ pub const Builder = struct {
                 .root_source_file = b.path(config_zig_relative),
             });
             mcu.module("hal").addImport("config", config_module);
+            boardModule.addImport("config", config_module);
             exe.root_module.addImport("config", config_module);
 
             if (config.build_linker_script_path) |linker_script| {

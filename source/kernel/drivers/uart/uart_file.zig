@@ -248,6 +248,12 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return uart.bytes_to_read();
             }
 
+            pub fn truncate(self: *Self, length: u64) anyerror!void {
+                _ = self;
+                _ = length;
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
             pub fn filetype(self: *const Self) FileType {
                 _ = self;
                 return FileType.CharDevice;

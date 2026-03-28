@@ -58,10 +58,64 @@ config FLASH_MEMORY_SIZE
     string "Flash memory size in format like: 1024K" 
     depends on FIRMWARE_IN_FLASH
 
+menu "XIP Flash"
+config CONFIG_FLASH_XIP_MAX_FREQUENCY_HZ
+    int "Maximum XIP flash frequency in Hz"
+    depends on FIRMWARE_IN_FLASH
+
+config CONFIG_FLASH_XIP_MAX_SELECT_US
+    int "Maximum XIP chip select assertion time in us"
+    depends on FIRMWARE_IN_FLASH
+endmenu
+
 menu "PSRAM"
 config CONFIG_PSRAM_CS_PIN
     int "Pin for PSRAM chip selection"
     depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_MAX_FREQUENCY_HZ
+    int "Maximum PSRAM frequency in Hz"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_CE_MAX_LOW_US
+    int "Maximum PSRAM chip select low pulse width in us"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_CE_MIN_DESELECT_NS
+    int "Minimum PSRAM chip select deselect time in ns"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_RXDELAY_LO
+    int "PSRAM RX delay below the high-speed threshold"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_RXDELAY_HI
+    int "PSRAM RX delay at or above the high-speed threshold"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_RXDELAY_HI_FREQ_THRESHOLD_HZ
+    int "PSRAM frequency threshold for the high RX delay in Hz"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+endmenu
+
+menu "SD Card"
+choice CONFIG_MMC_BUS_MODE
+    prompt "SD Card Bus Mode"
+    default CONFIG_MMC_BUS_MODE_SPI
+    help
+      Select the SD card bus mode. SPI uses single data line,
+      SDIO uses native 4-bit wide bus via PIO.
+
+    config CONFIG_MMC_BUS_MODE_SPI
+      bool "SPI"
+      help
+        Use SPI mode for SD card communication (1-bit, MOSI/MISO)
+
+    config CONFIG_MMC_BUS_MODE_SDIO
+      bool "SDIO"
+      help
+        Use native SDIO mode for SD card communication (4-bit DAT bus via PIO)
+endchoice
 endmenu
 
 endmenu

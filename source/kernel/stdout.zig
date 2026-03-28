@@ -25,14 +25,16 @@ const board = @import("board");
 var stdout: std.Io.Writer = undefined;
 var write_callback: ?WriteCallback = null;
 var write_context: ?*const anyopaque = null;
+var suppressed: bool = false;
 
 pub const WriteCallback = *const fn (self: *const anyopaque, data: []const u8) anyerror!usize;
 
-fn drain_sink(io_w: *std.Io.Writer, data: []const[] const u8, splat: usize) std.Io.Writer.Error!usize {
+fn drain_sink(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
     _ = splat;
     _ = io_w;
+    if (suppressed) return data[0].len;
     if (write_context == null) return error.WriteFailed;
-    if (write_callback) | callback | {
+    if (write_callback) |callback| {
         return callback(write_context.?, data[0]) catch return error.WriteFailed;
     }
     return error.WriteFailed;
@@ -59,4 +61,8 @@ pub fn print(comptime format: []const u8, args: anytype) void {
 
 pub fn write(comptime data: []const u8) void {
     _ = stdout.write(data) catch return;
+}
+
+pub fn suppress(value: bool) void {
+    suppressed = value;
 }

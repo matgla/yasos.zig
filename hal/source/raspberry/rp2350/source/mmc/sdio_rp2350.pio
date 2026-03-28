@@ -1,0 +1,365 @@
+/**
+ * SDIO_RP2350 - Copyright (c) 2022-2025 Rabbit Hole Computing™
+ *
+ * MIT License
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ */
+
+; RP2350 PIO program for implementing SD card access in SDIO mode
+; Run "pioasm sdio_rp2350.pio sdio_rp2350.pio.h" to regenerate the C header from this.
+
+; For official SDIO specifications, refer to:
+; https://www.sdcard.org/downloads/pls/
+; "SDIO Physical Layer Simplified Specification Version 9.00"
+; or the version with TOC: https://jpa.kapsi.fi/stuff/other/SDIO_toc.pdf
+
+; For standard speed mode, the card writes its outputs max 14 ns after
+; the falling edge of CLK, and samples its inputs on rising edge.
+;
+; For high speed mode, both input and output are synchronous to the rising
+; edge.
+;
+; Timing parameters for high speed mode are not included in the simplified
+; specification, but can be found in Kingston datasheet:
+; https://www.kingston.com/datasheets/SDCIT-specsheet-64gb_jp.pdf
+;
+; Card writes its outputs within 14 ns from rising edge of CLK
+; and holds them for 2.5 ns from next rising edge.
+;
+; Card reads its inputs at rising edge. Inputs must be valid
+; for 6 ns before the edge and 2 ns after the edge.
+;
+; In HS 50 MHz mode, one SDIO clock cycle is 20 ns and
+; RP2350 clock cycle is 6.7 ns. With synchronizers bypassed,
+; delay from GPIO IN to PIO is 2-5 ns and PIO to GPIO OUT
+; is 2-7 ns (according to issue #280 comments).
+;
+; To satisfy the high-speed timing when reading from the card, we should
+; read inputs two PIO instructions after writing CLK=1:
+;         1. SET CLK=1   ; Clock rises 2-7 ns after this instruction completes
+;         2. NOP/STALL   ; Inputs are sampled 2-5 ns before this instruction ends,
+;                        ; which is 5-2 ns after it starts, so roughly at the
+;                        ; same time the clock rising edge goes out.
+;         3. IN DATA     ; This reads the data that came in during cycle 2.
+;
+; For writing to the card, we should write outputs one cycle
+; before writing CLK=1.
+
+; Clock settings
+; For 3.3V communication the available speeds are:
+; - Initialization: max 400 kHz
+; - Default speed: max. 25 MHz clock
+; - High speed:    max. 50 MHz clock
+;
+; From the default RP2350 clock speed of 150 MHz, we divide by 3
+; to produce data transfer clock of 50 MHz, with 33% duty cycle.
+;
+; If the system clock is higher than 150 MHz and there is a need to apply
+; divider for high speed data transfer, the extra delay must be applied
+; to the instructions with "side 0". This is because the delay between
+; rising edge of clock and the data sampling
+; is determined by hardware delays and must remain constant.
+; 
+; For command transfer we use 25 MHz clock.
+;
+; Unlike the older sdio_RP2MCU.pio, this program takes advantage of the
+; permission to stop SDIO clock under conditions specified in section
+; "4.4 Clock Control".
+;
+; All programs in this file run on same PIO state machine.
+; Only one program is running at a time, so it has full control over
+; the clock.
+
+.define CMD_DELAY 2
+
+; Command program is used to:
+; - generate continuous clock on SDIO_CLK while running
+; - send CMD packets
+; - receive response packets
+;
+; Pin mapping for this program:
+; - Sideset    : CLK
+; - IN/OUT/SET : CMD
+; - JMP_PIN    : CMD
+;
+; The commands to send are put on TX fifo and must have two words:
+; Word 0 bits 31-24: Number of bits in command minus one (usually 47)
+; Word 0 bits 23-00: First 24 bits of the command packet, shifted out MSB first
+; Word 1 bits 31-08: Last 24 bits of the command packet, shifted out MSB first
+; Word 1 bits 07-00: Number of bits in response minus two (usually 46), or 0 if no response
+; The response is put on RX fifo, starting with the MSB.
+; Partial last word will be padded with zero bits at the top.
+
+.program sdio_cmd
+    .set 1
+    .side_set 1
+    .out 1 left auto 32     ; SDIO data goes MSB first
+    .in 32 left auto 32
+    .mov_status txfifo < 2  ; Check that command packet is ready to send before starting
+
+    mov OSR, ~NULL       side 1 [CMD_DELAY] ; Make sure OSR is full to prevent autopull
+
+wait_cmd:
+    mov Y, !STATUS      side 0 [CMD_DELAY] ; Check if TX FIFO has data, give idle clock
+    jmp !Y wait_cmd     side 1 [CMD_DELAY]
+
+load_cmd:
+    out pins, 32        side 0 [CMD_DELAY] ; Set CMD high, load first word (trigger autopull)
+    out X, 8            side 1 [CMD_DELAY] ; Number of bits to send
+    set pindirs, 1      side 1 [CMD_DELAY] ; Set SDIO_CMD as output
+
+send_cmd:
+    out pins, 1         side 0 [CMD_DELAY] ; Write output on falling edge of CLK
+    jmp X-- send_cmd    side 1 [CMD_DELAY]
+
+prep_resp:
+    set pindirs, 0      side 0 [0]           ; Set SDIO_CMD as input
+    out X, 8            side 0 [CMD_DELAY-1] ; Get number of bits in response
+
+wait_resp:
+    jmp !X resp_done    side 1 [CMD_DELAY] ; Check if we expect a response, give rising edge of CLK
+    jmp PIN wait_resp   side 0 [CMD_DELAY] ; Loop until SDIO_CMD = 0
+
+    in NULL, 1          side 1 [CMD_DELAY] ; Read start bit
+    
+    ; Note: input bits are read at the same time as we write CLK=0.
+    ; Because the host controls the clock, the read happens before
+    ; the card sees the falling clock edge. This gives maximum time
+    ; for the data bit to settle.
+read_resp:
+    in PINS, 1          side 0 [CMD_DELAY]  ; Read input data bit
+    jmp X-- read_resp   side 1 [CMD_DELAY]  ; Loop to receive all data bits
+
+PUBLIC resp_done:
+    push                side 0 [CMD_DELAY]  ; Push the remaining part of response
+
+; Command program for high speed mode
+; Differs in that the card writes the response bits on rising edge
+; of the clock signal.
+
+.program sdio_cmd_hs
+    .set 1
+    .side_set 1
+    .out 1 left auto 32     ; SDIO data goes MSB first
+    .in 32 left auto 32
+    .mov_status txfifo < 2  ; Check that command packet is ready to send before starting
+
+    mov OSR, ~NULL      side 1 [0]         ; Make sure OSR is full to prevent autopull
+
+wait_cmd:
+    mov Y, !STATUS      side 0 [CMD_DELAY] ; Check if TX FIFO has data, give idle clock
+    jmp !Y wait_cmd     side 1 [CMD_DELAY]
+
+load_cmd:
+    out pins, 32        side 0 [CMD_DELAY] ; Set CMD high, load first word (trigger autopull)
+    out X, 8            side 1 [CMD_DELAY] ; Number of bits to send
+    set pindirs, 1      side 1 [CMD_DELAY] ; Set SDIO_CMD as output
+
+send_cmd:
+    out pins, 1         side 0 [CMD_DELAY] ; Write output on falling edge of CLK
+    jmp X-- send_cmd    side 1 [CMD_DELAY]
+
+prep_resp:
+    set pindirs, 0      side 0 [CMD_DELAY] ; Set SDIO_CMD as input
+    out X, 8            side 1 [CMD_DELAY] ; Get number of bits in response
+
+wait_resp:
+    jmp !X resp_done    side 0 [CMD_DELAY] ; Check if we expect a response, give rising edge of CLK
+    jmp PIN wait_resp   side 1 [CMD_DELAY] ; Loop until SDIO_CMD = 0
+
+    in NULL, 1          side 0 [CMD_DELAY] ; Read start bit
+    
+    ; Note: input bits are read at the same time as we write CLK=1.
+    ; In high-speed mode card writes its output on rising edge.
+read_resp:
+    in PINS, 1          side 1 [CMD_DELAY]  ; Read input data bit
+    jmp X-- read_resp   side 0 [CMD_DELAY]  ; Loop to receive all data bits
+
+PUBLIC resp_done:
+    push                side 1 [CMD_DELAY-1] ; Push the remaining part of response
+
+
+
+; Data reception program (standard speed)
+;
+; Pin mapping for this program:
+; - Sideset: CLK
+; - IN:      SDIO_D0-D3
+; - JMPPIN:  SDIO_D0
+;
+; This program will wait for initial start of block token and then
+; receive a data block. The application must set number of nibbles
+; to receive minus 1 to Y register before running this program.
+;
+; After the block reception is done the reception of next block starts
+; automatically. If DMA is not reading the FIFO, the clock will be
+; paused and block reception can be continued later.
+;
+; In standard speed mode the card writes its outputs on falling edge,
+; We read the previous output when we send the falling edge.
+; Because of hardware delays this reads the value as it was two clock
+; cycles before the falling edge goes out.
+
+.program sdio_data_rx
+    .side_set 1
+    .out 4 left auto 32
+    .in 32 left auto 32
+    .mov_status rxfifo < 1
+
+wait_start:
+    mov X, Y                side 1  [CMD_DELAY]  ; Reinitialize number of nibbles to receive, rising edge of CLK
+    jmp pin, wait_start     side 0  [CMD_DELAY]  ; Falling edge of CLK, check for zero state on D0
+
+    nop                     side 1  [CMD_DELAY]  ; Issue next rising edge before entering the loop
+
+rx_data:
+    in PINS, 4              side 0  [CMD_DELAY]  ; Read input nibble, give falling edge
+    jmp X--, rx_data        side 1  [CMD_DELAY]  ; Loop while reception continues
+
+wait_next:
+    mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
+    jmp !X, wait_next       side 1  [0]          ; Keep clock stopped until next block should start
+
+; Data reception program (high speed)
+; This differs from the above in that the card writes its outputs
+; on rising edge, with up to 14 ns delay. To make the timing work,
+; we must read the input at the moment or slightly before the rising
+; edge goes out from our GPIO. This is done by executing read instruction
+; two cycles after the side-set.
+.program sdio_data_rx_hs
+    .side_set 1
+    .out 4 left auto 32
+    .in 32 left auto 32
+    .mov_status rxfifo < 1
+
+wait_start:
+    mov X, Y                side 1  [1]  ; Reinitialize number of nibbles to receive, rising edge of CLK
+    jmp pin, wait_start     side 0  [0]  ; Falling edge of CLK, check for zero state on D0
+
+    nop                     side 1  [1]  ; Issue next rising edge before entering the loop
+
+rx_data:
+    in PINS, 4              side 0  [0]  ; Read input nibble, give falling edge
+    jmp X--, rx_data        side 1  [1]  ; Loop while reception continues
+
+rx_done:
+    push                    side 1  [0]  ; Push partial last word
+
+wait_next:
+    mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
+    jmp !X, wait_next       side 1  [0]          ; Keep clock stopped until next block should start
+
+; Data reception program (high speed overclock)
+; This uses the nominally 50 MHz SD card high-speed mode with 75 MHz
+; clock. This is experimental.
+.program sdio_data_rx_hs_oc
+    .side_set 1
+    .out 4 left auto 32
+    .in 32 left auto 32
+    .mov_status rxfifo < 1
+
+wait_start:
+    mov X, Y                side 0  [0]  ; Reinitialize number of nibbles to receive, rising edge of CLK
+    jmp pin, wait_start     side 1  [0]  ; Rising edge of CLK, check for zero state on D0 2 cycles after prev rising
+
+    nop                     side 0  [0]  ; Issue next falling edge before entering the loop
+
+rx_data:
+    in PINS, 4              side 1  [0]  ; Read input nibble, give next rising edge
+    jmp X--, rx_data        side 0  [0]  ; Loop while reception continues
+
+rx_done:
+    push                    side 1  [0]  ; Push partial last word
+
+wait_next:
+    mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
+    jmp !X, wait_next       side 1  [0]          ; Keep clock stopped until next block should start
+
+; Data transmission program
+;
+; Pin mapping for this state machine:
+; - Sideset: CLK
+; - IN/OUT:  SDIO_D0-D3
+; - JMPPIN:  SDIO_D0
+;
+; Before running this program, pindirs should be set as output
+; and register X should be initialized with the number of nibbles
+; to send minus 1 (typically 8 + 1024 + 16 + 1 - 1 = 1048)
+; and register Y with the number of response bits minus 1 (typically 31).
+;
+; Words written to TX FIFO must be:
+; - Word 0: start token 0xFFFFFFF0
+; - Word 1-128: transmitted data (512 bytes)
+; - Word 129-130: CRC checksum
+; - Word 131: end token 0xFFFFFFFF
+;
+; After the card reports idle status, RX FIFO will get a word that
+; contains the D0 line response from card.
+;
+
+.program sdio_data_tx
+    .side_set 1
+    .out 4 left auto 32
+    .in 32 left
+
+tx_loop:
+    out PINS, 4          side 0   [CMD_DELAY]    ; Write nibble before rising edge
+    jmp X-- tx_loop      side 1   [CMD_DELAY]    ; Issue rising edge and loop while TX data continues
+
+    set pindirs, 0       side 0   [CMD_DELAY]    ; Set data bus as input and wait for turnaround
+
+rsp_loop:
+    in PINS, 1           side 1   [CMD_DELAY]    ; Read D0 at 2 cycles after falling edge issued on next line
+    jmp Y--, rsp_loop    side 0   [CMD_DELAY]    ; Issue falling edge
+    
+wait_idle:
+    jmp pin, done        side 1   [CMD_DELAY]    ; Wait for card to indicate idle condition
+    jmp wait_idle        side 0   [CMD_DELAY]    ; Issue falling edge
+
+done:
+    push                 side 0   [CMD_DELAY]    ; Push the response token
+
+
+; Data transmission program (high speed)
+; Differs from the above by writing new data 1 cycle after rising
+; edge to give maximum time for it to stabilize.
+; The reply is also read relative to rising edge.
+.program sdio_data_tx_hs
+    .side_set 1
+    .out 4 left auto 32
+    .in 32 left
+
+tx_loop:
+    out PINS, 4          side 0   [1]    ; Write nibble and wait for it to stabilize
+    jmp X-- tx_loop      side 1   [0]    ; Issue rising edge and loop while TX data continues
+
+    set pindirs, 0       side 0   [0]    ; Set data bus as input and wait for turnaround
+    nop                  side 1   [1]    ; Clock alignment
+
+rsp_loop:
+    in PINS, 1           side 0   [0]    ; Read D0 at 2 cycles after rising edge issued on next line
+    jmp Y--, rsp_loop    side 1   [1]    ; Issue rising edge
+    
+wait_idle:
+    jmp pin, done        side 0   [0]    ; Wait for card to indicate idle condition
+    jmp wait_idle        side 1   [1]    ; Issue rising edge
+
+done:
+    push                 side 0   [0]    ; Push the response token

@@ -22,9 +22,9 @@ menu "CPU Configuration"
 choice CHOICE_CPU_ARCHITECTURE
     prompt "CPU architecture"
     rsource "common/arch/**/**/KConfig"
-endchoice 
+endchoice
 
-choice CHOICE_CPU_CORE 
+choice CHOICE_CPU_CORE
     prompt "CPU core"
     rsource "common/cores/**/**/KConfig"
 endchoice
@@ -34,17 +34,34 @@ choice CHOICE_CPU_FAMILY
     rsource "**/KConfig"
 endchoice
 
-choice CHOICE_CPU 
+choice CHOICE_CPU
     prompt "CPU model"
     rsource "**/**/KConfig"
-endchoice 
+endchoice
+
+config CONFIG_CPU_CLOCK_FREQUENCY_MHZ
+    int "CPU clock frequency in MHz (150-700)"
+    default 150
+    range 150 700
+    depends on CPU_RP2350
+    help
+      Set the desired RP2350 system clock frequency in MHz.
+      The actual frequency is rounded down to the nearest value
+      achievable by the PLL (12 MHz XOSC, VCO 750-1600 MHz).
+      Values above 150 MHz require overclocking.
+      Core voltage is automatically adjusted (with ~10% safety margin):
+        <=250 MHz: 1.10V     <=370 MHz: 1.35V     <=480 MHz: 1.70V
+        <=324 MHz: 1.25V     <=384 MHz: 1.40V     <=512 MHz: 1.80V
+        <=348 MHz: 1.30V     <=424 MHz: 1.50V     >512 MHz:  1.90V
+                              <=452 MHz: 1.60V
+      Flash and PSRAM timings are scaled automatically.
 
 config CONFIG_CPU_HAS_FPU
-    bool 
+    bool
 
-config CONFIG_CPU_USE_FPU 
+config CONFIG_CPU_USE_FPU
     bool "Use floating point unit"
-    depends on CONFIG_CPU_HAS_FPU 
+    depends on CONFIG_CPU_HAS_FPU
 
 
 endmenu

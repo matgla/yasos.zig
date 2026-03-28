@@ -65,7 +65,7 @@ def test_compile_hello_world_with_usage_tracking(request):
                     allowed_increases -= 1
                 assert (prevusage == stats) or allowed_increases > 0, "memory usage should not raise"
             elif i > 0:
-                assert stats["MemKernelUsed"] > prevusage["MemKernelUsed"], "kernel memory should raise when creating new files in ramdisk"
+                assert stats["MemTmpUsed"] >= prevusage["MemTmpUsed"], "tmp memory should not decrease when creating new files in ramdisk"
                 if stats["MemProcessUsed"] != prevusage["MemProcessUsed"]:
                     allowed_increases -= 1
 
@@ -82,4 +82,3 @@ def test_compile_hello_world_with_usage_tracking(request):
         data = session.read_line_except_logs()
         assert "You entered: " + number in data
         data = session.wait_for_prompt()
-

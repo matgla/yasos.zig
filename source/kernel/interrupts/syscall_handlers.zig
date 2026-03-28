@@ -267,6 +267,7 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch();
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
+    process.append_tty_newline_on_exit();
     // Encode in Linux wait-status format: normal exit = (code << 8)
     // so that WEXITSTATUS/WIFEXITED macros work correctly.
     const wait_status = @as(i32, context.*) << 8;
@@ -319,7 +320,12 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
-            context.result.* = file.interface.write(@as([*]const u8, @ptrCast(context.buf.?))[0..context.count]);
+            const data = @as([*]const u8, @ptrCast(context.buf.?))[0..context.count];
+            const is_tty = file.interface.filetype() == FileType.CharDevice;
+            context.result.* = file.interface.write(data);
+            if (is_tty and context.result.* > 0) {
+                process.record_tty_output(context.fd, data[0..@intCast(context.result.*)]);
+            }
         }
         return 0;
     }
@@ -359,7 +365,9 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     defer kernel.process.unblock_context_switch();
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
     defer kernel_allocator.free(path);
-    try fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0);
+    fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0) catch |err| {
+        return err;
+    };
     return 0;
 }
 
@@ -421,8 +429,20 @@ pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_gettimeofday(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    const context: *const volatile c.gettimeofday_context = @ptrCast(@alignCast(arg));
+    const now_us = hal.time.get_time_us();
+
+    if (context.tv) |tv| {
+        tv.*.tv_sec = @intCast(@divTrunc(now_us, 1_000_000));
+        tv.*.tv_usec = @intCast(@mod(now_us, 1_000_000));
+    }
+
+    if (context.tz) |tz| {
+        tz.*.tz_minuteswest = 0;
+        tz.*.tz_dsttime = 0;
+    }
+
+    return 0;
 }
 
 pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
@@ -525,8 +545,11 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_time(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
-    const ticks: c.time_t = @intCast(systick.get_system_ticks().*);
-    context.result.* = ticks;
+    const now_seconds: c.time_t = @intCast(hal.time.get_time());
+    if (context.timep) |timep| {
+        timep.* = now_seconds;
+    }
+    context.result.* = now_seconds;
     return 0;
 }
 pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
@@ -666,6 +689,36 @@ pub fn sys_access(arg: *const volatile anyopaque) !i32 {
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.access(path, context.mode, context.flags);
+    return 0;
+}
+
+pub fn sys_klog_ctl(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.klog_ctl_context = @ptrCast(@alignCast(arg));
+    kernel.stdout.suppress(context.enable == 0);
+    return 0;
+}
+
+pub fn sys_ftruncate(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+    const context: *const volatile c.ftruncate_context = @ptrCast(@alignCast(arg));
+    var file = try get_file_from_process(@intCast(context.fd));
+    try file.interface.truncate(@intCast(context.length));
+    return 0;
+}
+
+const perf = @import("perf_profile.zig");
+
+pub fn sys_perf_dump(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.perf_dump_context = @ptrCast(@alignCast(arg));
+    if (!perf.enabled) {
+        context.num_entries.* = 0;
+        return 0;
+    }
+    perf.dump(context.entries, @intCast(context.max_entries), context.num_entries);
+    if (context.reset != 0) {
+        perf.reset();
+    }
     return 0;
 }
 

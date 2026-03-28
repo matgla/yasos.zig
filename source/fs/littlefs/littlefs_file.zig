@@ -114,6 +114,13 @@ pub const LittleFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         return self._filetype;
     }
 
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        const result = littlefs.lfs_file_truncate(self._lfs, self._file, @intCast(length));
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
+    }
+
     pub fn delete(self: *Self) void {
         if (self._is_open) {
             _ = littlefs.lfs_file_close(self._lfs, self._file);

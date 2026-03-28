@@ -7,10 +7,14 @@ import curses
 import hashlib
 import importlib.util
 import json
+import os
 import shlex
 import shutil
+import queue
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +25,88 @@ CACHE_PATH = REPO_ROOT / ".cache" / "remote_smoke_runner.json"
 REMOTE_SMOKE_LOGS_DIR = REPO_ROOT / ".cache" / "remote_smoke_logs"
 KERNEL_ARTIFACT = REPO_ROOT / "zig-out" / "bin" / "yasos_kernel"
 ROOTFS_ARTIFACT = REPO_ROOT / "rootfs.img"
+ROOTFS_HASH_PATH = REPO_ROOT / ".cache" / "rootfs_source_hash"
 SMOKE_REQUIREMENTS = REPO_ROOT / "tests" / "smoke" / "requirements.txt"
+
+# Directories and files whose content determines whether rootfs needs rebuilding.
+_ROOTFS_SOURCE_DIRS = [
+    "libs/libc",
+    "libs/libdl",
+    "libs/libm",
+    "libs/pthread",
+    "libs/yasos_curses",
+    "libs/termcap",
+    "libs/tinycc",
+    "apps/coreutils",
+    "apps/cowsay",
+    "apps/ascii_animations",
+    "apps/textvaders",
+    "apps/hello_world",
+    "apps/hexdump",
+    "apps/yasvi",
+    "apps/mkfs",
+    "apps/longjump_tester",
+    "apps/zork",
+    "apps/rzsz",
+    "apps/sha",
+    "apps/toybox_builder",
+]
+_ROOTFS_SOURCE_FILES = [
+    "build_rootfs.sh",
+    "hello_world.c",
+    "hello_script.sh",
+]
+_ROOTFS_SOURCE_EXTS = {".c", ".h", ".S", ".s", ".zig", ".sh", ".mk", ".ld"}
+
+
+def _rootfs_sources_hash(debug: bool) -> str:
+    """Compute a fast content hash over every source file that feeds into rootfs."""
+    digest = hashlib.sha256()
+    # Include the debug flag so Debug vs Release builds get different hashes.
+    digest.update(b"debug" if debug else b"release")
+
+    def _hash_file(path: Path) -> None:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return
+        digest.update(str(path.relative_to(REPO_ROOT)).encode())
+        digest.update(data)
+
+    # Hash individual root-level files.
+    for name in sorted(_ROOTFS_SOURCE_FILES):
+        _hash_file(REPO_ROOT / name)
+
+    # Hash source files inside tracked directories.
+    for rel_dir in sorted(_ROOTFS_SOURCE_DIRS):
+        d = REPO_ROOT / rel_dir
+        if not d.is_dir():
+            continue
+        # Only hash Makefiles and files with known source extensions to
+        # keep the fingerprint cheap and avoid hashing build artifacts.
+        for p in sorted(d.rglob("*")):
+            if p.is_dir() or "build" in p.parts:
+                continue
+            if p.suffix.lower() in _ROOTFS_SOURCE_EXTS or p.name in ("Makefile", "Makefile.inc", "configure", "configure.ac"):
+                _hash_file(p)
+
+    return digest.hexdigest()
+
+
+def _rootfs_is_up_to_date(debug: bool) -> bool:
+    """Return True when rootfs.img exists and no source inputs changed."""
+    if not ROOTFS_ARTIFACT.exists():
+        return False
+    if not ROOTFS_HASH_PATH.exists():
+        return False
+    stored = ROOTFS_HASH_PATH.read_text().strip()
+    current = _rootfs_sources_hash(debug)
+    return stored == current
+
+
+def _save_rootfs_hash(debug: bool) -> None:
+    ROOTFS_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ROOTFS_HASH_PATH.write_text(_rootfs_sources_hash(debug) + "\n")
 
 
 @dataclass(frozen=True)
@@ -31,7 +116,6 @@ class BoardProfile:
     defconfig: str
     interface_cfg: str
     target_cfg: str
-    flash_base: str
     rootfs_address: str
 
 
@@ -42,7 +126,6 @@ BOARD_PROFILES = {
         defconfig="configs/pimoroni_pico_plus2_and_vga_defconfig",
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
-        flash_base="0x10000000",
         rootfs_address="0x10100000",
     ),
     "mspc_v2": BoardProfile(
@@ -51,7 +134,6 @@ BOARD_PROFILES = {
         defconfig="configs/mspc_defconfig",
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
-        flash_base="0x10000000",
         rootfs_address="0x10100000",
     ),
 }
@@ -69,14 +151,10 @@ DEFAULT_CONFIG = {
     "serial_device": "",
     "optimize": "ReleaseFast",
     "test_retries": 1,
+    "with_gcc_torture": False,
     "pytest_args": "tests/smoke",
-}
-
-TARGET_TEST_COMMAND_HOOKS = {
-    "119_random_stuff.c": {
-        "setup": ["ulimit -S -s 1024"],
-        "teardown": ["ulimit -S -s 32"],
-    },
+    "uhubctl_hub": "",
+    "uhubctl_port": "",
 }
 
 
@@ -108,6 +186,14 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
         merged["test_retries"] = int(merged.get("test_retries", 1))
     except (TypeError, ValueError):
         merged["test_retries"] = 1
+    merged["with_gcc_torture"] = str(merged.get("with_gcc_torture", False)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } if not isinstance(merged.get("with_gcc_torture"), bool) else bool(merged.get("with_gcc_torture"))
+    merged.setdefault("uhubctl_hub", "")
+    merged.setdefault("uhubctl_port", "")
     return merged
 
 
@@ -262,7 +348,10 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
             ("Serial device", "serial_device"),
             ("Optimize", "optimize"),
             ("Test retries", "test_retries"),
+            ("With GCC torture", "with_gcc_torture"),
             ("Pytest args", "pytest_args"),
+            ("uhubctl hub (auto)", "uhubctl_hub"),
+            ("uhubctl port", "uhubctl_port"),
         ]
         selected = 0
 
@@ -279,6 +368,8 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                 display = config[key]
                 if key == "board":
                     display = board_label(str(display))
+                elif key == "with_gcc_torture":
+                    display = "enabled" if bool(display) else "disabled"
                 display = str(display)
                 prefix = ">" if index == selected else " "
                 line = f"{prefix} {label:<15} {display}"
@@ -309,6 +400,8 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     )
                 elif selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), -1)
+                elif selected_key == "with_gcc_torture":
+                    config[selected_key] = not bool(config[selected_key])
                 continue
             if key == curses.KEY_RIGHT:
                 selected_key = fields[selected][1]
@@ -318,6 +411,8 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     )
                 elif selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), 1)
+                elif selected_key == "with_gcc_torture":
+                    config[selected_key] = not bool(config[selected_key])
                 continue
             if key in (curses.KEY_F2, ord("s"), ord("S")):
                 try:
@@ -344,6 +439,9 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     continue
                 if selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), 1)
+                    continue
+                if selected_key == "with_gcc_torture":
+                    config[selected_key] = not bool(config[selected_key])
                     continue
                 edited = edit_value(stdscr, label, str(config[selected_key]))
                 if selected_key in ("ssh_port", "openocd_adapter_speed", "test_retries"):
@@ -430,6 +528,10 @@ if ! command -v openocd >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v uhubctl >/dev/null 2>&1; then
+    echo "warning: uhubctl not found, USB power-cycle reset unavailable" >&2
+fi
+
 for candidate in arm-none-eabi-gdb gdb-multiarch gdb; do
     if command -v "$candidate" >/dev/null 2>&1; then
         printf '%s\n' "$candidate"
@@ -502,12 +604,14 @@ def sync_remote_repo_subset(config: dict[str, Any], rel_paths: list[str]) -> str
     rsync_cmd = [
         "rsync",
         "-az",
+        "--info=progress2",
         "--files-from=-",
         "-e",
         command_string(ssh_cmd),
         "./",
         remote_dest,
     ]
+    print(f"Syncing {len(rel_paths)} files to remote...")
     run_command(rsync_cmd, cwd=REPO_ROOT, input_text="\n".join(rel_paths) + "\n")
     return remote_repo.rstrip("/")
 
@@ -522,6 +626,7 @@ def sync_remote_repo_sources(config: dict[str, Any]) -> str:
     rsync_cmd = [
         "rsync",
         "-az",
+        "--info=progress2",
         "--delete",
         "--exclude=.git/",
         "--exclude=.cache/",
@@ -536,6 +641,7 @@ def sync_remote_repo_sources(config: dict[str, Any]) -> str:
         "./",
         remote_dest,
     ]
+    print("Syncing repository sources to remote...")
     run_command(rsync_cmd, cwd=REPO_ROOT)
     return remote_repo.rstrip("/")
 
@@ -583,6 +689,9 @@ def smoke_sync_paths(config: dict[str, Any]) -> list[str]:
 
     add_path("tests/smoke")
     add_path("libs/tinycc/tests/tests2")
+    add_path("libs/tinycc/tests/ir_tests")
+    if bool(config.get("with_gcc_torture", False)):
+        add_path("libs/tinycc/tests/gcctestsuite")
     pytest_args = shlex.split(str(config["pytest_args"]).strip() or "tests/smoke")
     for arg in pytest_args:
         if arg.startswith("-"):
@@ -681,6 +790,69 @@ def fetch_remote_smoke_logs(config: dict[str, Any]) -> Path | None:
     return local_logs_dir
 
 
+def _quiet_log_sync(config: dict[str, Any]) -> int:
+    """Rsync remote logs to local without printing commands. Returns count of new files."""
+    remote_repo = str(config["remote_repo_path"]).rstrip("/")
+    remote_logs_dir = f"{remote_repo}/logs"
+    local_logs_dir = REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
+    local_logs_dir.mkdir(parents=True, exist_ok=True)
+
+    before = set(local_logs_dir.rglob("*")) if local_logs_dir.exists() else set()
+
+    rsync_cmd = [
+        "rsync",
+        "-az",
+        "-e",
+        command_string(ssh_transport_base(config)),
+        f"{config['ssh_target']}:{remote_logs_dir.rstrip('/')}/",
+        str(local_logs_dir) + "/",
+    ]
+    completed = subprocess.run(
+        rsync_cmd,
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return 0
+
+    after = set(local_logs_dir.rglob("*"))
+    return len(after - before)
+
+
+def _background_log_sync(
+    config: dict[str, Any],
+    stop_event: threading.Event,
+    msg_queue: queue.Queue[str],
+    interval: float = 10.0,
+) -> None:
+    """Periodically sync remote logs in a background thread, buffering messages."""
+    while not stop_event.is_set():
+        stop_event.wait(interval)
+        if stop_event.is_set():
+            break
+        try:
+            new_files = _quiet_log_sync(config)
+            if new_files > 0:
+                local_logs_dir = REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
+                total = sum(1 for _ in local_logs_dir.rglob("*.txt")) if local_logs_dir.exists() else 0
+                msg_queue.put(f"[log sync] {new_files} new log(s) fetched ({total} total in {local_logs_dir})")
+        except Exception:
+            pass
+
+
+def _drain_sync_messages(msg_queue: queue.Queue[str]) -> None:
+    """Print all pending log-sync messages."""
+    while True:
+        try:
+            msg = msg_queue.get_nowait()
+        except queue.Empty:
+            break
+        print(msg, flush=True)
+
+
 def prepare_remote_work_dir(config: dict[str, Any]) -> str:
     requested = str(config["remote_work_dir"]).strip()
     if not requested:
@@ -726,17 +898,64 @@ printf '%s\n' "$path"
         )
 
 
-def build_local_artifacts(config: dict[str, Any], debug: bool = False, build_rootfs: bool = True, force: bool = False) -> None:
-    board = BOARD_PROFILES[config["board"]]
+def _set_kconfig_option(option: str, value: str = "y") -> bool:
+    """Enable a Kconfig option in .config and regenerate config files.
+
+    Returns True if the config was changed, False if already set.
+    """
+    config_path = REPO_ROOT / "config" / "target" / ".config"
+    if not config_path.exists():
+        return False
+
+    text = config_path.read_text()
+    enabled_line = f"{option}={value}"
+    disabled_line = f"# {option} is not set"
+
+    if enabled_line in text:
+        return False
+
+    if disabled_line in text:
+        new_text = text.replace(disabled_line, enabled_line)
+    elif option not in text:
+        new_text = text.rstrip("\n") + "\n" + enabled_line + "\n"
+    else:
+        return False
+
+    config_path.write_text(new_text)
     run_command(
         [
-            "zig",
-            "build",
-            "defconfig",
-            f"-Ddefconfig_file={board.defconfig}",
+            "./yasos_venv/bin/python",
+            "./kconfiglib/generate.py",
+            "--input", str(config_path),
+            "-k", "Kconfig",
+            "-o", "config/target",
         ],
         cwd=REPO_ROOT,
     )
+    return True
+
+
+def build_local_artifacts(
+    config: dict[str, Any],
+    debug: bool = False,
+    build_rootfs: bool = True,
+    force: bool = False,
+    apply_defconfig: bool = False,
+) -> None:
+    if apply_defconfig:
+        board = BOARD_PROFILES[config["board"]]
+        run_command(
+            [
+                "zig",
+                "build",
+                "defconfig",
+                f"-Ddefconfig_file={board.defconfig}",
+            ],
+            cwd=REPO_ROOT,
+        )
+    if config.get("profile"):
+        if _set_kconfig_option("CONFIG_INSTRUMENTATION_PERF_PROFILING"):
+            print("Enabled CONFIG_INSTRUMENTATION_PERF_PROFILING for profiling.")
     run_command(
         ["zig", "build", f"-Doptimize={effective_optimize(config, debug)}"],
         cwd=REPO_ROOT,
@@ -745,9 +964,17 @@ def build_local_artifacts(config: dict[str, Any], debug: bool = False, build_roo
     if build_rootfs:
         if force:
             rootfs_cmd.insert(1, "-c")
-        if debug:
-            rootfs_cmd.append("--debug")
-        run_command(rootfs_cmd, cwd=REPO_ROOT)
+            if debug:
+                rootfs_cmd.append("--debug")
+            run_command(rootfs_cmd, cwd=REPO_ROOT)
+            _save_rootfs_hash(debug)
+        elif _rootfs_is_up_to_date(debug):
+            print("rootfs sources unchanged — skipping build_rootfs.sh")
+        else:
+            if debug:
+                rootfs_cmd.append("--debug")
+            run_command(rootfs_cmd, cwd=REPO_ROOT)
+            _save_rootfs_hash(debug)
 
     if not KERNEL_ARTIFACT.exists():
         raise RunnerError(f"Expected kernel artifact was not produced: {KERNEL_ARTIFACT}")
@@ -793,12 +1020,11 @@ def run_remote_smoke(
     rootfs_sha: str,
     requirements_sha: str,
     force: bool,
+    kernel_only: bool = False,
 ) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
-    full_flash_erase = bool(config.get("full_flash_erase", False))
     test_retries = int(config.get("test_retries", 0))
-    test_command_hooks = json.dumps(TARGET_TEST_COMMAND_HOOKS, separators=(",", ":")) if TARGET_TEST_COMMAND_HOOKS else ""
     pytest_args = shlex.split(str(config["pytest_args"]).strip() or "tests/smoke")
     remote_script = """set -euo pipefail
 remote_repo=$1
@@ -812,12 +1038,147 @@ remote_kernel=$8
 remote_rootfs=$9
 flash_only=${10}
 test_retries=${11}
-kernel_sha=${12}
-rootfs_sha=${13}
-requirements_sha=${14}
-force=${15}
-full_flash_erase=${16}
-""" + f"test_command_hooks_json={shlex.quote(test_command_hooks)}\n" + """shift 16
+with_gcc_torture=${12}
+kernel_sha=${13}
+rootfs_sha=${14}
+requirements_sha=${15}
+force=${16}
+profile=${17}
+uhubctl_hub=${18}
+uhubctl_port=${19}
+kernel_only=${20}
+extra_tcc_cflags=${21}
+shift 21
+
+detect_uhubctl_device() {
+    # Find a USB device by vendor ID in sysfs and return its hub location
+    # and port for uhubctl.  Prints "hub_path port" on stdout.
+    local vid=${1:-2e8a}
+    for dev in /sys/bus/usb/devices/*/; do
+        [[ -f "$dev/idVendor" ]] || continue
+        local v
+        v=$(cat "$dev/idVendor" 2>/dev/null) || continue
+        if [[ "$v" == "$vid" ]]; then
+            local devname
+            devname=$(basename "$dev")
+            # devname is e.g. "3-1.2" → parent hub "3-1", port "2"
+            #            or   "3-1"   → root hub bus "3", port "1"
+            if [[ "$devname" == *.* ]]; then
+                echo "${devname%.*} ${devname##*.}"
+            else
+                local bus="${devname%%-*}"
+                local port="${devname#*-}"
+                echo "$bus $port"
+            fi
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_uhubctl() {
+    # Resolve uhubctl_hub / uhubctl_port.  When hub is "auto", detect from
+    # the debug probe's sysfs entry.  When port is empty, cycle the whole hub.
+    # If the detected hub is not uhubctl-compatible, walk up to the root hub.
+    if [[ "$uhubctl_hub" == "auto" ]]; then
+        local detected
+        if detected=$(detect_uhubctl_device 2e8a); then
+            uhubctl_hub="${detected%% *}"
+            if [[ -z "$uhubctl_port" ]]; then
+                uhubctl_port="${detected##* }"
+            fi
+            # Verify uhubctl recognises this hub; walk up if not.
+            if ! uhubctl_cmd -l "$uhubctl_hub" >/dev/null 2>&1; then
+                echo "Hub $uhubctl_hub not uhubctl-compatible, walking up to parent..." >&2
+                if [[ "$uhubctl_hub" == *.* ]]; then
+                    # e.g. "3-1.2" → parent "3-1", port "2"
+                    uhubctl_port="${uhubctl_hub##*.}"
+                    uhubctl_hub="${uhubctl_hub%.*}"
+                else
+                    # e.g. "3-1" → root hub bus "3", port "1"
+                    uhubctl_port="${uhubctl_hub#*-}"
+                    uhubctl_hub="${uhubctl_hub%%-*}"
+                fi
+            fi
+            echo "Auto-detected uhubctl: hub=$uhubctl_hub port=$uhubctl_port" >&2
+        else
+            echo "WARNING: could not auto-detect USB hub for Pico debug probe" >&2
+            uhubctl_hub=""
+            uhubctl_port=""
+        fi
+    fi
+}
+
+resolve_uhubctl
+
+uhubctl_cmd() {
+    # uhubctl lives in /usr/sbin and needs root
+    local bin
+    bin=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)
+    if [[ -x "$bin" ]]; then
+        sudo "$bin" "$@"
+    else
+        return 1
+    fi
+}
+
+usb_power_reset() {
+    if [[ -n "$uhubctl_hub" ]] && uhubctl_cmd --version >/dev/null 2>&1; then
+        local port_args=()
+        if [[ -n "$uhubctl_port" ]]; then
+            port_args=(-p "$uhubctl_port")
+        fi
+        echo "Power-cycling USB (hub=$uhubctl_hub port=${uhubctl_port:-all})..." >&2
+        uhubctl_cmd -l "$uhubctl_hub" "${port_args[@]}" -a off -r 100 2>/dev/null || true
+        sleep 3
+        # After power-off the hub disappears from the bus; uhubctl may
+        # segfault when trying to re-scan.  Retry the 'on' command.
+        for _attempt in 1 2 3; do
+            if uhubctl_cmd -l "$uhubctl_hub" "${port_args[@]}" -a on -r 100 2>/dev/null; then
+                break
+            fi
+            sleep 2
+        done
+        sleep 3
+        # Wait for the debug probe to re-enumerate on the bus.
+        echo "Waiting for debug probe to re-enumerate..." >&2
+        for _wait in $(seq 1 15); do
+            if ls /dev/ttyACM* >/dev/null 2>&1; then
+                break
+            fi
+            sleep 1
+        done
+        sleep 1
+        return 0
+    fi
+    return 1
+}
+
+openocd_reset_halt() {
+    # Catch the CPU before it runs bad firmware after a power cycle.
+    # Try normal reset halt first; if that fails, use rescue DP.
+    if openocd -f "$interface_cfg" -f "$target_cfg" \
+        -c "adapter speed $adapter_speed" \
+        -c "init" -c "reset halt" -c "exit" 2>/dev/null; then
+        return 0
+    fi
+    echo "reset halt failed, trying rescue DP..." >&2
+    openocd_rescue_reset
+}
+
+openocd_rescue_reset() {
+    # Use the RP2350 rescue debug port to force-halt the chip.
+    # This works even when the CPU is stuck running bad firmware.
+    local rescue_cfg="target/rp2350-rescue.cfg"
+    if ! openocd -f "$interface_cfg" -f "$rescue_cfg" \
+        -c "adapter speed 5000" -c "init" -c "exit" 2>&1; then
+        echo "rescue DP reset failed" >&2
+        return 1
+    fi
+    # After rescue, the chip is halted. Give it a moment.
+    sleep 1
+    return 0
+}
 
 mkdir -p "$remote_work_dir"
 
@@ -829,26 +1190,32 @@ mkdir -p "$artifact_state_dir"
 flash_kernel=1
 flash_rootfs=1
 
+if [[ "$kernel_only" == "1" ]]; then
+    flash_rootfs=0
+fi
+
 if [[ "$force" != "1" ]]; then
     if [[ -f "$kernel_sha_file" ]] && [[ "$(cat "$kernel_sha_file")" == "$kernel_sha" ]]; then
         flash_kernel=0
     fi
-    if [[ -f "$rootfs_sha_file" ]] && [[ "$(cat "$rootfs_sha_file")" == "$rootfs_sha" ]]; then
+    if (( flash_rootfs )) && [[ -f "$rootfs_sha_file" ]] && [[ "$(cat "$rootfs_sha_file")" == "$rootfs_sha" ]]; then
         flash_rootfs=0
     fi
 fi
 
 if (( flash_kernel || flash_rootfs )); then
+    # Rescue DP reset first to clear any QSPI Quad I/O mode left by
+    # overclock firmware — avoids CRC checksum mismatches during verify.
+    openocd_rescue_reset 2>/dev/null || true
+
     openocd_cmd=(
         openocd
         -f "$interface_cfg"
         -f "$target_cfg"
         -c "adapter speed $adapter_speed"
+        -c "init"
+        -c "reset halt"
     )
-    if [[ "$full_flash_erase" == "1" ]]; then
-        echo "Performing full flash bank erase before programming."
-        openocd_cmd+=( -c "init" -c "reset halt" -c "flash erase_address """ + board.flash_base + """ 0" )
-    fi
     if (( flash_rootfs )); then
         openocd_cmd+=( -c "program $remote_rootfs $rootfs_address" )
     fi
@@ -856,7 +1223,33 @@ if (( flash_kernel || flash_rootfs )); then
         openocd_cmd+=( -c "program $remote_kernel verify" )
     fi
     openocd_cmd+=( -c "reset run" -c "exit" )
-    "${openocd_cmd[@]}"
+
+    flash_ok=0
+    for flash_attempt in 1 2 3; do
+        if "${openocd_cmd[@]}"; then
+            flash_ok=1
+            break
+        fi
+        echo "Flash attempt $flash_attempt failed, resetting target and retrying..." >&2
+        if (( flash_attempt == 1 )); then
+            # First retry: rescue DP clears double-fault lockups quickly
+            echo "Trying rescue DP reset..." >&2
+            openocd_rescue_reset
+        elif (( flash_attempt == 2 )); then
+            # Last retry: full USB power-cycle to recover from any state
+            if usb_power_reset; then
+                echo "USB power-cycle complete, halting target..." >&2
+                openocd_reset_halt || openocd_rescue_reset
+            else
+                sleep 2
+                openocd_rescue_reset
+            fi
+        fi
+    done
+    if (( ! flash_ok )); then
+        echo "ERROR: flashing failed after 3 attempts" >&2
+        exit 1
+    fi
 
     if (( flash_kernel )); then
         printf '%s\n' "$kernel_sha" > "$kernel_sha_file"
@@ -866,7 +1259,43 @@ if (( flash_kernel || flash_rootfs )); then
     fi
 else
     echo "Artifacts unchanged; skipping flash and resetting target only."
-    openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init" -c "reset run" -c "exit"
+    openocd_rescue_reset 2>/dev/null || true
+
+    openocd_cmd=(
+        openocd
+        -f "$interface_cfg"
+        -f "$target_cfg"
+        -c "adapter speed $adapter_speed"
+        -c "init"
+        -c "reset halt"
+        -c "reset run"
+        -c "exit"
+    )
+
+    reset_ok=0
+    for reset_attempt in 1 2 3; do
+        if "${openocd_cmd[@]}"; then
+            reset_ok=1
+            break
+        fi
+        echo "Reset attempt $reset_attempt failed, retrying..." >&2
+        if (( reset_attempt == 1 )); then
+            echo "Trying rescue DP reset..." >&2
+            openocd_rescue_reset
+        elif (( reset_attempt == 2 )); then
+            if usb_power_reset; then
+                echo "USB power-cycle complete, halting target..." >&2
+                openocd_reset_halt || openocd_rescue_reset
+            else
+                sleep 2
+                openocd_rescue_reset
+            fi
+        fi
+    done
+    if (( ! reset_ok )); then
+        echo "ERROR: target reset failed after 3 attempts" >&2
+        exit 1
+    fi
 fi
 
 if [[ "$flash_only" == "1" ]]; then
@@ -875,6 +1304,8 @@ fi
 
 cd "$remote_repo"
 rm -rf "$remote_repo/logs"
+mkdir -p "$remote_repo/logs"
+export YASOS_TIMING_REPORT_DIR="$remote_repo/logs"
 
 if [[ ! -x "$remote_work_dir/venv/bin/python3" ]]; then
     python3 -m venv "$remote_work_dir/venv"
@@ -892,21 +1323,29 @@ if [[ -n "$serial_device" ]]; then
   export SERIAL_DEVICE="$serial_device"
 fi
 
-if [[ -n "$test_command_hooks_json" ]]; then
-        export YASOS_SMOKE_TARGET_TEST_COMMAND_HOOKS="$test_command_hooks_json"
+if [[ "${with_gcc_torture}" == "1" ]]; then
+    export YASOS_SMOKE_ENABLE_GCC_TORTURE=1
 fi
 
-pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -s)
+if [[ "${profile}" == "1" ]]; then
+    export YASOS_TCC_PROFILE=1
+fi
+
+if [[ -n "${extra_tcc_cflags}" ]]; then
+    export YASOS_EXTRA_TCC_CFLAGS="${extra_tcc_cflags}"
+fi
+
+pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -sv)
 if (( test_retries > 0 )); then
     pytest_cmd+=(--reruns "$test_retries" --reruns-delay 1)
 fi
 
 "${pytest_cmd[@]}" "$@"
 """
-    cmd = ssh_base(config) + [
-        "bash",
-        "-s",
-        "--",
+    # SSH concatenates remote command args with spaces before sending to the
+    # remote shell.  Empty strings and values with special characters would be
+    # lost or mis-parsed without proper quoting.
+    remote_args = [
         str(config["remote_repo_path"]),
         remote_work_dir,
         board.interface_cfg,
@@ -918,19 +1357,62 @@ fi
         remote_rootfs,
         "1" if flash_only else "0",
         str(test_retries),
+        "1" if bool(config.get("with_gcc_torture", False)) else "0",
         kernel_sha,
         rootfs_sha,
         requirements_sha,
         "1" if force else "0",
-        "1" if full_flash_erase else "0",
+        "1" if bool(config.get("profile", False)) else "0",
+        str(config.get("uhubctl_hub", "")),
+        str(config.get("uhubctl_port", "")),
+        "1" if kernel_only else "0",
+        str(config.get("extra_tcc_cflags", "")),
         *pytest_args,
     ]
+    cmd = ssh_base(config) + [
+        "bash", "-s", "--",
+        *[shlex.quote(a) for a in remote_args],
+    ]
     run_error: RunnerError | None = None
+    stop_sync = threading.Event()
+    sync_queue: queue.Queue[str] = queue.Queue()
+    sync_thread: threading.Thread | None = None
+    if not flash_only:
+        local_logs_dir = REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
+        if local_logs_dir.exists():
+            shutil.rmtree(local_logs_dir)
+        sync_thread = threading.Thread(
+            target=_background_log_sync,
+            args=(config, stop_sync, sync_queue),
+            daemon=True,
+        )
+        sync_thread.start()
     try:
-        run_command(cmd, input_text=remote_script)
+        print(f"\n$ {command_string(cmd)}")
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if remote_script is not None:
+            proc.stdin.write(remote_script)
+            proc.stdin.close()
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            _drain_sync_messages(sync_queue)
+        proc.wait()
+        _drain_sync_messages(sync_queue)
+        if proc.returncode != 0:
+            raise RunnerError(f"Command failed with exit code {proc.returncode}: {command_string(cmd)}")
     except RunnerError as error:
         run_error = error
     finally:
+        stop_sync.set()
+        if sync_thread is not None:
+            sync_thread.join(timeout=5)
         if not flash_only:
             try:
                 fetched_logs_dir = fetch_remote_smoke_logs(config)
@@ -957,7 +1439,12 @@ adapter_speed=$4
 
 cd "$remote_repo"
 
-openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init" -c "reset run" -c "exit"
+# Rescue DP first to clear QSPI Quad I/O mode left by overclock firmware.
+openocd -f "$interface_cfg" -f target/rp2350-rescue.cfg \
+    -c "adapter speed 5000" -c "init" -c "exit" 2>/dev/null || true
+sleep 1
+
+openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init" -c "reset halt" -c "reset run" -c "exit"
 """
     cmd = ssh_base(config) + [
         "bash",
@@ -967,6 +1454,92 @@ openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -
         board.interface_cfg,
         board.target_cfg,
         adapter_speed,
+    ]
+    run_command(cmd, input_text=remote_script)
+
+
+def run_remote_power_reset(config: dict[str, Any]) -> None:
+    uhubctl_hub = str(config.get("uhubctl_hub", "")).strip()
+    uhubctl_port = str(config.get("uhubctl_port", "")).strip()
+    if not uhubctl_hub:
+        raise RunnerError("uhubctl_hub must be configured for --power-reset (use 'auto' to detect)")
+    remote_script = """set -euo pipefail
+uhubctl_hub=$1
+uhubctl_port=$2
+
+detect_uhubctl_device() {
+    local vid=${1:-2e8a}
+    for dev in /sys/bus/usb/devices/*/; do
+        [[ -f "$dev/idVendor" ]] || continue
+        local v
+        v=$(cat "$dev/idVendor" 2>/dev/null) || continue
+        if [[ "$v" == "$vid" ]]; then
+            local devname
+            devname=$(basename "$dev")
+            if [[ "$devname" == *.* ]]; then
+                echo "${devname%.*} ${devname##*.}"
+            else
+                local bus="${devname%%-*}"
+                local port="${devname#*-}"
+                echo "$bus $port"
+            fi
+            return 0
+        fi
+    done
+    return 1
+}
+
+uhubctl_bin=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)
+if [[ ! -x "$uhubctl_bin" ]]; then
+    echo "ERROR: uhubctl not found on remote host (tried PATH and /usr/sbin)" >&2
+    exit 1
+fi
+
+if [[ "$uhubctl_hub" == "auto" ]]; then
+    detected=$(detect_uhubctl_device 2e8a) || { echo "ERROR: could not auto-detect USB hub for Pico" >&2; exit 1; }
+    uhubctl_hub="${detected%% *}"
+    if [[ -z "$uhubctl_port" ]]; then
+        uhubctl_port="${detected##* }"
+    fi
+    # Verify uhubctl recognises this hub; walk up if not.
+    if ! sudo "$uhubctl_bin" -l "$uhubctl_hub" >/dev/null 2>&1; then
+        echo "Hub $uhubctl_hub not uhubctl-compatible, walking up to parent..." >&2
+        if [[ "$uhubctl_hub" == *.* ]]; then
+            uhubctl_port="${uhubctl_hub##*.}"
+            uhubctl_hub="${uhubctl_hub%.*}"
+        else
+            uhubctl_port="${uhubctl_hub#*-}"
+            uhubctl_hub="${uhubctl_hub%%-*}"
+        fi
+    fi
+    echo "Auto-detected: hub=$uhubctl_hub port=$uhubctl_port"
+fi
+
+port_args=()
+if [[ -n "$uhubctl_port" ]]; then
+    port_args=(-p "$uhubctl_port")
+fi
+
+echo "Power-cycling USB (hub=$uhubctl_hub port=${uhubctl_port:-all})..."
+sudo "$uhubctl_bin" -l "$uhubctl_hub" "${port_args[@]}" -a off -r 100
+sleep 3
+# After power-off the hub disappears from the bus; uhubctl may
+# segfault when trying to re-scan.  Retry the 'on' command.
+for _attempt in 1 2 3; do
+    if sudo "$uhubctl_bin" -l "$uhubctl_hub" "${port_args[@]}" -a on -r 100 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+sleep 3
+echo "Power-cycle complete."
+"""
+    cmd = ssh_base(config) + [
+        "bash",
+        "-s",
+        "--",
+        shlex.quote(uhubctl_hub),
+        shlex.quote(uhubctl_port),
     ]
     run_command(cmd, input_text=remote_script)
 
@@ -1111,6 +1684,18 @@ print(f"Opening {serial_device} at 921600 baud...", file=sys.stderr)
 ser = serial.Serial(serial_device, 921600, timeout=TIMEOUT_BOOT)
 ser.reset_input_buffer()
 
+print("Rescue DP reset to clear overclock state...", file=sys.stderr)
+subprocess.run(
+    ["openocd",
+     "-f", "interface/cmsis-dap.cfg",
+     "-f", "target/rp2350-rescue.cfg",
+     "-c", "adapter speed 5000",
+     "-c", "init",
+     "-c", "exit"],
+    capture_output=True, text=True, timeout=10
+)
+time.sleep(1)
+
 print("Resetting target via OpenOCD...", file=sys.stderr)
 result = subprocess.run(
     ["openocd",
@@ -1118,6 +1703,7 @@ result = subprocess.run(
      "-f", "target/rp2350.cfg",
      "-c", "adapter speed 20000",
      "-c", "init",
+     "-c", "reset halt",
      "-c", "reset run",
      "-c", "exit"],
     capture_output=True, text=True, timeout=10
@@ -1301,12 +1887,66 @@ def list_boards() -> None:
         print(f"{profile.key}: {profile.label}")
 
 
+def collect_smoke_tests(pytest_args: list[str], with_gcc_torture: bool) -> list[str]:
+    env = dict(os.environ)
+    if with_gcc_torture:
+        env["YASOS_SMOKE_ENABLE_GCC_TORTURE"] = "1"
+    else:
+        env.pop("YASOS_SMOKE_ENABLE_GCC_TORTURE", None)
+
+    cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", *pytest_args]
+    completed = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    if completed.returncode != 0:
+        raise RunnerError(f"Test collection failed with exit code {completed.returncode}: {command_string(cmd)}")
+
+    collected_tests: list[str] = []
+    for line in completed.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("=") or stripped.endswith(" tests collected in 0.00s"):
+            continue
+        if stripped.startswith("no tests collected"):
+            continue
+        if " tests collected in " in stripped:
+            continue
+        collected_tests.append(stripped)
+    return collected_tests
+
+
+def list_tests(args: argparse.Namespace) -> None:
+    runtime_config = apply_runtime_pytest_overrides(DEFAULT_CONFIG, args)
+    pytest_args = shlex.split(str(runtime_config["pytest_args"]).strip() or "tests/smoke")
+    for nodeid in collect_smoke_tests(pytest_args, bool(runtime_config.get("with_gcc_torture", False))):
+        print(nodeid)
+
+
 def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     runtime_config = dict(config)
-    runtime_config["full_flash_erase"] = bool(args.full_flash_erase)
 
     if args.test_retries is not None:
         runtime_config["test_retries"] = args.test_retries
+
+    if args.with_gcc_torture is not None:
+        runtime_config["with_gcc_torture"] = args.with_gcc_torture
+
+    if getattr(args, "gcc_test_suite_only", False):
+        runtime_config["with_gcc_torture"] = True
+        runtime_config["pytest_args"] = "tests/smoke -m gcc_torture"
+
+    if getattr(args, "profile", False):
+        runtime_config["profile"] = True
+
+    if getattr(args, "extra_tcc_cflags", None):
+        runtime_config["extra_tcc_cflags"] = args.extra_tcc_cflags
 
     if args.pytest_args:
         runtime_config["pytest_args"] = str(args.pytest_args)
@@ -1328,16 +1968,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="Force a clean rootfs rebuild, refresh the remote smoke venv, and reflash kernel/rootfs even if hashes match.")
     parser.add_argument("--gdb", action="store_true", help="Build locally, sync debug artifacts to the remote repository, then start an interactive remote GDB attach session over SSH without flashing. Combine with --reset to reset-halt before attaching.")
     parser.add_argument("--flash-only", action="store_true", help="Upload and flash artifacts on the remote host, then stop without running pytest.")
-    parser.add_argument("--full-flash-erase", action="store_true", help="Erase the entire flash bank before programming artifacts on the remote host. This is slower than the default partial erase but guarantees a fully clean flash contents.")
     parser.add_argument("--reset", action="store_true", help="Reset the configured target through OpenOCD on the remote host before exiting, or reset-halt before attaching when combined with --gdb.")
+    parser.add_argument("--power-reset", nargs="?", const="auto", default=None, metavar="HUB", help="Power-cycle the target via uhubctl on the remote host. Pass 'auto' (default) to detect the hub from the debug probe, or a hub path like '1-1'. Useful when the target is hung and OpenOCD cannot connect.")
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
+    parser.add_argument("--with-gcc-torture", dest="with_gcc_torture", action="store_true", default=None, help="Enable GCC torture smoke tests for this run. Also syncs libs/tinycc/tests/gcctestsuite and exports YASOS_SMOKE_ENABLE_GCC_TORTURE=1 remotely.")
+    parser.add_argument("--gcc-test-suite-only", action="store_true", help="Run only GCC torture tests. Implies --with-gcc-torture and filters pytest to -m gcc_torture.")
+    parser.add_argument("--extra-tcc-cflags", help="Extra CFLAGS passed to every TCC compilation during smoke tests. Example: --extra-tcc-cflags='-O1'.")
     parser.add_argument("--pytest-args", help="Override cached pytest arguments for this run only. Example: --pytest-args 'tests/smoke -k shell_test'.")
     parser.add_argument("--tests", nargs="+", help="Run an explicit list of pytest paths or nodeids for this run only.")
     parser.add_argument("--gdb-debug", action="store_true", help="Automated GDB debug: reset target, run a command via serial, capture yasld log, reset-halt, start GDB with symbols loaded. Requires --cmd.")
     parser.add_argument("--cmd", help="Target command to execute over serial before GDB attach (used with --gdb-debug). Example: --cmd 'tcc 15_recursion.c'")
     parser.add_argument("--gdb-script", help="Path to a GDB script file to source after connecting and loading symbols (used with --gdb-debug).")
     parser.add_argument("--log-cli-level", help="Set pytest --log-cli-level for this run (e.g. INFO, DEBUG, WARNING). Passed through to the remote pytest invocation.")
+    parser.add_argument("--profile", action="store_true", help="Enable TCC performance profiling. Captures per-phase bench breakdown and per-syscall cycle counts from the kernel. Results are saved alongside the timing report.")
+    parser.add_argument("--force-flash", action="store_true", help="Upload and flash existing kernel/rootfs artifacts without rebuilding. Forces reflash even if remote hashes match.")
+    parser.add_argument("--force-kernel-flash", action="store_true", help="Upload and flash only the kernel artifact without rebuilding. Skips rootfs entirely.")
     parser.add_argument("--list-boards", action="store_true", help="Print supported board identifiers and exit.")
+    parser.add_argument("--list-tests", action="store_true", help="Print available pytest nodeids for the smoke suite and exit. Honors --tests, --pytest-args, and --with-gcc-torture.")
     return parser.parse_args()
 
 
@@ -1346,12 +1993,20 @@ def main() -> int:
     if args.list_boards:
         list_boards()
         return 0
+    if args.list_tests:
+        list_tests(args)
+        return 0
 
     try:
         cached = load_cache()
         cache_exists = CACHE_PATH.exists()
+        apply_defconfig = args.reconfigure or not cache_exists
         if args.flash_only and args.gdb:
             raise RunnerError("--flash-only and --gdb cannot be used together")
+        if args.force_flash and args.gdb:
+            raise RunnerError("--force-flash and --gdb cannot be used together")
+        if args.force_kernel_flash and args.gdb:
+            raise RunnerError("--force-kernel-flash and --gdb cannot be used together")
         if args.gdb_debug and args.gdb:
             raise RunnerError("--gdb-debug and --gdb cannot be used together")
         if args.gdb_debug and not args.cmd:
@@ -1371,10 +2026,64 @@ def main() -> int:
         runtime_config = apply_runtime_pytest_overrides(config, args)
         runtime_config["remote_repo_path"] = prepare_remote_repo_path(config)
 
+        if args.power_reset is not None:
+            hub_override = args.power_reset  # 'auto' or explicit hub path
+            runtime_config["uhubctl_hub"] = hub_override
+            print(f"Running remote USB power-cycle reset (hub={hub_override}).")
+            run_remote_power_reset(runtime_config)
+            print("Remote power-cycle reset completed successfully.")
+            return 0
+
         if args.reset and not args.gdb:
             print("Running remote OpenOCD reset with cached configuration.")
             run_remote_reset(runtime_config)
             print("Remote reset completed successfully.")
+            return 0
+
+        if args.force_flash:
+            if not KERNEL_ARTIFACT.exists():
+                raise RunnerError(f"Kernel artifact not found: {KERNEL_ARTIFACT}. Build first.")
+            if not ROOTFS_ARTIFACT.exists():
+                raise RunnerError(f"Rootfs artifact not found: {ROOTFS_ARTIFACT}. Build first.")
+            print("Force-flashing existing artifacts (skipping build).")
+            kernel_sha = sha256_file(KERNEL_ARTIFACT)
+            rootfs_sha = sha256_file(ROOTFS_ARTIFACT)
+            requirements_sha = sha256_file(SMOKE_REQUIREMENTS)
+            remote_work_dir, remote_kernel, remote_rootfs = upload_artifacts(runtime_config)
+            run_remote_smoke(
+                runtime_config,
+                remote_work_dir,
+                remote_kernel,
+                remote_rootfs,
+                flash_only=True,
+                kernel_sha=kernel_sha,
+                rootfs_sha=rootfs_sha,
+                requirements_sha=requirements_sha,
+                force=True,
+            )
+            print("Force-flash completed successfully.")
+            return 0
+
+        if args.force_kernel_flash:
+            if not KERNEL_ARTIFACT.exists():
+                raise RunnerError(f"Kernel artifact not found: {KERNEL_ARTIFACT}. Build first.")
+            print("Force-flashing kernel only (skipping build and rootfs).")
+            kernel_sha = sha256_file(KERNEL_ARTIFACT)
+            requirements_sha = sha256_file(SMOKE_REQUIREMENTS)
+            remote_work_dir, remote_kernel = upload_kernel_artifact(runtime_config)
+            run_remote_smoke(
+                runtime_config,
+                remote_work_dir,
+                remote_kernel,
+                "",
+                flash_only=True,
+                kernel_sha=kernel_sha,
+                rootfs_sha="",
+                requirements_sha=requirements_sha,
+                force=True,
+                kernel_only=True,
+            )
+            print("Force kernel flash completed successfully.")
             return 0
 
         if args.gdb_debug:
@@ -1384,7 +2093,13 @@ def main() -> int:
             print(f"Target command: {args.cmd}")
             if args.gdb_script:
                 print(f"GDB script: {args.gdb_script}")
-            build_local_artifacts(runtime_config, debug=args.debug, build_rootfs=False, force=args.force)
+            build_local_artifacts(
+                runtime_config,
+                debug=args.debug,
+                build_rootfs=False,
+                force=args.force,
+                apply_defconfig=apply_defconfig,
+            )
             print("Syncing repository source files to the remote repository with rsync.")
             sync_remote_repo_sources(runtime_config)
             print("Syncing debug artifacts and symbol files to the remote repository with rsync.")
@@ -1412,7 +2127,13 @@ def main() -> int:
                 print("Running remote GDB attach workflow with reset-before-connect.")
             else:
                 print("Running remote GDB attach workflow with synced kernel symbols.")
-            build_local_artifacts(runtime_config, debug=args.debug, build_rootfs=False, force=args.force)
+            build_local_artifacts(
+                runtime_config,
+                debug=args.debug,
+                build_rootfs=False,
+                force=args.force,
+                apply_defconfig=apply_defconfig,
+            )
             print("Syncing repository source files to the remote repository with rsync.")
             sync_remote_repo_sources(runtime_config)
             print("Syncing debug artifacts and symbol files to the remote repository with rsync.")
@@ -1430,14 +2151,27 @@ def main() -> int:
             print("Running remote smoke workflow with debug kernel and rootfs builds.")
         else:
             print("Running remote smoke workflow with cached configuration.")
-        build_local_artifacts(runtime_config, debug=args.debug, force=args.force)
+        total_steps = 3 if args.flash_only else 4
+        step = 1
+        print(f"[{step}/{total_steps}] Building local artifacts...")
+        build_local_artifacts(
+            runtime_config,
+            debug=args.debug,
+            force=args.force,
+            apply_defconfig=apply_defconfig,
+        )
         kernel_sha = sha256_file(KERNEL_ARTIFACT)
         rootfs_sha = sha256_file(ROOTFS_ARTIFACT)
         requirements_sha = sha256_file(SMOKE_REQUIREMENTS)
+        step += 1
+        print(f"[{step}/{total_steps}] Uploading artifacts to remote host...")
         remote_work_dir, remote_kernel, remote_rootfs = upload_artifacts(runtime_config)
         if not args.flash_only:
-            print("Syncing repository source files to the remote repository with rsync.")
+            step += 1
+            print(f"[{step}/{total_steps}] Syncing repository source files to the remote repository with rsync.")
             sync_smoke_support(runtime_config)
+        step += 1
+        print(f"[{step}/{total_steps}] Running remote smoke tests...")
         run_remote_smoke(
             runtime_config,
             remote_work_dir,

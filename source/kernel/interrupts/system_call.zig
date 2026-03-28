@@ -33,6 +33,7 @@ const process_manager = @import("../process_manager.zig");
 
 const handlers = @import("syscall_handlers.zig");
 const arch = @import("arch");
+const perf = @import("perf_profile.zig");
 comptime {
     _ = @import("arch");
     const config = @import("config");
@@ -152,6 +153,9 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_sysconf => return handlers.sys_sysconf,
             c.sys_access => return handlers.sys_access,
             c.sys_prlimit => return handlers.sys_prlimit,
+            c.sys_klog_ctl => return handlers.sys_klog_ctl,
+            c.sys_ftruncate => return handlers.sys_ftruncate,
+            c.sys_perf_dump => return handlers.sys_perf_dump,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -181,6 +185,7 @@ fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksec
 }
 
 pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") callconv(.c) isize {
+    const start_cycles = if (perf.enabled) perf.read_cycles() else 0;
     process_manager.instance.get_current_process().processes_syscall = true;
     // log.err("System call processing started for: {d}", .{number});
     if (number >= c.SYSCALL_COUNT) {
@@ -189,12 +194,17 @@ pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *vol
     const result = write_result(out, syscall_lookup_table[number](arg));
     // log.err("System call processing finished for: {d}", .{number});
     process_manager.instance.get_current_process().processes_syscall = false;
+    if (perf.enabled) {
+        const elapsed = perf.read_cycles() -% start_cycles;
+        perf.record(number, elapsed);
+    }
     return result;
 }
 
 pub fn init(kernel_allocator: std.mem.Allocator) void {
     log.info("initialization...", .{});
     handlers.init(kernel_allocator);
+    perf.init();
 }
 
 test "SystemCall.VerifyLookupTable" {
@@ -246,6 +256,7 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_sysconf, syscall_lookup_table[c.sys_sysconf]);
     try std.testing.expectEqual(handlers.sys_access, syscall_lookup_table[c.sys_access]);
     try std.testing.expectEqual(handlers.sys_prlimit, syscall_lookup_table[c.sys_prlimit]);
+    try std.testing.expectEqual(handlers.sys_perf_dump, syscall_lookup_table[c.sys_perf_dump]);
 }
 
 test "SystemCall.UnhandledSyscallReturnsError" {

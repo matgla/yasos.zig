@@ -21,6 +21,7 @@ const std = @import("std");
 
 const c = @import("libc_imports").c;
 const interface = @import("interface");
+const root = @import("root");
 
 const kernel = @import("../kernel.zig");
 
@@ -37,6 +38,13 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
     const Self = @This();
     base: BufferedFileForMeminfo,
 
+    fn get_tmp_memory_usage() usize {
+        if (@hasDecl(root, "get_tmp_memory_usage")) {
+            return root.get_tmp_memory_usage();
+        }
+        return 0;
+    }
+
     pub fn create() MemInfoFile {
         var meminfo = MemInfoFile.init(.{
             .base = BufferedFileForMeminfo.InstanceType.create("meminfo"),
@@ -52,6 +60,7 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
     pub fn sync(self: *Self) i32 {
         const memory_used: usize = kernel.memory.heap.malloc.get_usage();
         const memory_used_slow = kernel.process.process_manager.instance.get_process_memory_pool().get_used_size();
+        const memory_used_tmp = get_tmp_memory_usage();
         const memory_used_combined = memory_used + memory_used_slow;
         var buffer = &interface.base(self)._buffer;
         var written_length: usize = 0;
@@ -60,6 +69,8 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
             buffer;
         written_length += buf.len;
         buf = std.fmt.bufPrint(buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "MemTmpUsed:      {s}\n", .{format_size(memory_used_tmp, &sizebuf)}) catch buf;
         written_length += buf.len;
         buf = std.fmt.bufPrint(buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch buf;
         written_length += buf.len;
@@ -123,6 +134,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
     const expected_text =
         \\MemUsed:                0 B
         \\MemKernelUsed:          0 B
+        \\MemTmpUsed:             0 B
         \\MemProcessUsed:         0 B
         \\
     ;
@@ -142,6 +154,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
     const expected_allocated_text =
         \\MemUsed:             3072 KB
         \\MemKernelUsed:       1024 KB
+        \\MemTmpUsed:             0 B
         \\MemProcessUsed:      2048 KB
         \\
     ;
@@ -158,6 +171,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
     const expected_allocated2_text =
         \\MemUsed:             2053 MB
         \\MemKernelUsed:       2049 MB
+        \\MemTmpUsed:             0 B
         \\MemProcessUsed:      4096 KB
         \\
     ;

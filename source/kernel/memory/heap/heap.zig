@@ -20,3 +20,5 @@
 pub const malloc = @import("malloc.zig");
 pub const ProcessPageAllocator = @import("process_page_allocator.zig").ProcessPageAllocator;
 pub const ProcessMemoryPool = @import("process_memory_pool.zig").ProcessMemoryPool;
+pub const TmpMemoryPool = @import("tmp_memory_pool.zig").TmpMemoryPool;
+pub const TmpPageAllocator = @import("tmp_page_allocator.zig").TmpPageAllocator;

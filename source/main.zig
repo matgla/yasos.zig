@@ -34,6 +34,25 @@ const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
 
 const panic_helper = @import("arch").panic;
 
+// Overclock support — exported from crt.zig, called after UART init
+extern fn apply_overclock() u32;
+extern fn overclock_get_target_khz() u32;
+extern fn overclock_get_vreg_code() u32;
+extern fn overclock_get_vco_freq() u32;
+extern fn overclock_get_postdiv1() u32;
+extern fn overclock_get_postdiv2() u32;
+extern fn overclock_is_enabled() u32;
+// Register dump functions
+extern fn overclock_read_qmi_timing() u32;
+extern fn overclock_read_qmi_rfmt() u32;
+extern fn overclock_read_qmi_rcmd() u32;
+extern fn overclock_read_pll_sys_cs() u32;
+extern fn overclock_read_pll_sys_fbdiv() u32;
+extern fn overclock_read_pll_sys_prim() u32;
+extern fn overclock_read_clk_sys_selected() u32;
+extern fn overclock_read_clk_ref_selected() u32;
+extern fn overclock_read_powman_vreg() u32;
+
 comptime {
     _ = @import("arch");
 }
@@ -59,17 +78,32 @@ pub const std_options: std.Options = .{
     .page_size_min = 1 * 1024,
     .logFn = kernel.kernel_stdout_log,
     .log_level = get_log_level(),
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{
-            .scope = .yasld,
-            .level = .info,
-        },
-    },
+    .log_scope_levels = &[_]std.log.ScopeLevel{ .{
+        .scope = .yasld,
+        .level = .info,
+    }, .{
+        .scope = .@"mmc/sdio",
+        .level = .debug,
+    } },
 };
 
 pub const os = struct {
     pub const PATH_MAX = 128;
 };
+
+const TmpRamPageSize = 256;
+const TmpMemoryPoolType = kernel.memory.heap.TmpMemoryPool(TmpRamPageSize);
+const TmpPageAllocatorType = kernel.memory.heap.TmpPageAllocator(TmpMemoryPoolType);
+
+var tmp_memory_pool: ?TmpMemoryPoolType = null;
+var tmp_page_allocator: ?TmpPageAllocatorType = null;
+
+pub fn get_tmp_memory_usage() usize {
+    if (tmp_memory_pool) |pool| {
+        return pool.get_used_size();
+    }
+    return 0;
+}
 
 fn initialize_board() void {
     try board.uart.uart0.init(.{
@@ -77,18 +111,51 @@ fn initialize_board() void {
     });
 
     kernel.stdout.set_output(&board.uart.uart0, @TypeOf(board.uart.uart0).write_some_opaque);
-    kernel.log.info("initialization of external memory", .{});
+
+    const oc_result = apply_overclock();
+
+    // Reconfigure UART baud — apply_overclock switches clk_peri to PLL_USB (48 MHz)
+    board.uart.uart0.set_baudrate(921600);
+
+    // Dump registers AFTER overclock
+    if (oc_result != 0) {
+        kernel.log.err("overclock FAILED with code {d}", .{oc_result});
+    }
+
     if (hal.external_memory.enable()) {
         hal.external_memory.dump_configuration();
-        kernel.log.info("External memory found", .{});
-        if (hal.external_memory.perform_post()) {
-            kernel.log.info("External memory post test passed", .{});
-        } else {
+        if (hal.external_memory.perform_post()) {} else {
             kernel.log.err("External memory post test failed", .{});
         }
     } else {
         kernel.log.err("No external memory found", .{});
     }
+}
+
+fn tmp_filesystem_allocator(kernel_allocator: std.mem.Allocator) !std.mem.Allocator {
+    if (comptime !std.mem.eql(u8, config.cpu.cpu, "rp2350")) {
+        return kernel_allocator;
+    }
+
+    if (tmp_page_allocator) |*allocator_state| {
+        return allocator_state.allocator();
+    }
+
+    const Linker = struct {
+        extern var __process_ram_start__: u8;
+        extern var __process_ram_end__: u8;
+    };
+
+    const tmp_start: [*]align(TmpRamPageSize) u8 = @ptrCast(@alignCast(&Linker.__process_ram_start__));
+    const tmp_end = @intFromPtr(&Linker.__process_ram_end__);
+    const tmp_len = tmp_end - @intFromPtr(tmp_start);
+
+    tmp_memory_pool = try TmpMemoryPoolType.init(kernel_allocator, tmp_start[0..tmp_len]);
+    if (tmp_memory_pool) |*pool| {
+        tmp_page_allocator = TmpPageAllocatorType.init(pool);
+    }
+
+    return tmp_page_allocator.?.allocator();
 }
 
 // must be in root module file, otherwise won't be used
@@ -216,7 +283,8 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
                 mmcnode.delete();
             }
         }
-        try mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/tmp");
+        const tmp_allocator = try tmp_filesystem_allocator(allocator);
+        try mount_filesystem(try allocate_filesystem(tmp_allocator, RamFs.InstanceType.init(tmp_allocator)), "/tmp");
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
         try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
     }

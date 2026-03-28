@@ -157,19 +157,27 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn release_pages_for(self: *ProcessMemoryPool, pid: c.pid_t) void {
-        log.debug("Releasing pages for: {d}", .{pid});
+        const pages_before = self.page_bitmap.count();
+        log.info("release_pages_for: pid={d} pages_before={d}", .{ pid, pages_before });
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
+            var pages_freed: usize = 0;
+            var entity_count: usize = 0;
             var next = mapping.value_ptr.first;
             while (next) |entity_node| {
                 const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
                 const start_index = (@intFromPtr(entity.address.ptr) - self.start_address) / page_size;
                 const end_index = start_index + @as(usize, @intCast(entity.address.len)) / page_size;
+                const n_pages = end_index - start_index;
+                log.info("  entity[{d}]: addr=0x{x} pages={d}", .{ entity_count, @intFromPtr(entity.address.ptr), n_pages });
                 for (start_index..end_index) |index| {
                     self.page_bitmap.unset(index);
                 }
+                pages_freed += n_pages;
+                entity_count += 1;
                 next = entity_node.next;
             }
+            log.info("  total entities={d} pages_freed={d}", .{ entity_count, pages_freed });
             if (self.memory_map.getPtr(pid)) |*list| {
                 var next_element = list.*.pop();
                 while (next_element) |node| {
@@ -179,6 +187,7 @@ pub const ProcessMemoryPool = struct {
                 }
             }
             _ = self.memory_map.remove(pid);
+            log.info("release_pages_for: pid={d} pages_after={d}", .{ pid, self.page_bitmap.count() });
         } else {
             log.warn("release_pages_for: pid={d} not found in memory_map", .{pid});
         }
