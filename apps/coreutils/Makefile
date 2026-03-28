@@ -14,7 +14,7 @@ all: build/touch
 prepare:
 	mkdir -p build
 
-build/touch.o: touch.c prepare
+build/touch.o: touch.c | prepare
 	$(CC) $(CFLAGS) -c $< -o build/touch.o
 
 build/touch: build/touch.o

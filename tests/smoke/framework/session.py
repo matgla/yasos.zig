@@ -30,6 +30,7 @@ from .detect_serial_port import detect_probe_serial_port
 
 current_dir = os.path.dirname(os.path.abspath(__file__)) + "/.."
 logger = logging.getLogger(__name__)
+LOG_PREFIXES = ("[DBG]", "[ERR]", "[INF]", "[WRN]")
 
 class Session:
     serial_port = None
@@ -147,7 +148,7 @@ class Session:
             split_lines = response.splitlines()
             filtered_lines = []
             for line in split_lines:
-                if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
+                if line.startswith(LOG_PREFIXES):
                     continue
                 stripped = line.strip()
                 if stripped:
@@ -206,7 +207,7 @@ class Session:
          while True:
             line = self.serial.readline().decode('utf-8', 'ignore')
             self._record_serial_output(line)
-            if line.startswith("[INF]") or line.startswith("[ERR]") or line.startswith("[WRN]"):
+            if line.startswith(LOG_PREFIXES):
                 continue
             return line.strip()
 

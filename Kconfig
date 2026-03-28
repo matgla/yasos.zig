@@ -44,11 +44,18 @@ config CONFIG_PROCESS_CONTEXT_SWITCH_PERIOD
   help
     Context switch period in milliseconds, process may be interrupted earlier if blocked on IO
 
-config CONFIG_PROCESS_ROOT_STACK_SIZE
-  int "Root process stack size"
-  default 4096
+config CONFIG_PROCESS_DEFAULT_STACK_SIZE
+  int "Default process stack size"
+  default 32768
   help
-    Size of kernel root process stack size
+    Default stack size for newly spawned processes, including the root process.
+
+config CONFIG_PROCESS_MAX_STACK_SIZE
+  int "Maximum process stack size"
+  default 1048576
+  help
+    Hard stack size limit for processes. Soft stack limits may be raised up to
+    this value.
 
 config CONFIG_PROCESS_HW_SPINLOCK_NUMBER
   int "HW spinlock number for process synchronization"

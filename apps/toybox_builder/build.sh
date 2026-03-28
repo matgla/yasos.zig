@@ -28,5 +28,10 @@ PREFIX=$1 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t make install
 if [ -f "$1/bin/cal" ]; then
   mv "$1/bin/cal" "$(dirname "$1")/bin/cal"
 fi
+for applet in ulimit prlimit; do
+    if [ ! -e "$1/bin/$applet" ]; then
+        ln -sf toybox "$1/bin/$applet"
+    fi
+done
 # cp ../toybox/toybox $1/bin/toybox
 

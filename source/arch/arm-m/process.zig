@@ -271,8 +271,8 @@ pub const ArmProcess = struct {
         };
     }
 
-    pub fn reallocate_stack(self: *Self) !void {
-        self.stack = try self.process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
+    pub fn reallocate_stack(self: *Self, stack_size: u32) !void {
+        self.stack = try self.process_allocator.alignedAlloc(u8, .@"8", stack_size);
         self.stack_is_shared = false;
     }
 

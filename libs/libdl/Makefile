@@ -20,7 +20,7 @@ all: $(TARGET_SHARED) $(TARGET_SHARED).elf $(TARGET_STATIC)
 prepare:
 	mkdir -p build
 
-build/%.o: %.c prepare
+build/%.o: %.c | prepare
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(TARGET_SHARED): $(OBJS)

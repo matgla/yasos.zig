@@ -42,8 +42,9 @@ pub const HardwareProcess = struct {
         };
     }
 
-    pub fn reallocate_stack(self: *HardwareProcess) !void {
+    pub fn reallocate_stack(self: *HardwareProcess, stack_size: u32) !void {
         _ = self;
+        _ = stack_size;
     }
 
     pub fn deinit(self: *HardwareProcess, allocator: std.mem.Allocator) void {

@@ -267,10 +267,13 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch();
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
+    // Encode in Linux wait-status format: normal exit = (code << 8)
+    // so that WEXITSTATUS/WIFEXITED macros work correctly.
+    const wait_status = @as(i32, context.*) << 8;
     if (process._parent) |parent| {
-        parent.child_exit_code = context.*;
+        parent.child_exit_code = wait_status;
     }
-    process_manager.instance.delete_process(process.pid, context.*);
+    process_manager.instance.delete_process(process.pid, wait_status);
 
     return context.*;
 }
@@ -465,7 +468,7 @@ pub fn sys_mremap(arg: *const volatile anyopaque) !i32 {
     defer kernel.process.unblock_context_switch();
     const context: *const volatile c.mremap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    context.result.* = process.mremap(context.addr.?, context.old_length, context.new_length) catch {
+    context.result.* = process.mremap(context.addr.?, context.old_length, context.new_length, context.flags) catch {
         context.result.* = c.MAP_FAILED;
         return -1;
     };
@@ -598,7 +601,7 @@ pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
             fd = context.newfd;
             _ = close_fd(fd);
         } else {
-            fd = process.get_free_fd();
+            fd = process.get_free_fd() orelse return kernel.errno.ErrnoSet.TooManyOpenFiles;
         }
         return try process.attach_file_with_fd(@intCast(fd), handle.path, handle.node.share());
     }
@@ -629,6 +632,31 @@ pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
             return kernel.errno.ErrnoSet.InvalidArgument;
         },
     }
+}
+
+pub fn sys_prlimit(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+
+    const context: *const volatile c.prlimit_context = @ptrCast(@alignCast(arg));
+    if (context.pid < 0) {
+        return kernel.errno.ErrnoSet.InvalidArgument;
+    }
+
+    const process = if (context.pid == 0)
+        process_manager.instance.get_current_process()
+    else
+        process_manager.instance.get_process_for_pid(context.pid) orelse return kernel.errno.ErrnoSet.NoSuchProcess;
+
+    if (context.old_limit) |old_limit| {
+        old_limit.* = try process.get_resource_limit(context.resource);
+    }
+
+    if (context.new_limit) |new_limit| {
+        try process.set_resource_limit(context.resource, new_limit.*);
+    }
+
+    return 0;
 }
 
 pub fn sys_access(arg: *const volatile anyopaque) !i32 {

@@ -151,6 +151,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_sysinfo => return handlers.sys_sysinfo,
             c.sys_sysconf => return handlers.sys_sysconf,
             c.sys_access => return handlers.sys_access,
+            c.sys_prlimit => return handlers.sys_prlimit,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -244,6 +245,7 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_sysinfo, syscall_lookup_table[c.sys_sysinfo]);
     try std.testing.expectEqual(handlers.sys_sysconf, syscall_lookup_table[c.sys_sysconf]);
     try std.testing.expectEqual(handlers.sys_access, syscall_lookup_table[c.sys_access]);
+    try std.testing.expectEqual(handlers.sys_prlimit, syscall_lookup_table[c.sys_prlimit]);
 }
 
 test "SystemCall.UnhandledSyscallReturnsError" {

@@ -254,7 +254,7 @@ pub const Loader = struct {
         }
     }
 
-    fn get_section_address_for_offset(module: *Module, header: *const Header, offset: usize) error{OffsetOutOfRange}!struct { section: usize, offset: usize } {
+    fn get_section_address_for_offset(module: *Module, header: *const Header, offset: usize) error{OffsetOutOfRange}!struct { section: usize, offset: usize, is_code: bool } {
         const text_limit: usize = header.code_length;
         const init_offset: usize = text_limit + header.init_length;
         const plt_limit: usize = init_offset + header.plt_length;
@@ -263,17 +263,17 @@ pub const Loader = struct {
         const got_limit: usize = bss_limit + header.got_length;
 
         if (offset < text_limit) {
-            return .{ .section = @intFromPtr(module.get_text().ptr), .offset = 0 };
+            return .{ .section = @intFromPtr(module.get_text().ptr), .offset = 0, .is_code = true };
         } else if (offset < init_offset) {
-            return .{ .section = @intFromPtr(module.get_init().ptr), .offset = text_limit };
+            return .{ .section = @intFromPtr(module.get_init().ptr), .offset = text_limit, .is_code = true };
         } else if (offset < plt_limit) {
-            return .{ .section = @intFromPtr(module.get_plt().ptr), .offset = init_offset };
+            return .{ .section = @intFromPtr(module.get_plt().ptr), .offset = init_offset, .is_code = true };
         } else if (offset < data_limit) {
-            return .{ .section = @intFromPtr(module.get_data().ptr), .offset = plt_limit };
+            return .{ .section = @intFromPtr(module.get_data().ptr), .offset = plt_limit, .is_code = false };
         } else if (offset < bss_limit) {
-            return .{ .section = @intFromPtr(module.get_bss().ptr), .offset = data_limit };
+            return .{ .section = @intFromPtr(module.get_bss().ptr), .offset = data_limit, .is_code = false };
         } else if (offset < got_limit) {
-            return .{ .section = @intFromPtr(module.get_got().ptr), .offset = bss_limit };
+            return .{ .section = @intFromPtr(module.get_got().ptr), .offset = bss_limit, .is_code = false };
         } else {
             log.debug("Offset: {x} is out of range, text: {x}, init: {x}, plt: {x}, data: {x}, bss: {x}, got: {x}\n", .{ offset, text_limit, init_offset, plt_limit, data_limit, bss_limit, got_limit });
             return error.OffsetOutOfRange;
@@ -299,6 +299,7 @@ pub const Loader = struct {
                 continue;
             }
 
+            const raw_offset = got[i].symbol_offset;
             const section_start = Loader.get_section_address_for_offset(module, header, got[i].symbol_offset) catch |err| {
                 log.err("[yasld] Can't find section for GOT[{d}]: {s}", .{ i, @errorName(err) });
                 return err;
@@ -306,7 +307,11 @@ pub const Loader = struct {
             const address = section_start.section + got[i].symbol_offset - section_start.offset;
             log.debug("Setting GOT[{d}] to: 0x{x}", .{ i, address });
             got[i].base_register = @intFromPtr(got.ptr);
-            got[i].symbol_offset = address;
+            // Cortex-M executes only Thumb code. Code addresses resolved here
+            // (e.g. labels from goto *&&label that have no local relocation)
+            // need bit 0 set so that BX does not fault.
+            got[i].symbol_offset = if (section_start.is_code) address | 1 else address;
+            log.debug("PhaseA GOT[{d}]: raw=0x{x} -> 0x{x}, is_code={}", .{ i, raw_offset, got[i].symbol_offset, section_start.is_code });
         }
 
         var current_function_pointer_relocation_index: usize = 0;
@@ -333,9 +338,12 @@ pub const Loader = struct {
                                     log.err("[yasld] Can't generate thunk for symbol: '{s}': {s}", .{ maybe_symbol.?.name(), @errorName(err) });
                                     return err;
                                 };
-                                log.debug("Setting GOT[{d}] to thunk: 0x{x} [{s}], target: 0x{x}, r9: 0x{x}", .{ rel.index, address, maybe_symbol.?.name(), symbol_entry.address, symbol_entry.target_got_address });
+                                log.debug("Setting GOT[{d}] to symtab thunk: 0x{x} [{s}], target: 0x{x}, r9: 0x{x}, thunk_idx: {d}", .{ rel.index, address, maybe_symbol.?.name(), symbol_entry.address, symbol_entry.target_got_address, current_function_pointer_relocation_index });
                                 current_function_pointer_relocation_index += 1;
                                 got[rel.index].symbol_offset = address;
+                            } else if (maybe_symbol.?.weak == 1) {
+                                log.debug("Weak function pointer symbol '{s}' not found, resolving to NULL", .{maybe_symbol.?.name()});
+                                got[rel.index].symbol_offset = 0;
                             } else {
                                 log.err("[yasld] Can't find function pointer symbol: '{s}'", .{maybe_symbol.?.name()});
                                 return LoaderError.SymbolNotFound;
@@ -364,6 +372,10 @@ pub const Loader = struct {
                     log.debug("Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });
                     got[rel.index].symbol_offset = symbol_entry.address;
                     got[rel.index].base_register = symbol_entry.target_got_address;
+                } else if (symbol.weak == 1) {
+                    log.debug("Weak symbol '{s}' not found, resolving to NULL", .{symbol.name()});
+                    got[rel.index].symbol_offset = 0;
+                    got[rel.index].base_register = 0;
                 } else {
                     log.err("[yasld] Can't find symbol: '{s}'\n", .{symbol.name()});
                     return LoaderError.SymbolNotFound;
@@ -410,7 +422,7 @@ pub const Loader = struct {
                                 log.err("[yasld] Can't generate local thunk for GOT[{d}]: {s}", .{ rel.index, @errorName(err) });
                                 return err;
                             };
-                            log.debug("Setting GOT[{d}] to local thunk: 0x{x}, target: 0x{x}, r9: 0x{x}", .{ rel.index, address, fn_address, @intFromPtr(got.ptr) });
+                            log.debug("Setting GOT[{d}] to local thunk: 0x{x}, target: 0x{x}, r9: 0x{x}, thunk_idx: {d}", .{ rel.index, address, fn_address, @intFromPtr(got.ptr), thunk_index });
                             got[rel.index].symbol_offset = address;
                             thunk_index += 1;
                         } else {
@@ -465,6 +477,9 @@ pub const Loader = struct {
                 address_from += 1;
             }
             log.debug("Patching from: 0x{x} to: 0x{x}, address_from: {x}, target: {x}", .{ rel.from, rel.to, address_from, @intFromPtr(target) });
+            if (rel.to >= module.get_data().len) {
+                log.err("DataReloc targeting GOT area: to=0x{x} from=0x{x} section={s} addr=0x{x} -> 0x{x}", .{ rel.to, rel.from, @tagName(from_section), @intFromPtr(target), address_from });
+            }
 
             target.* = address_from;
         }

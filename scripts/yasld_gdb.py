@@ -33,6 +33,10 @@ ELF_MAP = {
     "libm.so":        "libs/libm/build/libm.so",
     "libncurses.so":  "libs/yasos_curses/build/libncurses.so.elf",
     "libtermcap.so":  "libs/termcap/build/libtermcap.so.elf",
+    "libsoftfp.so":   "libs/tinycc/lib/fp/libsoftfp.so.elf",
+    "libvfpv4sp.so":  "libs/tinycc/lib/fp/libvfpv4sp.so.elf",
+    "libvfpv5dp.so":  "libs/tinycc/lib/fp/libvfpv5dp.so.elf",
+    "librp2350fp.so": "libs/tinycc/lib/fp/librp2350fp.so.elf",
     "armv8m-tcc":     "libs/tinycc/bin/armv8m-tcc.elf",
     # Apps
     "hello":          "apps/hello_world/build/hello.elf",

@@ -25,7 +25,7 @@ all: $(TARGET_SHARED) $(TARGET_STATIC)
 prepare:
 	mkdir -p build
 
-build/%.o: %.c prepare
+build/%.o: %.c | prepare
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(TARGET_SHARED): $(OBJS)
@@ -41,5 +41,9 @@ install: $(TARGET_SHARED) $(TARGET_STATIC)
 
 	cp include/*.h $(INCLUDEDIR)
 
+test:
+	$(MAKE) -C tests test
+
 clean:
 	rm -rf build
+	$(MAKE) -C tests clean

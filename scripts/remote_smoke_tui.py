@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import curses
+import hashlib
 import importlib.util
 import json
 import shlex
@@ -20,6 +21,7 @@ CACHE_PATH = REPO_ROOT / ".cache" / "remote_smoke_runner.json"
 REMOTE_SMOKE_LOGS_DIR = REPO_ROOT / ".cache" / "remote_smoke_logs"
 KERNEL_ARTIFACT = REPO_ROOT / "zig-out" / "bin" / "yasos_kernel"
 ROOTFS_ARTIFACT = REPO_ROOT / "rootfs.img"
+SMOKE_REQUIREMENTS = REPO_ROOT / "tests" / "smoke" / "requirements.txt"
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,7 @@ class BoardProfile:
     defconfig: str
     interface_cfg: str
     target_cfg: str
+    flash_base: str
     rootfs_address: str
 
 
@@ -39,6 +42,7 @@ BOARD_PROFILES = {
         defconfig="configs/pimoroni_pico_plus2_and_vga_defconfig",
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
+        flash_base="0x10000000",
         rootfs_address="0x10100000",
     ),
     "mspc_v2": BoardProfile(
@@ -47,6 +51,7 @@ BOARD_PROFILES = {
         defconfig="configs/mspc_defconfig",
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
+        flash_base="0x10000000",
         rootfs_address="0x10100000",
     ),
 }
@@ -65,6 +70,13 @@ DEFAULT_CONFIG = {
     "optimize": "ReleaseFast",
     "test_retries": 1,
     "pytest_args": "tests/smoke",
+}
+
+TARGET_TEST_COMMAND_HOOKS = {
+    "119_random_stuff.c": {
+        "setup": ["ulimit -S -s 1024"],
+        "teardown": ["ulimit -S -s 32"],
+    },
 }
 
 
@@ -353,6 +365,14 @@ def command_string(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def run_command(cmd: list[str], cwd: Path | None = None, input_text: str | None = None) -> None:
     print(f"\n$ {command_string(cmd)}")
     completed = subprocess.run(
@@ -492,6 +512,34 @@ def sync_remote_repo_subset(config: dict[str, Any], rel_paths: list[str]) -> str
     return remote_repo.rstrip("/")
 
 
+def sync_remote_repo_sources(config: dict[str, Any]) -> str:
+    require_local_rsync()
+    verify_remote_rsync(config)
+
+    remote_repo = str(config["remote_repo_path"]).rstrip("/") + "/"
+    remote_dest = f"{config['ssh_target']}:{remote_repo}"
+    ssh_cmd = ssh_transport_base(config)
+    rsync_cmd = [
+        "rsync",
+        "-az",
+        "--delete",
+        "--exclude=.git/",
+        "--exclude=.cache/",
+        "--exclude=zig-cache/",
+        "--exclude=zig-out/",
+        "--exclude=yasos_venv/",
+        "--exclude=__pycache__/",
+        "--exclude=*.pyc",
+        "--exclude=.DS_Store",
+        "-e",
+        command_string(ssh_cmd),
+        "./",
+        remote_dest,
+    ]
+    run_command(rsync_cmd, cwd=REPO_ROOT)
+    return remote_repo.rstrip("/")
+
+
 def sync_debug_artifacts(config: dict[str, Any]) -> str:
     rel_paths = debug_sync_paths()
     remote_repo = sync_remote_repo_subset(config, rel_paths)
@@ -544,6 +592,7 @@ def smoke_sync_paths(config: dict[str, Any]) -> list[str]:
 
 
 def sync_smoke_support(config: dict[str, Any]) -> None:
+    sync_remote_repo_sources(config)
     sync_remote_repo_subset(config, smoke_sync_paths(config))
 
 
@@ -677,7 +726,7 @@ printf '%s\n' "$path"
         )
 
 
-def build_local_artifacts(config: dict[str, Any], debug: bool = False, build_rootfs: bool = True) -> None:
+def build_local_artifacts(config: dict[str, Any], debug: bool = False, build_rootfs: bool = True, force: bool = False) -> None:
     board = BOARD_PROFILES[config["board"]]
     run_command(
         [
@@ -692,8 +741,10 @@ def build_local_artifacts(config: dict[str, Any], debug: bool = False, build_roo
         ["zig", "build", f"-Doptimize={effective_optimize(config, debug)}"],
         cwd=REPO_ROOT,
     )
-    rootfs_cmd = ["./build_rootfs.sh", "-c", "-o", ROOTFS_ARTIFACT.name]
+    rootfs_cmd = ["./build_rootfs.sh", "-o", ROOTFS_ARTIFACT.name]
     if build_rootfs:
+        if force:
+            rootfs_cmd.insert(1, "-c")
         if debug:
             rootfs_cmd.append("--debug")
         run_command(rootfs_cmd, cwd=REPO_ROOT)
@@ -732,10 +783,22 @@ def upload_artifacts(config: dict[str, Any]) -> tuple[str, str, str]:
     return remote_work_dir, remote_kernel, remote_rootfs
 
 
-def run_remote_smoke(config: dict[str, Any], remote_work_dir: str, remote_kernel: str, remote_rootfs: str, flash_only: bool) -> None:
+def run_remote_smoke(
+    config: dict[str, Any],
+    remote_work_dir: str,
+    remote_kernel: str,
+    remote_rootfs: str,
+    flash_only: bool,
+    kernel_sha: str,
+    rootfs_sha: str,
+    requirements_sha: str,
+    force: bool,
+) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
+    full_flash_erase = bool(config.get("full_flash_erase", False))
     test_retries = int(config.get("test_retries", 0))
+    test_command_hooks = json.dumps(TARGET_TEST_COMMAND_HOOKS, separators=(",", ":")) if TARGET_TEST_COMMAND_HOOKS else ""
     pytest_args = shlex.split(str(config["pytest_args"]).strip() or "tests/smoke")
     remote_script = """set -euo pipefail
 remote_repo=$1
@@ -749,11 +812,62 @@ remote_kernel=$8
 remote_rootfs=$9
 flash_only=${10}
 test_retries=${11}
-shift 11
+kernel_sha=${12}
+rootfs_sha=${13}
+requirements_sha=${14}
+force=${15}
+full_flash_erase=${16}
+""" + f"test_command_hooks_json={shlex.quote(test_command_hooks)}\n" + """shift 16
 
 mkdir -p "$remote_work_dir"
 
-openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "program $remote_rootfs $rootfs_address" -c "program $remote_kernel verify reset exit"
+artifact_state_dir="$remote_work_dir/.artifact-state"
+kernel_sha_file="$artifact_state_dir/kernel.sha256"
+rootfs_sha_file="$artifact_state_dir/rootfs.sha256"
+mkdir -p "$artifact_state_dir"
+
+flash_kernel=1
+flash_rootfs=1
+
+if [[ "$force" != "1" ]]; then
+    if [[ -f "$kernel_sha_file" ]] && [[ "$(cat "$kernel_sha_file")" == "$kernel_sha" ]]; then
+        flash_kernel=0
+    fi
+    if [[ -f "$rootfs_sha_file" ]] && [[ "$(cat "$rootfs_sha_file")" == "$rootfs_sha" ]]; then
+        flash_rootfs=0
+    fi
+fi
+
+if (( flash_kernel || flash_rootfs )); then
+    openocd_cmd=(
+        openocd
+        -f "$interface_cfg"
+        -f "$target_cfg"
+        -c "adapter speed $adapter_speed"
+    )
+    if [[ "$full_flash_erase" == "1" ]]; then
+        echo "Performing full flash bank erase before programming."
+        openocd_cmd+=( -c "init" -c "reset halt" -c "flash erase_address """ + board.flash_base + """ 0" )
+    fi
+    if (( flash_rootfs )); then
+        openocd_cmd+=( -c "program $remote_rootfs $rootfs_address" )
+    fi
+    if (( flash_kernel )); then
+        openocd_cmd+=( -c "program $remote_kernel verify" )
+    fi
+    openocd_cmd+=( -c "reset run" -c "exit" )
+    "${openocd_cmd[@]}"
+
+    if (( flash_kernel )); then
+        printf '%s\n' "$kernel_sha" > "$kernel_sha_file"
+    fi
+    if (( flash_rootfs )); then
+        printf '%s\n' "$rootfs_sha" > "$rootfs_sha_file"
+    fi
+else
+    echo "Artifacts unchanged; skipping flash and resetting target only."
+    openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init" -c "reset run" -c "exit"
+fi
 
 if [[ "$flash_only" == "1" ]]; then
     exit 0
@@ -766,10 +880,20 @@ if [[ ! -x "$remote_work_dir/venv/bin/python3" ]]; then
     python3 -m venv "$remote_work_dir/venv"
 fi
 
-"$remote_work_dir/venv/bin/pip" install -r "$remote_repo/tests/smoke/requirements.txt"
+requirements_sha_file="$remote_work_dir/venv/.requirements.sha256"
+if [[ "$force" == "1" ]] || [[ ! -f "$requirements_sha_file" ]] || [[ "$(cat "$requirements_sha_file")" != "$requirements_sha" ]]; then
+    "$remote_work_dir/venv/bin/pip" install -r "$remote_repo/tests/smoke/requirements.txt"
+    printf '%s\n' "$requirements_sha" > "$requirements_sha_file"
+else
+    echo "Smoke venv unchanged; skipping pip install."
+fi
 
 if [[ -n "$serial_device" ]]; then
   export SERIAL_DEVICE="$serial_device"
+fi
+
+if [[ -n "$test_command_hooks_json" ]]; then
+        export YASOS_SMOKE_TARGET_TEST_COMMAND_HOOKS="$test_command_hooks_json"
 fi
 
 pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -s)
@@ -794,6 +918,11 @@ fi
         remote_rootfs,
         "1" if flash_only else "0",
         str(test_retries),
+        kernel_sha,
+        rootfs_sha,
+        requirements_sha,
+        "1" if force else "0",
+        "1" if full_flash_erase else "0",
         *pytest_args,
     ]
     run_error: RunnerError | None = None
@@ -845,11 +974,13 @@ openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -
 def run_remote_gdb(config: dict[str, Any], remote_kernel: str, gdb_bin: str, reset_before_connect: bool) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
+    local_repo_path = REPO_ROOT.as_posix()
     openocd_init = 'openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init"'
     if reset_before_connect:
         openocd_init += ' -c "reset halt"'
     remote_script = f"""set -euo pipefail
 remote_repo={shlex.quote(str(config["remote_repo_path"]))}
+local_repo={shlex.quote(local_repo_path)}
 interface_cfg={shlex.quote(board.interface_cfg)}
 target_cfg={shlex.quote(board.target_cfg)}
 adapter_speed={shlex.quote(adapter_speed)}
@@ -903,9 +1034,19 @@ if [[ "$ready" != "1" ]]; then
     exit 1
 fi
 
-"$gdb_bin" "$remote_kernel" \
-    -ex "source scripts/yasld_gdb.py" \
-    -ex "target extended-remote :3333"
+gdb_args=(
+    "$gdb_bin" "$remote_kernel"
+    -ex "source scripts/yasld_gdb.py"
+    -ex "directory $remote_repo"
+)
+
+if [[ "$local_repo" != "$remote_repo" ]]; then
+    gdb_args+=( -ex "set substitute-path $local_repo $remote_repo" )
+fi
+
+gdb_args+=( -ex "target extended-remote :3333" )
+
+"${{gdb_args[@]}}"
 """
     run_remote_tty_script(config, remote_script)
 
@@ -932,6 +1073,7 @@ def run_remote_gdb_debug(
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
     serial_device = str(config.get("serial_device", "")).strip()
+    local_repo_path = REPO_ROOT.as_posix()
 
     gdb_script_arg = ""
     if gdb_script:
@@ -1036,6 +1178,7 @@ print(f"\nSerial log saved to {log_path} ({len(all_output)} bytes)", file=sys.st
 
     remote_script = f"""set -euo pipefail
 remote_repo={shlex.quote(str(config["remote_repo_path"]))}
+local_repo={shlex.quote(local_repo_path)}
 interface_cfg={shlex.quote(board.interface_cfg)}
 target_cfg={shlex.quote(board.target_cfg)}
 adapter_speed={shlex.quote(adapter_speed)}
@@ -1135,9 +1278,14 @@ echo "UART log: $UART_LOG"
 gdb_args=(
     "$gdb_bin" "$remote_kernel"
     -ex "source scripts/yasld_gdb.py"
+    -ex "directory $remote_repo"
     -ex "target extended-remote :3333"
     -ex "yasld-load $UART_LOG"
 )
+
+if [[ "$local_repo" != "$remote_repo" ]]; then
+    gdb_args+=( -ex "set substitute-path $local_repo $remote_repo" )
+fi
 
 if [[ -n "$gdb_script" ]]; then
     gdb_args+=(-x "$gdb_script")
@@ -1155,16 +1303,19 @@ def list_boards() -> None:
 
 def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     runtime_config = dict(config)
+    runtime_config["full_flash_erase"] = bool(args.full_flash_erase)
 
     if args.test_retries is not None:
         runtime_config["test_retries"] = args.test_retries
 
     if args.pytest_args:
         runtime_config["pytest_args"] = str(args.pytest_args)
-        return runtime_config
-
-    if args.tests:
+    elif args.tests:
         runtime_config["pytest_args"] = " ".join(shlex.quote(test) for test in args.tests)
+
+    if args.log_cli_level:
+        existing = str(runtime_config.get("pytest_args", "")).strip()
+        runtime_config["pytest_args"] = f"{existing} --log-cli-level={shlex.quote(args.log_cli_level)}"
 
     return runtime_config
 
@@ -1174,8 +1325,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-cached", action="store_true", help="Run immediately using cached settings without opening the TUI. This is now the default when a cache file exists.")
     parser.add_argument("--reconfigure", "--configure", dest="reconfigure", action="store_true", help="Open the TUI and update cached settings before running.")
     parser.add_argument("--debug", action="store_true", help="Build the kernel with Zig Debug optimization and pass --debug to build_rootfs.sh.")
+    parser.add_argument("--force", action="store_true", help="Force a clean rootfs rebuild, refresh the remote smoke venv, and reflash kernel/rootfs even if hashes match.")
     parser.add_argument("--gdb", action="store_true", help="Build locally, sync debug artifacts to the remote repository, then start an interactive remote GDB attach session over SSH without flashing. Combine with --reset to reset-halt before attaching.")
     parser.add_argument("--flash-only", action="store_true", help="Upload and flash artifacts on the remote host, then stop without running pytest.")
+    parser.add_argument("--full-flash-erase", action="store_true", help="Erase the entire flash bank before programming artifacts on the remote host. This is slower than the default partial erase but guarantees a fully clean flash contents.")
     parser.add_argument("--reset", action="store_true", help="Reset the configured target through OpenOCD on the remote host before exiting, or reset-halt before attaching when combined with --gdb.")
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
     parser.add_argument("--pytest-args", help="Override cached pytest arguments for this run only. Example: --pytest-args 'tests/smoke -k shell_test'.")
@@ -1183,6 +1336,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gdb-debug", action="store_true", help="Automated GDB debug: reset target, run a command via serial, capture yasld log, reset-halt, start GDB with symbols loaded. Requires --cmd.")
     parser.add_argument("--cmd", help="Target command to execute over serial before GDB attach (used with --gdb-debug). Example: --cmd 'tcc 15_recursion.c'")
     parser.add_argument("--gdb-script", help="Path to a GDB script file to source after connecting and loading symbols (used with --gdb-debug).")
+    parser.add_argument("--log-cli-level", help="Set pytest --log-cli-level for this run (e.g. INFO, DEBUG, WARNING). Passed through to the remote pytest invocation.")
     parser.add_argument("--list-boards", action="store_true", help="Print supported board identifiers and exit.")
     return parser.parse_args()
 
@@ -1230,7 +1384,9 @@ def main() -> int:
             print(f"Target command: {args.cmd}")
             if args.gdb_script:
                 print(f"GDB script: {args.gdb_script}")
-            build_local_artifacts(runtime_config, debug=args.debug, build_rootfs=False)
+            build_local_artifacts(runtime_config, debug=args.debug, build_rootfs=False, force=args.force)
+            print("Syncing repository source files to the remote repository with rsync.")
+            sync_remote_repo_sources(runtime_config)
             print("Syncing debug artifacts and symbol files to the remote repository with rsync.")
             synced_remote_kernel = sync_debug_artifacts(runtime_config)
             remote_kernel, using_flashed_kernel = select_remote_gdb_kernel(runtime_config, synced_remote_kernel)
@@ -1256,7 +1412,9 @@ def main() -> int:
                 print("Running remote GDB attach workflow with reset-before-connect.")
             else:
                 print("Running remote GDB attach workflow with synced kernel symbols.")
-            build_local_artifacts(runtime_config, debug=args.debug, build_rootfs=False)
+            build_local_artifacts(runtime_config, debug=args.debug, build_rootfs=False, force=args.force)
+            print("Syncing repository source files to the remote repository with rsync.")
+            sync_remote_repo_sources(runtime_config)
             print("Syncing debug artifacts and symbol files to the remote repository with rsync.")
             synced_remote_kernel = sync_debug_artifacts(runtime_config)
             remote_kernel, using_flashed_kernel = select_remote_gdb_kernel(runtime_config, synced_remote_kernel)
@@ -1272,12 +1430,25 @@ def main() -> int:
             print("Running remote smoke workflow with debug kernel and rootfs builds.")
         else:
             print("Running remote smoke workflow with cached configuration.")
-        build_local_artifacts(runtime_config, debug=args.debug)
+        build_local_artifacts(runtime_config, debug=args.debug, force=args.force)
+        kernel_sha = sha256_file(KERNEL_ARTIFACT)
+        rootfs_sha = sha256_file(ROOTFS_ARTIFACT)
+        requirements_sha = sha256_file(SMOKE_REQUIREMENTS)
         remote_work_dir, remote_kernel, remote_rootfs = upload_artifacts(runtime_config)
         if not args.flash_only:
-            print("Syncing smoke test files to the remote repository with rsync.")
+            print("Syncing repository source files to the remote repository with rsync.")
             sync_smoke_support(runtime_config)
-        run_remote_smoke(runtime_config, remote_work_dir, remote_kernel, remote_rootfs, flash_only=args.flash_only)
+        run_remote_smoke(
+            runtime_config,
+            remote_work_dir,
+            remote_kernel,
+            remote_rootfs,
+            flash_only=args.flash_only,
+            kernel_sha=kernel_sha,
+            rootfs_sha=rootfs_sha,
+            requirements_sha=requirements_sha,
+            force=args.force,
+        )
     except RunnerError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

@@ -32,6 +32,7 @@ pub const process = struct {
     pub const ProcFs = @import("process/procfs.zig").ProcFs;
     pub const block_context_switch = @import("interrupts/system_call.zig").block_context_switch;
     pub const unblock_context_switch = @import("interrupts/system_call.zig").unblock_context_switch;
+    pub const create_default_resource_limits = @import("process.zig").create_default_resource_limits;
 };
 
 pub const sync = struct {

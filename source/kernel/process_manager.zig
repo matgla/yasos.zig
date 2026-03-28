@@ -51,6 +51,65 @@ extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 extern fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32;
 extern fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize) i32;
 
+pub const RuntimeConfiguration = struct {
+    default_stack_size: u32,
+    default_resource_limits: [c.RLIM_NLIMITS]c.rlimit,
+
+    pub fn init() RuntimeConfiguration {
+        const default_stack_size = config.process.default_stack_size;
+        return .{
+            .default_stack_size = default_stack_size,
+            .default_resource_limits = process.create_default_resource_limits(default_stack_size),
+        };
+    }
+
+    pub fn resolve_stack_size(self: RuntimeConfiguration, requested_stack_size: u32) u32 {
+        if (requested_stack_size == 0) {
+            return self.default_stack_size;
+        }
+        return requested_stack_size;
+    }
+
+    pub fn create_process_limits(self: RuntimeConfiguration, stack_size: u32) [c.RLIM_NLIMITS]c.rlimit {
+        var limits = self.default_resource_limits;
+        limits[c.RLIMIT_STACK] = .{
+            .rlim_cur = stack_size,
+            .rlim_max = @max(stack_size, limits[c.RLIMIT_STACK].rlim_max),
+        };
+        return limits;
+    }
+
+    pub fn set_default_stack_size(self: *RuntimeConfiguration, stack_size: u32) void {
+        self.default_stack_size = stack_size;
+        self.default_resource_limits[c.RLIMIT_STACK] = .{
+            .rlim_cur = stack_size,
+            .rlim_max = @max(stack_size, self.default_resource_limits[c.RLIMIT_STACK].rlim_max),
+        };
+    }
+
+    pub fn set_default_resource_limit(self: *RuntimeConfiguration, resource: i32, limit: c.rlimit) !void {
+        if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+        if (limit.rlim_cur > limit.rlim_max) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        self.default_resource_limits[@intCast(resource)] = limit;
+        if (resource == c.RLIMIT_STACK) {
+            self.default_stack_size = @intCast(limit.rlim_cur);
+        }
+    }
+
+    pub fn get_default_resource_limit(self: RuntimeConfiguration, resource: i32) !c.rlimit {
+        if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        return self.default_resource_limits[@intCast(resource)];
+    }
+};
+
 fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
     return struct {
         pub const ContainerType = std.DoublyLinkedList;
@@ -70,6 +129,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         core: [hal.cpu.number_of_cores()]*ProcessType,
         mutex: kernel.sync.Mutex,
         terminate_list: std.DoublyLinkedList,
+        runtime_configuration: RuntimeConfiguration,
 
         pub fn init(allocator: std.mem.Allocator) Self {
             log.debug("Using scheduler '{s}'", .{SchedulerType.Name});
@@ -87,7 +147,20 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 .core = undefined,
                 .mutex = .{},
                 .terminate_list = .{},
+                .runtime_configuration = RuntimeConfiguration.init(),
             };
+        }
+
+        pub fn get_default_stack_size(self: *const Self) u32 {
+            return self.runtime_configuration.default_stack_size;
+        }
+
+        pub fn set_default_stack_size(self: *Self, stack_size: u32) void {
+            self.runtime_configuration.set_default_stack_size(stack_size);
+        }
+
+        pub fn get_runtime_configuration(self: *Self) *RuntimeConfiguration {
+            return &self.runtime_configuration;
         }
 
         pub fn schedule_next(self: *Self) kernel.scheduler.Action {
@@ -150,7 +223,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: ?*const anyopaque, cwd: []const u8) !void {
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
-                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
+                const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
+                var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
+                new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
 
                 kernel.process.block_context_switch();
                 defer kernel.process.unblock_context_switch();
@@ -163,7 +238,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         pub fn create_root_process(self: *Self, stack_size: u32, process_entry: anytype, args: ?*const anyopaque, cwd: []const u8) !void {
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
-                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
+                const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
+                var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
+                new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
                 self.processes.append(&new_process.node);
                 self.core[hal.cpu.coreid()] = new_process;
                 return;
@@ -232,7 +309,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 arch.enable_interrupts();
                 return kernel.errno.ErrnoSet.TryAgain;
             }
-            const new_process = current_process.vfork(&self._process_memory_pool, maybe_pid.?) catch {
+            const new_process = current_process.vfork(&self._process_memory_pool, maybe_pid.?) catch |err| {
+                log.err("vfork failed creating child for pid={d}: {s}", .{ current_process.pid, @errorName(err) });
                 arch.enable_interrupts();
                 return -1;
             };
@@ -244,7 +322,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             };
 
-            current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch {
+            current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch |err| {
+                log.err("vfork failed registering wait for parent pid={d} child pid={d}: {s}", .{ current_process.pid, new_process.pid, @errorName(err) });
                 arch.enable_interrupts();
                 return -1;
             };
@@ -485,6 +564,39 @@ test "ProcessManager.ShouldCreateProcesses" {
 
     const arg = "argument";
     try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
+}
+
+test "ProcessManager.ShouldUseRuntimeDefaultStackSizeWhenRequestedStackIsZero" {
+    var sut = ProcessManagerGenerator(StubScheduler).init(std.testing.allocator);
+    defer sut.deinit();
+
+    sut.set_default_stack_size(32 * 1024);
+
+    const arg = "argument";
+    try sut.create_process(0, &test_entry, @ptrCast(&arg), "/test");
+
+    const proc = sut.get_process_for_pid(1).?;
+    const stack_limit = try proc.get_resource_limit(c.RLIMIT_STACK);
+    try std.testing.expectEqual(@as(c.rlim_t, 32 * 1024), stack_limit.rlim_cur);
+    try std.testing.expectEqual(@as(c.rlim_t, 32 * 1024), stack_limit.rlim_max);
+}
+
+test "ProcessManager.ShouldApplyCachedDefaultLimitsToNewProcesses" {
+    var sut = ProcessManagerGenerator(StubScheduler).init(std.testing.allocator);
+    defer sut.deinit();
+
+    try sut.get_runtime_configuration().set_default_resource_limit(c.RLIMIT_NOFILE, .{
+        .rlim_cur = 64,
+        .rlim_max = 128,
+    });
+
+    const arg = "argument";
+    try sut.create_process(0, &test_entry, @ptrCast(&arg), "/test");
+
+    const proc = sut.get_process_for_pid(1).?;
+    const nofile_limit = try proc.get_resource_limit(c.RLIMIT_NOFILE);
+    try std.testing.expectEqual(@as(c.rlim_t, 64), nofile_limit.rlim_cur);
+    try std.testing.expectEqual(@as(c.rlim_t, 128), nofile_limit.rlim_max);
 }
 
 test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {

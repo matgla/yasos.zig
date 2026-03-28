@@ -302,8 +302,16 @@ pub const Module = struct {
         if (self.shared_data) |shared_data| {
             const maybe_symbol = shared_data.exported_symbols.element_by_name(name);
             if (maybe_symbol) |symbol| {
-                const base = self.get_base_address(@enumFromInt(symbol.section)) catch return null;
-                return base + symbol.offset;
+                const section: Section = @enumFromInt(symbol.section);
+                const base = self.get_base_address(section) catch return null;
+                var address = base + symbol.offset;
+                // Cortex-M only supports Thumb mode. Code addresses used with
+                // BX/BLX must have bit 0 set to stay in Thumb state; an even
+                // address causes an INVSTATE HardFault.
+                if ((section == .Code or section == .Init) and (address & 1 == 0)) {
+                    address |= 1;
+                }
+                return address;
             }
             // var it = shared_data.exported_symbols.iter();
             // while (it) |symbol| : (it = symbol.next()) {

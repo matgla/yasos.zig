@@ -107,4 +107,9 @@ pub const HostProcess = struct {
         _ = blocks_process;
         _ = self;
     }
+
+    pub fn reallocate_stack(self: *HostProcess, stack_size: u32) !void {
+        _ = self;
+        _ = stack_size;
+    }
 };

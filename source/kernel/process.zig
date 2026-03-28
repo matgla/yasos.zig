@@ -37,6 +37,34 @@ const arch = @import("arch");
 
 const hal = @import("hal");
 
+const default_nofile_limit: c.rlim_t = 256;
+
+pub fn create_default_resource_limits(stack_size: u32) [c.RLIM_NLIMITS]c.rlimit {
+    const max_stack_size = @max(stack_size, config.process.max_stack_size);
+    var limits: [c.RLIM_NLIMITS]c.rlimit = undefined;
+    for (&limits) |*limit| {
+        limit.* = .{
+            .rlim_cur = c.RLIM_INFINITY,
+            .rlim_max = c.RLIM_INFINITY,
+        };
+    }
+
+    limits[c.RLIMIT_NOFILE] = .{
+        .rlim_cur = default_nofile_limit,
+        .rlim_max = default_nofile_limit,
+    };
+    limits[c.RLIMIT_NPROC] = .{
+        .rlim_cur = config.process.max_pid_value - 1,
+        .rlim_max = config.process.max_pid_value - 1,
+    };
+    limits[c.RLIMIT_STACK] = .{
+        .rlim_cur = stack_size,
+        .rlim_max = max_stack_size,
+    };
+
+    return limits;
+}
+
 var pid_counter: u32 = 0;
 
 pub fn init() void {
@@ -141,6 +169,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         vfork_sp: usize = 0,
         vfork_fp: usize = 0,
         child_exit_code: i32 = 0,
+        resource_limits: [c.RLIM_NLIMITS]c.rlimit,
 
         pub const State = enum(u3) {
             Initialized,
@@ -176,6 +205,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._stack_shared_with_parent = false,
                 ._vfork_context = null,
                 ._start_time = hal.time.get_time_us(),
+                .resource_limits = create_default_resource_limits(stack_size),
             };
             process.impl = try ImplType.init(process._process_memory_allocator.allocator(), stack_size, process_entry, exit_handler_impl, args[0..], is_root);
             return process;
@@ -264,6 +294,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._vfork_context = null,
                 ._initialized = false,
                 ._start_time = hal.time.get_time_us(),
+                .resource_limits = self.resource_limits,
             };
             process.impl = try self.impl.vfork(process._process_memory_allocator.allocator());
             self._child = process;
@@ -439,7 +470,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn reallocate_stack(self: *Self) !void {
-            try self.impl.reallocate_stack();
+            const stack_limit = try self.get_resource_limit(c.RLIMIT_STACK);
+            const requested_stack_size = std.math.cast(u32, stack_limit.rlim_cur) orelse return kernel.errno.ErrnoSet.InvalidArgument;
+            log.err("Reallocating stack to new size: {d}", .{requested_stack_size});
+            try self.impl.reallocate_stack(requested_stack_size);
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
@@ -456,9 +490,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         /// Try to extend an existing mmap allocation in-place.
         /// Returns the same address on success (with extended size), or error.
-        pub fn mremap(self: *Self, addr: *anyopaque, old_length: i32, new_length: i32) !*anyopaque {
+        pub fn mremap(self: *Self, addr: *anyopaque, old_length: i32, new_length: i32, flags: i32) !*anyopaque {
             kernel.process.block_context_switch();
             defer kernel.process.unblock_context_switch();
+            _ = flags;
             var old_pages = @divTrunc(old_length, ProcessMemoryPoolType.page_size);
             if (@rem(old_length, ProcessMemoryPoolType.page_size) != 0) {
                 old_pages += 1;
@@ -473,15 +508,53 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return kernel.errno.ErrnoSet.OutOfMemory;
         }
 
-        pub fn get_free_fd(self: *Self) u16 {
+        fn can_allocate_fd(self: *const Self, fd: u16) bool {
+            const limit = self.resource_limits[c.RLIMIT_NOFILE].rlim_cur;
+            if (limit == c.RLIM_INFINITY) {
+                return true;
+            }
+
+            return @as(c.rlim_t, fd) < limit;
+        }
+
+        pub fn get_resource_limit(self: *const Self, resource: i32) !c.rlimit {
+            if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            return self.resource_limits[@intCast(resource)];
+        }
+
+        pub fn set_resource_limit(self: *Self, resource: i32, limit: c.rlimit) !void {
+            if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            if (limit.rlim_cur > limit.rlim_max) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            self.resource_limits[@intCast(resource)] = limit;
+        }
+
+        pub fn set_resource_limits(self: *Self, limits: [c.RLIM_NLIMITS]c.rlimit) void {
+            self.resource_limits = limits;
+        }
+
+        pub fn get_free_fd(self: *Self) ?u16 {
             var fd: u16 = 0;
             while (true) {
+                if (!self.can_allocate_fd(fd)) {
+                    return null;
+                }
                 if (self._fds.get(fd) == null) {
-                    break;
+                    return fd;
+                }
+                if (fd == std.math.maxInt(u16)) {
+                    return null;
                 }
                 fd += 1;
             }
-            return fd;
         }
 
         pub fn get_parent(self: Self) ?*Self {
@@ -518,11 +591,19 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn attach_file(self: *Self, path: []const u8, node: kernel.fs.Node) !i32 {
-            const fd = self.get_free_fd();
+            const fd = self.get_free_fd() orelse return kernel.errno.ErrnoSet.TooManyOpenFiles;
             return try self.attach_file_with_fd(@intCast(fd), path, node);
         }
 
         pub fn attach_file_with_fd(self: *Self, fd: i16, path: []const u8, node: kernel.fs.Node) !i32 {
+            if (fd < 0) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            if (!self.can_allocate_fd(@intCast(fd))) {
+                return kernel.errno.ErrnoSet.TooManyOpenFiles;
+            }
+
             const handle = try FileHandle.create(self._kernel_allocator, path, node);
             try self._fds.put(@intCast(fd), handle);
             return @intCast(fd);

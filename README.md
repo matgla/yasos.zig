@@ -83,6 +83,7 @@ python3 scripts/remote_smoke_tui.py --run-cached --debug --gdb
 python3 scripts/remote_smoke_tui.py --run-cached --test-retries 2
 python3 scripts/remote_smoke_tui.py --run-cached --tests tests/smoke/cd_test.py tests/smoke/ls_test.py
 python3 scripts/remote_smoke_tui.py --run-cached --pytest-args 'tests/smoke/tcc_suite_test.py::test_run_tcc_test_suite[00_assignment.c] -x'
+python3 scripts/remote_smoke_tui.py --run-cached --full-flash-erase
 ```
 
 The remote runner also exposes a cached `OpenOCD speed` field. It defaults to `20000` and is passed as `adapter speed` during the remote flash step, so you can tune CMSIS-DAP speed per host/debug probe without editing repo-level `.cfg` files.
@@ -90,6 +91,8 @@ The remote runner also exposes a cached `OpenOCD speed` field. It defaults to `2
 The TUI also caches `Test retries`. It defaults to `1` and is passed to pytest as `--reruns`, which helps mask occasional UART noise without rerunning the entire suite manually.
 
 Pass `--flash-only` to upload and flash the artifacts on the remote host, then stop without creating the remote Python venv or running pytest.
+
+Pass `--full-flash-erase` to issue `flash erase_address 0x10000000 0` before programming. This erases the entire RP2350 flash bank, so it is slower than the default partial erase but guarantees a clean flash state for one run.
 
 Pass `--tests` to override the cached smoke selection for one run with an explicit list of pytest paths or nodeids. This is useful for reproducing order-dependent failures on the remote board host without editing the cached TUI configuration.
 

@@ -85,6 +85,7 @@ if $CLEAR; then
   rm -rf apps/longjump_tester/build
 
   rm -rf libs/tinycc/bin
+  rm -rf libs/tinycc/.yasos-build
   cd libs/tinycc && make clean && cd ../..
   cd apps/zork && make clean && cd ../..
 fi
@@ -95,8 +96,12 @@ mkdir -p rootfs/proc
 mkdir -p rootfs/root
 mkdir -p rootfs/home
 cd rootfs
-ln -s usr/lib
-ln -s usr/bin
+if [ ! -e lib ] && [ ! -L lib ]; then
+  ln -s usr/lib lib
+fi
+if [ ! -e bin ] && [ ! -L bin ]; then
+  ln -s usr/bin bin
+fi
 ls -lah
 pwd
 cd ..
@@ -108,13 +113,59 @@ mkdir -p rootfs/dev
 pwd
 cd libs
 
+TINYCC_DIR="$SCRIPT_DIR/libs/tinycc"
+TINYCC_STAMP_DIR="$TINYCC_DIR/.yasos-build"
+
+touch_stamp()
+{
+  mkdir -p "$TINYCC_STAMP_DIR"
+  touch "$1"
+}
+
+tinycc_sources_newer_than()
+{
+  local stamp_file="$1"
+
+  if [ ! -f "$stamp_file" ]; then
+    return 0
+  fi
+
+  # Compare real source files against the stamp written after a successful
+  # build.  Exclude directories and files that are generated during the
+  # build itself (config.h, config.mak, conftest.c, include/, .yasos-build/).
+  find "$TINYCC_DIR" \
+    \( -path "$TINYCC_DIR/.git" \
+       -o -path "$TINYCC_DIR/.github" \
+       -o -path "$TINYCC_DIR/.pytest_cache" \
+       -o -path "$TINYCC_DIR/.venv" \
+       -o -path "$TINYCC_DIR/.yasos-build" \
+       -o -path "$TINYCC_DIR/bin" \
+       -o -path "$TINYCC_DIR/build" \
+       -o -path "$TINYCC_DIR/include" \
+       -o -path "$TINYCC_DIR/lib" \
+       -o -path "$TINYCC_DIR/rootfs" \) -prune -o \
+    -type f \( -name '*.c' \
+       -o -name '*.h' \
+       -o -name '*.s' \
+       -o -name '*.S' \
+       -o -name 'Makefile' \
+       -o -name 'configure' \
+       -o -name 'VERSION' \) \
+    ! -name 'config.h' \
+    ! -name 'config.mak' \
+    ! -name 'conftest.c' \
+    -newer "$stamp_file" -print -quit | grep -q .
+}
+
 build_cross_compiler()
 {
   echo "Building cross compiler..."
   cd tinycc
-  # Clean any stale configs from previous builds
-  make distclean 2>/dev/null || true
-  rm -f config.h config.mak *.o
+  if $CLEAR; then
+    # Only force a fresh tinycc rebuild when explicitly requested.
+    make distclean 2>/dev/null || true
+    rm -f config.h config.mak *.o
+  fi
   mkdir -p bin
   # Use explicit workspace paths to avoid system newlib
   YASOS_SYSROOT="$SCRIPT_DIR/rootfs"
@@ -123,16 +174,25 @@ build_cross_compiler()
   YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
 
   CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
-  CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror"
+  CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -Wall -Werror"
   CROSS_CONFIG_DEBUG=""
   if $DEBUG_TCC; then
-    CROSS_CONFIG_DEBUG="--debug --enable-O0"
+    CROSS_CONFIG_DEBUG="--debug --enable-O1"
     CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
-    CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O0 -DTARGETOS_YasOS=1 -Wall -Werror"
+    CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -Wall -Werror"
   fi
   if $DEBUG_REGALLOC; then
     CROSS_EXTRA_CFLAGS="$CROSS_EXTRA_CFLAGS -DTCC_REGALLOC_DEBUG"
   fi
+  CROSS_STAMP_FILE="$TINYCC_STAMP_DIR/cross.stamp"
+
+  if ! $CLEAR && [ -f "$CROSS_STAMP_FILE" ] && [ -f "$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc" ] && ! tinycc_sources_newer_than "$CROSS_STAMP_FILE"; then
+    echo "Cross compiler already up to date."
+    PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
+    cd ..
+    return
+  fi
+
   ./configure --extra-cflags="$CROSS_EXTRA_CFLAGS" \
     --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes \
     $CROSS_CONFIG_DEBUG \
@@ -154,6 +214,7 @@ build_cross_compiler()
     echo "ERROR: Cross-compiler armv8m-tcc not found after install!"
     exit 1
   fi
+  touch_stamp "$CROSS_STAMP_FILE"
   echo "Cross-compiler installed at: $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc"
 
   cd ..
@@ -177,85 +238,115 @@ build_c_compiler()
   NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
   NATIVE_TCC_DEBUG_OPT="-O1"
   if $DEBUG_TCC; then
-    NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O0"
+    NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O1"
     NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
-    NATIVE_TCC_DEBUG_OPT="-O0"
+    NATIVE_TCC_DEBUG_OPT="-O1"
+  fi
+
+  NATIVE_STAGE1_OUTPUT="$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.elf"
+  NATIVE_STAGE2_OUTPUT="$PREFIX/bin/tcc"
+  NATIVE_STAGE1_STAMP_FILE="$TINYCC_STAMP_DIR/native-stage1.stamp"
+  NATIVE_STAGE2_STAMP_FILE="$TINYCC_STAMP_DIR/native-stage2.stamp"
+  SKIP_NATIVE_STAGE1=false
+  SKIP_NATIVE_STAGE2=false
+
+  if ! $CLEAR && [ -f "$NATIVE_STAGE1_STAMP_FILE" ] && [ -f "$NATIVE_STAGE1_OUTPUT" ] && ! tinycc_sources_newer_than "$NATIVE_STAGE1_STAMP_FILE"; then
+    SKIP_NATIVE_STAGE1=true
+  fi
+
+  if ! $CLEAR && [ -f "$NATIVE_STAGE2_STAMP_FILE" ] && [ -f "$NATIVE_STAGE2_OUTPUT" ] && ! tinycc_sources_newer_than "$NATIVE_STAGE2_STAMP_FILE"; then
+    SKIP_NATIVE_STAGE2=true
   fi
 
   # First stage: build with host paths to get working binary
-  ./configure --cc=tcc --cpu=armv8m \
-    --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE -g $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
-    --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
-    --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
-    $NATIVE_TCC_DEBUG_CONFIG \
-    --prefix="$SCRIPT_DIR/libs/tinycc" \
-    --sysroot="$YASOS_SYSROOT" \
-    --libpaths="$YASOS_LIBPATHS" \
-    --crtprefix="$YASOS_CRTPREFIX" \
-    --sysincludepaths="$YASOS_SYSINCLUDES" \
-    --cross-prefix=armv8m-
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
   # Link against YasOS libraries, not host libraries.
   # The native armv8m bootstrap also needs the target runtime helpers archive explicitly.
   YASOS_LIBS="$SCRIPT_DIR/libs/tinycc/lib/tcc/armv8m-libtcc1.a -lpthread -ldl -lc -lm"
-  VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
+  if $SKIP_NATIVE_STAGE1; then
+    echo "Native compiler stage 1 already up to date."
+  else
+    ./configure --cc=tcc --cpu=armv8m \
+      --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE -g $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
+      --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
+      --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
+      $NATIVE_TCC_DEBUG_CONFIG \
+      --prefix="$SCRIPT_DIR/libs/tinycc" \
+      --sysroot="$YASOS_SYSROOT" \
+      --libpaths="$YASOS_LIBPATHS" \
+      --crtprefix="$YASOS_CRTPREFIX" \
+      --sysincludepaths="$YASOS_SYSINCLUDES" \
+      --cross-prefix=armv8m-
+    if [ $? -ne 0 ]; then
+      exit -1;
+    fi
+    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
 
-  if [ $? -ne 0 ]; then
-    exit -1;
+    if [ $? -ne 0 ]; then
+      exit -1;
+    fi
+    mv armv8m-tcc bin/armv8m-tcc.elf
+    touch_stamp "$NATIVE_STAGE1_STAMP_FILE"
+
+    if $CLEAR; then
+      # Only force a fresh native tinycc reconfigure when explicitly requested.
+      # Save the cross-compiler and FP libraries before distclean removes them.
+      cp $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.saved
+      mkdir -p /tmp/yasos-fp-libs-save
+      cp $SCRIPT_DIR/libs/tinycc/lib/fp/lib*.{a,so} /tmp/yasos-fp-libs-save/ 2>/dev/null || true
+      cp $SCRIPT_DIR/libs/tinycc/lib/fp/lib*.so.elf /tmp/yasos-fp-libs-save/ 2>/dev/null || true
+      make distclean
+      rm -f *.o armv8m-*.o
+      # Restore the cross-compiler and FP libraries.
+      mv $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.saved $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc
+      mkdir -p $SCRIPT_DIR/libs/tinycc/lib/fp
+      cp /tmp/yasos-fp-libs-save/* $SCRIPT_DIR/libs/tinycc/lib/fp/ 2>/dev/null || true
+      rm -rf /tmp/yasos-fp-libs-save
+    fi
   fi
-  mv armv8m-tcc bin/armv8m-tcc.elf
-  # Save the cross-compiler and FP libraries before distclean removes them
-  cp $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.saved
-  mkdir -p /tmp/yasos-fp-libs-save
-  cp $SCRIPT_DIR/libs/tinycc/lib/fp/lib*.{a,so} /tmp/yasos-fp-libs-save/ 2>/dev/null || true
-  make distclean
-  rm -f *.o armv8m-*.o
-  # Restore the cross-compiler and FP libraries
-  mv $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.saved $SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc
-  mkdir -p $SCRIPT_DIR/libs/tinycc/lib/fp
-  cp /tmp/yasos-fp-libs-save/* $SCRIPT_DIR/libs/tinycc/lib/fp/ 2>/dev/null || true
-  rm -rf /tmp/yasos-fp-libs-save
 
   # Second stage build with target prefix for correct embedded paths
   # Use target-relative paths for the native compiler
   NATIVE_LIBPATHS="{B}:/usr/lib:/lib"
   NATIVE_CRTPREFIX="/usr/lib"
   NATIVE_SYSINCLUDES="{B}/include:/usr/include"
-  ./configure --cc=tcc --cpu=armv8m \
-    --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE -g $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
-    --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
-    --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
-    $NATIVE_TCC_DEBUG_CONFIG \
-    --prefix=/usr \
-    --libpaths="$NATIVE_LIBPATHS" \
-    --crtprefix="$NATIVE_CRTPREFIX" \
-    --sysincludepaths="$NATIVE_SYSINCLUDES" \
-    --cross-prefix=armv8m- \
-    --sysroot=/
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
-  VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
-  # Copy the libtcc1.a files from cross-compiler install to build dir for make install
-  cp $SCRIPT_DIR/libs/tinycc/lib/tcc/armv8m-libtcc1.a .
-  make install armv8m-tcc DESTDIR=$SCRIPT_DIR/rootfs LIBS="$YASOS_LIBS"
-  mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
-  cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
-  # Install FP libraries (shared .so for dynamic linking, .a for static)
-  for fplib in $SCRIPT_DIR/libs/tinycc/lib/fp/libsoftfp.{a,so} \
-               $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv4sp.{a,so} \
-               $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv5dp.{a,so} \
-               $SCRIPT_DIR/libs/tinycc/lib/fp/librp2350fp.{a,so}; do
-    if [ -f "$fplib" ]; then
-      cp "$fplib" $PREFIX/lib/
-      echo "Installed $(basename $fplib) to $PREFIX/lib/"
+  if $SKIP_NATIVE_STAGE2; then
+    echo "Native compiler stage 2 already up to date."
+  else
+    ./configure --cc=tcc --cpu=armv8m \
+      --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE -g $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden" \
+      --extra-ldflags="-fpie -fPIE -fvisibility=hidden -g -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
+      --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
+      $NATIVE_TCC_DEBUG_CONFIG \
+      --prefix=/usr \
+      --libpaths="$NATIVE_LIBPATHS" \
+      --crtprefix="$NATIVE_CRTPREFIX" \
+      --sysincludepaths="$NATIVE_SYSINCLUDES" \
+      --cross-prefix=armv8m- \
+      --sysroot=/
+    if [ $? -ne 0 ]; then
+      exit -1;
     fi
-  done
+    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
+    if [ $? -ne 0 ]; then
+      exit -1;
+    fi
+    # Copy the libtcc1.a files from cross-compiler install to build dir for make install
+    cp $SCRIPT_DIR/libs/tinycc/lib/tcc/armv8m-libtcc1.a .
+    make install armv8m-tcc DESTDIR=$SCRIPT_DIR/rootfs LIBS="$YASOS_LIBS"
+    mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
+    cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
+    # Install FP libraries (shared .so for dynamic linking, .a for static)
+    for fplib in $SCRIPT_DIR/libs/tinycc/lib/fp/libsoftfp.{a,so} \
+                 $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv4sp.{a,so} \
+                 $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv5dp.{a,so} \
+                 $SCRIPT_DIR/libs/tinycc/lib/fp/librp2350fp.{a,so}; do
+      if [ -f "$fplib" ]; then
+        cp "$fplib" $PREFIX/lib/
+        echo "Installed $(basename $fplib) to $PREFIX/lib/"
+      fi
+    done
+    touch_stamp "$NATIVE_STAGE2_STAMP_FILE"
+  fi
   cd ..
 }
 
@@ -353,11 +444,11 @@ build_makefile libdl
 echo "Building libpthread..."
 build_makefile pthread
 
-echo "Building yasos_curses..."
-build_makefile yasos_curses
-
 echo "Building libm..."
 build_makefile libm
+
+echo "Building yasos_curses..."
+build_makefile yasos_curses
 
 echo "Building termcap..."
 build_makefile termcap
