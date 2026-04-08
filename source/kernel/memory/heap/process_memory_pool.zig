@@ -148,6 +148,7 @@ pub const ProcessMemoryPool = struct {
                 };
                 list.value_ptr.append(&entity.node);
                 log.debug("Allocating {d} pages for {d} at 0x{x}", .{ number_of_pages, pid, @intFromPtr(entity.address.ptr) });
+                @memset(entity.address, 0);
                 return entity.address;
             } else {
                 start_index = slot_end + 1;
@@ -259,6 +260,9 @@ pub const ProcessMemoryPool = struct {
                         @as([*]u8, @ptrFromInt(addr_int)),
                         @as(usize, @intCast(new_pages)) * page_size,
                     );
+                    // Zero only the newly extended pages
+                    const ext_start = @as(usize, @intCast(old_pages)) * page_size;
+                    @memset(entity.address[ext_start..], 0);
                     return entity.address;
                 }
                 next = entity_node.next;

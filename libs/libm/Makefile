@@ -1,6 +1,7 @@
 # Command-line CC still overrides this, but plain `make` should use TinyCC.
 CC = tcc
 CFLAGS = -std=c11 -Wall -gdwarf -fpic -pedantic -nostdlib -nostdinc -I. -I../../rootfs/usr/include -L../../rootfs/lib -Iinclude
+CFLAGS += $(ROOTFS_OPT_CFLAGS)
 LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nostdlib -Wl,-oformat=yaff
 # -nostdlib skips standard libs (libc, etc.) but tcc still auto-links
 # compiler runtime (libtcc1, libsoftfp) which provide __aeabi_* helpers.

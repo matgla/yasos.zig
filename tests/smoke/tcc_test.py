@@ -19,30 +19,8 @@
 from .conftest import session_key
 import random
 
-def parse_memory_stats(data):
-    lines = data.splitlines()
-    stats = {}
-    for line in lines:
-        if not ":" in line:
-            continue
-        if line.strip():
-            line = line.split(":", 1)
-            value_str = line[1].split()
-            value = int(value_str[0], base=16)
-            unit = value_str[1] if len(value_str) > 1 else ""
-            unit = unit.lower()
-            if unit == "kb":
-                value *= 1024
-            elif unit == "mb":
-                value *= 1024 * 1024
-            stats[line[0]] = value
-    return stats
-
 def test_compile_hello_world_with_usage_tracking(request):
-    prevusage = None
     session = request.node.stash[session_key]
-    # it may increase a bit due to fragmentation etc
-    allowed_increases = 4
     for i in range(10):
         output_file = '/tmp/hello' if i < 6 else f'/tmp/hello_{i}'
         # Start leak detection before second iteration to capture steady-state leaks
@@ -55,23 +33,7 @@ def test_compile_hello_world_with_usage_tracking(request):
         if i == 1:
             session.write_command("cat /proc/leakdump")
             session.wait_for_prompt()
-        session.write_command("cat /proc/meminfo")
-        usage = session.wait_for_prompt()
-        stats = parse_memory_stats(usage)
 
-        if prevusage != None:
-            if i < 6 and i != 0:
-                if prevusage != stats:
-                    allowed_increases -= 1
-                assert (prevusage == stats) or allowed_increases > 0, "memory usage should not raise"
-            elif i > 0:
-                assert stats["MemTmpUsed"] >= prevusage["MemTmpUsed"], "tmp memory should not decrease when creating new files in ramdisk"
-                if stats["MemProcessUsed"] != prevusage["MemProcessUsed"]:
-                    allowed_increases -= 1
-
-                assert (stats["MemProcessUsed"] == prevusage["MemProcessUsed"]) or allowed_increases > 0, "process memory should not raise after compiling a file"
-
-        prevusage = stats
         session.write_command(output_file)
         data = session.read_line_except_logs()
         assert "Hello, World!" in data

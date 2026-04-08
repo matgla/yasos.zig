@@ -39,7 +39,6 @@ class Session:
     target_crashed = False
     file = None
     prompt = "$ "
-    _meminfo_guard = False
     crash_markers = (
         "hardfault diagnostics:",
         "hard fault occured",
@@ -184,51 +183,7 @@ class Session:
     def write_raw(self, data, timeout):
         self.serial.write(data)
 
-    _meminfo_before = None
-    _meminfo_last_command = None
-
-    def _read_meminfo(self):
-        """Read /proc/meminfo and return as dict. Guarded against recursion."""
-        result = {}
-        self.serial.write(b"cat /proc/meminfo\n")
-        self.wait_for_data("cat /proc/meminfo\n")
-        lines = self._read_until(Session.prompt)
-        if lines.endswith(Session.prompt):
-            response = lines[:-len(Session.prompt)]
-            for line in response.splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith(LOG_PREFIXES) and ":" in stripped:
-                    key, _, val = stripped.partition(":")
-                    result[key.strip()] = val.strip()
-        return result
-
-    def _check_meminfo_diff(self):
-        """Compare current meminfo with saved before-snapshot, log diffs."""
-        if Session._meminfo_before is None:
-            return
-        try:
-            after = self._read_meminfo()
-        except Exception:
-            return
-        before = Session._meminfo_before
-        cmd = Session._meminfo_last_command or "?"
-        Session._meminfo_before = None
-        Session._meminfo_last_command = None
-        for key in before:
-            if key in after and before[key] != after[key]:
-                logger.info("memdiff [%s] %s: %s -> %s", cmd, key, before[key], after[key])
-
     def write_command(self, command):
-        if not Session._meminfo_guard:
-            Session._meminfo_guard = True
-            try:
-                self._check_meminfo_diff()
-                Session._meminfo_before = self._read_meminfo()
-                Session._meminfo_last_command = command
-            except Exception:
-                pass
-            finally:
-                Session._meminfo_guard = False
         self.serial.write((command + '\n').encode('utf-8'))
         data = self.wait_for_data(command + '\n');
         line = data.strip()

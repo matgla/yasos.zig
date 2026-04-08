@@ -20,6 +20,16 @@
 
 #pragma once
 
+#include <limits.h>
+
+#ifndef FP_ILOGB0
+#define FP_ILOGB0 (-INT_MAX)
+#endif
+
+#ifndef FP_ILOGBNAN
+#define FP_ILOGBNAN INT_MAX
+#endif
+
 // Trigonometric functions
 double sin(double x);
 double cos(double x);
@@ -37,6 +47,7 @@ double tanh(double x);
 double exp(double x);
 double log(double x);
 double log10(double x);
+int ilogb(double x);
 
 // Power functions
 double pow(double base, double exponent);
@@ -64,6 +75,7 @@ float tanhf(float x);
 float expf(float x);
 float logf(float x);
 float log10f(float x);
+int ilogbf(float x);
 float powf(float base, float exponent);
 float sqrtf(float x);
 float roundf(float x);
@@ -85,6 +97,7 @@ long double tanhl(long double x);
 long double expl(long double x);
 long double logl(long double x);
 long double log10l(long double x);
+int ilogbl(long double x);
 long double powl(long double base, long double exponent);
 long double sqrtl(long double x);
 long double roundl(long double x);

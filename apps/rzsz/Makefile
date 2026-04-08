@@ -1,5 +1,6 @@
 CC ?= armv8m-tcc
 CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib -I.
+CFLAGS += $(ROOTFS_OPT_CFLAGS)
 LDFLAGS = -fvisibility=hidden -g -L../../rootfs/lib
 SRCS = main.c crc32.c crc16.c terminal.c zmodem/zmodem.c
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))

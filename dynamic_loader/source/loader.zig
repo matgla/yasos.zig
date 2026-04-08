@@ -174,6 +174,7 @@ pub const Loader = struct {
         try self.process_symbol_table_relocations(&parser, module, header);
         try self.process_local_relocations(&parser, module, symbol_table_fn_ptr_count);
         try self.process_data_relocations(&parser, module, symbol_table_fn_ptr_count + local_fn_ptr_count);
+        try self.process_copy_relocations(&parser, module);
 
         // Mark thunks as generated after all relocation processing is complete
         if (module.unique_data) |unique| {
@@ -574,6 +575,29 @@ pub const Loader = struct {
                 address_from += 1;
             }
             target.* = address_from;
+        }
+    }
+
+    fn process_copy_relocations(self: Loader, parser: *const Parser, module: *Module) !void {
+        const bss = module.get_bss();
+        for (parser.copy_relocations.relocations) |rel| {
+            const maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
+            if (maybe_symbol) |symbol| {
+                const name = symbol.name();
+                const maybe_entry = self.find_symbol(module, name);
+                if (maybe_entry) |entry| {
+                    const src: [*]const u8 = @ptrFromInt(entry.address);
+                    const dst: [*]u8 = @ptrFromInt(@intFromPtr(bss.ptr) + rel.bss_offset);
+                    @memcpy(dst[0..rel.size], src[0..rel.size]);
+                    log.debug("R_ARM_COPY: '{s}' {d} bytes from 0x{x} to BSS+0x{x}", .{ name, rel.size, entry.address, rel.bss_offset });
+                } else {
+                    log.err("[yasld] R_ARM_COPY: can't find symbol '{s}'", .{name});
+                    return LoaderError.SymbolNotFound;
+                }
+            } else {
+                log.err("[yasld] R_ARM_COPY: can't find imported symbol at index {d}", .{rel.symbol_index});
+                return LoaderError.SymbolNotFound;
+            }
         }
     }
 

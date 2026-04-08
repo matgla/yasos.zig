@@ -1080,6 +1080,13 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
     return SDIO_BUSY;
 }
 
+// Check if card is signaling busy by holding DAT0 low.
+// Valid after rp2350_sdio_stop() has re-enabled the clock.
+bool rp2350_sdio_is_card_busy(void)
+{
+    return !gpio_get(SDIO_D0);
+}
+
 // Force everything to idle state
 // This requires careful sequencing to cleanly abort any running data transfers.
 sdio_status_t rp2350_sdio_stop()

@@ -33,6 +33,7 @@ const YaffHashTable = @import("hashtable.zig").YaffHashTable;
 const SymbolTableRelocations = relocation.RelocationTable(relocation.SymbolTableRelocation);
 const LocalRelocations = relocation.RelocationTable(relocation.LocalRelocation);
 const DataRelocations = relocation.RelocationTable(relocation.DataRelocation);
+const CopyRelocations = relocation.RelocationTable(relocation.CopyRelocation);
 
 pub const Parser = struct {
     name: []const u8,
@@ -40,6 +41,7 @@ pub const Parser = struct {
     symbol_table_relocations: SymbolTableRelocations,
     local_relocations: LocalRelocations,
     data_relocations: DataRelocations,
+    copy_relocations: CopyRelocations,
     imported_symbols: SymbolTable,
     exported_symbols: SymbolTable,
     text_address: usize,
@@ -77,10 +79,15 @@ pub const Parser = struct {
             .relocations = data_relocation_array[0..header.data_relocations_amount],
         };
 
+        const copy_relocation_array: [*]align(4) relocation.CopyRelocation = @ptrFromInt(data_relocations.address() + data_relocations.size());
+        const copy_relocations = CopyRelocations{
+            .relocations = copy_relocation_array[0..header.copy_relocations_amount],
+        };
+
         const imported_array = SymbolTable{
             .number_of_items = header.imported_symbols_amount,
             .alignment = header.alignment,
-            .root = @as(*const Symbol, @ptrFromInt(data_relocations.address() + data_relocations.size())),
+            .root = @as(*const Symbol, @ptrFromInt(copy_relocations.address() + copy_relocations.size())),
             .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.imported_symbols_lookup_offset))[0..header.imported_symbols_amount],
         };
 
@@ -133,6 +140,7 @@ pub const Parser = struct {
             .symbol_table_relocations = symbol_table_relocations,
             .local_relocations = local_relocations,
             .data_relocations = data_relocations,
+            .copy_relocations = copy_relocations,
             .imported_symbols = imported_array,
             .exported_symbols = exported_array,
             .text_address = text,

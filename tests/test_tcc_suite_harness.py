@@ -207,3 +207,37 @@ def test_build_tcc_test_cases_marks_empty_tagged_compile_only_variants_by_source
 
     assert all(cases[test_id].compile_only is True for test_id in compile_only_ids)
     assert cases[runtime_id].compile_only is False
+
+
+def test_discover_local_dependencies_includes_builtins_lib_sources():
+    testcase = suite.TccTestCase(
+        test_id="gcc_execute/builtins/strpbrk[-O0]",
+        name="builtins/strpbrk.c",
+        sources=("builtins/strpbrk.c", "builtins/strpbrk-lib.c", "builtins/lib/main.c"),
+        source_dir=suite.gcc_execute_path,
+    )
+
+    upload_entries = suite._iter_testcase_upload_entries(testcase)
+    dependencies = suite._discover_local_dependencies(upload_entries)
+    dependency_map = {remote_name: str(local_path) for local_path, remote_name in dependencies}
+
+    assert "builtins/lib/strpbrk.c" in dependency_map
+    assert dependency_map["builtins/lib/strpbrk.c"].endswith("builtins/lib/strpbrk.c")
+
+
+def test_discover_local_dependencies_includes_chk_headers_and_sources():
+    testcase = suite.TccTestCase(
+        test_id="gcc_execute/builtins/strcpy-chk[-O0]",
+        name="builtins/strcpy-chk.c",
+        sources=("builtins/strcpy-chk.c", "builtins/strcpy-chk-lib.c", "builtins/lib/main.c"),
+        source_dir=suite.gcc_execute_path,
+    )
+
+    upload_entries = suite._iter_testcase_upload_entries(testcase)
+    dependencies = suite._discover_local_dependencies(upload_entries)
+    dependency_map = {remote_name: str(local_path) for local_path, remote_name in dependencies}
+
+    assert "builtins/chk.h" in dependency_map
+    assert dependency_map["builtins/chk.h"].endswith("builtins/chk.h")
+    assert "builtins/lib/chk.c" in dependency_map
+    assert dependency_map["builtins/lib/chk.c"].endswith("builtins/lib/chk.c")

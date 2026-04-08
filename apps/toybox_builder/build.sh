@@ -21,9 +21,10 @@ for PATCH_FILE in *.patch; do
     fi
 done
 
-CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="-I$1/usr/include -g" LDFLAGS="-Wl,-oformat=elf32-littlearm -lm" make toybox
+TOYBOX_CFLAGS="-I$1/usr/include -g${TOYBOX_EXTRA_CFLAGS:+ }$TOYBOX_EXTRA_CFLAGS"
+CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-Wl,-oformat=elf32-littlearm -lm" make toybox
 mv -f ../toybox/toybox ../toybox/toybox.elf
-CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="-I$1/usr/include -g" LDFLAGS="-lm" make toybox
+CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-lm" make toybox
 PREFIX=$1 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t make install
 if [ -f "$1/bin/cal" ]; then
   mv "$1/bin/cal" "$(dirname "$1")/bin/cal"
@@ -34,4 +35,3 @@ for applet in ulimit prlimit; do
     fi
 done
 # cp ../toybox/toybox $1/bin/toybox
-

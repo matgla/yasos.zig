@@ -60,6 +60,10 @@ done
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
 
 PREFIX=$SCRIPT_DIR/rootfs/usr
+TARGET_BUILD_EXTRA_CFLAGS=""
+if ! $DEBUG_TCC; then
+  TARGET_BUILD_EXTRA_CFLAGS="-O1"
+fi
 
 echo "Building rootfs from $SCRIPT_DIR..."
 cd $SCRIPT_DIR
@@ -356,7 +360,7 @@ build_gnumake()
   if [ $CLEAR = true ]; then
     make clean
   fi
-  LDFLAGS="-Wl,-oformat=elf32-littlearm" CC=$CC ./configure --host=arm-none-eabi --prefix=$PREFIX
+  LDFLAGS="-Wl,-oformat=elf32-littlearm" CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" CC="$CC" ./configure --host=arm-none-eabi --prefix=$PREFIX
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -365,7 +369,7 @@ build_gnumake()
     exit -1;
   fi
   cp make make.elf
-  CC=$CC ./configure --host=arm-none-eabi --prefix=$PREFIX
+  CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" CC="$CC" ./configure --host=arm-none-eabi --prefix=$PREFIX
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -387,11 +391,11 @@ build_makefile()
   if [ $CLEAR = true ]; then
     make clean
   fi
-  make CC=$CC -j4
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" -j4
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make CC=$CC install PREFIX=$PREFIX
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" install PREFIX=$PREFIX
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -402,13 +406,13 @@ build_makefile()
 build_zork_makefile()
 {
   cd $1
-  make CC=$CC CFLAGS="-g -Wl,-oformat=elf32-littlearm" -j4
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" CFLAGS="-g $TARGET_BUILD_EXTRA_CFLAGS -Wl,-oformat=elf32-littlearm" -j4
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   mv zork zork.elf
 
-  make CC=$CC -j4
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" -j4
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -416,7 +420,7 @@ build_zork_makefile()
   mkdir -p $PREFIX/games
   mkdir -p $PREFIX/games/lib
 
-  make CC=$CC install BINDIR=$PREFIX/games/ DATADIR=$PREFIX/games/lib/ MANDIR=$PREFIX/share/man/man6
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" install BINDIR=$PREFIX/games/ DATADIR=$PREFIX/games/lib/ MANDIR=$PREFIX/share/man/man6
   mv $PREFIX/games/zork $PREFIX/games/hmm
   if [ $? -ne 0 ]; then
     exit -1;
@@ -484,7 +488,7 @@ build_makefile rzsz
 build_makefile sha
 # build_gnumake make
 
-$SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
+TOYBOX_EXTRA_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 
 cd ..
 
@@ -495,4 +499,3 @@ if $BUILD_IMAGE; then
   rm -rf rootfs/usr/share
   genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
 fi
-

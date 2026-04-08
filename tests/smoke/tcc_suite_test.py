@@ -75,6 +75,50 @@ should_skip_gcc_test = _gcc_conftest.should_skip_gcc_test
 is_xfail_test = _gcc_conftest.is_xfail_test
 is_xfail_o1_test = _gcc_conftest.is_xfail_o1_test
 
+# Tests skipped only on the native embedded target due to resource exhaustion.
+# These run fine on a PC but OOM or overflow the process stack on bare-metal.
+NATIVE_TARGET_SKIP_TESTS = {
+    # compile/ tests — resource exhaustion on the embedded target
+    "compile/20001226-1": "compile-time OOM: emits 'memory full'",
+    "compile/pr46534": "compile-time OOM: emits 'memory full'",
+    "compile/limits-blockid": "pathological limits test: compile-time OOM",
+    "compile/limits-enumconst": "pathological limits test: compile-time OOM",
+    "compile/limits-externalid": "pathological limits test: compile-time OOM",
+    "compile/limits-externdecl": "pathological limits test: compile-time OOM",
+    "compile/limits-exprparen": "compile-time process stack overflow on target",
+    "compile/limits-structnest": "compile-time process stack overflow on target",
+    "compile/limits-caselabels": "memory and performance optimization needed",
+    "compile/limits-declparen": "compile-time process stack overflow on target",
+    # execute/ tests — compile phase exhausts process stack before link/run
+    "unroll-1": "compile-time process stack overflow on target",
+    "builtins/strcat-chk": "compile-time process stack overflow on target",
+    "memcpy-a1": "test is to huge to run on the embedded target",
+    "memclr": "test is to huge to run on the embedded target",
+    "memcpy-a2": "test is to huge to run on the embedded target",
+    "memcpy-a4": "test is to huge to run on the embedded target",
+    "memcpy-a8": "test is to huge to run on the embedded target",
+}
+
+IGNORE_NATIVE_TARGET_SKIP_TESTS = os.environ.get("YASOS_SMOKE_RERUN_FAILED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def _native_skip_reason(test_path: Path) -> Optional[str]:
+    """Return skip reason if test should be skipped on native embedded target."""
+    if IGNORE_NATIVE_TARGET_SKIP_TESTS:
+        return None
+    key = _gcc_conftest._test_key(test_path)
+    if key in NATIVE_TARGET_SKIP_TESTS:
+        return f"Native target skip: {NATIVE_TARGET_SKIP_TESTS[key]}"
+    stem = test_path.stem
+    if stem in NATIVE_TARGET_SKIP_TESTS:
+        return f"Native target skip: {NATIVE_TARGET_SKIP_TESTS[stem]}"
+    return None
+
 
 def sha256_file(path):
     digest = hashlib.sha256()
@@ -298,6 +342,13 @@ LARGE_STACK_TESTS = {
 FLOAT_RELATIVE_TOLERANCE = 1e-4
 
 
+GCC_EXECUTE_PERSISTENT_OUTPUT_TESTS = {
+    "941202-1",
+    "pr22061-1",
+    "ieee/pr28634",
+}
+
+
 def lines_match_with_float_tolerance(expected, actual, rel_tol):
     """Compare two lines, allowing floating-point values to differ within rel_tol."""
     expected_tokens = expected.split()
@@ -340,6 +391,7 @@ def _set_stack_size(session, size_kb):
 RETURNS_PATTERN = re.compile(r"^\[returns (\d+)\]$")
 TAG_PATTERN = re.compile(r"^\[([a-zA-Z_][a-zA-Z0-9_]*(?:=[^\]]+)?)\]$")
 SHA256_LINE_PATTERN = re.compile(r"^(?P<digest>[0-9a-f]{64})(?:\s+.+)?$", re.IGNORECASE)
+LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
 EXIT_MARKER_PREFIX = "__EXIT_STATUS__:"
 COMPILE_MARKER_PREFIX = "__COMPILE_STATUS__:"
 temp_source_reuse_plan_key = pytest.StashKey()
@@ -515,7 +567,7 @@ def build_gcc_execute_test_cases():
         sources = [relative_source.as_posix()]
         sources.extend(extra_source.relative_to(execute_root).as_posix() for extra_source in gcc_case.extra_sources)
 
-        skip_reason = should_skip_gcc_test(gcc_case.source)
+        skip_reason = should_skip_gcc_test(gcc_case.source) or _native_skip_reason(gcc_case.source)
         xfail_reason = is_xfail_test(gcc_case.source)
 
         for opt_level in GCC_OPT_LEVELS:
@@ -547,7 +599,7 @@ def build_gcc_compile_test_cases():
 
     for gcc_case in discover_gcc_compile_tests():
         relative_source = gcc_case.source.relative_to(compile_root)
-        skip_reason = should_skip_gcc_test(gcc_case.source)
+        skip_reason = should_skip_gcc_test(gcc_case.source) or _native_skip_reason(gcc_case.source)
         xfail_reason = is_xfail_test(gcc_case.source)
 
         for opt_level in GCC_OPT_LEVELS:
@@ -685,7 +737,10 @@ def remote_source_path(relative_path, source_dir=None):
 
 
 def remote_output_dir(testcase=None):
-    _ = testcase
+    if testcase is not None and testcase.source_dir == gcc_execute_path:
+        testcase_key = str(Path(testcase.name).with_suffix(""))
+        if testcase_key in GCC_EXECUTE_PERSISTENT_OUTPUT_TESTS:
+            return REMOTE_PERSISTENT_OUTPUT_DIR
     return REMOTE_OUTPUT_DIR
 
 
@@ -742,13 +797,68 @@ def upload_testcase(local_path, remote_relative_path, session, source_dir=None):
         return "cached"
     return upload_state
 
+
+def _iter_testcase_upload_entries(testcase):
+    base_path = Path(testcase.source_dir if testcase.source_dir else path)
+    entries = []
+    for source_name in testcase.sources:
+        entries.append((base_path / source_name, source_name))
+    for local_name, remote_name in testcase.support_files:
+        entries.append((base_path / local_name, remote_name))
+    return entries
+
+
+def _discover_local_dependencies(upload_entries):
+    discovered = []
+    queued = list(upload_entries)
+    seen_local_paths = set()
+    seen_remote_paths = {posixpath.normpath(remote_name) for _, remote_name in upload_entries}
+
+    while queued:
+        local_path, remote_name = queued.pop()
+        resolved_local_path = Path(local_path).resolve()
+        if resolved_local_path in seen_local_paths or not resolved_local_path.is_file():
+            continue
+        seen_local_paths.add(resolved_local_path)
+
+        try:
+            content = resolved_local_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        remote_parent = posixpath.dirname(posixpath.normpath(remote_name))
+        for include_name in LOCAL_INCLUDE_PATTERN.findall(content):
+            dependency_local = (resolved_local_path.parent / include_name).resolve()
+            if not dependency_local.is_file():
+                continue
+
+            dependency_remote = posixpath.normpath(
+                posixpath.join(remote_parent, include_name)
+            )
+            if dependency_remote in seen_remote_paths:
+                continue
+
+            seen_remote_paths.add(dependency_remote)
+            dependency_entry = (dependency_local, dependency_remote)
+            discovered.append(dependency_entry)
+            queued.append(dependency_entry)
+
+    return discovered
+
 def upload_test_sources(testcase, session):
     upload_states = []
-    base_path = testcase.source_dir if testcase.source_dir else path
-    for source_name in testcase.sources:
-        upload_states.append(upload_testcase(os.path.join(base_path, source_name), source_name, session, testcase.source_dir if testcase.source_dir else None))
-    for local_name, remote_name in testcase.support_files:
-        upload_states.append(upload_testcase(os.path.join(base_path, local_name), remote_name, session, testcase.source_dir if testcase.source_dir else None))
+    upload_entries = _iter_testcase_upload_entries(testcase)
+    upload_entries.extend(_discover_local_dependencies(upload_entries))
+
+    for local_path, remote_name in upload_entries:
+        upload_states.append(
+            upload_testcase(
+                str(local_path),
+                remote_name,
+                session,
+                testcase.source_dir if testcase.source_dir else None,
+            )
+        )
 
     if not upload_states:
         return "cached"

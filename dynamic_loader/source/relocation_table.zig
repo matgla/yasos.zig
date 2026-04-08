@@ -51,6 +51,12 @@ pub const LocalRelocation = packed struct {
     }
 };
 
+pub const CopyRelocation = extern struct {
+    bss_offset: u32,
+    symbol_index: u32,
+    size: u32,
+};
+
 pub fn RelocationTable(comptime RelocationType: anytype) type {
     return struct {
         relocations: []align(4) RelocationType,
@@ -73,4 +79,5 @@ comptime {
     if (@sizeOf(DataRelocation) != 8) @compileError("DataRelocation has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(DataRelocation)}) catch "unknown"));
     if (@sizeOf(LocalRelocation) != 8) @compileError("LocalRelocation has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(LocalRelocation)}) catch "unknown"));
     if (@sizeOf(SymbolTableRelocation) != 8) @compileError("SymbolRelocation has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(SymbolTableRelocation)}) catch "unknown"));
+    if (@sizeOf(CopyRelocation) != 12) @compileError("CopyRelocation has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(CopyRelocation)}) catch "unknown"));
 }

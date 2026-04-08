@@ -629,7 +629,9 @@ def sync_remote_repo_sources(config: dict[str, Any]) -> str:
         "--info=progress2",
         "--delete",
         "--exclude=.git/",
+        "--exclude=.pytest_cache/",
         "--exclude=.cache/",
+        "--exclude=.gdbhistory",
         "--exclude=zig-cache/",
         "--exclude=zig-out/",
         "--exclude=yasos_venv/",
@@ -1021,6 +1023,7 @@ def run_remote_smoke(
     requirements_sha: str,
     force: bool,
     kernel_only: bool = False,
+    rerun_failed: bool = False,
 ) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
@@ -1039,16 +1042,17 @@ remote_rootfs=$9
 flash_only=${10}
 test_retries=${11}
 with_gcc_torture=${12}
-kernel_sha=${13}
-rootfs_sha=${14}
-requirements_sha=${15}
-force=${16}
-profile=${17}
-uhubctl_hub=${18}
-uhubctl_port=${19}
-kernel_only=${20}
-extra_tcc_cflags=${21}
-shift 21
+rerun_failed=${13}
+kernel_sha=${14}
+rootfs_sha=${15}
+requirements_sha=${16}
+force=${17}
+profile=${18}
+uhubctl_hub=${19}
+uhubctl_port=${20}
+kernel_only=${21}
+extra_tcc_cflags=${22}
+shift 22
 
 detect_uhubctl_device() {
     # Find a USB device by vendor ID in sysfs and return its hub location
@@ -1080,6 +1084,11 @@ resolve_uhubctl() {
     # Resolve uhubctl_hub / uhubctl_port.  When hub is "auto", detect from
     # the debug probe's sysfs entry.  When port is empty, cycle the whole hub.
     # If the detected hub is not uhubctl-compatible, walk up to the root hub.
+    #
+    # On Raspberry Pi 4 the internal VIA VL805 hub (1-1) does NOT support
+    # per-port power switching.  We must power off ALL ports together with
+    # "uhubctl -l 1-1 -a 0" (no -p flag).  To detect this, we check whether
+    # the hub reports "ganged" power switching and clear uhubctl_port if so.
     if [[ "$uhubctl_hub" == "auto" ]]; then
         local detected
         if detected=$(detect_uhubctl_device 2e8a); then
@@ -1100,7 +1109,19 @@ resolve_uhubctl() {
                     uhubctl_hub="${uhubctl_hub%%-*}"
                 fi
             fi
-            echo "Auto-detected uhubctl: hub=$uhubctl_hub port=$uhubctl_port" >&2
+
+            # Check if the hub supports per-port power switching.
+            # If uhubctl reports "ganged" switching, per-port control won't
+            # work (e.g. Raspberry Pi 4 VIA VL805).  Clear the port so we
+            # power-cycle ALL ports together with "uhubctl -l <hub> -a 0".
+            local hub_info
+            hub_info=$(uhubctl_cmd -l "$uhubctl_hub" 2>/dev/null) || true
+            if echo "$hub_info" | grep -qi "ganged"; then
+                echo "Hub $uhubctl_hub uses ganged power switching — cycling all ports together" >&2
+                uhubctl_port=""
+            fi
+
+            echo "Auto-detected uhubctl: hub=$uhubctl_hub port=${uhubctl_port:-all}" >&2
         else
             echo "WARNING: could not auto-detect USB hub for Pico debug probe" >&2
             uhubctl_hub=""
@@ -1120,6 +1141,66 @@ uhubctl_cmd() {
     else
         return 1
     fi
+}
+
+sysfs_usb_reset() {
+    # On Raspberry Pi, individual USB port power control is not supported.
+    # The only way to cut VBUS power is to unbind the entire internal USB
+    # hub from the kernel driver, which powers off ALL USB ports at once.
+    # Then rebinding restores power and triggers full re-enumeration.
+    # On Pi 4 the internal hub is typically at "1-1".
+    local vid=${1:-2e8a}
+    local devname=""
+    for dev in /sys/bus/usb/devices/*/; do
+        [[ -f "$dev/idVendor" ]] || continue
+        local v
+        v=$(cat "$dev/idVendor" 2>/dev/null) || continue
+        if [[ "$v" == "$vid" ]]; then
+            devname=$(basename "$dev")
+            break
+        fi
+    done
+
+    if [[ -z "$devname" ]]; then
+        echo "ERROR: Could not find USB device with vendor ID $vid in sysfs" >&2
+        return 1
+    fi
+
+    # Walk up to the top-level port (e.g. "1-1.4.2" → "1-1")
+    local top_port="$devname"
+    while [[ "$top_port" == *.* ]]; do
+        top_port="${top_port%.*}"
+    done
+
+    echo "Power-cycling ALL USB ports by unbinding hub $top_port (probe=$devname)..." >&2
+    echo "NOTE: This will disconnect all USB devices on this bus temporarily." >&2
+
+    # Unbind the top-level hub — this cuts VBUS power to all ports
+    if [[ -e "/sys/bus/usb/drivers/usb/$top_port" ]]; then
+        echo "$top_port" | sudo tee /sys/bus/usb/drivers/usb/unbind > /dev/null
+        echo "Hub $top_port unbound — USB power is OFF." >&2
+    else
+        echo "ERROR: Hub $top_port not found in USB driver" >&2
+        return 1
+    fi
+
+    sleep 5
+
+    # Rebind the hub — this restores power and triggers re-enumeration
+    echo "$top_port" | sudo tee /sys/bus/usb/drivers/usb/bind > /dev/null
+    echo "Hub $top_port rebound — USB power is ON, waiting for re-enumeration..." >&2
+
+    sleep 3
+
+    for _wait in $(seq 1 20); do
+        if ls /dev/ttyACM* >/dev/null 2>&1; then
+            echo "Debug probe re-enumerated successfully." >&2
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: Debug probe did not re-enumerate after 20s" >&2
+    return 1
 }
 
 usb_power_reset() {
@@ -1151,7 +1232,8 @@ usb_power_reset() {
         sleep 1
         return 0
     fi
-    return 1
+    # Fallback: sysfs authorized toggle (works without uhubctl)
+    sysfs_usb_reset
 }
 
 openocd_reset_halt() {
@@ -1327,6 +1409,10 @@ if [[ "${with_gcc_torture}" == "1" ]]; then
     export YASOS_SMOKE_ENABLE_GCC_TORTURE=1
 fi
 
+if [[ "${rerun_failed}" == "1" ]]; then
+    export YASOS_SMOKE_RERUN_FAILED=1
+fi
+
 if [[ "${profile}" == "1" ]]; then
     export YASOS_TCC_PROFILE=1
 fi
@@ -1358,6 +1444,7 @@ fi
         "1" if flash_only else "0",
         str(test_retries),
         "1" if bool(config.get("with_gcc_torture", False)) else "0",
+        "1" if rerun_failed else "0",
         kernel_sha,
         rootfs_sha,
         requirements_sha,
@@ -1462,12 +1549,14 @@ def run_remote_power_reset(config: dict[str, Any]) -> None:
     uhubctl_hub = str(config.get("uhubctl_hub", "")).strip()
     uhubctl_port = str(config.get("uhubctl_port", "")).strip()
     if not uhubctl_hub:
-        raise RunnerError("uhubctl_hub must be configured for --power-reset (use 'auto' to detect)")
+        # Default to auto-detect when no hub is configured
+        uhubctl_hub = "auto"
     remote_script = """set -euo pipefail
 uhubctl_hub=$1
 uhubctl_port=$2
 
-detect_uhubctl_device() {
+detect_usb_device() {
+    # Find a USB device by vendor ID in sysfs
     local vid=${1:-2e8a}
     for dev in /sys/bus/usb/devices/*/; do
         [[ -f "$dev/idVendor" ]] || continue
@@ -1489,50 +1578,120 @@ detect_uhubctl_device() {
     return 1
 }
 
+sysfs_usb_reset() {
+    # On Raspberry Pi, individual USB port power control is not supported.
+    # The only way to cut VBUS power is to unbind the entire internal USB
+    # hub from the kernel driver, which powers off ALL USB ports at once.
+    # Then rebinding restores power and triggers full re-enumeration.
+    local vid=${1:-2e8a}
+    local devname=""
+    for dev in /sys/bus/usb/devices/*/; do
+        [[ -f "$dev/idVendor" ]] || continue
+        local v
+        v=$(cat "$dev/idVendor" 2>/dev/null) || continue
+        if [[ "$v" == "$vid" ]]; then
+            devname=$(basename "$dev")
+            break
+        fi
+    done
+
+    if [[ -z "$devname" ]]; then
+        echo "ERROR: Could not find USB device with vendor ID $vid in sysfs" >&2
+        return 1
+    fi
+
+    # Walk up to the top-level port (e.g. "1-1.4.2" -> "1-1")
+    local top_port="$devname"
+    while [[ "$top_port" == *.* ]]; do
+        top_port="${top_port%.*}"
+    done
+
+    echo "Power-cycling ALL USB ports by unbinding hub $top_port (probe=$devname)..."
+    echo "NOTE: This will disconnect all USB devices on this bus temporarily."
+
+    if [[ -e "/sys/bus/usb/drivers/usb/$top_port" ]]; then
+        echo "$top_port" | sudo tee /sys/bus/usb/drivers/usb/unbind > /dev/null
+        echo "Hub $top_port unbound — USB power is OFF."
+    else
+        echo "ERROR: Hub $top_port not found in USB driver" >&2
+        return 1
+    fi
+
+    sleep 5
+
+    echo "$top_port" | sudo tee /sys/bus/usb/drivers/usb/bind > /dev/null
+    echo "Hub $top_port rebound — USB power is ON, waiting for re-enumeration..."
+
+    sleep 3
+
+    for _wait in $(seq 1 20); do
+        if ls /dev/ttyACM* >/dev/null 2>&1; then
+            echo "Debug probe re-enumerated successfully."
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: Debug probe did not re-enumerate after 20s"
+    return 1
+}
+
 uhubctl_bin=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)
-if [[ ! -x "$uhubctl_bin" ]]; then
-    echo "ERROR: uhubctl not found on remote host (tried PATH and /usr/sbin)" >&2
-    exit 1
+use_uhubctl=0
+if [[ -x "$uhubctl_bin" ]]; then
+    use_uhubctl=1
 fi
 
 if [[ "$uhubctl_hub" == "auto" ]]; then
-    detected=$(detect_uhubctl_device 2e8a) || { echo "ERROR: could not auto-detect USB hub for Pico" >&2; exit 1; }
+    detected=$(detect_usb_device 2e8a) || { echo "ERROR: could not auto-detect USB hub for Pico" >&2; exit 1; }
     uhubctl_hub="${detected%% *}"
     if [[ -z "$uhubctl_port" ]]; then
         uhubctl_port="${detected##* }"
     fi
-    # Verify uhubctl recognises this hub; walk up if not.
-    if ! sudo "$uhubctl_bin" -l "$uhubctl_hub" >/dev/null 2>&1; then
-        echo "Hub $uhubctl_hub not uhubctl-compatible, walking up to parent..." >&2
-        if [[ "$uhubctl_hub" == *.* ]]; then
-            uhubctl_port="${uhubctl_hub##*.}"
-            uhubctl_hub="${uhubctl_hub%.*}"
-        else
-            uhubctl_port="${uhubctl_hub#*-}"
-            uhubctl_hub="${uhubctl_hub%%-*}"
+    if (( use_uhubctl )); then
+        # Verify uhubctl recognises this hub; walk up if not.
+        if ! sudo "$uhubctl_bin" -l "$uhubctl_hub" >/dev/null 2>&1; then
+            echo "Hub $uhubctl_hub not uhubctl-compatible, walking up to parent..."
+            if [[ "$uhubctl_hub" == *.* ]]; then
+                uhubctl_port="${uhubctl_hub##*.}"
+                uhubctl_hub="${uhubctl_hub%.*}"
+            else
+                uhubctl_port="${uhubctl_hub#*-}"
+                uhubctl_hub="${uhubctl_hub%%-*}"
+            fi
+        fi
+
+        # Check for ganged power switching (e.g. RPi 4 VIA VL805 hub).
+        # Per-port power control doesn't work — must cycle all ports together.
+        hub_info=$(sudo "$uhubctl_bin" -l "$uhubctl_hub" 2>/dev/null) || true
+        if echo "$hub_info" | grep -qi "ganged"; then
+            echo "Hub $uhubctl_hub uses ganged power switching — cycling all ports together"
+            uhubctl_port=""
         fi
     fi
-    echo "Auto-detected: hub=$uhubctl_hub port=$uhubctl_port"
+    echo "Auto-detected: hub=$uhubctl_hub port=${uhubctl_port:-all}"
 fi
 
-port_args=()
-if [[ -n "$uhubctl_port" ]]; then
-    port_args=(-p "$uhubctl_port")
-fi
-
-echo "Power-cycling USB (hub=$uhubctl_hub port=${uhubctl_port:-all})..."
-sudo "$uhubctl_bin" -l "$uhubctl_hub" "${port_args[@]}" -a off -r 100
-sleep 3
-# After power-off the hub disappears from the bus; uhubctl may
-# segfault when trying to re-scan.  Retry the 'on' command.
-for _attempt in 1 2 3; do
-    if sudo "$uhubctl_bin" -l "$uhubctl_hub" "${port_args[@]}" -a on -r 100 2>/dev/null; then
-        break
+if (( use_uhubctl )); then
+    port_args=()
+    if [[ -n "$uhubctl_port" ]]; then
+        port_args=(-p "$uhubctl_port")
     fi
-    sleep 2
-done
-sleep 3
-echo "Power-cycle complete."
+
+    echo "Power-cycling USB via uhubctl (hub=$uhubctl_hub port=${uhubctl_port:-all})..."
+    sudo "$uhubctl_bin" -l "$uhubctl_hub" "${port_args[@]}" -a off -r 100
+    sleep 3
+    for _attempt in 1 2 3; do
+        if sudo "$uhubctl_bin" -l "$uhubctl_hub" "${port_args[@]}" -a on -r 100 2>/dev/null; then
+            break
+        fi
+        sleep 2
+    done
+    sleep 3
+    echo "Power-cycle complete."
+else
+    echo "uhubctl not found, using sysfs USB port reset fallback..."
+    sysfs_usb_reset
+fi
 """
     cmd = ssh_base(config) + [
         "bash",
@@ -1957,6 +2116,12 @@ def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namesp
         existing = str(runtime_config.get("pytest_args", "")).strip()
         runtime_config["pytest_args"] = f"{existing} --log-cli-level={shlex.quote(args.log_cli_level)}"
 
+    if getattr(args, "rerun_failed", False):
+        existing = str(runtime_config.get("pytest_args", "")).strip()
+        existing_args = shlex.split(existing) if existing else []
+        if "--lf" not in existing_args and "--last-failed" not in existing_args:
+            runtime_config["pytest_args"] = f"{existing} --lf --lfnf=none".strip()
+
     return runtime_config
 
 
@@ -1971,6 +2136,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reset", action="store_true", help="Reset the configured target through OpenOCD on the remote host before exiting, or reset-halt before attaching when combined with --gdb.")
     parser.add_argument("--power-reset", nargs="?", const="auto", default=None, metavar="HUB", help="Power-cycle the target via uhubctl on the remote host. Pass 'auto' (default) to detect the hub from the debug probe, or a hub path like '1-1'. Useful when the target is hung and OpenOCD cannot connect.")
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
+    parser.add_argument("--rerun-failed", action="store_true", help="Run only tests that failed in the previous remote pytest run by passing --lf to pytest. If no last-failed cache exists on the remote host, runs no tests instead of the full suite.")
     parser.add_argument("--with-gcc-torture", dest="with_gcc_torture", action="store_true", default=None, help="Enable GCC torture smoke tests for this run. Also syncs libs/tinycc/tests/gcctestsuite and exports YASOS_SMOKE_ENABLE_GCC_TORTURE=1 remotely.")
     parser.add_argument("--gcc-test-suite-only", action="store_true", help="Run only GCC torture tests. Implies --with-gcc-torture and filters pytest to -m gcc_torture.")
     parser.add_argument("--extra-tcc-cflags", help="Extra CFLAGS passed to every TCC compilation during smoke tests. Example: --extra-tcc-cflags='-O1'.")
@@ -2060,6 +2226,7 @@ def main() -> int:
                 rootfs_sha=rootfs_sha,
                 requirements_sha=requirements_sha,
                 force=True,
+                rerun_failed=args.rerun_failed,
             )
             print("Force-flash completed successfully.")
             return 0
@@ -2082,6 +2249,7 @@ def main() -> int:
                 requirements_sha=requirements_sha,
                 force=True,
                 kernel_only=True,
+                rerun_failed=args.rerun_failed,
             )
             print("Force kernel flash completed successfully.")
             return 0
@@ -2182,6 +2350,7 @@ def main() -> int:
             rootfs_sha=rootfs_sha,
             requirements_sha=requirements_sha,
             force=args.force,
+            rerun_failed=args.rerun_failed,
         )
     except RunnerError as error:
         print(f"error: {error}", file=sys.stderr)

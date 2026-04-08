@@ -571,6 +571,16 @@ pub const MmcIo = struct {
 
     const sdio_io_retry_limit: usize = 6;
 
+    fn wait_for_card_dat0(self: *const Self) void {
+        var timeout: u32 = 100_000;
+        while (self._mmc.is_busy() and timeout > 0) : (timeout -= 1) {
+            hal.time.sleep_us(10);
+        }
+        if (timeout == 0) {
+            log.warn("DAT0 busy timeout waiting for card ready", .{});
+        }
+    }
+
     fn sdio_read(self: *const Self, address: u64, buf: []u8) isize {
         const block_address: u32 = @intCast(address >> 9);
         const num_blocks = buf.len / 512;
@@ -581,6 +591,8 @@ pub const MmcIo = struct {
         while (i < num_blocks) {
             const remaining = num_blocks - i;
             const chunk: u32 = @intCast(if (remaining > max_blocks_per_req) max_blocks_per_req else remaining);
+
+            self.wait_for_card_dat0();
 
             if (chunk == 1) {
                 const resp = self._mmc.send_sdio_command(17, @intCast(block_address + i));
@@ -639,6 +651,8 @@ pub const MmcIo = struct {
         var i: usize = 0;
         var retransmissions: usize = 0;
         while (i < num_blocks) {
+            self.wait_for_card_dat0();
+
             const resp = self._mmc.send_sdio_command(24, @intCast(block_address + i));
             if (resp.command_index != 24) {
                 if (retransmissions < sdio_io_retry_limit) {

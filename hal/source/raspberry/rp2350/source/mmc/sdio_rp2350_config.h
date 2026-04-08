@@ -34,7 +34,7 @@ static inline void sdio_busy_wait_us_impl(uint32_t us) {
 #define SDIO_GPIO_CLK_SLEW      GPIO_SLEW_RATE_FAST
 #define SDIO_GPIO_CMD_DATA_SLEW GPIO_SLEW_RATE_FAST
 #define SDIO_GPIO_CLK_DRIVE     GPIO_DRIVE_STRENGTH_8MA
-#define SDIO_GPIO_CMD_DATA_DRIVE GPIO_DRIVE_STRENGTH_4MA
+#define SDIO_GPIO_CMD_DATA_DRIVE GPIO_DRIVE_STRENGTH_8MA
 
 /* DMA channels to use */
 #define SDIO_DMACH_A    4

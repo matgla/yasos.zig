@@ -31,10 +31,10 @@ const sdio = @cImport({
 
 pub const MmcSdio = struct {
     const crc_window_us: u64 = 30 * std.time.us_per_s;
-    const crc_fallback_threshold: u8 = 2;
+    const crc_fallback_threshold: u8 = 5;
     const crc_log_burst_limit: u8 = 10;
     const response_timeout_window_us: u64 = 30 * std.time.us_per_s;
-    const response_timeout_fallback_threshold: u8 = 3;
+    const response_timeout_fallback_threshold: u8 = 5;
     const response_timeout_log_burst_limit: u8 = 10;
 
     const TimingProfile = enum(u8) {
@@ -509,7 +509,7 @@ pub const MmcSdio = struct {
 
     pub fn is_busy(self: MmcSdio) bool {
         _ = self;
-        return false;
+        return sdio.rp2350_sdio_is_card_busy();
     }
 
     pub fn set_wide_bus(self: *MmcSdio, wide: bool) void {

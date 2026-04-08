@@ -137,6 +137,7 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete);
 sdio_status_t rp2350_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize);
 sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete);
 sdio_status_t rp2350_sdio_stop(void);
+bool rp2350_sdio_is_card_busy(void);
 
 typedef enum {
     SDIO_INITIALIZE             = 0,
