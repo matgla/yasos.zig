@@ -68,7 +68,10 @@ assert _gcc_spec is not None and _gcc_spec.loader is not None
 _gcc_spec.loader.exec_module(_gcc_conftest)
 
 GCC_TORTURE_PATH = _gcc_conftest.GCC_TORTURE_PATH
-GCC_OPT_LEVELS = _gcc_conftest.OPT_LEVELS
+GCC_OPT_LEVELS = _gcc_conftest.get_opt_levels(
+    env_var="YASOS_SMOKE_TCC_OPT_LEVELS",
+    default=("-O0",),
+)
 discover_gcc_execute_tests = _gcc_conftest.discover_gcc_execute_tests
 discover_gcc_compile_tests = _gcc_conftest.discover_gcc_compile_tests
 should_skip_gcc_test = _gcc_conftest.should_skip_gcc_test

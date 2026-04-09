@@ -41,6 +41,15 @@ class TestProfile:
     compile_speed: dict[str, float] = field(default_factory=dict)
     syscall_entries: list[dict] = field(default_factory=list)
 
+    @property
+    def internal_compile_ms(self) -> float | None:
+        if not self.compile_speed:
+            return None
+        time_s = self.compile_speed.get("time_s")
+        if time_s is None:
+            return None
+        return time_s * 1000.0
+
 
 profile_results: list[TestProfile] = []
 
@@ -131,16 +140,28 @@ def format_profile_report(terminalreporter) -> None:
     if not profile_results:
         return
 
+    from .timing import timing_results
+
+    wall_compile_ms_by_test = {entry.test_id: entry.compile_ms for entry in timing_results}
+
     report_dir = os.environ.get("YASOS_TIMING_REPORT_DIR", ".")
     report_path = os.path.join(report_dir, "tcc_profile_report.json")
 
     report_data = []
     for p in profile_results:
+        wall_compile_ms = wall_compile_ms_by_test.get(p.test_id)
+        internal_compile_ms = p.internal_compile_ms
+        compile_overhead_ms = None
+        if wall_compile_ms is not None and internal_compile_ms is not None:
+            compile_overhead_ms = max(0.0, wall_compile_ms - internal_compile_ms)
         report_data.append({
             "test_id": p.test_id,
             "bench_phases": p.bench_phases,
             "stats": p.stats,
             "compile_speed": p.compile_speed,
+            "wall_compile_ms": round(wall_compile_ms, 2) if wall_compile_ms is not None else None,
+            "internal_compile_ms": round(internal_compile_ms, 2) if internal_compile_ms is not None else None,
+            "compile_overhead_ms": round(compile_overhead_ms, 2) if compile_overhead_ms is not None else None,
             "output_sizes": p.output_sizes,
             "syscall_entries": p.syscall_entries,
             "raw_lines": p.raw_lines,
@@ -174,8 +195,59 @@ def format_profile_report(terminalreporter) -> None:
                 syscall_totals[name]["max_cycles"], entry["max_cycles"]
             )
 
+    wall_compile_total_ms = 0.0
+    internal_compile_total_ms = 0.0
+    compile_overhead_rows = []
+    for p in profile_results:
+        wall_compile_ms = wall_compile_ms_by_test.get(p.test_id)
+        internal_compile_ms = p.internal_compile_ms
+        if wall_compile_ms is None or internal_compile_ms is None:
+            continue
+        compile_overhead_ms = max(0.0, wall_compile_ms - internal_compile_ms)
+        wall_compile_total_ms += wall_compile_ms
+        internal_compile_total_ms += internal_compile_ms
+        compile_overhead_rows.append({
+            "test_id": p.test_id,
+            "wall_compile_ms": wall_compile_ms,
+            "internal_compile_ms": internal_compile_ms,
+            "compile_overhead_ms": compile_overhead_ms,
+        })
+    compile_overhead_rows.sort(key=lambda row: row["compile_overhead_ms"], reverse=True)
+
     terminalreporter.section("TCC Performance Profile")
     terminalreporter.write_line(f"Tests profiled: {len(profile_results)}")
+
+    if compile_overhead_rows:
+        compile_overhead_total_ms = wall_compile_total_ms - internal_compile_total_ms
+        overhead_pct = (compile_overhead_total_ms / wall_compile_total_ms * 100.0) if wall_compile_total_ms else 0.0
+        terminalreporter.write_line("")
+        terminalreporter.write_line("Wall vs internal compile time:")
+        terminalreporter.write_line(
+            f"  Wall compile total:     {wall_compile_total_ms / 1000.0:.2f}s"
+        )
+        terminalreporter.write_line(
+            f"  TCC internal total:     {internal_compile_total_ms / 1000.0:.2f}s"
+        )
+        terminalreporter.write_line(
+            f"  Estimated overhead:     {compile_overhead_total_ms / 1000.0:.2f}s ({overhead_pct:.1f}%)"
+        )
+        terminalreporter.write_line(
+            "  Overhead is wall-clock outside TCC bench timing: shell/process setup, loader, syscalls/filesystem, and prompt/serial wait."
+        )
+
+        terminalreporter.write_line("")
+        terminalreporter.write_line("Top tests by wall-minus-bench compile overhead:")
+        terminalreporter.write_line(
+            f"  {'#':<4} {'Test ID':<55} {'Wall':>10} {'Bench':>10} {'Overhead':>10}"
+        )
+        terminalreporter.write_line(f"  {'-' * 97}")
+        for index, row in enumerate(compile_overhead_rows[:15], 1):
+            terminalreporter.write_line(
+                f"  {index:<4} {row['test_id']:<55} "
+                f"{row['wall_compile_ms']:>8.1f}ms "
+                f"{row['internal_compile_ms']:>8.1f}ms "
+                f"{row['compile_overhead_ms']:>8.1f}ms"
+            )
 
     if phase_totals:
         terminalreporter.write_line("")

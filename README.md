@@ -81,6 +81,7 @@ python3 scripts/remote_smoke_tui.py --run-cached --gdb
 python3 scripts/remote_smoke_tui.py --run-cached --reset --gdb
 python3 scripts/remote_smoke_tui.py --run-cached --debug --gdb
 python3 scripts/remote_smoke_tui.py --run-cached --test-retries 2
+python3 scripts/remote_smoke_tui.py --run-cached --smoke-tcc-opt-level -O1 --with-gcc-torture
 python3 scripts/remote_smoke_tui.py --run-cached --tests tests/smoke/cd_test.py tests/smoke/ls_test.py
 python3 scripts/remote_smoke_tui.py --run-cached --pytest-args 'tests/smoke/tcc_suite_test.py::test_run_tcc_test_suite[00_assignment.c] -x'
 python3 scripts/remote_smoke_tui.py --run-cached --full-flash-erase
@@ -89,6 +90,8 @@ python3 scripts/remote_smoke_tui.py --run-cached --full-flash-erase
 The remote runner also exposes a cached `OpenOCD speed` field. It defaults to `20000` and is passed as `adapter speed` during the remote flash step, so you can tune CMSIS-DAP speed per host/debug probe without editing repo-level `.cfg` files.
 
 The TUI also caches `Test retries`. It defaults to `1` and is passed to pytest as `--reruns`, which helps mask occasional UART noise without rerunning the entire suite manually.
+
+TinyCC's native pytest suites now exercise both `-O0` and `-O1` by default. The remote smoke runner keeps GCC-torture smoke cases on a single cached `Smoke TCC opt` level (`-O0` or `-O1`) so native board runs stay scoped to the layer you selected.
 
 Pass `--flash-only` to upload and flash the artifacts on the remote host, then stop without creating the remote Python venv or running pytest.
 

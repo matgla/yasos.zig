@@ -139,6 +139,7 @@ BOARD_PROFILES = {
 }
 
 OPTIMIZE_OPTIONS = ["ReleaseFast", "ReleaseSafe", "Debug", "ReleaseSmall"]
+SMOKE_TCC_OPT_LEVEL_OPTIONS = ["-O0", "-O1"]
 
 DEFAULT_CONFIG = {
     "board": "pimoroni_pico_plus2_and_vga",
@@ -150,6 +151,7 @@ DEFAULT_CONFIG = {
     "remote_work_dir": "~/.cache/yasos-remote-smoke",
     "serial_device": "",
     "optimize": "ReleaseFast",
+    "smoke_tcc_opt_level": "-O0",
     "test_retries": 1,
     "with_gcc_torture": False,
     "pytest_args": "tests/smoke",
@@ -174,6 +176,8 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
         merged["board"] = DEFAULT_CONFIG["board"]
     if merged.get("optimize") not in OPTIMIZE_OPTIONS:
         merged["optimize"] = DEFAULT_CONFIG["optimize"]
+    if merged.get("smoke_tcc_opt_level") not in SMOKE_TCC_OPT_LEVEL_OPTIONS:
+        merged["smoke_tcc_opt_level"] = DEFAULT_CONFIG["smoke_tcc_opt_level"]
     try:
         merged["ssh_port"] = int(merged.get("ssh_port", 22))
     except (TypeError, ValueError):
@@ -347,6 +351,7 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
             ("Remote work dir", "remote_work_dir"),
             ("Serial device", "serial_device"),
             ("Optimize", "optimize"),
+            ("Smoke TCC opt", "smoke_tcc_opt_level"),
             ("Test retries", "test_retries"),
             ("With GCC torture", "with_gcc_torture"),
             ("Pytest args", "pytest_args"),
@@ -400,6 +405,8 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     )
                 elif selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), -1)
+                elif selected_key == "smoke_tcc_opt_level":
+                    config[selected_key] = cycle_option(SMOKE_TCC_OPT_LEVEL_OPTIONS, str(config[selected_key]), -1)
                 elif selected_key == "with_gcc_torture":
                     config[selected_key] = not bool(config[selected_key])
                 continue
@@ -411,6 +418,8 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     )
                 elif selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), 1)
+                elif selected_key == "smoke_tcc_opt_level":
+                    config[selected_key] = cycle_option(SMOKE_TCC_OPT_LEVEL_OPTIONS, str(config[selected_key]), 1)
                 elif selected_key == "with_gcc_torture":
                     config[selected_key] = not bool(config[selected_key])
                 continue
@@ -439,6 +448,9 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     continue
                 if selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), 1)
+                    continue
+                if selected_key == "smoke_tcc_opt_level":
+                    config[selected_key] = cycle_option(SMOKE_TCC_OPT_LEVEL_OPTIONS, str(config[selected_key]), 1)
                     continue
                 if selected_key == "with_gcc_torture":
                     config[selected_key] = not bool(config[selected_key])
@@ -1051,8 +1063,9 @@ profile=${18}
 uhubctl_hub=${19}
 uhubctl_port=${20}
 kernel_only=${21}
-extra_tcc_cflags=${22}
-shift 22
+smoke_tcc_opt_level=${22}
+extra_tcc_cflags=${23}
+shift 23
 
 detect_uhubctl_device() {
     # Find a USB device by vendor ID in sysfs and return its hub location
@@ -1417,6 +1430,10 @@ if [[ "${profile}" == "1" ]]; then
     export YASOS_TCC_PROFILE=1
 fi
 
+if [[ -n "${smoke_tcc_opt_level}" ]]; then
+    export YASOS_SMOKE_TCC_OPT_LEVELS="${smoke_tcc_opt_level}"
+fi
+
 if [[ -n "${extra_tcc_cflags}" ]]; then
     export YASOS_EXTRA_TCC_CFLAGS="${extra_tcc_cflags}"
 fi
@@ -1453,6 +1470,7 @@ fi
         str(config.get("uhubctl_hub", "")),
         str(config.get("uhubctl_port", "")),
         "1" if kernel_only else "0",
+        str(config.get("smoke_tcc_opt_level", DEFAULT_CONFIG["smoke_tcc_opt_level"])),
         str(config.get("extra_tcc_cflags", "")),
         *pytest_args,
     ]
@@ -2046,12 +2064,13 @@ def list_boards() -> None:
         print(f"{profile.key}: {profile.label}")
 
 
-def collect_smoke_tests(pytest_args: list[str], with_gcc_torture: bool) -> list[str]:
+def collect_smoke_tests(pytest_args: list[str], with_gcc_torture: bool, smoke_tcc_opt_level: str) -> list[str]:
     env = dict(os.environ)
     if with_gcc_torture:
         env["YASOS_SMOKE_ENABLE_GCC_TORTURE"] = "1"
     else:
         env.pop("YASOS_SMOKE_ENABLE_GCC_TORTURE", None)
+    env["YASOS_SMOKE_TCC_OPT_LEVELS"] = smoke_tcc_opt_level
 
     cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", *pytest_args]
     completed = subprocess.run(
@@ -2084,7 +2103,11 @@ def collect_smoke_tests(pytest_args: list[str], with_gcc_torture: bool) -> list[
 def list_tests(args: argparse.Namespace) -> None:
     runtime_config = apply_runtime_pytest_overrides(DEFAULT_CONFIG, args)
     pytest_args = shlex.split(str(runtime_config["pytest_args"]).strip() or "tests/smoke")
-    for nodeid in collect_smoke_tests(pytest_args, bool(runtime_config.get("with_gcc_torture", False))):
+    for nodeid in collect_smoke_tests(
+        pytest_args,
+        bool(runtime_config.get("with_gcc_torture", False)),
+        str(runtime_config.get("smoke_tcc_opt_level", DEFAULT_CONFIG["smoke_tcc_opt_level"])),
+    ):
         print(nodeid)
 
 
@@ -2096,6 +2119,9 @@ def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namesp
 
     if args.with_gcc_torture is not None:
         runtime_config["with_gcc_torture"] = args.with_gcc_torture
+
+    if args.smoke_tcc_opt_level is not None:
+        runtime_config["smoke_tcc_opt_level"] = args.smoke_tcc_opt_level
 
     if getattr(args, "gcc_test_suite_only", False):
         runtime_config["with_gcc_torture"] = True
@@ -2138,6 +2164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
     parser.add_argument("--rerun-failed", action="store_true", help="Run only tests that failed in the previous remote pytest run by passing --lf to pytest. If no last-failed cache exists on the remote host, runs no tests instead of the full suite.")
     parser.add_argument("--with-gcc-torture", dest="with_gcc_torture", action="store_true", default=None, help="Enable GCC torture smoke tests for this run. Also syncs libs/tinycc/tests/gcctestsuite and exports YASOS_SMOKE_ENABLE_GCC_TORTURE=1 remotely.")
+    parser.add_argument("--smoke-tcc-opt-level", choices=SMOKE_TCC_OPT_LEVEL_OPTIONS, help="Select the GCC-torture optimization level used by smoke tests. Keeps remote smoke on one opt layer even though TinyCC's native test matrix runs both -O0 and -O1.")
     parser.add_argument("--gcc-test-suite-only", action="store_true", help="Run only GCC torture tests. Implies --with-gcc-torture and filters pytest to -m gcc_torture.")
     parser.add_argument("--extra-tcc-cflags", help="Extra CFLAGS passed to every TCC compilation during smoke tests. Example: --extra-tcc-cflags='-O1'.")
     parser.add_argument("--pytest-args", help="Override cached pytest arguments for this run only. Example: --pytest-args 'tests/smoke -k shell_test'.")

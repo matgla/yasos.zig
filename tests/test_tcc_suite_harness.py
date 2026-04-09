@@ -241,3 +241,19 @@ def test_discover_local_dependencies_includes_chk_headers_and_sources():
     assert dependency_map["builtins/chk.h"].endswith("builtins/chk.h")
     assert "builtins/lib/chk.c" in dependency_map
     assert dependency_map["builtins/lib/chk.c"].endswith("builtins/lib/chk.c")
+
+
+def test_gcc_conftest_get_opt_levels_defaults_to_both():
+    assert suite._gcc_conftest.get_opt_levels(
+        env_var="YASOS_TEST_OPT_LEVELS_UNSET",
+        default=("-O0", "-O1"),
+    ) == ["-O0", "-O1"]
+
+
+def test_gcc_conftest_get_opt_levels_accepts_single_smoke_override(monkeypatch):
+    monkeypatch.setenv("YASOS_SMOKE_TCC_OPT_LEVELS", "O1")
+
+    assert suite._gcc_conftest.get_opt_levels(
+        env_var="YASOS_SMOKE_TCC_OPT_LEVELS",
+        default=("-O0",),
+    ) == ["-O1"]
