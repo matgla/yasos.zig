@@ -24,7 +24,8 @@ pub const SymbolTableRelocation = packed struct {
     is_exported_symbol: u1,
     index: u31,
     function_pointer: u1,
-    symbol_index: u31,
+    plt_call: u1,
+    symbol_index: u30,
 
     pub fn next(self: SymbolTableRelocation) *const SymbolTableRelocation {
         return @ptrFromInt(@intFromPtr(self) + @sizeOf(SymbolTableRelocation));

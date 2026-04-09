@@ -157,8 +157,18 @@ pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+    const context: *const volatile c.fstat_context = @ptrCast(@alignCast(arg));
+    if (context.buf == null) {
+        return kernel.errno.ErrnoSet.InvalidArgument;
+    }
+    const path = try determine_path_for_file(kernel_allocator, null, context.fd);
+    defer kernel_allocator.free(path);
+    fs.get_ivfs().interface.stat(path, context.buf, true) catch |err| {
+        return err;
+    };
+    return 0;
 }
 
 pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
@@ -234,11 +244,14 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
     const maybe_node: ?kernel.fs.Node = fs.get_ivfs().interface.get(path) catch |err| blk: {
         break :blk switch (err) {
             error.NoEntry => null,
-            else => return err,
+            else => {
+                return err;
+            },
         };
     };
     if (maybe_node) |file| {
-        return try process.attach_file(path, file);
+        const fd_result = try process.attach_file(path, file);
+        return fd_result;
     } else if ((context.flags & c.O_CREAT) != 0) {
         try fs.get_ivfs().interface.create(path, context.mode);
         const ifile = try fs.get_ivfs().interface.get(path);
@@ -292,7 +305,6 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
             context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
-
             return 0;
         }
     }

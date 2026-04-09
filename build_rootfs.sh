@@ -178,19 +178,19 @@ build_cross_compiler()
   YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
 
   CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
-  CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -Wall -Werror"
+  CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -DCONFIG_TCC_BCHECK=0 -Wall -Werror"
   CROSS_CONFIG_DEBUG=""
   if $DEBUG_TCC; then
     CROSS_CONFIG_DEBUG="--debug --enable-O1"
     CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
-    CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -Wall -Werror"
+    CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -DCONFIG_TCC_BCHECK=0 -Wall -Werror"
   fi
   if $DEBUG_REGALLOC; then
     CROSS_EXTRA_CFLAGS="$CROSS_EXTRA_CFLAGS -DTCC_REGALLOC_DEBUG"
   fi
   CROSS_STAMP_FILE="$TINYCC_STAMP_DIR/cross.stamp"
 
-  if ! $CLEAR && [ -f "$CROSS_STAMP_FILE" ] && [ -f "$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc" ] && ! tinycc_sources_newer_than "$CROSS_STAMP_FILE"; then
+  if ! $CLEAR && [ -f "$CROSS_STAMP_FILE" ] && [ -f "$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc" ] && ! tinycc_sources_newer_than "$CROSS_STAMP_FILE" && [ ! "$SCRIPT_DIR/build_rootfs.sh" -nt "$CROSS_STAMP_FILE" ]; then
     echo "Cross compiler already up to date."
     PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
     cd ..
@@ -208,10 +208,12 @@ build_cross_compiler()
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc
+  # Save cross-compiler config for later comparison with native build
+  cp config.h config.h.cross
+  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
-  make install
+  make install INC-armv8m="$YASOS_SYSINCLUDES"
 
   # Verify cross-compiler was installed
   if [ ! -f "$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc" ]; then
@@ -283,7 +285,7 @@ build_c_compiler()
     if [ $? -ne 0 ]; then
       exit -1;
     fi
-    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
+    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
 
     if [ $? -ne 0 ]; then
       exit -1;
@@ -330,13 +332,26 @@ build_c_compiler()
     if [ $? -ne 0 ]; then
       exit -1;
     fi
-    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS"
+    # Compare critical config values between cross and native builds.
+    # Differences in these defines cause PCH keyword/predefines mismatches.
+    if [ -f config.h.cross ]; then
+      echo "Comparing cross vs native config.h..."
+      # Extract defines that affect keyword tables and predefines
+      for def in CONFIG_TCC_BCHECK CONFIG_TCC_BACKTRACE CONFIG_TCC_PIE CONFIG_TCC_PIC CONFIG_TCC_PREDEFS; do
+        cross_val=$(grep -o "#define $def [0-9]*" config.h.cross | head -1)
+        native_val=$(grep -o "#define $def [0-9]*" config.h | head -1)
+        if [ "$cross_val" != "$native_val" ]; then
+          echo "WARNING: Config mismatch: cross='$cross_val' native='$native_val'"
+        fi
+      done
+    fi
+    VERBOSE=1 make armv8m-tcc -j8 LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
     if [ $? -ne 0 ]; then
       exit -1;
     fi
     # Copy the libtcc1.a files from cross-compiler install to build dir for make install
     cp $SCRIPT_DIR/libs/tinycc/lib/tcc/armv8m-libtcc1.a .
-    make install armv8m-tcc DESTDIR=$SCRIPT_DIR/rootfs LIBS="$YASOS_LIBS"
+    make install armv8m-tcc DESTDIR=$SCRIPT_DIR/rootfs LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
     mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
     cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
     # Install FP libraries (shared .so for dynamic linking, .a for static)
@@ -491,6 +506,65 @@ build_makefile sha
 TOYBOX_EXTRA_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 
 cd ..
+
+# ---- Stage 4: Precompile common headers for the native TCC ----
+# Generate PCH files using the cross compiler.  The sysroot-stripping
+# logic in tccpp.c ensures the stored paths match the target filesystem.
+# The native on-target TCC uses the "native" PCH subdir.
+PCH_DIR="$SCRIPT_DIR/rootfs/usr/lib/tcc/pch/armv8m-"
+mkdir -p "$PCH_DIR"
+PCH_HEADERS="stdio.h stdlib.h string.h"
+PCH_INDEX=""
+echo "Generating precompiled headers..."
+for hdr in $PCH_HEADERS; do
+  pch_name="${hdr%.h}.pch"
+  hdr_path="$SCRIPT_DIR/rootfs/usr/include/$hdr"
+  if [ -f "$hdr_path" ]; then
+    armv8m-tcc -generate-pch "$hdr_path" -o "$PCH_DIR/$pch_name"
+    if [ $? -eq 0 ]; then
+      PCH_INDEX="${PCH_INDEX}/usr/include/${hdr}\t${pch_name}\n"
+      echo "  Generated $pch_name"
+    else
+      echo "  WARNING: Failed to generate $pch_name"
+    fi
+  else
+    echo "  WARNING: Header $hdr_path not found, skipping PCH"
+  fi
+done
+if [ -n "$PCH_INDEX" ]; then
+  printf "$PCH_INDEX" > "$PCH_DIR/auto.index"
+  echo "  Wrote auto.index"
+fi
+
+# Validate that generated PCH files can be loaded by the native compiler.
+# The cross-compiler (armv8m-tcc) and native compiler share the same
+# keyword table and predefines, so validating with the cross-compiler
+# catches mismatches before flashing.
+echo "Validating precompiled headers..."
+PCH_VALID=true
+for hdr in $PCH_HEADERS; do
+  pch_name="${hdr%.h}.pch"
+  pch_path="$PCH_DIR/$pch_name"
+  if [ -f "$pch_path" ]; then
+    # Create a minimal test file that includes the header
+    echo "#include <$hdr>" > /tmp/pch_validate_$$.c
+    echo "int main(void){return 0;}" >> /tmp/pch_validate_$$.c
+    output=$(armv8m-tcc -verbose-pch -use-pch "$pch_path" -c /tmp/pch_validate_$$.c -o /dev/null 2>&1)
+    if echo "$output" | grep -q "ignoring PCH"; then
+      echo "  ERROR: PCH validation failed for $pch_name:"
+      echo "$output" | grep -E "pch:|ignoring PCH" | sed 's/^/    /'
+      PCH_VALID=false
+    else
+      echo "  Validated $pch_name OK"
+    fi
+    rm -f /tmp/pch_validate_$$.c
+  fi
+done
+if ! $PCH_VALID; then
+  echo "ERROR: PCH validation failed! Cross and native compilers produce incompatible precompiled headers."
+  echo "Check keyword table, predefines, and config.h defines for mismatches."
+  exit 1
+fi
 
 if $BUILD_IMAGE; then
   echo "Outputing file to: $OUTPUT_FILE"

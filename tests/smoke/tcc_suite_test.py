@@ -16,7 +16,7 @@
  """
 
 from .conftest import session_key
-from .timing import CaseTiming, timing_results, start_timer, elapsed_ms
+from .timing import CaseTiming, timing_results, start_timer, elapsed_ms, attach_loader_timing
 from .profiling import profiling_enabled, extract_profile_lines, record_profile
 import random
 import time
@@ -97,6 +97,7 @@ NATIVE_TARGET_SKIP_TESTS = {
     "memcpy-a2": "test is to huge to run on the embedded target",
     "memcpy-a4": "test is to huge to run on the embedded target",
     "memcpy-a8": "test is to huge to run on the embedded target",
+    "107_mibench_remaining": "test is too large to run on the embedded target",
 }
 
 IGNORE_NATIVE_TARGET_SKIP_TESTS = os.environ.get("YASOS_SMOKE_RERUN_FAILED", "").strip().lower() in {
@@ -531,6 +532,7 @@ def build_ir_test_cases():
             name=filename,
             sources=(filename,),
             source_dir=ir_tests_path,
+            skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
         ))
 
     return test_cases
@@ -965,12 +967,7 @@ def _prepare_compile_source_paths(testcase, session, current_item_id=None, temp_
 def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_source_plan=None):
     filename_without_extension = get_testcase_binary_name(testcase)
     output_name = filename_without_extension + (".o" if testcase.compile_only else "")
-    output_dir = remote_output_dir(testcase)
     output_binary = remote_output_path(output_name, testcase)
-    session.write_command("mkdir -p " + shlex.quote(output_dir))
-    session.wait_for_prompt_except_logs()
-    session.write_command(f"rm -f {shlex.quote(output_binary)}")
-    session.wait_for_prompt_except_logs()
 
     cleanup_paths = [output_binary]
     source_paths, temp_cleanup_paths = _prepare_compile_source_paths(
@@ -993,7 +990,9 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
     try:
         session.write_command(
             f"tcc {bench_flag}{compile_mode_flag}{extra_cflags}{compile_args} -o {shlex.quote(output_binary)}; "
-            f"echo {COMPILE_MARKER_PREFIX}$?"
+            f"compile_status=$?; "
+            f"if [ $compile_status -eq 0 ] && [ ! -e {shlex.quote(output_binary)} ]; then compile_status=254; fi; "
+            f"echo {COMPILE_MARKER_PREFIX}$compile_status"
         )
         old_timeout = session.serial.timeout
         session.serial.timeout = old_timeout * 2
@@ -1058,14 +1057,7 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
 
         assert compile_status == 0, f"compilation failed (exit {compile_status}):\n{compile_output}"
 
-        compile_succeeded = get_remote_hash(output_binary, session) is not None
-        assert compile_succeeded, f"expected output artifact {output_binary} to exist after successful compile"
-
         if testcase.compile_only:
-            return
-
-        if not compile_succeeded:
-            assert not runtime_expected_lines, f"compile failed unexpectedly for runtime test: {filtered_compile_lines}"
             return
 
         quoted_args = " ".join(shlex.quote(argument) for argument in testcase.args)
@@ -1077,6 +1069,7 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
         data_lines = session.wait_for_prompt_except_logs()
         if timing is not None:
             timing.execute_ms = elapsed_ms(_t_execute)
+            attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
 
         actual_exit_code = None
         filtered_lines = []
@@ -1179,6 +1172,8 @@ def test_run_ir_test_suite(request, testcase):
     """Run ir_tests from tinycc/tests/ir_tests directory."""
     session = request.node.stash[session_key]
     temp_source_plan = get_temp_source_reuse_plan(request.session)
+    if testcase.skip_reason:
+        pytest.skip(testcase.skip_reason)
     output_dir = remote_output_dir(testcase)
     session.write_command(
         "mkdir -p "

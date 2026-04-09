@@ -146,9 +146,12 @@ pub const Loader = struct {
 
         // Pre-count function pointer thunks needed for both symbol table and local relocations
         var symbol_table_fn_ptr_count: usize = 0;
+        var lazy_plt_call_count: usize = 0;
         for (parser.symbol_table_relocations.relocations) |rel| {
             if (rel.function_pointer == 1) {
                 symbol_table_fn_ptr_count += 1;
+            } else if (rel.plt_call == 1) {
+                lazy_plt_call_count += 1;
             }
         }
         var local_fn_ptr_count: usize = 0;
@@ -165,9 +168,15 @@ pub const Loader = struct {
         }
         const total_fn_ptr_thunks = symbol_table_fn_ptr_count + local_fn_ptr_count + data_fn_ptr_count;
         log.debug("Total function pointer thunks needed: {d} (symbol_table: {d}, local: {d}, data: {d})", .{ total_fn_ptr_thunks, symbol_table_fn_ptr_count, local_fn_ptr_count, data_fn_ptr_count });
+        log.debug("Total lazy PLT thunks needed: {d}", .{lazy_plt_call_count});
         if (total_fn_ptr_thunks > 0) {
             if (module.unique_data) |unique| {
                 try unique.allocate_thunks(total_fn_ptr_thunks);
+            }
+        }
+        if (lazy_plt_call_count > 0) {
+            if (module.unique_data) |unique| {
+                try unique.allocate_lazy_thunks(lazy_plt_call_count);
             }
         }
 
@@ -401,6 +410,26 @@ pub const Loader = struct {
                 maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
             }
             if (maybe_symbol) |symbol| {
+                // PLT calls (R_ARM_JUMP_SLOT) can be lazily bound: defer
+                // resolution until the function is actually called.
+                if (rel.plt_call == 1) {
+                    if (maybe_unique_data) |unique| {
+                        const address = unique.generate_lazy_thunk(
+                            module,
+                            &got[rel.index],
+                            @ptrCast(symbol.name().ptr),
+                            symbol.weak == 1,
+                        ) catch |err| {
+                            log.err("[yasld] Can't generate lazy thunk for '{s}': {s}", .{ symbol.name(), @errorName(err) });
+                            return err;
+                        };
+                        log.debug("Setting GOT[{d}] to lazy thunk: 0x{x} [{s}]", .{ rel.index, address, symbol.name() });
+                        got[rel.index].symbol_offset = address;
+                        got[rel.index].base_register = @intFromPtr(got.ptr);
+                    }
+                    continue;
+                }
+
                 const maybe_symbol_entry = self.find_symbol(module, symbol.name());
                 if (maybe_symbol_entry) |symbol_entry| {
                     log.debug("Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });

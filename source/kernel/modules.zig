@@ -17,6 +17,7 @@
 // It keeps track of loaded modules and their addresses, for further deallocation when died.
 
 const std = @import("std");
+const hal = @import("hal");
 
 const yasld = @import("yasld");
 
@@ -37,6 +38,11 @@ const ModuleContext = struct {
 const kernel = @import("kernel.zig");
 
 const log = std.log.scoped(.loader);
+
+fn log_loader_timing(kind: []const u8, path: []const u8, pid: c.pid_t, start_us: u64) void {
+    const elapsed_us = hal.time.get_time_us() - start_us;
+    log.err("yasld-bench {s} path={s} pid={d} us={d}", .{ kind, path, pid, elapsed_us });
+}
 
 fn file_resolver(name: []const u8) ?*const anyopaque {
     var context: ModuleContext = .{
@@ -144,10 +150,12 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
             _ = f.interface.read(memory);
         }
         if (yasld.get_loader()) |loader| {
+            const load_start_us = hal.time.get_time_us();
             const executable = loader.*.load_executable(header_address, process_allocator) catch |err| {
                 log.err("loading '{s}' failed: {s}", .{ path, @errorName(err) });
                 return err;
             };
+            log_loader_timing("executable", path, pid, load_start_us);
             release_executable(pid);
             entry.executable = executable;
             modules_list.put(pid, entry) catch |err| return err;
@@ -182,9 +190,11 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
             @panic("Implement image copying to memory");
         }
         if (yasld.get_loader()) |loader| {
+            const load_start_us = hal.time.get_time_us();
             const library = loader.*.load_library(header_address, process_allocator) catch |err| {
                 return err;
             };
+            log_loader_timing("library", path, pid, load_start_us);
 
             if (!libraries_list.contains(pid)) {
                 libraries_list.put(pid, .{}) catch |err| return err;

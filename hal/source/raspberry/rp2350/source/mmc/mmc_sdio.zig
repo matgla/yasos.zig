@@ -361,55 +361,66 @@ pub const MmcSdio = struct {
     // Max 128 blocks per request = 64KB.
     var aligned_buf: [512]u8 align(4) = undefined;
 
+    // Disable all interrupts during DMA poll loops to prevent:
+    // 1. Context switches (PendSV/SysTick preemption)
+    // 2. DMA IRQ reentrancy — the hardware ISR calling rp2350_sdio_dma_irq()
+    //    while rx_poll() is already inside it causes blocks_checksumed to be
+    //    overwritten with a stale value, re-verifying a block whose received
+    //    checksum was already cleared to 0xDEADBEEF → false CRC error.
+    // DMA transfers continue autonomously via hardware control-block chaining;
+    // no IRQ is needed for the transfer to proceed.
+    inline fn disable_irq() void {
+        asm volatile ("cpsid i" ::: .{ .memory = true });
+    }
+
+    inline fn enable_irq() void {
+        asm volatile ("cpsie i" ::: .{ .memory = true });
+    }
+
     pub fn read_sdio_data(self: *MmcSdio, buf: []u8) anyerror!void {
-        const block_size: usize = 512;
+        // For sub-block reads (e.g. CMD6 switch status = 64 bytes), use
+        // the buffer length as the block size so the PIO/DMA reads exactly
+        // the right number of bytes from the data lines.
+        const block_size: usize = if (buf.len < 512) buf.len else 512;
         const num_blocks: u32 = @intCast(buf.len / block_size);
         if (num_blocks == 0) return error.InvalidParam;
 
-        // DMA requires 4-byte aligned buffer
-        const is_aligned = (@intFromPtr(buf.ptr) & 3) == 0;
-        const dma_buf = if (is_aligned) buf.ptr else &aligned_buf;
-        const dma_blocks: u32 = if (is_aligned) num_blocks else 1;
-
-        if (is_aligned) {
-            // Fast path: direct DMA into caller's buffer
-            const status = sdio.rp2350_sdio_rx_start(dma_buf, dma_blocks, 512);
-            try check_status(status);
+        // Always DMA into SRAM bounce buffer to avoid XIP cache coherency
+        // issues when the destination is in PSRAM.  The XIP cache is not
+        // snooped on DMA writes, so sdio_verify_rx_checksums() could read
+        // stale cached data and report false CRC errors.
+        //
+        // Between blocks of a multi-block CMD18 transfer we must NOT call
+        // rp2350_sdio_stop() — that resets PIO state to SDIO_IDLE, causing
+        // a full reinit on the next rx_start which disrupts the card's
+        // continuous data stream.  Instead let rx_poll set SDIO_RX_DONE so
+        // the next rx_start can continue seamlessly.
+        disable_irq();
+        var i: u32 = 0;
+        while (i < num_blocks) : (i += 1) {
+            const status = sdio.rp2350_sdio_rx_start(&aligned_buf, 1, @intCast(block_size));
+            if (status != sdio.SDIO_OK) {
+                enable_irq();
+                try check_status(status);
+            }
             var blocks_complete: u32 = 0;
             while (true) {
                 const poll_status = sdio.rp2350_sdio_rx_poll(&blocks_complete);
                 if (poll_status == sdio.SDIO_OK) {
-                    _ = sdio.rp2350_sdio_stop();
-                    return;
+                    // Don't call stop() here — leave state as SDIO_RX_DONE
+                    // so the next rx_start continues the multi-block stream.
+                    break;
                 }
                 if (poll_status != sdio.SDIO_BUSY) {
-                    self.report_rx_poll_failure(poll_status, blocks_complete, num_blocks, false);
-                    // rx_poll already calls rp2350_sdio_stop() on error
+                    enable_irq();
+                    self.report_rx_poll_failure(poll_status, blocks_complete, 1, true);
                     try check_status(poll_status);
                 }
             }
-        } else {
-            // Slow path: bounce buffer, one block at a time
-            var i: u32 = 0;
-            while (i < num_blocks) : (i += 1) {
-                const status = sdio.rp2350_sdio_rx_start(dma_buf, 1, 512);
-                try check_status(status);
-                var blocks_complete: u32 = 0;
-                while (true) {
-                    const poll_status = sdio.rp2350_sdio_rx_poll(&blocks_complete);
-                    if (poll_status == sdio.SDIO_OK) {
-                        _ = sdio.rp2350_sdio_stop();
-                        break;
-                    }
-                    if (poll_status != sdio.SDIO_BUSY) {
-                        self.report_rx_poll_failure(poll_status, blocks_complete, 1, true);
-                        // rx_poll already calls rp2350_sdio_stop() on error
-                        try check_status(poll_status);
-                    }
-                }
-                @memcpy(buf[512 * i .. 512 * (i + 1)], &aligned_buf);
-            }
+            @memcpy(buf[block_size * i .. block_size * (i + 1)], aligned_buf[0..block_size]);
         }
+        _ = sdio.rp2350_sdio_stop();
+        enable_irq();
     }
 
     pub fn write_sdio_data(self: *MmcSdio, buf: []const u8) anyerror!void {
@@ -421,20 +432,28 @@ pub const MmcSdio = struct {
         // DMA requires 4-byte aligned buffer
         const is_aligned = (@intFromPtr(buf.ptr) & 3) == 0;
 
+        disable_irq();
         if (is_aligned) {
             const status = sdio.rp2350_sdio_tx_start(buf.ptr, num_blocks, 512);
-            try check_status(status);
+            if (status != sdio.SDIO_OK) {
+                enable_irq();
+                try check_status(status);
+            }
         } else {
             // Bounce: copy one block at a time
             // For multi-block unaligned writes we'd need a bigger bounce buffer;
             // for now handle the common single-block case
             if (num_blocks != 1) {
+                enable_irq();
                 log.err("unaligned multi-block write not supported", .{});
                 return error.WriteFail;
             }
             @memcpy(&aligned_buf, buf[0..512]);
             const status = sdio.rp2350_sdio_tx_start(&aligned_buf, 1, 512);
-            try check_status(status);
+            if (status != sdio.SDIO_OK) {
+                enable_irq();
+                try check_status(status);
+            }
         }
 
         // Poll until transfer completes
@@ -443,9 +462,11 @@ pub const MmcSdio = struct {
             const poll_status = sdio.rp2350_sdio_tx_poll(&blocks_complete);
             if (poll_status == sdio.SDIO_OK) {
                 _ = sdio.rp2350_sdio_stop();
+                enable_irq();
                 return;
             }
             if (poll_status != sdio.SDIO_BUSY) {
+                enable_irq();
                 log.err("tx_poll failed: {d} ({d}/{d} blocks)", .{ poll_status, blocks_complete, num_blocks });
                 _ = sdio.rp2350_sdio_stop();
                 try check_status(poll_status);

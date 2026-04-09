@@ -71,6 +71,7 @@ pub fn UartFile(comptime UartType: anytype) type {
 
             pub fn read(self: *Self, buffer: []u8) isize {
                 var index: usize = 0;
+                var cursor_pos: usize = 0;
                 var ch: [1]u8 = .{0};
                 var start_time: u64 = 0;
                 if (self._read_timeout != 0) {
@@ -106,25 +107,142 @@ pub fn UartFile(comptime UartType: anytype) type {
                     }
 
                     if ((ch[0] == 8 or ch[0] == 127) and self._icanonical) {
-                        if (index > 0) {
-                            buffer[index] = 0;
+                        if (cursor_pos > 0) {
+                            // Shift buffer left from cursor_pos
+                            var j = cursor_pos - 1;
+                            while (j < index - 1) : (j += 1) {
+                                buffer[j] = buffer[j + 1];
+                            }
+                            buffer[index - 1] = 0;
                             index -= 1;
+                            cursor_pos -= 1;
                             if (self._echo) {
-                                ch[0] = 8;
-                                _ = Self.uart.write_some(ch[0..1]) catch {};
-                                ch[0] = ' ';
-                                _ = Self.uart.write_some(ch[0..1]) catch {};
-                                ch[0] = 8;
-                                _ = Self.uart.write_some(ch[0..1]) catch {};
+                                // Move cursor left
+                                _ = Self.uart.write_some("\x08") catch {};
+                                // Re-echo from cursor to end + space to clear last char
+                                if (cursor_pos < index) {
+                                    _ = Self.uart.write_some(buffer[cursor_pos..index]) catch {};
+                                }
+                                _ = Self.uart.write_some(" ") catch {};
+                                // Move cursor back to cursor_pos
+                                var back: usize = index - cursor_pos + 1;
+                                while (back > 0) : (back -= 1) {
+                                    _ = Self.uart.write_some("\x08") catch {};
+                                }
                             }
                         }
                         continue;
                     }
-                    buffer[index] = ch[0];
-                    if (self._echo) {
-                        _ = uart.write_some(ch[0..1]) catch {};
+
+                    // In canonical mode, handle escape sequences for line editing
+                    if (ch[0] == 0x1B and self._icanonical) {
+                        // Use time-based timeout (20ms) to wait for escape sequence bytes
+                        const esc_start = hal.time.get_time_us();
+                        while (!Self.uart.is_readable()) {
+                            if (hal.time.get_time_us() - esc_start > 20000) break;
+                        }
+                        if (!Self.uart.is_readable()) continue; // bare ESC, discard
+                        _ = Self.uart.read(ch[0..]) catch continue;
+
+                        if (ch[0] == '[') {
+                            const esc_start2 = hal.time.get_time_us();
+                            while (!Self.uart.is_readable()) {
+                                if (hal.time.get_time_us() - esc_start2 > 20000) break;
+                            }
+                            if (!Self.uart.is_readable()) continue;
+                            _ = Self.uart.read(ch[0..]) catch continue;
+
+                            switch (ch[0]) {
+                                'D' => {
+                                    // Left arrow
+                                    if (cursor_pos > 0) {
+                                        cursor_pos -= 1;
+                                        if (self._echo) {
+                                            _ = Self.uart.write_some("\x1b[D") catch {};
+                                        }
+                                    }
+                                },
+                                'C' => {
+                                    // Right arrow
+                                    if (cursor_pos < index) {
+                                        cursor_pos += 1;
+                                        if (self._echo) {
+                                            _ = Self.uart.write_some("\x1b[C") catch {};
+                                        }
+                                    }
+                                },
+                                'A', 'B', 'H', 'F' => {
+                                    // Up/Down/Home/End: discard in canonical mode
+                                },
+                                else => {
+                                    // Consume rest of extended sequences (e.g. ESC[3~, ESC[15~)
+                                    while (true) {
+                                        if (ch[0] == '~' or
+                                            (ch[0] >= 'A' and ch[0] <= 'Z') or
+                                            (ch[0] >= 'a' and ch[0] <= 'z'))
+                                        {
+                                            break;
+                                        }
+                                        const esc_start3 = hal.time.get_time_us();
+                                        while (!Self.uart.is_readable()) {
+                                            if (hal.time.get_time_us() - esc_start3 > 20000) break;
+                                        }
+                                        if (!Self.uart.is_readable()) break;
+                                        _ = Self.uart.read(ch[0..]) catch break;
+                                    }
+                                },
+                            }
+                        } else if (ch[0] == 'O') {
+                            // SS3 sequences: ESC O P (F1), ESC O Q (F2), etc.
+                            const esc_start2 = hal.time.get_time_us();
+                            while (!Self.uart.is_readable()) {
+                                if (hal.time.get_time_us() - esc_start2 > 20000) break;
+                            }
+                            if (Self.uart.is_readable()) {
+                                _ = Self.uart.read(ch[0..]) catch {};
+                            }
+                            // Discard the whole sequence in canonical mode
+                        }
+                        // Any other byte after ESC: already consumed, discard
+                        continue;
                     }
-                    index += 1;
+
+                    if (cursor_pos < index and self._icanonical) {
+                        // Line terminators always go at the end
+                        if (ch[0] == '\n' or ch[0] == 0) {
+                            buffer[index] = ch[0];
+                            index += 1;
+                            cursor_pos = index;
+                            if (self._echo) {
+                                _ = uart.write_some(ch[0..1]) catch {};
+                            }
+                        } else {
+                            // Insert in middle: shift buffer right
+                            var j = index;
+                            while (j > cursor_pos) : (j -= 1) {
+                                buffer[j] = buffer[j - 1];
+                            }
+                            buffer[cursor_pos] = ch[0];
+                            cursor_pos += 1;
+                            index += 1;
+                            if (self._echo) {
+                                // Echo from cursor-1 to end of line
+                                _ = Self.uart.write_some(buffer[cursor_pos - 1 .. index]) catch {};
+                                // Move cursor back to cursor_pos
+                                var back: usize = index - cursor_pos;
+                                while (back > 0) : (back -= 1) {
+                                    _ = Self.uart.write_some("\x08") catch {};
+                                }
+                            }
+                        }
+                    } else {
+                        buffer[index] = ch[0];
+                        if (self._echo) {
+                            _ = uart.write_some(ch[0..1]) catch {};
+                        }
+                        index += 1;
+                        cursor_pos = index;
+                    }
                     if (self._icanonical) {
                         if (ch[0] == 0 or ch[0] == '\n' or ch[0] == -1) {
                             break;
@@ -176,11 +294,17 @@ pub fn UartFile(comptime UartType: anytype) type {
                             }
                             return 0;
                         },
-                        c.TCSETSW => {
-                            return -1;
-                        },
-                        c.TCSETSF => {
-                            return -1;
+                        c.TCSETSW, c.TCSETSF => {
+                            self._icanonical = (termios.c_lflag & c.ICANON) != 0;
+                            self._echo = (termios.c_lflag & c.ECHO) != 0;
+                            self._read_timeout = @intCast(termios.c_cc[c.VTIME]);
+                            self._minimum_bytes_to_read = @intCast(termios.c_cc[c.VMIN]);
+                            if (termios.c_oflag == 0) {
+                                self._raw_mode = true;
+                            } else {
+                                self._raw_mode = false;
+                            }
+                            return 0;
                         },
                         c.TCGETS => {
                             termios.c_iflag = 0;
@@ -199,6 +323,9 @@ pub fn UartFile(comptime UartType: anytype) type {
                             }
                             if (self._echo) {
                                 termios.c_lflag |= c.ECHO;
+                            }
+                            if (!self._raw_mode) {
+                                termios.c_oflag = c.OPOST;
                             }
                             return 0;
                         },
@@ -560,26 +687,32 @@ test "UartFile.Fcntl.F_GETFL.ShouldReturnStatusWhenNonBlockIsSet" {
     try std.testing.expectEqual(@as(i32, c.O_NONBLOCK), result);
 }
 
-test "UartFile.Ioctl.TCSETSW.ShouldReturnError" {
+test "UartFile.Ioctl.TCSETSW.ShouldApplySettings" {
     MockUart.reset();
     defer MockUart.reset();
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
     var termios: c.termios = std.mem.zeroes(c.termios);
+    termios.c_lflag = c.ICANON;
 
     const result = file.data().ioctl(c.TCSETSW, @ptrCast(&termios));
-    try std.testing.expectEqual(@as(i32, -1), result);
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect(file.data()._icanonical);
+    try std.testing.expect(!file.data()._echo);
 }
 
-test "UartFile.Ioctl.TCSETSF.ShouldReturnError" {
+test "UartFile.Ioctl.TCSETSF.ShouldApplySettings" {
     MockUart.reset();
     defer MockUart.reset();
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
     var termios: c.termios = std.mem.zeroes(c.termios);
+    termios.c_lflag = c.ECHO;
 
     const result = file.data().ioctl(c.TCSETSF, @ptrCast(&termios));
-    try std.testing.expectEqual(@as(i32, -1), result);
+    try std.testing.expectEqual(@as(i32, 0), result);
+    try std.testing.expect(!file.data()._icanonical);
+    try std.testing.expect(file.data()._echo);
 }
 
 test "UartFile.Read.ShouldHandleBackspaceCharacter" {

@@ -22,6 +22,11 @@ static inline void sdio_busy_wait_us_impl(uint32_t us) {
 }
 #define SDIO_WAIT_US(x) sdio_busy_wait_us_impl(x)
 
+/* Never exceed the target clock rate.  At 618 MHz sys_clk the default 5 %
+ * threshold results in 25.75 MHz which is above the SD specification
+ * maximum of 25 MHz for default-speed mode. */
+#define SDIO_MAX_CLOCK_RATE_EXCEED_PERCENT 0
+
 /* Disable SdFat C++ class */
 #define SDIO_USE_SDFAT 0
 

@@ -42,6 +42,18 @@ pub const SymbolEntry = struct {
 extern const indirect_call_thunk_template_size: usize;
 extern fn indirect_call_thunk_template_start() void;
 
+extern const lazy_resolver_thunk_template_size: usize;
+extern fn lazy_resolver_thunk_template_start() void;
+
+/// Information passed to the lazy resolver at runtime.
+/// One instance per lazily-bound GOT entry, embedded alongside the thunk.
+pub const LazyBindingInfo = extern struct {
+    module: *Module,
+    got_entry: *GotEntry,
+    symbol_name: usize, // [*:0]const u8 stored as usize for extern compat
+    is_weak: u32,
+};
+
 pub const ThunkHolderData = struct {
     data: []u8,
     refcount: usize,
@@ -63,6 +75,29 @@ pub const ThunkHolderData = struct {
             allocator.free(self.data);
             allocator.destroy(self);
         }
+    }
+};
+
+/// Holds lazy resolver thunks and their associated LazyBindingInfo structs.
+pub const LazyThunkHolderData = struct {
+    thunk_data: []u8,
+    info_data: []LazyBindingInfo,
+    count: usize,
+
+    pub fn create(allocator: std.mem.Allocator, size: usize) !*LazyThunkHolderData {
+        const self = try allocator.create(LazyThunkHolderData);
+        self.* = .{
+            .thunk_data = try allocator.alloc(u8, size * lazy_resolver_thunk_template_size),
+            .info_data = try allocator.alloc(LazyBindingInfo, size),
+            .count = 0,
+        };
+        return self;
+    }
+
+    pub fn destroy(self: *LazyThunkHolderData, allocator: std.mem.Allocator) void {
+        allocator.free(self.thunk_data);
+        allocator.free(self.info_data);
+        allocator.destroy(self);
     }
 };
 
@@ -106,6 +141,7 @@ pub const LoadedUniqueData = struct {
     bss: ?[]u8,
     got: ?[]GotEntry,
     thunks: ?*ThunkHolderData,
+    lazy_thunks: ?*LazyThunkHolderData,
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
     _underlaying_memory: []u8,
@@ -120,6 +156,7 @@ pub const LoadedUniqueData = struct {
             .bss = null,
             .got = null,
             .thunks = null,
+            .lazy_thunks = null,
             .allocator = allocator,
             .process_allocator = process_allocator,
             ._underlaying_memory = underlaying_memory,
@@ -185,7 +222,52 @@ pub const LoadedUniqueData = struct {
         return error.ThunksNotAllocated;
     }
 
+    pub fn allocate_lazy_thunks(self: *LoadedUniqueData, size: usize) !void {
+        if (self.lazy_thunks == null) {
+            self.lazy_thunks = try LazyThunkHolderData.create(self.process_allocator, size);
+        }
+    }
+
+    pub fn generate_lazy_thunk(
+        self: *LoadedUniqueData,
+        module: *Module,
+        got_entry: *GotEntry,
+        symbol_name: [*:0]const u8,
+        is_weak: bool,
+    ) !usize {
+        if (self.lazy_thunks) |lazy| {
+            const index = lazy.count;
+            const position = index * lazy_resolver_thunk_template_size;
+            if (position + lazy_resolver_thunk_template_size > lazy.thunk_data.len) {
+                return error.IndexOutOfBounds;
+            }
+            // Fill in the LazyBindingInfo for this entry
+            lazy.info_data[index] = .{
+                .module = module,
+                .got_entry = got_entry,
+                .symbol_name = @intFromPtr(symbol_name),
+                .is_weak = if (is_weak) 1 else 0,
+            };
+            // Copy thunk template and patch literal pool
+            const thunk_template: [*]const u8 = @ptrFromInt(@intFromPtr(&lazy_resolver_thunk_template_start) - 1);
+            const thunk_slice: []const u8 = thunk_template[0..lazy_resolver_thunk_template_size];
+            @memcpy(lazy.thunk_data[position .. position + lazy_resolver_thunk_template_size], thunk_slice[0..]);
+            // Patch lazy_info_ptr at offset +24
+            const info_ptr = @intFromPtr(&lazy.info_data[index]);
+            @memcpy(lazy.thunk_data[position + 24 .. position + 24 + @sizeOf(usize)], std.mem.asBytes(&info_ptr));
+            // Patch resolver_fn at offset +28
+            const resolver_addr = @intFromPtr(&lazy_resolve);
+            @memcpy(lazy.thunk_data[position + 28 .. position + 28 + @sizeOf(usize)], std.mem.asBytes(&resolver_addr));
+            lazy.count += 1;
+            return @intFromPtr(&lazy.thunk_data[position]) | 1;
+        }
+        return error.LazyThunksNotAllocated;
+    }
+
     pub fn destroy(self: *LoadedUniqueData) void {
+        if (self.lazy_thunks) |lazy| {
+            lazy.destroy(self.process_allocator);
+        }
         self.process_allocator.free(self._underlaying_memory);
         self.allocator.destroy(self);
     }
@@ -485,3 +567,30 @@ pub const Module = struct {
     //     return null;
     // }
 };
+
+/// Lazy resolver function called from the lazy_resolver_thunk assembly stub.
+/// Resolves the symbol, patches the GOT entry for future direct access,
+/// and returns the resolved address in low 32 bits + target R9 in high 32 bits
+/// as a u64 returned in r0:r1 per AAPCS (avoiding hidden-pointer ABI for structs > 4 bytes).
+export fn lazy_resolve(info: *LazyBindingInfo) callconv(.c) u64 {
+    const module: *Module = info.module;
+    const symbol_name_ptr: [*:0]const u8 = @ptrFromInt(info.symbol_name);
+    const name = std.mem.span(symbol_name_ptr);
+
+    const maybe_entry = module.find_symbol(name);
+    if (maybe_entry) |entry| {
+        // Patch GOT entry for subsequent direct access
+        info.got_entry.symbol_offset = entry.address;
+        info.got_entry.base_register = entry.target_got_address;
+        log.debug("lazy_resolve: resolved '{s}' -> 0x{x}, r9=0x{x}", .{ name, entry.address, entry.target_got_address });
+        return @as(u64, entry.address) | (@as(u64, entry.target_got_address) << 32);
+    } else if (info.is_weak != 0) {
+        log.debug("lazy_resolve: weak symbol '{s}' not found, resolving to NULL", .{name});
+        info.got_entry.symbol_offset = 0;
+        info.got_entry.base_register = 0;
+        return 0;
+    } else {
+        log.err("lazy_resolve: symbol '{s}' not found", .{name});
+        @panic("lazy_resolve: unresolved symbol");
+    }
+}
