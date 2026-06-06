@@ -23,5 +23,9 @@ prepare_smoke: pull_container
 run_smoke_tests: prepare_smoke
 	${RUN_CONTAINER} -c "./tests/smoke/run_tests.sh"
 
+ut:
+	$(MAKE) -C libs/tinycc/tests/unit run
+
 run_tests:
 	${RUN_CONTAINER} -c "zig build test --summary all"
+	${RUN_CONTAINER} -c "zig build test -Doptimize=ReleaseFast --summary all"

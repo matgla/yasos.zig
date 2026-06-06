@@ -37,6 +37,7 @@ double tan(double x);
 double asin(double x);
 double acos(double x);
 double atan(double x);
+double atan2(double y, double x);
 
 // Hyperbolic functions
 double sinh(double x);
@@ -52,15 +53,23 @@ int ilogb(double x);
 // Power functions
 double pow(double base, double exponent);
 double sqrt(double x);
+double cbrt(double x);
 double ldexp(double x, int exp);
 
 // Rounding functions
 double round(double x);
 double ceil(double x);
 double floor(double x);
+double trunc(double x);
 
 // Absolute value
 double fabs(double x);
+
+// Remainder and sign functions
+double fmod(double x, double y);
+double remainder(double x, double y);
+double copysign(double x, double y);
+double modf(double value, double *iptr);
 
 // Float variants
 float sinf(float x);
@@ -69,6 +78,7 @@ float tanf(float x);
 float asinf(float x);
 float acosf(float x);
 float atanf(float x);
+float atan2f(float y, float x);
 float sinhf(float x);
 float coshf(float x);
 float tanhf(float x);
@@ -83,6 +93,12 @@ float ceilf(float x);
 float floorf(float x);
 float fabsf(float x);
 float ldexpf(float x, int exp);
+float cbrtf(float x);
+float truncf(float x);
+float fmodf(float x, float y);
+float remainderf(float x, float y);
+float copysignf(float x, float y);
+float modff(float value, float *iptr);
 
 // Long double variants
 long double sinl(long double x);
@@ -91,6 +107,7 @@ long double tanl(long double x);
 long double asinl(long double x);
 long double acosl(long double x);
 long double atanl(long double x);
+long double atan2l(long double y, long double x);
 long double sinhl(long double x);
 long double coshl(long double x);
 long double tanhl(long double x);
@@ -105,6 +122,12 @@ long double ceill(long double x);
 long double floorl(long double x);
 long double fabsl(long double x);
 long double ldexpl(long double x, int exp);
+long double cbrtl(long double x);
+long double truncl(long double x);
+long double fmodl(long double x, long double y);
+long double remainderl(long double x, long double y);
+long double copysignl(long double x, long double y);
+long double modfl(long double value, long double *iptr);
 
 // Mathematical constants (if not already defined)
 #ifndef M_PI

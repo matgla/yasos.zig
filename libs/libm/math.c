@@ -272,6 +272,21 @@ double atan(double x) {
   return sum;
 }
 
+double atan2(double y, double x) {
+  // Quadrant-aware arctangent of y/x, result in (-PI, PI].
+  if (x > 0.0) {
+    return atan(y / x);
+  }
+  if (x < 0.0) {
+    // Shift by +/-PI to move the atan(y/x) result into the correct quadrant.
+    return (y < 0.0) ? atan(y / x) - M_PI : atan(y / x) + M_PI;
+  }
+  // x == 0: result is on the y axis.
+  if (y > 0.0) return M_PI / 2.0;
+  if (y < 0.0) return -M_PI / 2.0;
+  return 0.0; // x == 0 && y == 0: undefined, return 0 by convention.
+}
+
 // ============================================================================
 // Hyperbolic functions
 // ============================================================================
@@ -418,6 +433,115 @@ double floor(double x) {
 }
 
 // ============================================================================
+// Remainder, truncation, sign, and cube-root functions
+// ============================================================================
+
+typedef union {
+  double value;
+  unsigned long long bits;
+} math_double_bits;
+
+static double _nan_local(void) {
+  math_double_bits n;
+  n.bits = 0x7ff8000000000000ULL; // quiet NaN
+  return n.value;
+}
+
+double trunc(double x) {
+  // Round toward zero.
+  return (x < 0.0) ? ceil(x) : floor(x);
+}
+
+double copysign(double x, double y) {
+  // Magnitude of x combined with the sign bit of y (exact, handles -0/NaN).
+  math_double_bits bx, by;
+  bx.value = x;
+  by.value = y;
+  bx.bits = (bx.bits & 0x7fffffffffffffffULL) | (by.bits & 0x8000000000000000ULL);
+  return bx.value;
+}
+
+double fmod(double x, double y) {
+  // Remainder of x/y, sign of x, magnitude < |y|.
+  if (y == 0.0)
+    return _nan_local();
+
+  double ax = fabs(x);
+  double ay = fabs(y);
+  if (ax < ay)
+    return x; // already reduced; preserves x and its sign
+
+  // Shift-and-subtract: remove the largest power-of-two multiple of ay
+  // that still fits in the running remainder.  Every subtracted term is
+  // exactly representable, so the result is exact.
+  double r = ax;
+  while (r >= ay) {
+    double t = ay;
+    while (t + t <= r)
+      t += t;
+    r -= t;
+  }
+  return (x < 0.0) ? -r : r;
+}
+
+double remainder(double x, double y) {
+  // IEEE remainder: result in [-|y|/2, |y|/2], quotient rounded to even.
+  if (y == 0.0)
+    return _nan_local();
+
+  double ay = fabs(y);
+  double ax = fabs(x);
+  double r = fmod(ax, ay); // r in [0, ay)
+  double half = 0.5 * ay;
+
+  if (r > half) {
+    r -= ay;
+  } else if (r == half) {
+    // Exact tie: pick the remainder that leaves an even quotient.
+    double q = (ax - r) / ay; // integer-valued
+    if (fmod(q, 2.0) != 0.0)
+      r -= ay;
+  }
+  return (x < 0.0) ? -r : r;
+}
+
+double cbrt(double x) {
+  // Sign-symmetric cube root: cbrt(-x) == -cbrt(x).
+  if (x == 0.0)
+    return x; // preserves signed zero
+
+  double sign = (x < 0.0) ? -1.0 : 1.0;
+  double a = fabs(x);
+
+  // Good initial guess via exp/log, then Newton steps for y^3 = a:
+  //   y <- (2*y + a / y^2) / 3
+  double y = exp(log(a) / 3.0);
+  for (int i = 0; i < 4; i++) {
+    y = (2.0 * y + a / (y * y)) / 3.0;
+  }
+  return sign * y;
+}
+
+double modf(double value, double *iptr) {
+  // Split into integer part (toward zero, stored in *iptr) and fractional
+  // part (returned, same sign as value).
+  math_double_bits b;
+  b.value = value;
+  unsigned int exponent = (unsigned int)((b.bits >> 52) & 0x7ffu);
+
+  if (exponent == 0x7ffu) {
+    // Inf or NaN: integer part is value; fraction is +/-0 for Inf, NaN for NaN.
+    *iptr = value;
+    int is_nan = (b.bits & 0x000fffffffffffffULL) != 0;
+    return is_nan ? value : copysign(0.0, value);
+  }
+
+  double ip = trunc(value);
+  *iptr = ip;
+  return value - ip;
+}
+
+// ============================================================================
 // Float variants (cast to double and back)
 // ============================================================================
 
@@ -443,6 +567,10 @@ float acosf(float x) {
 
 float atanf(float x) {
   return (float)atan((double)x);
+}
+
+float atan2f(float y, float x) {
+  return (float)atan2((double)y, (double)x);
 }
 
 float sinhf(float x) {
@@ -497,6 +625,33 @@ float ldexpf(float x, int exp) {
   return (float)ldexp((double)x, exp);
 }
 
+float truncf(float x) {
+  return (float)trunc((double)x);
+}
+
+float cbrtf(float x) {
+  return (float)cbrt((double)x);
+}
+
+float fmodf(float x, float y) {
+  return (float)fmod((double)x, (double)y);
+}
+
+float remainderf(float x, float y) {
+  return (float)remainder((double)x, (double)y);
+}
+
+float copysignf(float x, float y) {
+  return (float)copysign((double)x, (double)y);
+}
+
+float modff(float value, float *iptr) {
+  double ip;
+  float frac = (float)modf((double)value, &ip);
+  *iptr = (float)ip;
+  return frac;
+}
+
 // ============================================================================
 // Long double variants (cast to double and back)
 // ============================================================================
@@ -523,6 +678,10 @@ long double acosl(long double x) {
 
 long double atanl(long double x) {
   return (long double)atan((double)x);
+}
+
+long double atan2l(long double y, long double x) {
+  return (long double)atan2((double)y, (double)x);
 }
 
 long double sinhl(long double x) {
@@ -575,4 +734,31 @@ long double fabsl(long double x) {
 
 long double ldexpl(long double x, int exp) {
   return (long double)ldexp((double)x, exp);
+}
+
+long double truncl(long double x) {
+  return (long double)trunc((double)x);
+}
+
+long double cbrtl(long double x) {
+  return (long double)cbrt((double)x);
+}
+
+long double fmodl(long double x, long double y) {
+  return (long double)fmod((double)x, (double)y);
+}
+
+long double remainderl(long double x, long double y) {
+  return (long double)remainder((double)x, (double)y);
+}
+
+long double copysignl(long double x, long double y) {
+  return (long double)copysign((double)x, (double)y);
+}
+
+long double modfl(long double value, long double *iptr) {
+  double ip;
+  long double frac = (long double)modf((double)value, &ip);
+  *iptr = (long double)ip;
+  return frac;
 }
