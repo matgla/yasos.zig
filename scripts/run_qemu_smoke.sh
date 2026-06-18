@@ -22,8 +22,10 @@
 # QEMU) and are enabled so they run as fixes land. Pass files to override, e.g.
 #   scripts/run_qemu_smoke.sh tcc_suite_test.py -k 00_assignment
 # Run the whole suite with:  scripts/run_qemu_smoke.sh .
-# Run in parallel (one QEMU per pytest-xdist worker, ~independent targets):
+# Runs in parallel by default (one QEMU per pytest-xdist worker, using all CPUs
+# via -n auto). Override the worker count by passing your own -n:
 #   scripts/run_qemu_smoke.sh . -n 4
+# Disable parallelism with -n 0 or YASOS_SMOKE_XDIST=0.
 # Note: the per-test timing/profiling summaries are skipped under -n (they
 # aggregate in-process), and pytest's -s output interleaves across workers.
 #
@@ -40,6 +42,10 @@
 #   YASOS_QEMU_EXTRA_ARGS, YASOS_QEMU_BOOT_TIMEOUT
 #   YASOS_QEMU_OPTIMIZE   zig optimize mode for the build (default ReleaseFast)
 #   YASOS_SMOKE_ENABLE_GCC_TORTURE   default 1 here; set 0 to skip GCC torture
+#   YASOS_SMOKE_XDIST     pytest-xdist worker count (default auto = all CPUs);
+#                         set 0 to run serially
+#   YASOS_SMOKE_TCC_OPT_LEVELS   tcc -O levels to exercise across all suites
+#                         (default "-O0 -O1 -O2"); e.g. set "-O0" for one level
 #
 set -euo pipefail
 
@@ -110,6 +116,12 @@ fi
 # to skip them. The test sources live in the gcc-testsuite submodule nested
 # inside libs/tinycc — fetch it (shallow) on first use. A user-provided
 # GCC_TORTURE_PATH points at an external checkout, so no fetch is needed then.
+# Exercise all optimization levels under QEMU by default. This iterates every
+# suite (tests2, ir_tests, gcc-torture) at -O0/-O1/-O2 — tests2/ir_tests ids get
+# tagged [-ON] when more than one level is configured. Override with a custom
+# list (space/comma separated), e.g. YASOS_SMOKE_TCC_OPT_LEVELS="-O0".
+export YASOS_SMOKE_TCC_OPT_LEVELS="${YASOS_SMOKE_TCC_OPT_LEVELS:--O0 -O1 -O2}"
+
 export YASOS_SMOKE_ENABLE_GCC_TORTURE="${YASOS_SMOKE_ENABLE_GCC_TORTURE:-1}"
 case "$YASOS_SMOKE_ENABLE_GCC_TORTURE" in
     1|true|yes|on)
@@ -121,6 +133,20 @@ case "$YASOS_SMOKE_ENABLE_GCC_TORTURE" in
         fi
         ;;
 esac
+
+# Run one QEMU per pytest-xdist worker in parallel by default, using all
+# available CPUs. Override the worker count by passing your own -n (e.g. -n 4),
+# or disable parallelism with -n 0 / YASOS_SMOKE_XDIST=0.
+XDIST_DEFAULT="${YASOS_SMOKE_XDIST:-auto}"
+have_n=0
+for arg in "${PYTEST_ARGS[@]}"; do
+    case "$arg" in
+        -n|-n[0-9]*|-nauto|-nlogical|--numprocesses|--numprocesses=*) have_n=1; break ;;
+    esac
+done
+if [ "$have_n" -eq 0 ] && [ "$XDIST_DEFAULT" != "0" ]; then
+    PYTEST_ARGS+=(-n "$XDIST_DEFAULT")
+fi
 
 export YASOS_QEMU_KERNEL="$KERNEL"
 echo ">> Running smoke tests on QEMU ($(basename "$KERNEL"))"

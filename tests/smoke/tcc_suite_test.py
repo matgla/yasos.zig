@@ -77,18 +77,33 @@ GCC_OPT_LEVELS = _gcc_conftest.get_opt_levels(
     env_var="YASOS_SMOKE_TCC_OPT_LEVELS",
     default=("-O0",),
 )
-# The remote TUI selects a single optimization level (default -O0). The
-# gcc-torture suites iterate GCC_OPT_LEVELS to tag their ids; the tests2 and
-# ir_tests suites instead prepend this single selected level to every test's
-# cflags so the chosen -O flag is actually passed to tcc (it previously only
-# reached the gcc-torture cases). -O0 matches tcc's default, so the default
-# smoke run is unchanged.
+# The remote TUI selects a single optimization level (default -O0). All suites
+# (gcc-torture, tests2, ir_tests) iterate GCC_OPT_LEVELS so the chosen -O flags
+# are actually passed to tcc. When a single level is configured (the default /
+# remote-TUI case) the tests2/ir_tests ids are left untagged for backward
+# compatibility; when multiple levels are configured each variant is tagged
+# [-ON] like the gcc-torture suites. -O0 matches tcc's default, so a default
+# single-level smoke run is unchanged.
 SMOKE_OPT_CFLAGS = tuple(GCC_OPT_LEVELS[:1])
 
 
 def _with_smoke_opt(cflags):
-    """Prepend the selected smoke optimization level to a test's cflags."""
+    """Prepend the first selected smoke optimization level to a test's cflags."""
     return SMOKE_OPT_CFLAGS + tuple(cflags)
+
+
+def _opt_level_variants(base_test_id, base_cflags=()):
+    """Yield (test_id, cflags) for each configured smoke optimization level.
+
+    With a single configured level the test_id is returned untagged (preserving
+    the remote-TUI/default ids); with multiple levels each variant is tagged
+    [-ON] and prepends that level to the test's cflags.
+    """
+    base_cflags = tuple(base_cflags)
+    multi = len(GCC_OPT_LEVELS) > 1
+    for opt_level in GCC_OPT_LEVELS:
+        test_id = f"{base_test_id}[{opt_level}]" if multi else base_test_id
+        yield test_id, (opt_level,) + base_cflags
 discover_gcc_execute_tests = _gcc_conftest.discover_gcc_execute_tests
 discover_gcc_compile_tests = _gcc_conftest.discover_gcc_compile_tests
 should_skip_gcc_test = _gcc_conftest.should_skip_gcc_test
@@ -556,39 +571,43 @@ def build_tcc_test_cases():
     for source_name in REGISTERED_SINGLE_FILE_TESTS:
         if source_name in SMOKE_DISABLED_TESTS:
             continue
-        test_cases.append(TccTestCase(test_id=source_name, name=source_name, sources=(source_name,),
-                                      cflags=SMOKE_OPT_CFLAGS,
-                                      timeout=COMPILE_TIMEOUT_TESTS.get(source_name)))
+        for test_id, cflags in _opt_level_variants(source_name):
+            test_cases.append(TccTestCase(test_id=test_id, name=source_name, sources=(source_name,),
+                                          cflags=cflags,
+                                          timeout=COMPILE_TIMEOUT_TESTS.get(source_name)))
 
     for source_name, args in REGISTERED_TESTS_WITH_ARGS:
         if source_name in SMOKE_DISABLED_TESTS:
             continue
-        test_cases.append(TccTestCase(test_id=source_name, name=source_name, sources=(source_name,),
-                                      cflags=SMOKE_OPT_CFLAGS, args=args))
+        for test_id, cflags in _opt_level_variants(source_name):
+            test_cases.append(TccTestCase(test_id=test_id, name=source_name, sources=(source_name,),
+                                          cflags=cflags, args=args))
 
     for test_case in REGISTERED_MULTI_FILE_TESTS:
         if any(source_name in SMOKE_DISABLED_TESTS for source_name in test_case.sources):
             continue
-        test_cases.append(replace(test_case, cflags=_with_smoke_opt(test_case.cflags)))
+        for test_id, cflags in _opt_level_variants(test_case.test_id, test_case.cflags):
+            test_cases.append(replace(test_case, test_id=test_id, cflags=cflags))
 
     for source_name in REGISTERED_TAGGED_TEST_FILES:
         if source_name in SMOKE_DISABLED_TESTS:
             continue
         tagged_expectations = parse_tagged_expect_file(source_name)
         for tag, expectation in tagged_expectations.items():
-            test_cases.append(
-                TccTestCase(
-                    test_id=f"{source_name}[{tag}]",
-                    name=source_name,
-                    sources=(source_name,),
-                    cflags=_with_smoke_opt((f"-D{tag}",)),
-                    expected_lines=tuple(expectation["lines"]),
-                    expected_exit_code=expectation["exit_code"],
-                    expected_compile_failure=expectation["expected_compile_failure"],
-                    expected_error_patterns=tuple(expectation["expected_error_patterns"]),
-                    compile_only=expectation.get("compile_only", False),
+            for test_id, cflags in _opt_level_variants(f"{source_name}[{tag}]", (f"-D{tag}",)):
+                test_cases.append(
+                    TccTestCase(
+                        test_id=test_id,
+                        name=source_name,
+                        sources=(source_name,),
+                        cflags=cflags,
+                        expected_lines=tuple(expectation["lines"]),
+                        expected_exit_code=expectation["exit_code"],
+                        expected_compile_failure=expectation["expected_compile_failure"],
+                        expected_error_patterns=tuple(expectation["expected_error_patterns"]),
+                        compile_only=expectation.get("compile_only", False),
+                    )
                 )
-            )
 
     return test_cases
 
@@ -676,15 +695,16 @@ def build_ir_test_cases():
         if not os.path.exists(expect_path):
             continue
 
-        test_cases.append(TccTestCase(
-            test_id=f"ir_tests/{filename}",
-            name=filename,
-            sources=(filename,),
-            cflags=SMOKE_OPT_CFLAGS,
-            source_dir=ir_tests_path,
-            skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
-            timeout=COMPILE_TIMEOUT_TESTS.get(filename),
-        ))
+        for test_id, cflags in _opt_level_variants(f"ir_tests/{filename}"):
+            test_cases.append(TccTestCase(
+                test_id=test_id,
+                name=filename,
+                sources=(filename,),
+                cflags=cflags,
+                source_dir=ir_tests_path,
+                skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
+                timeout=COMPILE_TIMEOUT_TESTS.get(filename),
+            ))
 
     return test_cases
 

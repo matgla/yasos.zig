@@ -185,7 +185,7 @@ DEFAULT_CONFIG = {
     "optimize": "ReleaseFast",
     "smoke_tcc_opt_level": "-O0",
     "test_retries": 1,
-    "with_gcc_torture": False,
+    "with_gcc_torture": True,
     "pytest_args": "tests/smoke",
     "uhubctl_hub": "",
     "uhubctl_port": "",
@@ -718,6 +718,29 @@ fi
     return selected_kernel, selected_kernel == flashed_remote_kernel
 
 
+def ensure_gcc_torture_submodule(config: dict[str, Any]) -> None:
+    """Fetch the gcc-testsuite submodule when GCC torture tests are enabled but
+    the c-torture tree is missing (submodule never initialized)."""
+    if not bool(config.get("with_gcc_torture", False)):
+        return
+    tinycc_dir = REPO_ROOT / "libs" / "tinycc"
+    torture_dir = (
+        tinycc_dir / "tests" / "gcctestsuite" / "gcc-testsuite" / "gcc" / "testsuite" / "gcc.c-torture"
+    )
+    if torture_dir.is_dir():
+        return
+    print("GCC torture tests enabled but submodule not fetched; initializing gcc-testsuite...")
+    run_command(
+        ["git", "submodule", "update", "--init", "--depth", "1", "tests/gcctestsuite/gcc-testsuite"],
+        cwd=tinycc_dir,
+    )
+    if not torture_dir.is_dir():
+        raise RunnerError(
+            "gcc-testsuite submodule was initialized but "
+            f"{torture_dir.relative_to(REPO_ROOT)} is still missing."
+        )
+
+
 def smoke_sync_paths(config: dict[str, Any]) -> list[str]:
     paths: set[str] = set()
 
@@ -747,6 +770,7 @@ def smoke_sync_paths(config: dict[str, Any]) -> list[str]:
 
 
 def sync_smoke_support(config: dict[str, Any]) -> None:
+    ensure_gcc_torture_submodule(config)
     sync_remote_repo_sources(config)
     sync_remote_repo_subset(config, smoke_sync_paths(config))
 
@@ -2497,6 +2521,7 @@ def collect_smoke_tests(pytest_args: list[str], with_gcc_torture: bool, smoke_tc
 
 def list_tests(args: argparse.Namespace) -> None:
     runtime_config = apply_runtime_pytest_overrides(DEFAULT_CONFIG, args)
+    ensure_gcc_torture_submodule(runtime_config)
     pytest_args = shlex.split(str(runtime_config["pytest_args"]).strip() or "tests/smoke")
     for nodeid in collect_smoke_tests(
         pytest_args,

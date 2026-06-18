@@ -45,23 +45,29 @@ fn configureCmake(b: *std.Build) ![]const u8 {
 
     const cmake_binary_dir = b.pathJoin(&.{ b.cache_root.path.?, "pico_sdk_generated" });
     std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
-    const cmake_binary_dir_absolute = std.fs.cwd().realpathAlloc(b.allocator, cmake_binary_dir) catch |err| {
-        if (err == error.FileNotFound) {
-            const cache_dir_absolute = try std.fs.cwd().realpathAlloc(b.allocator, b.cache_root.path.?);
-            const cache_dir = try std.fs.openDirAbsolute(cache_dir_absolute, .{});
-            _ = try cache_dir.makePath("pico_sdk_generated");
-            std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
 
-            const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
-            std.log.info("{s}", .{configure_project});
+    // Gate on the pioasm binary, not the cache directory: an interrupted build
+    // can leave pico_sdk_generated/ half-populated (e.g. only _deps fetched),
+    // which would otherwise skip the configure + pioasmBuild step and later fail
+    // with FileNotFound when generate_pio invokes the never-produced binary.
+    const pioasm_path = b.pathJoin(&.{ cmake_binary_dir, "pioasm", "pioasm" });
+    std.fs.cwd().access(pioasm_path, .{}) catch |err| {
+        if (err != error.FileNotFound) return err;
 
-            const build_pioasm = b.run(&.{ cmake_exe, "--build", @as([]const u8, cmake_binary_dir), "--target", "pioasmBuild" });
-            std.log.info("{s}", .{build_pioasm});
-            return cmake_binary_dir;
-        }
-        return err;
+        const cache_dir_absolute = try std.fs.cwd().realpathAlloc(b.allocator, b.cache_root.path.?);
+        const cache_dir = try std.fs.openDirAbsolute(cache_dir_absolute, .{});
+        // Reconfiguring a stale/partial cache does not reliably regenerate the
+        // pioasmBuild ExternalProject target, so start from a clean directory.
+        cache_dir.deleteTree("pico_sdk_generated") catch {};
+        _ = try cache_dir.makePath("pico_sdk_generated");
+
+        const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
+        std.log.info("{s}", .{configure_project});
+
+        const build_pioasm = b.run(&.{ cmake_exe, "--build", @as([]const u8, cmake_binary_dir), "--target", "pioasmBuild" });
+        std.log.info("{s}", .{build_pioasm});
+        return cmake_binary_dir;
     };
-    _ = cmake_binary_dir_absolute;
 
     return cmake_binary_dir;
 }
