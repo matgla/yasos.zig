@@ -19,10 +19,12 @@ MEMORY
 {
   flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 1024K
   romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 4096K
-  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 256K
-  process_ram(rxw)  : ORIGIN = 0x20040000, LENGTH = 128K
-  scratch_x(rxw)    : ORIGIN = 0x20080000, LENGTH = 4K
-  scratch_y(rxw)    : ORIGIN = 0x20081000, LENGTH = 4K
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 76K
+  process_ram(rxw)  : ORIGIN = 0x20013000, LENGTH = 436K
+  /* The two 4 KB scratch banks merged into one 8 KB region holding the kernel
+   * stack (single-core: core1's stack bank is unused). Non-striped SRAM is ideal
+   * for the stack. kernel_ram is now just .bss + ~64 KB heap. */
+  scratch(rxw)      : ORIGIN = 0x20080000, LENGTH = 8K
 }
 
 SECTIONS
@@ -88,9 +90,14 @@ SECTIONS
 
    .romfs :
   {
-    __romfs_start__ = .;
+    /* The rootfs image is flashed SEPARATELY into the romfs flash region (it is
+     * not linked into this section, so *(.romfs) is empty). Span the symbols
+     * over the whole romfs memory region so the kernel MPU maps it executable —
+     * otherwise unprivileged execve'd processes whose XIP .text lives above the
+     * 1 MB kernel-flash region fault with IACCVIOL. */
+    __romfs_start__ = ORIGIN(romfs);
     KEEP(*(.romfs))
-    __romfs_end__ = .;
+    __romfs_end__ = ORIGIN(romfs) + LENGTH(romfs);
   } > romfs
   /* keep this at beginning of ram or align to arm alignment requirement for
    cortex-m0plus */
@@ -132,45 +139,29 @@ SECTIONS
 
   __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
 
-  .scratch_x :
+  /* Any scratch-bank data + the kernel stack live in the merged 8 KB scratch
+   * region. Stack grows down from the top; MSPLIM is the bottom. */
+  .scratch (NOLOAD) :
   {
-    __scratch_x_start__ = .;
-    *(.scratch_x.*)
+    *(.scratch_x.* .scratch_y.*)
     . = ALIGN(4);
-    __scratch_x_end__ = .;
-  } > scratch_x AT > flash
-  __scratch_x_source__ = LOADADDR(.scratch_x);
-
-  .scratch_y :
-  {
-    __scratch_y_start__ = .;
-    *(.scratch_y.*)
-    . = ALIGN(4);
-    __scratch_y_end__ = .;
-  } > scratch_y AT > flash
-  __scratch_y_source__ = LOADADDR(.scratch_y);
-
-  .stack1_dummy (NOLOAD):
-  {
-    *(.stack1*)
-  } > scratch_x
+  } > scratch
 
   .stack_dummy (NOLOAD):
   {
-    KEEP(*(.stack*))
-  } > scratch_y
+    KEEP(*(.stack* .stack1*))
+  } > scratch
 
-  __stack_limit__ = ORIGIN(process_ram) + LENGTH(process_ram);
-  __stack1_top__ = ORIGIN(scratch_x) + LENGTH(scratch_x);
-  __stack1_bottom__ = ORIGIN(scratch_x);
-  __stack_top__ = ORIGIN(scratch_y) + LENGTH(scratch_y);
-  __stack_bottom__ = __stack_limit__;
+  __stack_top__ = ORIGIN(scratch) + LENGTH(scratch);
+  __stack_bottom__ = ORIGIN(scratch);
 
+  __flash_start__ = ORIGIN(flash);
+  __flash_end__ = ORIGIN(flash) + LENGTH(flash);
   __kernel_ram_start__ = ORIGIN(kernel_ram);
   __kernel_ram_end__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
   __process_ram_start__ = ORIGIN(process_ram);
   __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
 
   PROVIDE(__stack = __stack_top__);
-  ASSERT(__stack_limit__ >= __heap_limit__, "region RAM overflowed")
+  ASSERT(__end__ <= __heap_limit__, "kernel_ram too small: .bss/heap exceed kernel_ram")
 }

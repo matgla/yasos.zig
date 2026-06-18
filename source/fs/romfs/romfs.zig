@@ -91,6 +91,22 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         node.stat(data);
     }
 
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        // Fetch the raw link node (no-follow); its data holds the target path.
+        var header = try self.get_file_header(path, false);
+        defer header.deinit();
+        if (header.filetype() != FileType.SymbolicLink) {
+            return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
+        }
+        var target_name = header.read_name_at_offset(self.allocator, 0) orelse
+            return kernel.errno.ErrnoSet.InputOutputError;
+        defer target_name.deinit();
+        const target = target_name.get_name();
+        const n = @min(buffer.len, target.len);
+        @memcpy(buffer[0..n], target[0..n]);
+        return n;
+    }
+
     fn get_file_header(self: *Self, path: []const u8, resolve_link: bool) !FileHeader {
         const path_without_trailing_separator = std.mem.trimRight(u8, path, "/");
         var it = try std.fs.path.componentIterator(path);

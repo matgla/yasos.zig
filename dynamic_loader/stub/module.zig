@@ -29,6 +29,10 @@ pub const LoadedUniqueData = struct {
     address: usize,
     size: usize,
     got: ?[]usize,
+    // Mirrors the real loader's combined data/bss/got backing buffer so kernel
+    // code (save_parent_writable_sections in source/kernel/modules.zig) compiles
+    // against this host-test stub.
+    _underlaying_memory: []u8 = &.{},
 };
 
 var empty_section = [_]u8{};
@@ -43,6 +47,10 @@ pub const Module = struct {
     entry: ?SymbolEntry,
     name: ?[]const u8,
     unique_data: ?LoadedUniqueData,
+    // Mirrors the real Module's YAFF stack/heap profile so the exec path in
+    // source/kernel/process_manager.zig compiles against this host-test stub.
+    stack_size: u32 = 0xFFFFFFFF,
+    heap_size: u32 = 0xFFFFFFFF,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -56,6 +64,8 @@ pub const Module = struct {
             .entry = null,
             .name = "dummy_module",
             .unique_data = null,
+            .stack_size = 0xFFFFFFFF,
+            .heap_size = 0xFFFFFFFF,
         };
         return module;
     }

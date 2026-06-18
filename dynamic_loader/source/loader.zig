@@ -133,6 +133,13 @@ pub const Loader = struct {
         const parser = Parser.create(header);
         parser.print();
 
+        // Carry the per-image stack/heap profile so exec can bound the process
+        // to what the program declared (0xFFFFFFFF = OS default).
+        module.stack_size = header.stack_size;
+        module.heap_size = header.heap_size;
+        // RELRO: size of the shared XIP rodata prefix (see resolve_data_offset).
+        module.const_rodata_length = header.const_rodata_length;
+
         try module.set_name(parser.name);
         try self.import_child_modules(header, &parser, module);
         // if module is already loaded just data must be loaded
@@ -146,12 +153,9 @@ pub const Loader = struct {
 
         // Pre-count function pointer thunks needed for both symbol table and local relocations
         var symbol_table_fn_ptr_count: usize = 0;
-        var lazy_plt_call_count: usize = 0;
         for (parser.symbol_table_relocations.relocations) |rel| {
             if (rel.function_pointer == 1) {
                 symbol_table_fn_ptr_count += 1;
-            } else if (rel.plt_call == 1) {
-                lazy_plt_call_count += 1;
             }
         }
         var local_fn_ptr_count: usize = 0;
@@ -168,15 +172,9 @@ pub const Loader = struct {
         }
         const total_fn_ptr_thunks = symbol_table_fn_ptr_count + local_fn_ptr_count + data_fn_ptr_count;
         log.debug("Total function pointer thunks needed: {d} (symbol_table: {d}, local: {d}, data: {d})", .{ total_fn_ptr_thunks, symbol_table_fn_ptr_count, local_fn_ptr_count, data_fn_ptr_count });
-        log.debug("Total lazy PLT thunks needed: {d}", .{lazy_plt_call_count});
         if (total_fn_ptr_thunks > 0) {
             if (module.unique_data) |unique| {
                 try unique.allocate_thunks(total_fn_ptr_thunks);
-            }
-        }
-        if (lazy_plt_call_count > 0) {
-            if (module.unique_data) |unique| {
-                try unique.allocate_lazy_thunks(lazy_plt_call_count);
             }
         }
 
@@ -254,9 +252,8 @@ pub const Loader = struct {
                 section = .Bss;
             }
 
-            const base_address = try module.get_base_address(section);
             module.entry = .{
-                .address = base_address + header.entry,
+                .address = try module.address_in_section(section, header.entry),
                 .target_got_address = @intFromPtr(module.get_got().ptr),
             };
         }
@@ -325,7 +322,19 @@ pub const Loader = struct {
         } else if (offset < plt_limit) {
             return .{ .section = @intFromPtr(module.get_plt().ptr), .offset = init_offset, .is_code = true };
         } else if (offset < data_limit) {
-            return .{ .section = @intFromPtr(module.get_data().ptr), .offset = plt_limit, .is_code = false };
+            // RELRO: the data region is [shared rodata | per-process data]. An
+            // offset within the rodata prefix resolves to the shared XIP rodata;
+            // the rest to the per-process data buffer (whose offset space starts
+            // const_rodata_length later).
+            const data_region_offset = offset - plt_limit;
+            if (module.const_rodata_length > 0 and data_region_offset < module.const_rodata_length) {
+                if (module.shared_data) |shared| {
+                    if (shared.rodata) |rodata| {
+                        return .{ .section = @intFromPtr(rodata.ptr), .offset = plt_limit, .is_code = false };
+                    }
+                }
+            }
+            return .{ .section = @intFromPtr(module.get_data().ptr), .offset = plt_limit + module.const_rodata_length, .is_code = false };
         } else if (offset < bss_limit) {
             return .{ .section = @intFromPtr(module.get_bss().ptr), .offset = data_limit, .is_code = false };
         } else if (offset < got_limit) {
@@ -423,26 +432,17 @@ pub const Loader = struct {
                 maybe_symbol = parser.imported_symbols.element_at(rel.symbol_index);
             }
             if (maybe_symbol) |symbol| {
-                // PLT calls (R_ARM_JUMP_SLOT) can be lazily bound: defer
-                // resolution until the function is actually called.
-                if (rel.plt_call == 1) {
-                    if (maybe_unique_data) |unique| {
-                        const address = unique.generate_lazy_thunk(
-                            module,
-                            &got[rel.index],
-                            @ptrCast(symbol.name().ptr),
-                            symbol.weak == 1,
-                        ) catch |err| {
-                            log.err("[yasld] Can't generate lazy thunk for '{s}': {s}", .{ symbol.name(), @errorName(err) });
-                            return err;
-                        };
-                        log.debug("Setting GOT[{d}] to lazy thunk: 0x{x} [{s}]", .{ rel.index, address, symbol.name() });
-                        got[rel.index].symbol_offset = address;
-                        got[rel.index].base_register = @intFromPtr(got.ptr);
-                    }
-                    continue;
-                }
-
+                // PLT calls (R_ARM_JUMP_SLOT) and ordinary imported symbols are
+                // both resolved eagerly here, filling the GOT entry with
+                // {symbol_offset = fn addr, base_register = target R9}. Every
+                // imported call relocates to `bl PLT[n]` at link time (R_ARM_CALL
+                // -> AUTO_GOTPLT_ENTRY), and that shared .plt stub lives in XIP
+                // flash; on each call it loads both GOT words and switches R9,
+                // so a per-process dispatch thunk is unnecessary. Dropping the
+                // old per-PLT-import lazy-resolver thunk saves ~6.6 KiB/process
+                // for toybox (208 imports x 32 B) plus the LazyBindingInfo
+                // descriptors. Trade-off: all imports resolve at load instead of
+                // first call (lazy binding deferred to a future PLT-fallback).
                 const maybe_symbol_entry = self.find_symbol(module, symbol.name());
                 if (maybe_symbol_entry) |symbol_entry| {
                     log.debug("Setting GOT[{d}] to: 0x{x} [{s}], exported: {d} -> GOT address: {x}", .{ rel.index, symbol_entry.address, symbol.name(), rel.is_exported_symbol, symbol_entry.target_got_address });
@@ -479,8 +479,10 @@ pub const Loader = struct {
 
         for (parser.local_relocations.relocations) |rel| {
             const section: Section = @enumFromInt(rel.section);
-            const relocated_start_address: usize = try module.get_base_address(section);
-            const relocated = relocated_start_address + rel.target_offset;
+            // RELRO-aware: a DATA target offset < const_rodata_length resolves to
+            // the shared rodata (this is also how the rodata anchor slot, emitted
+            // as {DATA, 0}, is pointed at the shared rodata base).
+            const relocated = try module.address_in_section(section, rel.target_offset);
 
             if (section == .Code) {
                 // Code section local relocations are function pointers.
@@ -538,20 +540,10 @@ pub const Loader = struct {
                 }
                 const got_entry = got[rel.from];
 
-                var data_memory_address: usize = @intFromPtr(module.get_data().ptr);
-                var rel_to = rel.to;
-                if (rel_to > module.get_data().len) {
-                    rel_to -= module.get_data().len;
-                    data_memory_address = @intFromPtr(module.get_bss().ptr);
-                    if (rel_to > module.get_bss().len) {
-                        rel_to -= module.get_bss().len;
-                        data_memory_address = @intFromPtr(module.get_got().ptr);
-                        if (rel_to > module.get_got().len * 8) {
-                            return LoaderError.DataProcessingFailure;
-                        }
-                    }
-                }
-                const address_to_change: usize = data_memory_address + rel_to;
+                // Patch site lives in the per-process [data][bss][got] buffer;
+                // resolve_data_offset maps the linker offset (which includes the
+                // shared-rodata prefix) into it (offset - const_rodata_length).
+                const address_to_change: usize = module.resolve_data_offset(rel.to);
                 const target: *usize = @ptrFromInt(address_to_change);
 
                 if (got_entry.base_register != @intFromPtr(got.ptr)) {
@@ -587,27 +579,13 @@ pub const Loader = struct {
                 continue;
             }
 
-            var data_memory_address: usize = @intFromPtr(module.get_data().ptr);
-            var rel_to = rel.to;
-            log.debug("Processing data relocation: relto: {x} -> data: {x}", .{ rel_to, module.get_data().len });
-            if (rel_to > module.get_data().len) {
-                rel_to -= module.get_data().len;
-                data_memory_address = @intFromPtr(module.get_bss().ptr);
-                log.debug("Processing data relocation: relto: {x} -> bss: {x}", .{ rel_to, module.get_bss().len });
-                if (rel_to > module.get_bss().len) {
-                    rel_to -= module.get_bss().len;
-                    data_memory_address = @intFromPtr(module.get_got().ptr);
-                    log.debug("Processing data relocation: relto: {x} -> got: {x}", .{ rel_to, module.get_got().len * 8 });
-                    if (rel_to > module.get_got().len * 8) {
-                        return LoaderError.DataProcessingFailure;
-                    }
-                }
-            }
-
-            const address_to_change: usize = data_memory_address + rel_to;
+            // Patch site is in the per-process [data][bss][got] buffer.
+            const address_to_change: usize = module.resolve_data_offset(rel.to);
             const target: *usize = @ptrFromInt(address_to_change);
-            const base_address_from: usize = try module.get_base_address(from_section);
-            var address_from: usize = base_address_from + rel.from;
+            // Target (pointer value): DATA goes through the rodata-aware resolver
+            // (a pointer into shared rodata, e.g. a const string, lands there);
+            // CODE/Init keep their base + offset.
+            var address_from: usize = try module.address_in_section(from_section, rel.from);
 
             // Cortex-M executes only Thumb code. Some relocation producers emit
             // even code symbol addresses for function pointers (for example

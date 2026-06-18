@@ -70,6 +70,9 @@ pub const Architecture = enum(u16) {
 //     text_offset: u16,
 //     imported_symbols_lookup_offset: u16,
 //     // exported_symbols_lookup_offset: u16,
+//     stack_size: u32,  // per-image stack hint; 0xFFFFFFFF = OS default
+//     heap_size: u32,   // per-image heap cap;   0xFFFFFFFF = free to grow
+//     const_rodata_length: u32, // RELRO shared-const-rodata size; 0 = none
 // };
 
 pub fn print_header(header: *const Header) void {
@@ -101,10 +104,13 @@ pub fn print_header(header: *const Header) void {
     log.debug("    imported_symbols_offset: {d},", .{header.imported_symbols_offset});
     log.debug("    exported_symbols_offset: {d},", .{header.exported_symbols_offset});
     log.debug("    text_offset: {d},", .{header.text_offset});
+    log.debug("    stack_size: 0x{x},", .{header.stack_size});
+    log.debug("    heap_size: 0x{x},", .{header.heap_size});
+    log.debug("    const_rodata_length: 0x{x},", .{header.const_rodata_length});
     log.debug("  }}", .{});
 }
 
 comptime {
     var buf: [30]u8 = undefined;
-    if (@sizeOf(Header) != 80) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
+    if (@sizeOf(Header) != 92) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
 }

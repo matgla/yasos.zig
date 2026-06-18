@@ -42,6 +42,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     /// Current position in file
     _position: isize,
     _name: []const u8,
+    /// Regular file by default; a symbolic link stores its target in `_data`.
+    _filetype: FileType,
 
     pub fn create(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) RamFsFile {
         return RamFsFile.init(.{
@@ -49,6 +51,17 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
             ._allocator = allocator,
             ._position = 0,
             ._name = filename,
+            ._filetype = .File,
+        });
+    }
+
+    pub fn create_symlink(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) RamFsFile {
+        return RamFsFile.init(.{
+            ._data = data,
+            ._allocator = allocator,
+            ._position = 0,
+            ._name = filename,
+            ._filetype = .SymbolicLink,
         });
     }
 
@@ -57,10 +70,16 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         self._allocator = other._allocator;
         self._position = 0;
         self._name = other._name;
+        self._filetype = other._filetype;
     }
 
     pub fn create_node(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) anyerror!kernel.fs.Node {
         const file = try create(allocator, data, filename).interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
+    }
+
+    pub fn create_symlink_node(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) anyerror!kernel.fs.Node {
+        const file = try create_symlink(allocator, data, filename).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
@@ -168,8 +187,14 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
                     return -1;
                 }
                 var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data.?));
-                attr.is_memory_mapped = true;
-                attr.mapped_address_r = self._data.data.items.ptr;
+                // Report not-memory-mapped so the dynamic loader copies any
+                // executed file into the (user-mapped) process memory pool
+                // instead of executing in place. RamFs data lives in the kernel
+                // heap, which is unmapped for unprivileged code under the
+                // kernel-protection MPU — XIP from there would fault (IACCVIOL).
+                _ = self;
+                attr.is_memory_mapped = false;
+                attr.mapped_address_r = null;
             },
             else => {
                 return -1;
@@ -184,8 +209,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     }
 
     pub fn filetype(self: *const Self) FileType {
-        _ = self;
-        return .File;
+        return self._filetype;
     }
 
     pub fn delete(self: *Self) void {

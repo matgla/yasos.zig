@@ -103,7 +103,12 @@ fn requiredVregCode() u32 {
     if (clock_freq_mhz <= 452) return 0x130; // 1.60V
     if (clock_freq_mhz <= 480) return 0x150; // 1.70V
     if (clock_freq_mhz <= 512) return 0x160; // 1.80V
-    return 0x170; // 1.90V
+    if (clock_freq_mhz <= 560) return 0x170; // 1.90V
+    // 600+ MHz is marginal at 1.90V (intermittent PSRAM/core read corruption
+    // that disappears at 150 MHz). Step up: 0x180=1.95V, 0x190=2.00V. Each 0x10
+    // is +50 mV. Bump further only if still corrupting — high VREG stresses the
+    // core, so dial back to the lowest stable code once it passes.
+    return 0x180; // 1.95V
 }
 
 const flash_max_sck_mhz: u32 = flash_config.xip_max_frequency_hz / 1_000_000;

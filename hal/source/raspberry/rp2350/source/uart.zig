@@ -26,7 +26,7 @@ const common = @import("hal_common");
 
 const picosdk = @import("picosdk.zig").picosdk;
 
-var buf: [4096]u8 = undefined;
+var buf: [64]u8 = undefined;
 pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
     if (!(index == 0 or index == 1)) @compileError("RP2350 supports UART0 or UART1 only");
     if (pins.tx == null or pins.rx == null) @compileError("Pins must be provided for RP2350 UART");
@@ -36,7 +36,7 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         const Register = get_register_address(index);
         const RegisterVolatile = get_volatile_register_address(index);
 
-        var rx_buffer: common.utils.RingBuffer(u8, 4096) = common.utils.RingBuffer(u8, 4096).init();
+        var rx_buffer: common.utils.RingBuffer(u8, 64) = common.utils.RingBuffer(u8, 64).init();
         var is_initialized: bool = false;
 
         fn uart_is_readable() linksection(".time_critical") bool {
@@ -103,9 +103,20 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             asm volatile ("cpsid i" ::: .{ .memory = true });
             const derived_ptr = &RegisterVolatile.*.dr;
             for (data) |byte| {
-                while (!self.is_writable()) {}
+                while (!self.is_writable()) {
+                    // PRIMASK is set, so on_uart_rx_irq cannot fire while we
+                    // busy-wait for TX FIFO space. The PL011 RX FIFO is only 32
+                    // bytes deep; for any write longer than that the host can
+                    // push inbound bytes (command echo is half-duplex) faster
+                    // than they drain, overflowing the HW FIFO and silently
+                    // dropping characters. Drain it inline so it never overruns.
+                    on_uart_rx_irq();
+                }
                 derived_ptr.* = byte;
             }
+            // Mop up anything that landed in the HW FIFO during the final byte's
+            // transmit before we unmask and return to the caller.
+            on_uart_rx_irq();
             asm volatile ("cpsie i" ::: .{ .memory = true });
             return data.len;
         }

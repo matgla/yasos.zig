@@ -211,6 +211,10 @@ pub fn build(b: *std.Build) !void {
 
     hal.addCSourceFiles(.{
         .files = &.{
+            // MUST be first: provides interrupt-safe __malloc_lock/__malloc_unlock
+            // ahead of any object that references malloc, so newlib's no-op mlock.o
+            // is never pulled from libc_nano.a (avoids a duplicate-symbol error).
+            "malloc_lock.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_uart/uart.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_clocks/clocks.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_irq/irq.c",

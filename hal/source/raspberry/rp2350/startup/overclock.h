@@ -29,6 +29,14 @@ void overclock_apply(
     uint32_t vco_freq, uint32_t post_div1, uint32_t post_div2,
     uint32_t qmi_timing, uint32_t qmi_rfmt, uint32_t qmi_rcmd);
 
+/* Calibrate the flash (M0) rxdelay for the current system clock: sweep all
+ * eight values, CRC a flash region read uncached at each, and park rxdelay at
+ * the centre of the widest timing-valid window. Runs from RAM and flushes the
+ * XIP cache. Returns the chosen rxdelay; *out_lo/*out_hi report the passing
+ * window [lo..hi]; lo > hi means the sweep was inconclusive and the configured
+ * timing was left untouched. Call after the overclock has been applied. */
+uint32_t overclock_calibrate_flash_rxdelay(uint32_t *out_lo, uint32_t *out_hi);
+
 #ifdef __cplusplus
 }
 #endif

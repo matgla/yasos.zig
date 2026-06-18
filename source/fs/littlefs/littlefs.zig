@@ -257,6 +257,20 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return error.NotSupported;
     }
 
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        _ = self;
+        _ = target;
+        _ = linkpath;
+        return error.NotSupported;
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        _ = self;
+        _ = path;
+        _ = buffer;
+        return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
+    }
+
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
 

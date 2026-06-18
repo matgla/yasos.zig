@@ -30,12 +30,21 @@ const c = @import("libc_imports").c;
 
 var kernel_allocator: std.mem.Allocator = undefined;
 
+// Memoizes library-name -> XIP base resolved by file_resolver. /lib is a
+// read-only memory-mapped (romfs/XIP) directory, so a name's mapped address is
+// fixed for the lifetime of the system. Without this, every imported library
+// of every spawned process triggered a full linear /lib directory scan (FAT
+// iteration + per-entry ioctl), which the loader phase timing showed dominates
+// load time (~1-1.7 ms per imported lib, vs ~0.1 ms relocating its GOT).
+var resolver_cache: std.StringHashMap(*const anyopaque) = undefined;
+
 const ModuleContext = struct {
     name: []const u8,
     address: ?*const anyopaque,
 };
 
 const kernel = @import("kernel.zig");
+const perf = @import("interrupts/perf_profile.zig");
 
 const log = std.log.scoped(.loader);
 
@@ -44,14 +53,21 @@ fn log_loader_timing(kind: []const u8, path: []const u8, pid: c.pid_t, start_us:
     // Include kernel-heap usage so an accumulating leak across the suite (the
     // suspected "memory full" cause) is visible on every load, not only on
     // release. A monotonically climbing kernel_used here is the smoking gun.
-    log.err("yasld-bench {s} path={s} pid={d} us={d} kernel_used={d} allocs={d}", .{
+    log.debug("yasld-bench {s} path={s} pid={d} us={d} kernel_used={d} allocs={d}", .{
         kind, path, pid, elapsed_us,
         kernel.memory.heap.malloc.get_usage(),
         kernel.memory.heap.malloc.get_counter(),
     });
+    // Mirror the load/relocate time to serial (the log.debug above is file-only)
+    // so the smoke harness captures the dynamic-load cost per spawn.
+    perf.trace("load kind={s} path={s} pid={d} us={d}", .{ kind, path, pid, elapsed_us });
 }
 
 fn file_resolver(name: []const u8) ?*const anyopaque {
+    if (resolver_cache.get(name)) |address| {
+        return address;
+    }
+
     var context: ModuleContext = .{
         .name = name,
         .address = null,
@@ -78,6 +94,14 @@ fn file_resolver(name: []const u8) ?*const anyopaque {
     }
 
     if (context.address) |address| {
+        // Cache for subsequent lookups. The key must outlive `name` (which
+        // points into the transient module being parsed), so dupe it. On any
+        // allocation failure just skip caching — correctness is unaffected.
+        if (kernel_allocator.dupe(u8, name)) |key| {
+            resolver_cache.put(key, address) catch {
+                kernel_allocator.free(key);
+            };
+        } else |_| {}
         return address;
     }
     return null;
@@ -115,6 +139,8 @@ pub fn init(allocator: std.mem.Allocator) void {
     yasld.loader_init(&file_resolver, allocator);
     modules_list = std.AutoHashMap(c.pid_t, ExecutableHandle).init(allocator);
     libraries_list = std.AutoHashMap(c.pid_t, std.DoublyLinkedList).init(allocator);
+    resolver_cache = std.StringHashMap(*const anyopaque).init(allocator);
+    vfork_snapshots = std.AutoHashMap(c.pid_t, *VForkSnapshot).init(allocator);
     kernel_allocator = allocator;
 }
 
@@ -127,6 +153,14 @@ pub fn deinit() void {
     }
     modules_list.deinit();
     libraries_list.deinit();
+    var rit = resolver_cache.keyIterator();
+    while (rit.next()) |key| {
+        kernel_allocator.free(key.*);
+    }
+    resolver_cache.deinit();
+    var vit = vfork_snapshots.valueIterator();
+    while (vit.next()) |snap| snap.*.free();
+    vfork_snapshots.deinit();
     yasld.loader_deinit();
 }
 
@@ -239,8 +273,6 @@ pub fn release_executable(pid: c.pid_t) void {
             log.warn("release_executable: pid={d} has entry but no executable", .{pid});
         }
         _ = libraries_list.remove(pid);
-    } else {
-        log.warn("release_executable: pid={d} not found in modules_list", .{pid});
     }
     log.info("release_executable: pid={d} done kernel_used={d} alloc_count={d}", .{ pid, kernel.memory.heap.malloc.get_usage(), kernel.memory.heap.malloc.get_counter() });
 }
@@ -339,12 +371,52 @@ pub const VForkSnapshot = struct {
         self.allocator.free(self.backups);
         self.allocator.destroy(self);
     }
+
+    // Free the backing copies WITHOUT restoring (system teardown, or a stale entry
+    // whose target memory is gone — restoring it would corrupt unrelated memory).
+    pub fn free(self: *VForkSnapshot) void {
+        for (self.backups) |backup| self.allocator.free(backup.copy);
+        self.allocator.free(self.backups);
+        self.allocator.destroy(self);
+    }
 };
 
-var active_vfork_snapshot: ?*VForkSnapshot = null;
+// Per-(child)-pid snapshots of a vfork parent's writable sections. The vfork child
+// runs on the parent's shared memory and can corrupt it before exec (toybox subshell
+// children malloc + write environ/toys.argv), so the parent's sections are restored
+// when that child execs (prepare_exec) or exits (delete_process). Keyed by the CHILD
+// pid — the in-hand process at both restore sites. This replaced a single global that
+// save() overwrote without freeing: a vfork child can itself vfork before exec,
+// orphaning the prior snapshot and leaking ~5.8 KB each (observed 10 live ≈ 56 KB,
+// 89% of the kernel-heap peak). The map, freed on both exec and exit, removes the leak
+// while keeping the protection.
+var vfork_snapshots: std.AutoHashMap(c.pid_t, *VForkSnapshot) = undefined;
 
-pub fn save_parent_writable_sections(pid: c.pid_t) void {
-    const exec = get_executable_for_pid(pid) orelse return;
+// The vfork writable-section snapshot copies the parent executable's + every loaded
+// library's writable image (.data+.bss+.got) to the kernel heap on each vfork so the
+// parent can be restored if the child corrupts shared memory before exec. For toybox
+// that snapshot is ~57 KB (toybox 41 KB + libc 16 KB), which was the entire kernel
+// heap peak (device-measured: 64 KB -> 12 KB tracked with this off) and added a 57 KB
+// memcpy to every process spawn.
+//
+// It is OFF because the only vfork path toybox currently uses (sh_exec, the simple
+// command path) is intentionally exec-only / malloc-free — a correct POSIX vfork child
+// — so it never corrupts the parent. (Verified: the full vfork-heavy smoke set passes
+// with this disabled.) The malloc-using subshell path (subshell_callback) and pipes
+// are not implemented in this toybox build ("TODO: Implement pipe").
+//
+// Re-enable ONLY if a vfork child that writes parent memory before exec is introduced
+// (e.g. a malloc-using subshell/pipe). The proper fix then is to make that child
+// exec-only (like sh_exec), not to pay this snapshot. When enabled it uses the
+// per-pid map below (freed on exec and exit) to avoid leaking on nested vforks.
+// NOTE: kernel_ram is now sized (~64 KB heap) on the assumption this stays OFF.
+// Enabling it adds ~57 KB of kernel heap per concurrent spawn and would need a
+// correspondingly larger kernel_ram (see hal/.../linker_script.ld).
+const vfork_snapshot_enabled = false;
+
+pub fn save_parent_writable_sections(parent_pid: c.pid_t, child_pid: c.pid_t) void {
+    if (!vfork_snapshot_enabled) return;
+    const exec = get_executable_for_pid(parent_pid) orelse return;
 
     // Count modules with unique_data (executable + its library children)
     var count: usize = 0;
@@ -390,13 +462,15 @@ pub fn save_parent_writable_sections(pid: c.pid_t) void {
     }
 
     snapshot.* = .{ .backups = backups[0..idx], .allocator = kernel_allocator };
-    active_vfork_snapshot = snapshot;
+    // Defensive: a leftover snapshot for a reused child pid should have been removed
+    // at the prior child's exec/exit; drop it without restoring (its target is gone).
+    if (vfork_snapshots.fetchRemove(child_pid)) |kv| kv.value.free();
+    vfork_snapshots.put(child_pid, snapshot) catch snapshot.free();
 }
 
-pub fn restore_parent_writable_sections() void {
-    if (active_vfork_snapshot) |snapshot| {
-        snapshot.restore_and_free();
-        active_vfork_snapshot = null;
+pub fn restore_parent_writable_sections(child_pid: c.pid_t) void {
+    if (vfork_snapshots.fetchRemove(child_pid)) |kv| {
+        kv.value.restore_and_free();
     }
 }
 
@@ -628,6 +702,14 @@ test "Modules.ResolverShouldReturnNullIfFileNotFoundInFileSystem" {
     _ = fs_mock
         .expectCall("get")
         .withArgs(.{"/lib"})
+        .willReturn(kernel.errno.ErrnoSet.NoEntry);
+
+    // A failing get() makes the VFS probe the path for symlink components via
+    // stat(); the mock reports /lib is not a symlink so resolution gives up.
+    _ = fs_mock
+        .expectCall("stat")
+        .withArgs(.{ interface.mock.any{}, interface.mock.any{}, interface.mock.any{} })
+        .times(interface.mock.any{})
         .willReturn(kernel.errno.ErrnoSet.NoEntry);
 
     try std.testing.expectEqual(null, file_resolver("libtest.so"));

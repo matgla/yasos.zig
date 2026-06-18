@@ -30,7 +30,11 @@ done
 TOYBOX_CFLAGS="-I$1/usr/include -g${TOYBOX_EXTRA_CFLAGS:+ }$TOYBOX_EXTRA_CFLAGS"
 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-Wl,-oformat=elf32-littlearm -lm" make toybox
 mv -f ../toybox/toybox ../toybox/toybox.elf
-CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-lm" make toybox
+# Per-image stack profile: toybox applets (and the shell) run in 16 KiB rather
+# than the 32 KiB default that tcc needs — sized via the YAFF stack_size hint
+# (-stack-size). Validated against the smoke suite; raise if deeper shell
+# recursion / complex scripts overflow (stack-overflow detection will flag it).
+CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-lm -stack-size=16384" make toybox
 PREFIX=$1 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t make install
 if [ -f "$1/bin/cal" ]; then
   mv "$1/bin/cal" "$(dirname "$1")/bin/cal"

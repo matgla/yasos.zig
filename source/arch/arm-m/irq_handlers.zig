@@ -54,19 +54,37 @@ fn in_kernel_sram(addr: usize) bool {
     return addr >= kernel_sram_begin and addr < kernel_sram_end;
 }
 
+// Platform-agnostic kernel main-stack leak test. The kernel handler/main stack
+// grows down from its top to MSPLIM; a user-process (PSP) register that points
+// into that window was leaked from kernel context by a context switch. Using
+// MSPLIM (read live) instead of a hardcoded SRAM range makes this work on both
+// RP2350 (MSPLIM=0x20060000) and the QEMU mps2-an505 (MSPLIM=0x80FC0000), where
+// the kernel stack and the user PSP stack both live in the 0x80000000 PSRAM.
+const kernel_stack_window: usize = 0x80000; // 512 KiB above MSPLIM
+fn is_kernel_stack_leak(addr: usize) bool {
+    const msplim = read_msplim();
+    return addr >= msplim and addr < msplim + kernel_stack_window;
+}
+
 // User code executes from the romfs/app region in flash (>= 0x10100000) or from
 // PSRAM (0x11xxxxxx); kernel code lives below 0x10100000. The leak heuristic
 // only makes sense for a user fault — kernel code legitimately holds kernel-SRAM
 // pointers (frame pointers, stack addresses) in r4-r11.
 const romfs_begin: usize = 0x10100000;
 fn is_user_text(pc: usize) bool {
-    return pc >= romfs_begin and pc < 0x12000000;
+    // RP2350: romfs/app in flash (0x10100000) or PSRAM (0x11xxxxxx).
+    // QEMU mps2-an505: user code is loaded into 0x28000000..0x2A000000.
+    return (pc >= romfs_begin and pc < 0x12000000) or
+        (pc >= 0x28000000 and pc < 0x2A000000);
 }
 
 // Readable RAM windows we are willing to peek at from the fault handler.
 fn is_readable_ram(addr: usize) bool {
-    return (addr >= 0x11000000 and addr < 0x11800000) or // PSRAM
-        (addr >= kernel_sram_begin and addr < kernel_sram_end); // SRAM
+    return (addr >= 0x11000000 and addr < 0x11800000) or // RP2350 PSRAM
+        (addr >= kernel_sram_begin and addr < kernel_sram_end) or // RP2350 SRAM
+        (addr >= 0x80000000 and addr < 0x81000000) or // QEMU mps2-an505 PSRAM (16 MiB)
+        (addr >= 0x20000000 and addr < 0x20400000) or // QEMU mps2-an505 SRAM
+        (addr >= 0x28000000 and addr < 0x2A000000); // QEMU mps2-an505 user text (romfs)
 }
 
 // Dump up to `count` words starting at `start` (word-aligned), 4 per line,
@@ -91,18 +109,27 @@ fn dump_memory_window(label: []const u8, start: usize, count: usize) void {
     }
 }
 
-export fn irq_hard_fault() void {
-    // Capture callee-saved regs (r4-r11) BEFORE any handler code can clobber
-    // them. On exception entry these are NOT auto-stacked, so they still hold
-    // the faulting context's values. Needed to diagnose frame-pointer (r7/r11)
-    // corruption that manifests as a bogus `mov sp, rN` STKOF.
-    var callee: [8]usize = undefined;
+// Buffer for the faulting context's callee-saved registers (r4-r11), filled by
+// the naked entry stub below before any compiler prologue runs.
+export var hardfault_callee: [8]usize = undefined;
+
+// Naked entry: capture r4-r11 BEFORE the Zig prologue. On Thumb the compiler
+// uses r7 as this function's frame pointer (`add r7, sp, #N`), so capturing r7
+// from inside the Zig body reported the HANDLER's own frame pointer — a fixed
+// kernel-MSP value (~0x80FFF288) — instead of the faulting task's r7. That
+// artifact masqueraded for several sessions as an "r7 context-switch leak".
+// On exception entry r4-r11 are NOT auto-stacked, so the naked stub sees the
+// faulting context's true values.
+export fn irq_hard_fault() callconv(.naked) void {
     asm volatile (
-        \\ stmia %[p], {r4-r11}
-        :
-        : [p] "{r0}" (&callee),
-        : .{ .memory = true }
+        \\ ldr r0, =hardfault_callee
+        \\ stmia r0, {r4-r11}
+        \\ b hard_fault_main
     );
+}
+
+export fn hard_fault_main() void {
+    const callee = hardfault_callee;
     // SDIO depends on lower-priority interrupts that are masked inside the
     // fault handler, so a blocking SD write here would hang. Route the
     // postmortem to the console only; everything before the fault is already
@@ -152,8 +179,8 @@ export fn irq_hard_fault() void {
             .{ .n = "r10", .v = callee[6] }, .{ .n = "r11", .v = callee[7] },
         };
         for (named) |reg| {
-            if (in_kernel_sram(reg.v)) {
-                log.err("  SUSPECT: {s}=0x{X:0>8} points into kernel SRAM (context-switch register leak?)", .{ reg.n, reg.v });
+            if (in_kernel_sram(reg.v) or is_kernel_stack_leak(reg.v)) {
+                log.err("  SUSPECT: {s}=0x{X:0>8} points into kernel stack/SRAM (context-switch register leak?)", .{ reg.n, reg.v });
             }
         }
     }
@@ -165,16 +192,30 @@ export fn irq_hard_fault() void {
     if (uses_process_stack(exc_return)) {
         dump_memory_window("psp", psp, 24);
     }
+    // Dump instruction words around the faulting PC so the exact executed
+    // instruction can be disassembled directly from loaded memory (the loader's
+    // reported .text base can be skewed vs the ELF, so trust these bytes).
+    dump_memory_window("code", (frame.pc & ~@as(usize, 0xF)) -% 16, 12);
 
-    if (is_psplim_overflow(exc_return, cfsr_raw)) {
-        log.err("Process stack overflow detected, terminating current process", .{});
+    // A fault that originated in a user process (PSP) — whether a stack
+    // overflow or any other fault (bus/usage/etc., e.g. from a miscompiled
+    // user program) — must NOT bring down the kernel. Resume the process at
+    // _exit(-1) so it terminates cleanly: the diagnostics above are preserved,
+    // the guest keeps running, and the loader reclaims the process. Only a
+    // fault taken from kernel (MSP) context is a genuine kernel bug we panic on.
+    if (uses_process_stack(exc_return)) {
+        if (is_psplim_overflow(exc_return, cfsr_raw)) {
+            log.err("Process stack overflow detected, terminating current process", .{});
+        } else {
+            log.err("User process fault (CFSR=0x{X:0>8}), terminating current process", .{cfsr_raw});
+        }
         scb.cfsr.write_raw(cfsr_raw);
         scb.hfsr.write_raw(hfsr_raw);
         write_psp(prepare_stack_overflow_exit_frame());
         return;
     }
 
-    @panic("Hard fault occured");
+    @panic("Hard fault occured (kernel context)");
     // while (true) {
     //     asm volatile (
     //         \\ wfi

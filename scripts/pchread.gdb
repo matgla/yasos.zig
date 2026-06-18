@@ -25,3 +25,4 @@ if arr and 0 <= (nb or -1) < 16:
     print("[PCHREAD] WATCH addresses: entry[0].pch_name=0x%08x entry[0].header_path=0x%08x" % (arr+4, arr))
 end
 quit
+source

@@ -151,6 +151,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pid: c.pid_t,
         _kernel_allocator: std.mem.Allocator,
         current_core: u8,
+        // Whether this process runs as a privileged thread. The root/init process
+        // runs kernel code (file descriptor setup, the dynamic loader, logging) in
+        // thread mode and must stay privileged; all spawned user processes run
+        // unprivileged so the MPU can keep them out of the kernel heap and stack.
+        privileged: bool,
         waiting_for: ?*const Semaphore = null,
         _fds: std.AutoHashMap(u16, FileHandle),
         cwd: []u8,
@@ -164,7 +169,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _vfork_context: ?VForkContext = null,
         _initialized: bool = false,
         _start_time: u64,
-        processes_syscall: bool = false,
+        // Wall-clock (us) captured right after this process's exec'd image is
+        // loaded and relocated. Used to separate dynamic-load time from real
+        // execution time when perf profiling is enabled. 0 means the process was
+        // never exec'd (e.g. a forked process that did not call execve).
+        _exec_loaded_time: u64 = 0,
         vfork_return: usize = 0,
         vfork_sp: usize = 0,
         vfork_fp: usize = 0,
@@ -197,6 +206,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .pid = pid,
                 ._kernel_allocator = kernel_allocator,
                 .current_core = 0,
+                .privileged = is_root,
                 ._fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
                 .cwd = cwd_handle,
                 .node = .{},
@@ -275,6 +285,16 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn get_process_memory_allocator(self: *Self) std.mem.Allocator {
             return self._process_memory_allocator.allocator();
         }
+
+        /// Bound this process's heap to `heap_bytes` beyond its current footprint
+        /// (the image + stack already resident at exec time). Enforces the YAFF
+        /// heap_size profile: once set, dynamic allocations that would exceed the
+        /// ceiling fail (user malloc returns NULL) instead of growing the shared
+        /// paged pool without bound. 0xFFFFFFFF = unbounded. Call after the stack
+        /// is reallocated so the baseline captures the fixed sections.
+        pub fn set_heap_limit_bytes(self: *Self, heap_bytes: u32) void {
+            self._process_memory_allocator.set_heap_limit_bytes(heap_bytes);
+        }
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
         pub fn vfork(self: *Self, process_memory_pool: *ProcessMemoryPoolType, pid: c.pid_t) !*Self {
@@ -290,6 +310,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .pid = pid,
                 ._kernel_allocator = self._kernel_allocator,
                 .current_core = 0,
+                // A vfork child is a user process on its way to exec; it must run
+                // unprivileged regardless of whether its parent (e.g. the init
+                // process) is privileged.
+                .privileged = false,
                 ._fds = try self.dupe_fds(),
                 .cwd = cwd_handle,
                 .node = .{},
@@ -332,6 +356,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn stack_pointer(self: Self) *const u8 {
             return self.impl.stack_pointer();
+        }
+
+        pub fn is_privileged(self: Self) bool {
+            return self.privileged;
         }
 
         pub fn get_stack_bottom(self: Self) *const u8 {
@@ -692,6 +720,12 @@ const ProcessMemoryPoolForTests = struct {
     pub fn release_pages_for(self: *Self, pid: c.pid_t) void {
         _ = self;
         _ = pid;
+    }
+
+    pub fn used_pages_for(self: *const Self, pid: c.pid_t) usize {
+        _ = self;
+        _ = pid;
+        return 0;
     }
 
     pub fn allocate_pages(self: *Self, number_of_pages: i32, pid: c.pid_t) ?[]u8 {

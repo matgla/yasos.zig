@@ -78,6 +78,18 @@ pub const IFileSystem = interface.ConstructInterface(struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         return interface.VirtualCall(self, "stat", .{ path, data, follow_links }, anyerror!void);
     }
+
+    // Read a symbolic link's target into `buffer`, returning the number of bytes
+    // written. Filesystems that do not support symlinks return InvalidArgument
+    // (EINVAL: "not a symbolic link").
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        return interface.VirtualCall(self, "readlink", .{ path, buffer }, anyerror!usize);
+    }
+
+    // Create a symbolic link at `linkpath` pointing to `target`.
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        return interface.VirtualCall(self, "symlink", .{ target, linkpath }, anyerror!void);
+    }
 });
 
 pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
@@ -123,5 +135,19 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     pub fn format(self: *Self) anyerror!void {
         _ = self;
         return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem cannot be formatted
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        _ = self;
+        _ = path;
+        _ = buffer;
+        return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
+    }
+
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        _ = self;
+        _ = target;
+        _ = linkpath;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem does not allow symlinking
     }
 });

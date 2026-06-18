@@ -15,6 +15,15 @@
 
 const std = @import("std");
 
+// Mirrors arch/arm-m/panic.zig so kernel code (malloc leak-detection traces)
+// compiles against the host test build.
+pub const max_stack_depth: usize = 16;
+
+pub fn is_valid_stack_ptr(addr: usize) bool {
+    // On the host there is no fixed RAM map; any non-null pointer is acceptable.
+    return addr != 0;
+}
+
 pub fn dump_stack_trace(log: anytype, address: usize) void {
     var index: usize = 0;
     var stack = std.debug.StackIterator.init(address, @frameAddress());

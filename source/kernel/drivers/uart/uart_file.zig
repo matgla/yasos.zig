@@ -31,8 +31,6 @@ const FileType = @import("../../fs/ifile.zig").FileType;
 
 const interface = @import("interface");
 
-var readbuf: [1024]u8 = undefined;
-
 pub fn UartFile(comptime UartType: anytype) type {
     const Internal = struct {
         const UartFileImpl = interface.DeriveFromBase(IFile, struct {

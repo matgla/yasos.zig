@@ -20,7 +20,6 @@ pub fn build(b: *std.Build) !void {
             });
             yasld.addAssemblyFile(b.path(b.fmt("source/arch/{s}/call.S", .{cpu_arch})));
             yasld.addAssemblyFile(b.path(b.fmt("source/arch/{s}/indirect_call_thunk.S", .{cpu_arch})));
-            yasld.addAssemblyFile(b.path(b.fmt("source/arch/{s}/lazy_resolver_thunk.S", .{cpu_arch})));
         }
     }
 }

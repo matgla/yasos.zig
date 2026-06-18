@@ -22,6 +22,7 @@ const std = @import("std");
 
 const board = @import("board");
 const stdout = @import("stdout.zig");
+const file_log = @import("file_log.zig");
 
 fn log_level_as_text(comptime level: std.log.Level) []const u8 {
     switch (level) {
@@ -39,15 +40,33 @@ pub fn kernel_stdout_log(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    const scope_prefix = switch (scope) {
-        std.log.default_log_scope => @tagName(scope),
-        else => if (@intFromEnum(level) <= @intFromEnum(std.log.Level.err))
-            @tagName(scope)
-        else
-            @tagName(scope),
+    const prefix = "[" ++ comptime log_level_as_text(level) ++ "][" ++ @tagName(scope) ++ "] ";
+    const line_format = prefix ++ format ++ "\n";
+
+    // The serial console is a per-byte BLOCKING UART at 921600 baud. Mirroring
+    // the voluminous info/debug diagnostics (notably the per-process loader
+    // load lines) to it stalls the CPU on every spawn and floods the test
+    // harness's serial stream. So route info/debug only to the file log; keep
+    // warnings and errors on serial so crash markers stay live for crash
+    // detection. Everything is captured in the file log when it is enabled.
+    const to_serial = @intFromEnum(level) <= @intFromEnum(std.log.Level.warn);
+    const to_file = file_log.is_enabled();
+
+    // Fast path: an info/debug line with no file sink has nowhere to go — drop
+    // it before paying the formatting cost.
+    if (!to_serial and !to_file) return;
+
+    var buf: [512]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, line_format, args) catch {
+        // Oversized line: record a truncated marker rather than dropping it.
+        const trunc = std.fmt.bufPrint(&buf, "{s}<truncated>\n", .{prefix}) catch return;
+        if (to_file) file_log.append(trunc);
+        if (to_serial) stdout.write_bytes(trunc);
+        return;
     };
-    const prefix = "[" ++ comptime log_level_as_text(level) ++ "][" ++ scope_prefix ++ "] ";
-    stdout.get().print(prefix ++ format ++ "\n", args) catch return;
+
+    if (to_file) file_log.append(line);
+    if (to_serial) stdout.write_bytes(line);
 }
 
 pub const log = std.log.scoped(.kernel);

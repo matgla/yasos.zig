@@ -23,6 +23,9 @@ const std = @import("std");
 const c = @import("c").c;
 
 const log = std.log.scoped(.malloc);
+// Dedicated scope so the heap-composition dump is trivially greppable
+// (`[ERR][heapprof] ...`) and parsed by scripts/heapdump_report.py.
+const heapprof_log = std.log.scoped(.heapprof);
 
 const arch = @import("arch");
 const config = @import("config");
@@ -34,7 +37,14 @@ pub const KernelAllocatorType = MallocAllocator(.{
 });
 
 var memory_in_use: isize = 0;
+var peak_memory_in_use: isize = 0;
 var surpressed_memory: isize = 0;
+// One-shot kernel-heap composition dump: when tracked heap first crosses this,
+// walk the live allocation trackers and emit a parseable backtrace block to
+// serial (`[ERR][heapprof] ...`), symbolized offline by
+// scripts/heapdump_report.py. Captures the (boot) peak. Needs leak detection on.
+var heapdump_done: bool = false;
+const heapdump_threshold_bytes: isize = 50 * 1024;
 var counter: isize = 0;
 
 // Size-bucketed net allocation counters for leak diagnosis
@@ -96,12 +106,18 @@ pub fn get_usage() usize {
     return if (memory_in_use < 0) 0 else @intCast(memory_in_use);
 }
 
+/// High-water mark of kernel heap bytes in use since boot (or last reset).
+pub fn get_peak_usage() usize {
+    return if (peak_memory_in_use < 0) 0 else @intCast(peak_memory_in_use);
+}
+
 pub fn get_counter() isize {
     return counter;
 }
 
 pub fn reset() void {
     memory_in_use = 0;
+    peak_memory_in_use = 0;
     surpressed_memory = 0;
     counter = 0;
 }
@@ -209,6 +225,39 @@ const Tracker = extern struct {
             }
         }
     }
+
+    // Emit a parseable snapshot of every live allocation (size, owner pid, and the
+    // top backtrace frames as raw return addresses) for offline symbolization by
+    // scripts/heapdump_report.py. The kernel can't symbolize; Python does it
+    // against the kernel ELF. Routed through `.err` so the smoke harness filters
+    // these lines out of parsed command output while still capturing them in the
+    // raw serial log.
+    pub fn dump_composition(self: *Tracker) void {
+        var node: ?*Tracker = self.next;
+        var total: usize = 0;
+        var live: usize = 0;
+        while (node) |n| {
+            total += n.allocated_length;
+            live += 1;
+            node = n.next;
+        }
+        heapprof_log.err("begin total={d} live={d}", .{ total, live });
+        node = self.next;
+        while (node) |n| {
+            var bt: [6]usize = [_]usize{0} ** 6;
+            var i: usize = 0;
+            // data[0] is the allocation pointer; data[1..data_len] are the
+            // caller-first return addresses captured at alloc time.
+            while (i < bt.len and i < n.data_len) : (i += 1) {
+                bt[i] = n.data[i + 1];
+            }
+            heapprof_log.err("a {d} {d} {x} {x} {x} {x} {x} {x}", .{
+                n.allocated_length, n.owner_pid, bt[0], bt[1], bt[2], bt[3], bt[4], bt[5],
+            });
+            node = n.next;
+        }
+        heapprof_log.err("end", .{});
+    }
 };
 
 pub fn MallocAllocator(comptime options: anytype) type {
@@ -280,6 +329,9 @@ pub fn MallocAllocator(comptime options: anytype) type {
             std.debug.assert(len > 0);
             const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
             memory_in_use += @as(isize, @intCast(len));
+            if (memory_in_use > peak_memory_in_use) {
+                peak_memory_in_use = memory_in_use;
+            }
             counter += 1;
             bucket_inc(len);
             if (comptime is_leaks_detection_enabled()) {
@@ -309,6 +361,13 @@ pub fn MallocAllocator(comptime options: anytype) type {
                 }
                 tracker_object.data_len = index - 1;
                 tracker.push(tracker_object);
+                // One-shot heap-composition snapshot at the (boot) peak: the peak
+                // is transient and freed before the shell prompt, so dump it the
+                // first time we cross the threshold rather than at process exit.
+                if (!heapdump_done and memory_in_use > heapdump_threshold_bytes) {
+                    heapdump_done = true;
+                    tracker.dump_composition();
+                }
             }
             if (@hasField(@TypeOf(options), "dump_stats") and options.dump_stats) {
                 log.info("usage: {d}B", .{memory_in_use});

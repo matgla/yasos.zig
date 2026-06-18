@@ -47,7 +47,6 @@ const c = @import("libc_imports").c;
 const config = @import("config");
 
 const kernel = @import("kernel.zig");
-const stdout = @import("stdout.zig");
 
 const log = std.log.scoped(.file_log);
 
@@ -58,7 +57,7 @@ const log_dir = "/root/logs";
 const log_path = "/root/logs/kernel.log";
 const prev_path = "/root/logs/kernel.prev.log";
 
-const buffer_size = 4096;
+const buffer_size = 512;
 
 var enabled: bool = false;
 var opened: bool = false; // SD file opened lazily from a safe (drain) context
@@ -66,7 +65,13 @@ var node: ?kernel.fs.Node = null;
 
 // Circular byte buffer. `head` is the next write position, `count` the number
 // of valid bytes ending at `head` (oldest at head-count, wrapping).
-var ring: [buffer_size]u8 = undefined;
+//
+// Aligned to the SD block size (512). When FatFs takes its whole-sector
+// fast path it hands the caller's buffer straight to disk_write -> the RP2350
+// SDIO driver, which DMAs directly only when the buffer is 4-byte aligned and
+// otherwise falls back to a per-block bounce @memcpy (mmc_sdio.write_sdio_data).
+// A 512-aligned base keeps the drain spans on the DMA-direct path.
+var ring: [buffer_size]u8 align(512) = undefined;
 var head: usize = 0;
 var count: usize = 0;
 var dropped: usize = 0;
@@ -74,12 +79,24 @@ var dropped: usize = 0;
 var appending: bool = false; // re-entrancy guard for the log sink
 var draining: bool = false; // set while SD I/O is in flight in drain()
 
-// Register the RAM sink. No SD I/O here — the file is opened lazily on the
-// first drain() from a safe context. Call once after /root is mounted.
+// Enable the RAM sink. No SD I/O here — the file is opened lazily on the first
+// drain() from a safe context. Call once after /root is mounted. The kernel log
+// front-end (kernel_stdout_log) feeds lines in via append(); see is_enabled().
 pub fn init() void {
     if (!persist_to_sd) return;
     enabled = true;
-    stdout.set_secondary_output(undefined, sink);
+}
+
+// Whether the file log is active. kernel_stdout_log uses this to decide whether
+// info/debug lines have a sink (they are kept off the blocking serial console).
+pub fn is_enabled() bool {
+    return enabled;
+}
+
+// Append a pre-formatted log line to the RAM ring (drained to SD later from a
+// safe context). Cheap, context- and IRQ-safe; no-op when disabled.
+pub fn append(data: []const u8) void {
+    _ = sink(undefined, data) catch {};
 }
 
 // Stop buffering/draining. Called from the fault handler so the panic path

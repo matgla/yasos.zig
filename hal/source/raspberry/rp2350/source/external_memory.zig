@@ -170,6 +170,12 @@ fn qmi_configure_timings() void {
     else
         clamp_int(u3, config.psram.rxdelay_lo);
 
+    // Add a half-SCK of CS-to-first-edge setup at high system clocks, matching
+    // the flash (M0) path (which uses select_setup=1 for sys >= 200 MHz). At an
+    // overclocked ~123 MHz PSRAM SCK the APS6404 needs that extra tCSS margin;
+    // rxdelay calibration (run right after this) then re-centres around it.
+    const psram_select_setup: u1 = if (system_clock >= 200_000_000) 1 else 0;
+
     qmi.*.m[1].timing.write(.{
         .clkdiv = psram_clock_divider,
         .rxdelay = psram_rx_delay,
@@ -177,7 +183,7 @@ fn qmi_configure_timings() void {
         .min_deselect = clamp_int(u5, psram_extra_deselect_cycles),
         .max_select = clamp_int(u6, psram_max_select_cycles / 64),
         .select_hold = 3,
-        .select_setup = 0,
+        .select_setup = psram_select_setup,
         ._reserved1 = 0,
         // Force CE to deassert at every 1024-byte page (matches Pimoroni's
         // reference PSRAM driver). With NONE, a single CE-low QMI burst runs
@@ -243,7 +249,7 @@ fn qmi_calibrate_rxdelay() void {
     while (d <= psram_rxdelay_max) : (d += 1) {
         qmi_set_rxdelay(@intCast(d));
         const ok = qmi_rxdelay_probe();
-        log.debug("PSRAM rxdelay {d}: {s}", .{ d, if (ok) "pass" else "fail" });
+        log.err("PSRAM rxdelay {d}: {s}", .{ d, if (ok) "pass" else "fail" });
         if (ok) {
             if (run_start < 0) run_start = @intCast(d);
             const run_len = d - @as(u8, @intCast(run_start)) + 1;
@@ -265,7 +271,7 @@ fn qmi_calibrate_rxdelay() void {
 
     const start: u32 = @intCast(best_start);
     const chosen: u3 = @intCast(start + (best_len - 1) / 2);
-    log.info("PSRAM rxdelay calibrated: window [{d}..{d}], chosen {d}", .{ start, start + best_len - 1, chosen });
+    log.err("PSRAM rxdelay calibrated: window [{d}..{d}], chosen {d}", .{ start, start + best_len - 1, chosen });
     qmi_set_rxdelay(chosen);
 }
 
@@ -348,6 +354,8 @@ fn slicify(ptr: [*]volatile u8, len: usize) []volatile u8 {
 extern fn qmi_initialize_m1() usize;
 extern fn qmi_dummy_read() void;
 extern fn qmi_reinitialize_flash() void;
+// RAM-resident flash (M0) rxdelay calibration in startup/overclock.c.
+extern fn overclock_calibrate_flash_rxdelay(out_lo: *u32, out_hi: *u32) u32;
 const log = std.log.scoped(.hal_external_memory);
 
 pub const ExternalMemory = struct {
@@ -487,6 +495,20 @@ pub const ExternalMemory = struct {
             // fixed rxdelay from qmi_configure_timings() only holds at stock
             // speeds and corrupts reads once the core is overclocked.
             qmi_calibrate_rxdelay();
+
+            // Calibrate the flash (M0) rxdelay the same way. Flash and PSRAM
+            // share the QMI bus, so a mis-sampled flash read can desync the read
+            // pipeline for the very next PSRAM access; the boot formula in
+            // computeQmiConfig() under-delays flash once overclocked. Runs from
+            // RAM and flushes the XIP cache internally.
+            var flash_rx_lo: u32 = 0;
+            var flash_rx_hi: u32 = 0;
+            const flash_rx = overclock_calibrate_flash_rxdelay(&flash_rx_lo, &flash_rx_hi);
+            if (flash_rx_lo <= flash_rx_hi) {
+                log.err("Flash rxdelay calibrated: window [{d}..{d}], chosen {d}", .{ flash_rx_lo, flash_rx_hi, flash_rx });
+            } else {
+                log.err("Flash rxdelay calibration inconclusive, keeping {d}", .{flash_rx});
+            }
             const addr: *volatile u32 = @ptrFromInt(psram_nocache_base);
             addr.* = 0x12345678;
             if (addr.* != 0x12345678) {

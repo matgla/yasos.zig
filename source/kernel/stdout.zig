@@ -83,6 +83,11 @@ pub fn write(comptime data: []const u8) void {
     _ = stdout.write(data) catch return;
 }
 
+// Like `write` but for runtime byte slices (e.g. a pre-formatted log line).
+pub fn write_bytes(data: []const u8) void {
+    _ = stdout.write(data) catch return;
+}
+
 pub fn suppress(value: bool) void {
     suppressed = value;
 }

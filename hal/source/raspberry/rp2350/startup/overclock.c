@@ -19,6 +19,7 @@
 #include "hardware/regs/clocks.h"
 #include "hardware/regs/qmi.h"
 #include "hardware/sync.h"
+#include "pico/bootrom.h"
 
 /* ---- POWMAN registers (not exposed by SDK) ---- */
 #define POWMAN_VREG_CTRL  (*(volatile uint32_t *)0x40100004)
@@ -164,4 +165,84 @@ void __no_inline_not_in_flash_func(overclock_apply)(
     hw_set_bits(&clocks_hw->clk[clk_sys].ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);
     while (!(clocks_hw->clk[clk_sys].selected & 2u))
         ;
+}
+
+/* --- Flash (M0) rxdelay calibration --------------------------------------- *
+ * Sweep all eight QMI_M0 rxdelay values, CRC the same flash region read through
+ * the UNCACHED window at each, find the widest run of identical CRC (== the
+ * timing-valid sample window) and park rxdelay at its centre. This mirrors the
+ * PSRAM (M1) calibration but for the flash side, which the boot formula in
+ * computeQmiConfig() under-delays once overclocked (its clkdiv-1 clamp caps
+ * rxdelay at half an SCK period instead of tracking the real round-trip).
+ *
+ * MUST run from RAM: it transiently programs invalid timings on the very bus we
+ * fetch code from, so this routine, the CRC helper and their literal pools are
+ * all __no_inline_not_in_flash_func, and they touch flash ONLY through the
+ * explicit uncached reads below. The XIP cache is flushed before returning so
+ * lines fetched at the boot rxdelay are dropped.
+ */
+static uint32_t __no_inline_not_in_flash_func(qmi_flash_region_crc)(uint32_t words) {
+    /* CS0 (flash) uncached/no-alloc window: every access hits the QMI at the
+     * current rxdelay instead of being served from the XIP cache. */
+    const volatile uint32_t *p = (const volatile uint32_t *)0x14000000u;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < words; i++) {
+        uint32_t w = p[i];
+        for (int byte = 0; byte < 4; byte++) {
+            crc ^= (w >> (byte * 8)) & 0xFFu;
+            for (int b = 0; b < 8; b++)
+                crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+uint32_t __no_inline_not_in_flash_func(overclock_calibrate_flash_rxdelay)(
+        uint32_t *out_lo, uint32_t *out_hi) {
+    const uint32_t probe_words = 2048u; /* 8 KiB of real (non-uniform) flash content */
+    const uint32_t saved = qmi_hw->m[0].timing;
+    uint32_t crc[8];
+
+    for (uint32_t d = 0; d < 8u; d++) {
+        qmi_hw->m[0].timing =
+            (saved & ~QMI_M0_TIMING_RXDELAY_BITS) | (d << QMI_M0_TIMING_RXDELAY_LSB);
+        __asm volatile("dsb\n\tisb" ::: "memory");
+        crc[d] = qmi_flash_region_crc(probe_words);
+    }
+
+    /* Longest run of identical consecutive CRCs is the valid sample window. */
+    int run_lo = 0, best_lo = 0, best_len = 1;
+    for (int d = 1; d < 8; d++) {
+        if (crc[d] == crc[d - 1]) {
+            int len = d - run_lo + 1;
+            if (len > best_len) { best_len = len; best_lo = run_lo; }
+        } else {
+            run_lo = d;
+        }
+    }
+
+    uint32_t chosen;
+    if (best_len <= 1) {
+        /* Inconclusive sweep — keep the configured timing untouched. */
+        qmi_hw->m[0].timing = saved;
+        chosen = (saved & QMI_M0_TIMING_RXDELAY_BITS) >> QMI_M0_TIMING_RXDELAY_LSB;
+        if (out_lo) *out_lo = 1; /* lo > hi signals "no window" to the caller */
+        if (out_hi) *out_hi = 0;
+    } else {
+        chosen = (uint32_t)best_lo + (uint32_t)(best_len - 1) / 2u;
+        qmi_hw->m[0].timing =
+            (saved & ~QMI_M0_TIMING_RXDELAY_BITS) | (chosen << QMI_M0_TIMING_RXDELAY_LSB);
+        if (out_lo) *out_lo = (uint32_t)best_lo;
+        if (out_hi) *out_hi = (uint32_t)(best_lo + best_len - 1);
+    }
+    __asm volatile("dsb\n\tisb" ::: "memory");
+
+    /* Drop XIP-cache lines fetched at the previous (boot) rxdelay. The bootrom
+     * flush runs from ROM and the lookup is force-inlined here, so no flash
+     * fetch happens before the cache is clean. */
+    rom_flash_flush_cache_fn flush =
+        (rom_flash_flush_cache_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_FLUSH_CACHE);
+    flush();
+
+    return chosen;
 }

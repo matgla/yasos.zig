@@ -195,9 +195,61 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         data.st_mode = switch (node.filetype()) {
             .File => c.S_IFREG,
             .Directory => c.S_IFDIR,
+            .SymbolicLink => c.S_IFLNK,
             else => return,
         };
         return;
+    }
+
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        if (linkpath.len == 0) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+        var maybe_node: ?kernel.fs.Node = self.get(linkpath) catch |err| blk: {
+            if (err != kernel.errno.ErrnoSet.NoEntry) {
+                return err;
+            }
+            break :blk null;
+        };
+        if (maybe_node) |*node| {
+            node.delete();
+            return kernel.errno.ErrnoSet.FileExists;
+        }
+        const basename = std.fs.path.basenamePosix(linkpath);
+        var parent_node = try self.get_parent_node(linkpath);
+        defer parent_node.delete();
+        var maybe_parent_dir = parent_node.as_directory();
+        if (maybe_parent_dir) |*parent_dir| {
+            const filedata = try self._allocator.create(RamFsData);
+            filedata.* = try RamFsData.create(self._allocator);
+            // The link target is stored verbatim as the file content.
+            try filedata.data.appendSlice(self._allocator, target);
+            const filenode = try self._allocator.create(RamFsNode);
+            const filename = try self._allocator.dupe(u8, basename);
+            filenode.* = RamFsNode{
+                .node = try RamFsFile.InstanceType.create_symlink_node(self._allocator, filedata, filename),
+                .list_node = std.DoublyLinkedList.Node{},
+                .name = filename,
+            };
+            try parent_dir.as(RamFsDirectory).data().append(filenode);
+            return;
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        var node = try self.get(path);
+        defer node.delete();
+        if (node.filetype() != FileType.SymbolicLink) {
+            return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
+        }
+        var file = node.as_file() orelse return kernel.errno.ErrnoSet.InvalidArgument;
+        _ = file.interface.seek(0, c.SEEK_SET) catch {};
+        const n = file.interface.read(buffer);
+        if (n < 0) {
+            return kernel.errno.ErrnoSet.InputOutputError;
+        }
+        return @intCast(n);
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
@@ -518,7 +570,8 @@ test "RamFsFile.ShouldReturnNotMemoryMappedForIoctl" {
     var status: kernel.fs.FileMemoryMapAttributes = undefined;
     try std.testing.expectEqual(-1, file.?.interface.ioctl(-1, &status));
     try std.testing.expectEqual(0, file.?.interface.ioctl(@intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus), &status));
-    try std.testing.expectEqual(true, status.is_memory_mapped);
+    try std.testing.expectEqual(false, status.is_memory_mapped);
+    try std.testing.expectEqual(@as(?*const anyopaque, null), status.mapped_address_r);
 }
 
 test "RamFsFile.ShouldAlwaysReturnZeroForFcntl" {

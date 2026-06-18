@@ -145,7 +145,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
 
     const a = try malloc.allocator().alloc(u8, 1024 * 1024); // allocate 1 MB
     defer malloc.allocator().free(a);
-    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(512, 123, 0);
+    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(8192, 123); // 8192*256B = 2 MiB (page grain is now 256 B)
 
     _ = sut.interface.sync();
     _ = try sut.interface.seek(0, c.SEEK_SET);
@@ -162,7 +162,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
 
     const b = try malloc.allocator().alloc(u8, 1024 * 1024 * 2048);
     defer malloc.allocator().free(b);
-    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(512, 123, 0);
+    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(8192, 123); // 8192*256B = 2 MiB (page grain is now 256 B)
 
     _ = sut.interface.sync();
     _ = try sut.interface.seek(0, c.SEEK_SET);

@@ -158,7 +158,18 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         path_c[path_c.len - 1] = 0; // Null-terminate
         defer self._allocator.free(path_c);
         const finfo = fatfs.stat(path_c) catch |err| {
-            log.err("Failed to stat path: {s}, error: {s}", .{ path, @errorName(err) });
+            // NoFile/NoPath just mean "not on this filesystem" — an expected
+            // negative result the VFS relies on for its symlink/cross-mount
+            // fallback (vfs.stat re-resolves on failure). Logging it at err
+            // level spams every stat that crosses a symlink (e.g. /tmp).
+            switch (err) {
+                error.NoFile, error.NoPath => {
+                    log.debug("stat: path not found: {s}", .{path});
+                },
+                else => {
+                    log.err("Failed to stat path: {s}, error: {s}", .{ path, @errorName(err) });
+                },
+            }
             return fatfs_error_to_errno(err);
         };
         data.st_blksize = 512;
@@ -172,6 +183,20 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         _ = old_path;
         _ = new_path;
         return error.NotSupported;
+    }
+
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        _ = self;
+        _ = target;
+        _ = linkpath;
+        return error.NotSupported; // FAT has no symbolic links
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        _ = self;
+        _ = path;
+        _ = buffer;
+        return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {

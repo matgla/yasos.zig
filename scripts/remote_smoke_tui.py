@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -196,6 +197,37 @@ class RunnerError(RuntimeError):
     pass
 
 
+def normalize_uhubctl_ports(value: Any) -> str:
+    """Normalize a uhubctl port spec into uhubctl's comma-separated form.
+
+    Accepts a single port ("2"), a space/comma/semicolon-separated list
+    ("1 2", "1,2", "1;2"), or a range ("1-2"), and returns a canonical
+    comma-separated string ("1,2"). uhubctl's -p flag accepts this form
+    natively, so several ports (e.g. the debug probe on port 1 and the
+    target board on port 2) are power-cycled together by one reset.
+
+    Unrecognised tokens are dropped; an empty/invalid spec returns "" which
+    means "let auto-detect choose" (or "cycle the whole hub" when ganged).
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    ports: list[str] = []
+    for tok in re.split(r"[\s,;]+", text):
+        tok = tok.strip()
+        if not tok:
+            continue
+        # Single ports ("2") and ranges ("1-2") are valid uhubctl specs; pass
+        # them through. Anything else is a typo — skip rather than feed garbage
+        # to uhubctl (which would error out and abort the whole reset).
+        if re.fullmatch(r"\d+(-\d+)?", tok):
+            if tok not in ports:
+                ports.append(tok)
+    return ",".join(ports)
+
+
 def effective_optimize(config: dict[str, Any], debug: bool) -> str:
     return "Debug" if debug else str(config["optimize"])
 
@@ -222,7 +254,9 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
         merged["test_retries"] = int(merged.get("test_retries", 1))
     except (TypeError, ValueError):
         merged["test_retries"] = 1
-    merged["with_gcc_torture"] = str(merged.get("with_gcc_torture", False)).strip().lower() in {
+    # Default on (matches DEFAULT_CONFIG): the GCC torture suite runs unless a
+    # config/CLI explicitly disables it.
+    merged["with_gcc_torture"] = str(merged.get("with_gcc_torture", True)).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -230,6 +264,10 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
     } if not isinstance(merged.get("with_gcc_torture"), bool) else bool(merged.get("with_gcc_torture"))
     merged.setdefault("uhubctl_hub", "")
     merged.setdefault("uhubctl_port", "")
+    # The port field may carry several ports (e.g. "1,2" for the debug probe
+    # plus the target board on the Waveshare power-switching hub). Canonicalize
+    # to uhubctl's comma form so every reset path power-cycles them together.
+    merged["uhubctl_port"] = normalize_uhubctl_ports(merged.get("uhubctl_port"))
     return merged
 
 
@@ -388,7 +426,7 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
             ("With GCC torture", "with_gcc_torture"),
             ("Pytest args", "pytest_args"),
             ("uhubctl hub (auto)", "uhubctl_hub"),
-            ("uhubctl port", "uhubctl_port"),
+            ("uhubctl port(s) e.g. 1,2", "uhubctl_port"),
         ]
         selected = 0
 
@@ -631,6 +669,11 @@ def debug_sync_paths() -> list[str]:
     # Include any GDB script files (e.g. gdb_debug_plan.gdb)
     for gdb_file in (REPO_ROOT / "libs" / "tinycc").glob("*.gdb"):
         paths.append(gdb_file.relative_to(REPO_ROOT).as_posix())
+    # Include ad-hoc python/gdb debug scripts kept under scripts/.
+    for script_name in ("catch_r9_zero.py", "probe_svc_sp.py", "catch_pc0.py", "catch_malloc_r9.py", "catch_sp_zero.py"):
+        candidate = REPO_ROOT / "scripts" / script_name
+        if candidate.exists():
+            paths.append(candidate.relative_to(REPO_ROOT).as_posix())
     for rel_path in load_yasld_elf_map().values():
         candidate = REPO_ROOT / rel_path
         if candidate.exists():
@@ -1012,23 +1055,31 @@ def build_local_artifacts(
     force: bool = False,
     apply_defconfig: bool = False,
 ) -> None:
-    if apply_defconfig:
-        board = BOARD_PROFILES[config["board"]]
-        run_command(
-            [
-                "zig",
-                "build",
-                "defconfig",
-                f"-Ddefconfig_file={board.defconfig}",
-            ],
-            cwd=REPO_ROOT,
-        )
-        # Record the defconfig we just regenerated from so the next run can
-        # detect edits and force another full rebuild.
-        _save_defconfig_hash(board.defconfig)
+    # Always regenerate config/target/.config from THIS board's defconfig before
+    # building. The cached config/target is shared global state: a parallel session
+    # (e.g. a QEMU run) can repoint it to another board, and the defconfig-hash check
+    # below only detects edits to *this* defconfig file, not an external board switch
+    # — so without this we would silently build+flash the wrong target. `zig build`
+    # is content-cached, so when the config is already correct this is a no-op rebuild.
+    # `apply_defconfig` is kept only to force a from-scratch rebuild when the defconfig
+    # itself changed (handled by the caller via the rootfs/kernel staleness checks).
+    _ = apply_defconfig
+    board = BOARD_PROFILES[config["board"]]
+    run_command(
+        [
+            "zig",
+            "build",
+            "defconfig",
+            f"-Ddefconfig_file={board.defconfig}",
+        ],
+        cwd=REPO_ROOT,
+    )
+    # Record the defconfig we just regenerated from so the next run can
+    # detect edits and force another full rebuild.
+    _save_defconfig_hash(board.defconfig)
     if config.get("profile"):
-        if _set_kconfig_option("CONFIG_INSTRUMENTATION_PERF_PROFILING"):
-            print("Enabled CONFIG_INSTRUMENTATION_PERF_PROFILING for profiling.")
+        if _set_kconfig_option("CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING"):
+            print("Enabled CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING for profiling.")
     run_command(
         ["zig", "build", f"-Doptimize={effective_optimize(config, debug)}"],
         cwd=REPO_ROOT,
@@ -1155,6 +1206,9 @@ detect_uhubctl_device() {
 resolve_uhubctl() {
     # Resolve uhubctl_hub / uhubctl_port.  When hub is "auto", detect from
     # the debug probe's sysfs entry.  When port is empty, cycle the whole hub.
+    # uhubctl_port may name several ports (e.g. "1,2" for the debug probe plus
+    # the target board on the Waveshare power-switching hub); an explicitly
+    # configured port spec is preserved here and passed through to uhubctl -p.
     # If the detected hub is not uhubctl-compatible, walk up to the root hub.
     #
     # On Raspberry Pi 4 the internal VIA VL805 hub (1-1) does NOT support
@@ -1186,9 +1240,15 @@ resolve_uhubctl() {
             # If uhubctl reports "ganged" switching, per-port control won't
             # work (e.g. Raspberry Pi 4 VIA VL805).  Clear the port so we
             # power-cycle ALL ports together with "uhubctl -l <hub> -a 0".
+            # Only inspect the target hub's OWN status header ("Current status
+            # for hub ..."), not its connected-device/port lines — a per-port
+            # (ppps) root hub can have a *ganged* child hub plugged into it
+            # (e.g. a Waveshare hub on a Pi 5 root port), and matching that
+            # child's "ganged" tag would wrongly cycle ALL root ports, cutting
+            # power to the debug probe alongside the target board.
             local hub_info
             hub_info=$(uhubctl_cmd -l "$uhubctl_hub" 2>/dev/null) || true
-            if echo "$hub_info" | grep -qi "ganged"; then
+            if echo "$hub_info" | grep -E "^Current status for hub" | grep -qi "ganged"; then
                 echo "Hub $uhubctl_hub uses ganged power switching — cycling all ports together" >&2
                 uhubctl_port=""
             fi
@@ -1279,6 +1339,8 @@ usb_power_reset() {
     if [[ -n "$uhubctl_hub" ]] && uhubctl_cmd --version >/dev/null 2>&1; then
         local port_args=()
         if [[ -n "$uhubctl_port" ]]; then
+            # $uhubctl_port may be a uhubctl port list/range (e.g. "1,2" to
+            # power-cycle the debug probe and the target board together).
             port_args=(-p "$uhubctl_port")
         fi
         echo "Power-cycling USB (hub=$uhubctl_hub port=${uhubctl_port:-all})..." >&2
@@ -1868,8 +1930,11 @@ if [[ "$uhubctl_hub" == "auto" ]]; then
 
         # Check for ganged power switching (e.g. RPi 4 VIA VL805 hub).
         # Per-port power control doesn't work — must cycle all ports together.
+        # Match only the target hub's OWN status header, not its connected-device
+        # lines: a ppps root hub may host a ganged child hub (e.g. Waveshare),
+        # and matching that child's tag would cut power to the debug probe too.
         hub_info=$(sudo "$uhubctl_bin" -l "$uhubctl_hub" 2>/dev/null) || true
-        if echo "$hub_info" | grep -qi "ganged"; then
+        if echo "$hub_info" | grep -E "^Current status for hub" | grep -qi "ganged"; then
             echo "Hub $uhubctl_hub uses ganged power switching — cycling all ports together"
             uhubctl_port=""
         fi
@@ -1880,6 +1945,8 @@ fi
 if (( use_uhubctl )); then
     port_args=()
     if [[ -n "$uhubctl_port" ]]; then
+        # $uhubctl_port may be a uhubctl port list/range (e.g. "1,2" to
+        # power-cycle the debug probe and the target board together).
         port_args=(-p "$uhubctl_port")
     fi
 
@@ -2587,6 +2654,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rescue", action="store_true", help="Force-recover a wedged RP2350: connect via the rescue debug port, halt, and mass-erase all flash so no auto-running image can re-wedge the QSPI. Use when flashing keeps failing. Wipes kernel AND rootfs; reflash both with --force afterwards.")
     parser.add_argument("--connect", action="store_true", help="Open an interactive serial console to the target over SSH (no build, flash, or reset). Exit the console with Ctrl-].")
     parser.add_argument("--power-reset", nargs="?", const="auto", default=None, metavar="HUB", help="Power-cycle the target via uhubctl on the remote host. Pass 'auto' (default) to detect the hub from the debug probe, or a hub path like '1-1'. Useful when the target is hung and OpenOCD cannot connect.")
+    parser.add_argument("--power-reset-port", default=None, metavar="PORTS", help="Override which hub port(s) the power-cycle reset switches, as a uhubctl spec (e.g. '1,2' for the debug probe on port 1 plus the target board on port 2, or '1-2'). Defaults to the configured uhubctl port(s); empty means auto-detect the probe's port.")
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
     parser.add_argument("--rerun-failed", action="store_true", help="Run only tests that failed in the previous remote pytest run by passing --lf to pytest. If no last-failed cache exists on the remote host, runs no tests instead of the full suite.")
     parser.add_argument("--with-gcc-torture", dest="with_gcc_torture", action="store_true", default=None, help="Enable GCC torture smoke tests for this run. Also syncs libs/tinycc/tests/gcctestsuite and exports YASOS_SMOKE_ENABLE_GCC_TORTURE=1 remotely.")
@@ -2673,7 +2741,10 @@ def main() -> int:
         if args.power_reset is not None:
             hub_override = args.power_reset  # 'auto' or explicit hub path
             runtime_config["uhubctl_hub"] = hub_override
-            print(f"Running remote USB power-cycle reset (hub={hub_override}).")
+            if args.power_reset_port is not None:
+                runtime_config["uhubctl_port"] = normalize_uhubctl_ports(args.power_reset_port)
+            port_spec = runtime_config.get("uhubctl_port") or "auto"
+            print(f"Running remote USB power-cycle reset (hub={hub_override} port={port_spec}).")
             run_remote_power_reset(runtime_config)
             print("Remote power-cycle reset completed successfully.")
             return 0

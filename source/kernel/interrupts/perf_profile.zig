@@ -13,10 +13,27 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+const std = @import("std");
 const config = @import("config");
 const c = @import("libc_imports").c;
 
 pub const enabled = if (@hasDecl(config.instrumentation, "perf_profiling")) config.instrumentation.perf_profiling else false;
+
+// Emitted at `.err` so the line reaches the serial console (only err/warn do)
+// and, crucially, so the smoke harness filters it out of parsed command output
+// via its LOG_PREFIXES list ("[ERR]"/...). The raw per-test serial capture still
+// records it, so `grep '\[ERR\]\[tprof\]'` recovers the timings. Using the `# `
+// comment convention instead would leak into every command's output parsing
+// (sha256sum hash reads, run-output validation) and break unrelated tests.
+const tprof_log = std.log.scoped(.tprof);
+
+/// Emit a profiling line (prefixed `[ERR][tprof]`) used to separate dynamic-load
+/// time from real execution time. Compiles to a no-op unless perf profiling is
+/// enabled, so production builds pay nothing.
+pub fn trace(comptime fmt: []const u8, args: anytype) void {
+    if (!enabled) return;
+    tprof_log.err(fmt, args);
+}
 
 const DEMCR: *volatile u32 = @ptrFromInt(0xE000EDFC);
 const DWT_CTRL: *volatile u32 = @ptrFromInt(0xE0001000);

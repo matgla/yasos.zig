@@ -158,6 +158,15 @@ COMPILE_STACK_KIB_TESTS = {
     # ~40-level nested switch/if: recursive-descent parsing needs ~32 KiB of
     # stack even on the host, so the target's 32 KiB stack overflows (STKOF).
     "compile/pr113623": 64,
+    # Huge main() with hundreds of varargs call expressions: recursive-descent
+    # parsing overflows the target's default 32 KiB stack (host cross segfaults
+    # at ulimit -s 32).  64 KiB still STKOFs on-device (larger native frames),
+    # so raise to 128 KiB.
+    "pr92904": 128,
+    # Deeply-nested expressions/statements in a huge fn11(): native ARM frames
+    # are much larger than host (host compiles fine at ulimit -s 32, but the
+    # device overflows its default 32 KiB; 96/128 KiB compile on-device).
+    "compile/pr82052": 128,
     # Deep expression recursion: host cross-tcc needs ~64 KiB for both.
     "unroll-1": 128,
     "builtins/strcat-chk": 128,
@@ -189,6 +198,10 @@ COMPILE_TIMEOUT_TESTS = {
     "limits-fnargs": 30,
     "limits-stringlit": 30,
     "pr34093": 30,
+    # large GCC-vector-extension lowering: N=32 vectors expand into many
+    # scalar ops per function; the -O1/-O2 compile is ~2.6 s on QEMU and
+    # exceeds the 5 s wait under parallel-suite load (compile itself is fine).
+    "pr54713-3": 30,
     # gcc-torture execute (20040705-*/20040709-* #include 20040629-1.c)
     "20040629-1": 30,
     "20040705-1": 30,
@@ -620,6 +633,16 @@ IR_TESTS_DISABLED = {
     "test_stack_frames.py",  # Not a C test file
 }
 
+# Known self-host miscompiles: these compile correctly with the gcc-built cross
+# (so the host-cross IR harness passes) but the self-hosted device tcc
+# miscompiles them at the listed optimization level.  Keyed by (filename,
+# opt_level) so only the affected variant is xfailed; remove the entry once the
+# underlying compiler bug is fixed (an XPASS then flags it for cleanup).
+IR_TESTS_XFAIL = {
+    # (empty) 183_selfhost_inline_accumulate at -O1 was fixed by the
+    # ra_safe_loop_phi_coalesce cur-outlives-partner guard (tinycc c1847440).
+}
+
 IR_TESTS_FLOAT_TOLERANCE = {
     "70_float_simple.c",
     "71_double_simple.c",
@@ -696,6 +719,7 @@ def build_ir_test_cases():
             continue
 
         for test_id, cflags in _opt_level_variants(f"ir_tests/{filename}"):
+            opt_level = cflags[0] if cflags else "-O0"
             test_cases.append(TccTestCase(
                 test_id=test_id,
                 name=filename,
@@ -703,6 +727,7 @@ def build_ir_test_cases():
                 cflags=cflags,
                 source_dir=ir_tests_path,
                 skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
+                xfail_reason=IR_TESTS_XFAIL.get((filename, opt_level)),
                 timeout=COMPILE_TIMEOUT_TESTS.get(filename),
             ))
 
@@ -923,6 +948,33 @@ def remote_output_dir(testcase=None):
     return REMOTE_OUTPUT_DIR
 
 
+def _enter_output_dir(session, output_dir):
+    """cd into the compiler-output directory for a test case.
+
+    The default output dir is /tmp, which always exists, so we just cd into it
+    — no per-test mkdir round-trip. The source-tree directories are created on
+    demand when their files are uploaded (see ``upload``), so they don't need a
+    per-test mkdir either. Only the non-default (persistent) output dir may be
+    missing, so it gets a one-shot ``mkdir -p`` folded into the same command.
+
+    We then wait for the shell prompt before returning. ``write_command``
+    returns as soon as it sees the command *echo*, not the prompt, so without
+    this the next command (the source ``sha256sum``, a long line) would be blasted
+    while the shell is still scheduling back in and printing its prompt — RX IRQs
+    masked, the UART FIFO not drained, and the tail of the burst dropped. Parking
+    the device at an idle prompt first is exactly the state the later ``tcc`` line
+    enjoys (it follows the hash's prompt-wait) and never truncates.
+    """
+    if output_dir == REMOTE_OUTPUT_DIR:
+        session.write_command("cd " + shlex.quote(output_dir))
+    else:
+        session.write_command(
+            "mkdir -p " + shlex.quote(output_dir)
+            + " && cd " + shlex.quote(output_dir)
+        )
+    session.wait_for_prompt_except_logs()
+
+
 def remote_output_path(filename, testcase=None):
     return posixpath.normpath(posixpath.join(remote_output_dir(testcase), filename))
 
@@ -945,9 +997,20 @@ def get_remote_hash(remote_path, session):
 
 
 def upload_testcase(local_path, remote_relative_path, session, source_dir=None):
-    filename = os.path.basename(remote_relative_path)
     remote_path = remote_source_path(remote_relative_path, source_dir)
     remote_dir = posixpath.dirname(remote_path)
+    local_hash = sha256_file(local_path)
+
+    # Fast path: this exact content was already uploaded-and-verified to this
+    # exact remote path during this session. The device copy can only change if
+    # we re-upload it (we don't here) or the target is reset (which clears this
+    # cache in Session.reset_target). Skipping the device-side sha256sum removes
+    # a toybox spawn + serial round-trip per source per test — and the redundant
+    # re-hash of the same file across the -O0/-O1/-O2 reruns.
+    confirmed = getattr(session, "confirmed_uploads", None)
+    if confirmed is not None and confirmed.get(remote_path) == local_hash:
+        return "cached"
+
     remote_hash = get_remote_hash(remote_path, session)
     upload_state = "checking hash"
 
@@ -956,9 +1019,6 @@ def upload_testcase(local_path, remote_relative_path, session, source_dir=None):
         session.write_command("mkdir -p " + shlex.quote(remote_dir))
         session.wait_for_prompt_except_logs()
         serial_send_file(session, local_path, remote_path)
-
-    local_hash = sha256_file(local_path)
-    if remote_hash is None:
         remote_hash = get_remote_hash(remote_path, session)
         assert remote_hash is not None, "file upload failed, missing remote hash"
 
@@ -971,6 +1031,11 @@ def upload_testcase(local_path, remote_relative_path, session, source_dir=None):
         remote_hash = get_remote_hash(remote_path, session)
         assert remote_hash is not None, "file upload failed, missing remote hash"
         assert local_hash == remote_hash, "file upload failed, hash mismatch"
+
+    # Remote now matches local; remember it so later tests this session take the
+    # fast path above instead of re-hashing on the device.
+    if confirmed is not None:
+        confirmed[remote_path] = local_hash
 
     if upload_state == "checking hash":
         return "cached"
@@ -1146,7 +1211,11 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
     output_name = filename_without_extension + (".o" if testcase.compile_only else "")
     output_binary = remote_output_path(output_name, testcase)
 
-    cleanup_paths = [output_binary]
+    # Expected-compile-failure tests never produce the output binary (the
+    # compile bails with an error), so there is nothing to remove. Skip queuing
+    # it for cleanup — `rm -f` on the nonexistent path returns "Invalid
+    # argument" on the target VFS instead of silently succeeding.
+    cleanup_paths = [] if testcase.expected_compile_failure else [output_binary]
     source_paths, temp_cleanup_paths = _prepare_compile_source_paths(
         testcase,
         session,
@@ -1325,10 +1394,18 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
         # the rm command would never echo back and the reset wipes /tmp anyway.
         needs_reset = getattr(session, "target_needs_reset", False)
         if cleanup_paths and not needs_reset:
-            session.write_command(
-                "rm -f " + " ".join(shlex.quote(cleanup_path) for cleanup_path in cleanup_paths)
-            )
-            session.wait_for_prompt_except_logs()
+            # This cleanup fires immediately after a memory-heavy compile, while
+            # the device is still tearing down the tcc process (releasing its
+            # large GOT/heap). On big test cases (e.g. pr54713-3, kernel_used
+            # ~70k) that teardown can push the echo of this command past the
+            # default 1 s serial timeout, tripping a false "Prompt not found"
+            # desync even though the compile itself passed. Give the echo the
+            # same generous budget the compile read got.
+            with session.timeout(max(COMPILE_TIMEOUT, session.serial.timeout)):
+                session.write_command(
+                    "rm -f " + " ".join(shlex.quote(cleanup_path) for cleanup_path in cleanup_paths)
+                )
+                session.wait_for_prompt_except_logs()
 
 path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../libs/tinycc/tests/tests2"))
 ir_tests_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../libs/tinycc/tests/ir_tests"))
@@ -1371,9 +1448,23 @@ def _failure_is_real(session, exc):
 def _resync_prompt_for_rerun(session):
     """Best-effort recovery of a clean shell prompt before a rerun.
 
-    Interrupts any stuck foreground job (Ctrl-C), drains stale serial output and
-    waits for a fresh prompt, so the retry starts from a known-good state.
+    First try a gentle recovery: drain stale serial output and nudge the shell
+    with a newline. The common transient failure is a mid-command UART
+    truncation where the trailing newline still arrived, so the bad command
+    already ran and the shell is back at a prompt -- no interrupt is needed.
+
+    Only if the gentle recovery fails (a foreground job is genuinely stuck) do
+    we fall back to Ctrl-C (\\x03). This avoids injecting a spurious ETX/^C into
+    the serial stream -- and into the per-test logs and the live console -- on
+    every retry.
     """
+    for _ in range(3):
+        try:
+            if session._try_recover_prompt():
+                return True
+        except Exception:
+            break
+    # Gentle recovery failed: a job may be stuck. Interrupt it, then retry.
     try:
         session.serial.write(b"\x03")  # kill a stuck/runaway foreground job
     except Exception:
@@ -1433,15 +1524,7 @@ def test_run_tcc_test_suite(request, testcase):
     session = request.node.stash[session_key]
     temp_source_plan = get_temp_source_reuse_plan(request.session)
     output_dir = remote_output_dir(testcase)
-    session.write_command(
-        "mkdir -p "
-        + " ".join(
-            shlex.quote(path)
-            for path in (REMOTE_TESTS2_DIR, REMOTE_IR_TESTS_DIR, output_dir)
-        )
-    )
-    data = session.wait_for_prompt_except_logs()
-    session.write_command("cd " + shlex.quote(output_dir))
+    _enter_output_dir(session, output_dir)
 
     progress = ProgressLine(testcase.test_id)
 
@@ -1478,16 +1561,10 @@ def test_run_ir_test_suite(request, testcase):
     temp_source_plan = get_temp_source_reuse_plan(request.session)
     if testcase.skip_reason:
         pytest.skip(testcase.skip_reason)
+    if testcase.xfail_reason:
+        pytest.xfail(testcase.xfail_reason)
     output_dir = remote_output_dir(testcase)
-    session.write_command(
-        "mkdir -p "
-        + " ".join(
-            shlex.quote(p)
-            for p in (REMOTE_TESTS2_DIR, REMOTE_IR_TESTS_DIR, output_dir)
-        )
-    )
-    data = session.wait_for_prompt_except_logs()
-    session.write_command("cd " + shlex.quote(output_dir))
+    _enter_output_dir(session, output_dir)
 
     progress = ProgressLine(testcase.test_id)
 
@@ -1517,15 +1594,7 @@ def test_run_gcc_compile_torture_suite(request, testcase):
         pytest.xfail(testcase.xfail_reason)
 
     output_dir = remote_output_dir(testcase)
-    session.write_command(
-        "mkdir -p "
-        + " ".join(
-            shlex.quote(p)
-            for p in (REMOTE_GCC_COMPILE_DIR, REMOTE_GCC_EXECUTE_DIR, output_dir)
-        )
-    )
-    session.wait_for_prompt_except_logs()
-    session.write_command("cd " + shlex.quote(output_dir))
+    _enter_output_dir(session, output_dir)
 
     progress = ProgressLine(testcase.test_id)
 
@@ -1555,15 +1624,7 @@ def test_run_gcc_execute_torture_suite(request, testcase):
         pytest.xfail(testcase.xfail_reason)
 
     output_dir = remote_output_dir(testcase)
-    session.write_command(
-        "mkdir -p "
-        + " ".join(
-            shlex.quote(p)
-            for p in (REMOTE_GCC_COMPILE_DIR, REMOTE_GCC_EXECUTE_DIR, output_dir)
-        )
-    )
-    session.wait_for_prompt_except_logs()
-    session.write_command("cd " + shlex.quote(output_dir))
+    _enter_output_dir(session, output_dir)
 
     progress = ProgressLine(testcase.test_id)
 

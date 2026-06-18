@@ -205,6 +205,19 @@ pub const Parser = struct {
         return ptr[0..self.header.data_length];
     }
 
+    // RELRO: the first const_rodata_length bytes of the data region are
+    // pure-const .rodata shared XIP across processes (borrowed, never copied).
+    pub fn get_rodata(self: Parser) []const u8 {
+        const ptr: [*]const u8 = @ptrFromInt(self.data_address);
+        return ptr[0..self.header.const_rodata_length];
+    }
+
+    // The per-process data (everything after the shared rodata prefix).
+    pub fn get_process_data(self: Parser) []const u8 {
+        const ptr: [*]const u8 = @ptrFromInt(self.data_address + self.header.const_rodata_length);
+        return ptr[0 .. self.header.data_length - self.header.const_rodata_length];
+    }
+
     pub fn get_text(self: Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.text_address);
         return ptr[0..self.header.code_length];

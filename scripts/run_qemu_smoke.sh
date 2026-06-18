@@ -89,7 +89,9 @@ if [ "$DO_BUILD" -eq 1 ]; then
 
     if [ ! -f "$REPO_ROOT/rootfs.img" ] || [ "$REBUILD_ROOTFS" -eq 1 ]; then
         echo ">> Building rootfs.img"
-        ./build_rootfs.sh -c -o rootfs.img
+        # --no-kernel: this script runs its own `zig build` below, so skip
+        # build_rootfs's built-in kernel rebuild to avoid a redundant build.
+        ./build_rootfs.sh -c -o rootfs.img --no-kernel
     else
         echo ">> Reusing existing rootfs.img (pass --rebuild-rootfs to regenerate)"
     fi

@@ -192,6 +192,46 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
+// A "fast" syscall is one whose handler provably never blocks, never invokes the
+// scheduler / triggers a context switch, and never vforks/execs. Such calls can
+// run entirely in the SVCall handler (already privileged) and exception-return
+// directly to the user, skipping the trampoline-to-thread-mode + second SVC +
+// CONTROL juggling. The result is delivered through the `out` pointer, so no
+// stacked-frame patching is needed. Keep this set conservative and audited:
+// misclassifying a blocking syscall would deadlock at SVCall priority.
+fn is_fast_syscall(comptime index: usize) bool {
+    return switch (index) {
+        c.sys_getpid,
+        c.sys_getuid,
+        c.sys_geteuid,
+        c.sys_time,
+        c.sys_gettimeofday,
+        c.sys_sysconf,
+        c.sys_getentropy,
+        => true,
+        else => false,
+    };
+}
+
+fn create_fast_syscall_table(comptime count: usize) [count]bool {
+    var table: [count]bool = undefined;
+    for (&table, 0..) |*f, index| {
+        f.* = is_fast_syscall(index);
+    }
+    return table;
+}
+
+const fast_syscall_table = create_fast_syscall_table(c.SYSCALL_COUNT);
+
+// Called from the SVCall handler (context_switch.S) to decide whether the
+// incoming syscall can take the handler-mode fast path. Returns 1 for fast, 0
+// otherwise (including out-of-range numbers, which fall through to the trampoline
+// where _irq_svcall reports NotImplemented).
+pub export fn syscall_is_fast(number: u32) linksection(".time_critical") callconv(.c) usize {
+    if (number >= c.SYSCALL_COUNT) return 0;
+    return if (fast_syscall_table[number]) 1 else 0;
+}
+
 fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") isize {
     const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
     const result: i32 = result_or_error catch |err| {
@@ -207,14 +247,12 @@ fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksec
 
 pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") callconv(.c) isize {
     const start_cycles = if (perf.enabled) perf.read_cycles() else 0;
-    process_manager.instance.get_current_process().processes_syscall = true;
     // log.err("System call processing started for: {d}", .{number});
     if (number >= c.SYSCALL_COUNT) {
         return write_result(out, kernel.errno.ErrnoSet.NotImplemented);
     }
     const result = write_result(out, syscall_lookup_table[number](arg));
     // log.err("System call processing finished for: {d}", .{number});
-    process_manager.instance.get_current_process().processes_syscall = false;
     if (perf.enabled) {
         const elapsed = perf.read_cycles() -% start_cycles;
         perf.record(number, elapsed);

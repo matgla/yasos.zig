@@ -66,6 +66,13 @@ pub const HardwareProcess = struct {
         return @ptrFromInt(@intFromPtr(&stack_dat) + 0x1000);
     }
 
+    pub fn get_stack_top(self: *const HardwareProcess) *const u8 {
+        if (self._sp) |sp| {
+            return @ptrFromInt(@intFromPtr(sp) + 0x1000);
+        }
+        return @ptrFromInt(@intFromPtr(&stack_dat) + 0x1000);
+    }
+
     pub fn set_stack_pointer(self: *HardwareProcess, ptr: *u8, blocked_by_process: ?*HardwareProcess) void {
         _ = blocked_by_process;
         self._sp = ptr;

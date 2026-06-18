@@ -34,6 +34,12 @@ const interface = @import("interface");
 
 const log = std.log.scoped(.vfs);
 
+// Maximum number of symbolic links resolved while walking a single path before
+// giving up with ELOOP.
+const max_symlink_depth = 16;
+// Working buffer size for symlink targets. Generous headroom over PATH_MAX (128).
+const symlink_target_buffer = 256;
+
 pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     const Self = @This();
     mount_points: MountPoints,
@@ -48,14 +54,20 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return 0;
     }
 
-    pub fn create(self: *Self, path: []const u8, mode: i32) anyerror!void {
+    // ------------------------------------------------------------------
+    // Raw delegation helpers — route a path to the owning mounted filesystem
+    // WITHOUT any symbolic-link resolution. The public methods below add
+    // failure-triggered resolution on top of these.
+    // ------------------------------------------------------------------
+    fn raw_create(self: *Self, path: []const u8, mode: i32) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
             return try node.point.filesystem.interface.create(node.left, mode);
         }
+        return kernel.errno.ErrnoSet.NoEntry;
     }
 
-    pub fn mkdir(self: *Self, path: []const u8, mode: i32) anyerror!void {
+    fn raw_mkdir(self: *Self, path: []const u8, mode: i32) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
             return try node.point.filesystem.interface.mkdir(node.left, mode);
@@ -63,12 +75,152 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
-    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
+    fn raw_unlink(self: *Self, path: []const u8) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
             return node.point.filesystem.interface.unlink(node.left);
         }
         return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    fn raw_get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            return try node.point.filesystem.interface.get(node.left);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    fn raw_stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            const trimmed_path = std.mem.trim(u8, node.left, "/ ");
+            return try node.point.filesystem.interface.stat(trimmed_path, data, follow_symlinks);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    fn raw_access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            return try node.point.filesystem.interface.access(node.left, mode, flags);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    fn raw_readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            return try node.point.filesystem.interface.readlink(node.left, buffer);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    fn raw_symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, linkpath);
+        if (maybe_node) |*node| {
+            return try node.point.filesystem.interface.symlink(target, node.left);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    // Walk `path` left to right; whenever a path component is a symbolic link,
+    // splice in its target (crossing mount points) and restart. Returns a newly
+    // allocated, fully-resolved absolute path if any link was followed, or null
+    // if the path contained no symlink components (caller keeps the original).
+    // `follow_final` controls whether the last component is resolved — false for
+    // create/mkdir/unlink/lstat (operate on the link itself), true for get/stat.
+    //
+    // This is only ever called after a raw_* call has already failed, so the
+    // common (no-symlink) path performs zero extra filesystem calls.
+    fn resolve_symlinks(self: *Self, path: []const u8, follow_final: bool) anyerror!?[]u8 {
+        const allocator = self.mount_points.allocator;
+        var cur = try allocator.dupe(u8, path);
+        errdefer allocator.free(cur);
+        var changed = false;
+        var depth: usize = 0;
+
+        outer: while (true) {
+            var i: usize = 0;
+            var comp_start: usize = 0;
+            while (i <= cur.len) : (i += 1) {
+                if (i < cur.len and cur[i] != '/') continue;
+                if (i == comp_start) {
+                    comp_start = i + 1;
+                    continue;
+                }
+                const prefix = cur[0..i];
+                // Is this the last non-empty component?
+                var j = i;
+                while (j < cur.len and cur[j] == '/') j += 1;
+                const is_final = j >= cur.len;
+                if (is_final and !follow_final) break;
+
+                var st: c.struct_stat = undefined;
+                self.raw_stat(prefix, &st, false) catch break;
+
+                if ((st.st_mode & c.S_IFMT) == c.S_IFLNK) {
+                    depth += 1;
+                    if (depth > max_symlink_depth) return kernel.errno.ErrnoSet.TooManySymbolicLinks;
+
+                    var target_buffer: [symlink_target_buffer]u8 = undefined;
+                    const n = self.raw_readlink(prefix, target_buffer[0..]) catch break;
+                    const target = target_buffer[0..n];
+                    const remainder = cur[i..];
+                    // Absolute target replaces from root; relative target resolves
+                    // against the link's parent directory (cur[0..comp_start]).
+                    const base = if (target.len > 0 and target[0] == '/') "" else cur[0..comp_start];
+                    const joined = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ base, target, remainder });
+                    defer allocator.free(joined);
+                    const normalized = try std.fs.path.resolve(allocator, &.{joined});
+                    allocator.free(cur);
+                    cur = normalized;
+                    changed = true;
+                    continue :outer;
+                }
+                comp_start = i + 1;
+            }
+            break;
+        }
+
+        if (!changed) {
+            allocator.free(cur);
+            return null;
+        }
+        return cur;
+    }
+
+    pub fn create(self: *Self, path: []const u8, mode: i32) anyerror!void {
+        return self.raw_create(path, mode) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_create(resolved, mode);
+            }
+            return err;
+        };
+    }
+
+    pub fn mkdir(self: *Self, path: []const u8, mode: i32) anyerror!void {
+        return self.raw_mkdir(path, mode) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_mkdir(resolved, mode);
+            }
+            return err;
+        };
+    }
+
+    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
+        return self.raw_unlink(path) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_unlink(resolved);
+            }
+            return err;
+        };
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -77,11 +229,14 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
-        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
-        if (maybe_node) |*node| {
-            return try node.point.filesystem.interface.get(node.left);
-        }
-        return kernel.errno.ErrnoSet.NoEntry;
+        return self.raw_get(path) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, true) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_get(resolved);
+            }
+            return err;
+        };
     }
 
     pub fn delete(self: *Self) void {
@@ -95,12 +250,36 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
-        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
-        if (maybe_node) |*node| {
-            const trimmed_path = std.mem.trim(u8, node.left, "/ ");
-            return try node.point.filesystem.interface.stat(trimmed_path, data, follow_symlinks);
-        }
-        return kernel.errno.ErrnoSet.NoEntry;
+        return self.raw_stat(path, data, follow_symlinks) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_stat(resolved, data, follow_symlinks);
+            }
+            return err;
+        };
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        return self.raw_readlink(path, buffer) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_readlink(resolved, buffer);
+            }
+            return err;
+        };
+    }
+
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        return self.raw_symlink(target, linkpath) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(linkpath, false) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_symlink(target, resolved);
+            }
+            return err;
+        };
     }
 
     // Below are part of VirtualFileSystem interface, not IFileSystem
@@ -127,11 +306,14 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
-        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
-        if (maybe_node) |*node| {
-            return try node.point.filesystem.interface.access(node.left, mode, flags);
-        }
-        return kernel.errno.ErrnoSet.NoEntry;
+        return self.raw_access(path, mode, flags) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, true) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_access(resolved, mode, flags);
+            }
+            return err;
+        };
     }
 });
 

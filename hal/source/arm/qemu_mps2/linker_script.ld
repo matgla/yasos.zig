@@ -170,6 +170,8 @@ SECTIONS
   __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
   __HeapLimit = __heap_limit__;
 
+  __flash_start__ = ORIGIN(flash);
+  __flash_end__ = ORIGIN(flash) + LENGTH(flash);
   __kernel_ram_start__ = ORIGIN(kernel_ram);
   __kernel_ram_end__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
   __process_ram_start__ = ORIGIN(process_ram);

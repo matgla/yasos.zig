@@ -128,7 +128,7 @@ irq_svcall:
   cmp r0, #1
   beq process_syscall_unblock_context_switch
   cmp r0, #0
-  bne process_syscall_entry
+  bne process_syscall_fast_check
   mrs r2, psp
   isb
     // let's check if fpu is used by current task
@@ -141,13 +141,35 @@ process_syscall_return_without_fpu:
   ldmia r2!, {r3, lr}
   msr psp, r2
   isb
-  dmb
+  // The syscall ran privileged (process_syscall_entry cleared nPRIV); restore
+  // the resumed process's privilege level so an unprivileged process does not
+  // continue running privileged after returning from a syscall.
+  push {r0, lr}
+  bl apply_current_privilege
+  pop {r0, lr}
   bx lr
   //ldmia r2!, {r1}
   // msr psp, r2
   // dsb
   // isb
 
+
+// Fast path: a syscall whose handler never blocks/schedules can run directly in
+// the handler (already privileged) and exception-return to the user. The result
+// is written through the out pointer (r2), so the user frame needs no patching;
+// CONTROL.nPRIV is left untouched, so the thread resumes at its prior privilege.
+// r0 = syscall number, r1 = arg pointer, r2 = out pointer, lr = EXC_RETURN.
+process_syscall_fast_check:
+  push {r0-r3, lr}
+  bl syscall_is_fast      // r0(number) -> r0 (1 fast, 0 otherwise)
+  cmp r0, #0
+  pop {r0-r3, lr}         // ldmia preserves the condition flags
+  beq process_syscall_entry
+  // fast: dispatch in handler mode, args (r0-r2) already in place
+  push {r0, lr}           // r0 for 8-byte alignment; lr = EXC_RETURN
+  bl _irq_svcall
+  pop {r0, lr}
+  bx lr                   // exception return to user; nPRIV unchanged
 
 process_syscall_entry:
   push {r4, r5, r6, r7}
@@ -162,13 +184,11 @@ process_syscall_entry:
   stmdb r4!, {r0-r3, r12}
   msr psp, r4
   isb
-  dsb
   mrs r4, control
   isb
   bic r4, r4, #1
   msr control, r4
   isb
-  dsb
   ldr r3, =0xfffffffd
   pop {r4, r5, r6, r7}
   // process stack is modified, but not yet ready to be switched, block context switch till prepared
@@ -224,23 +244,34 @@ pendsv_exit:
 pendsv_store_and_switch:
   pop {r0, r1}
   bl store_and_switch_to_next_task
-  //push {r0, r1}
-  //mrs r0, psp
-  //isb
-  //bl print_process_loaded
-  //pop {r0, r1}
+  bl apply_current_privilege
   bx r0
 pendsv_switch_to_next_task:
   pop {r0, r1}
   bl switch_to_next_task
-  //push {r0, r1}
-  //mrs r0, psp
-  //isb
-  //bl print_process_loaded
-  //pop {r0, r1}
+  bl apply_current_privilege
   bx r0
 pendsv_ignore:
   pop {r0, pc}
+
+// Set CONTROL.nPRIV for the thread we are about to return to, based on the
+// resumed process's privilege flag (the root/init process stays privileged; all
+// user processes run unprivileged). Only nPRIV is touched here: this runs in
+// handler mode where SPSEL is handled by the exception return. r0 (the EXC_RETURN
+// value the caller bx-es to) is preserved across the call.
+.thumb_func
+apply_current_privilege:
+  push {r0, r1, r2, lr}
+  bl process_current_is_privileged // r0 = 1 if privileged
+  mrs r1, control
+  bic r1, r1, #1                   // assume privileged: nPRIV = 0
+  cmp r0, #0
+  bne 1f
+  orr r1, r1, #1                   // unprivileged: nPRIV = 1
+1:
+  msr control, r1
+  isb
+  pop {r0, r1, r2, pc}
 
 
 .global switch_to_the_first_task
@@ -249,9 +280,21 @@ switch_to_the_first_task:
   push {r0, lr} // this will be taken by return to user mode
   mov r1, lr
   bl switch_to_next_task
+  // Switch to PSP (SPSEL=1) and set nPRIV for the first task from its privilege
+  // flag (the root/init process is privileged). This runs in thread mode on MSP,
+  // so the SPSEL flip must be the final stack-affecting operation: pop the saved
+  // exec-return value before the single CONTROL write that flips both bits.
+  push {r0}
+  bl process_current_is_privileged // r0 = 1 if privileged
+  mov r2, r0
+  pop {r0}                          // r0 = exec-return value (still on MSP)
   mrs r1, control
-  isb
-  orr r1, r1, #3 // unprivileged + psp
+  bic r1, r1, #1                    // nPRIV = 0
+  orr r1, r1, #2                    // SPSEL = 1 (use PSP)
+  cmp r2, #0
+  bne 1f
+  orr r1, r1, #1                    // unprivileged: nPRIV = 1
+1:
   msr control, r1
   isb
   dsb

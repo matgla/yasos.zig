@@ -32,6 +32,7 @@ const SymbolEntry = @import("yasld").SymbolEntry;
 const system_call = @import("interrupts/system_call.zig");
 const c = @import("libc_imports").c;
 const handlers = @import("interrupts/syscall_handlers.zig");
+const perf = @import("interrupts/perf_profile.zig");
 
 const arch = @import("arch");
 
@@ -257,8 +258,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
 
             // If a vfork child exits without calling exec, restore parent's
-            // writable sections that may have been corrupted
-            dynamic_loader.restore_parent_writable_sections();
+            // writable sections that may have been corrupted. Keyed by the
+            // exiting (child) pid; a no-op if it wasn't a vfork child.
+            dynamic_loader.restore_parent_writable_sections(pid);
 
             var next = self.processes.first;
             while (next) |node| {
@@ -341,7 +343,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             context.pid.* = new_process.pid;
 
             // Save parent's writable sections before child runs on shared memory
-            dynamic_loader.save_parent_writable_sections(current_process.pid);
+            dynamic_loader.save_parent_writable_sections(current_process.pid, new_process.pid);
 
             self.processes.append(&new_process.node);
             self._scheduler.set_next(&new_process.node);
@@ -372,33 +374,75 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             current_process._vfork_context = ctx;
         }
 
-        fn clone_exec_args(allocator: std.mem.Allocator, argv: [*c][*c]u8) !struct {
+        /// Clone the exec argv and envp into a single array owned by the new
+        /// process. The layout follows the SysV convention so the C runtime can
+        /// recover the environment without extra register plumbing:
+        ///
+        ///   [ argv0 .. argv(argc-1), NULL, env0 .. env(envc-1), NULL ]
+        ///
+        /// argv[argc] is the argv terminator; the environment starts at
+        /// argv[argc + 1] (crt1 sets `environ = &argv[argc + 1]`). The trailing
+        /// NULL is always present (even for an empty environment), so the
+        /// derivation is valid regardless of env size.
+        fn clone_exec_args(allocator: std.mem.Allocator, argv: [*c][*c]u8, envp: [*c][*c]u8) !struct {
             argc: usize,
             argv: [*c][*c]u8,
         } {
             var argc: usize = 0;
             while (argv[argc] != null) : (argc += 1) {}
 
-            const argv_copy = try allocator.alloc([*c]u8, argc + 1);
-            errdefer allocator.free(argv_copy);
+            var envc: usize = 0;
+            if (envp != null) {
+                while (envp[envc] != null) : (envc += 1) {}
+            }
 
-            var cloned: usize = 0;
-            errdefer {
+            // Lay out the pointer array (argv, NULL, envp, NULL) followed by all
+            // string bytes in ONE contiguous block. The exec target's process
+            // memory pool is page-granular (4 KiB minimum per allocation), so the
+            // old one-dupeZ-per-string scheme burned a whole page on every argv
+            // and envp entry — ~14 pages (~56 KiB) for a typical command. Packing
+            // them collapses that to a single page. crt1 still recovers `environ`
+            // from &argv[argc + 1] because the pointer array stays contiguous.
+            const n_ptrs = argc + 1 + envc + 1;
+            const ptr_bytes = n_ptrs * @sizeOf([*c]u8);
+            var str_bytes: usize = 0;
+            {
                 var i: usize = 0;
-                while (i < cloned) : (i += 1) {
-                    allocator.free(std.mem.span(argv_copy[i].?));
-                }
+                while (i < argc) : (i += 1) str_bytes += std.mem.span(argv[i]).len + 1;
+                i = 0;
+                while (i < envc) : (i += 1) str_bytes += std.mem.span(envp[i]).len + 1;
             }
 
-            while (cloned < argc) : (cloned += 1) {
-                const source = std.mem.span(argv[cloned]);
-                argv_copy[cloned] = @ptrCast(try allocator.dupeZ(u8, source));
+            const block = try allocator.alloc(u8, ptr_bytes + str_bytes);
+            errdefer allocator.free(block);
+            // The process page allocator returns page-aligned memory, so the
+            // pointer array at offset 0 is safely aligned for [*c]u8.
+            const ptrs: [*][*c]u8 = @ptrCast(@alignCast(block.ptr));
+
+            var str_off: usize = ptr_bytes;
+            var i: usize = 0;
+            while (i < argc) : (i += 1) {
+                const source = std.mem.span(argv[i]);
+                @memcpy(block[str_off .. str_off + source.len], source);
+                block[str_off + source.len] = 0;
+                ptrs[i] = @ptrCast(block.ptr + str_off);
+                str_off += source.len + 1;
             }
-            argv_copy[argc] = null;
+            ptrs[argc] = null;
+
+            i = 0;
+            while (i < envc) : (i += 1) {
+                const source = std.mem.span(envp[i]);
+                @memcpy(block[str_off .. str_off + source.len], source);
+                block[str_off + source.len] = 0;
+                ptrs[argc + 1 + i] = @ptrCast(block.ptr + str_off);
+                str_off += source.len + 1;
+            }
+            ptrs[argc + 1 + envc] = null;
 
             return .{
                 .argc = argc,
-                .argv = @ptrCast(argv_copy.ptr),
+                .argv = @ptrCast(ptrs),
             };
         }
 
@@ -408,11 +452,34 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             const current_process = self.get_current_process();
 
             // Restore parent's writable sections that may have been corrupted
-            // by the vfork child running on shared memory before exec
-            dynamic_loader.restore_parent_writable_sections();
+            // by the vfork child running on shared memory before exec. Keyed by
+            // this (child) process's pid — the snapshot save() stored at vfork.
+            dynamic_loader.restore_parent_writable_sections(current_process.pid);
+
+            // Pre-exec pool occupancy: how much of each tier is already resident
+            // (suspended parent shell + its libs) BEFORE this image's pages load.
+            // This is the baseline a new process — e.g. tcc — inherits and must
+            // share, so its own headroom before PSRAM spill is cap - this.
+            if (perf.enabled) {
+                const pool = self.get_process_memory_pool();
+                perf.trace("base pid={d} sram_used={d} sram_cap={d} psram_used={d} psram_cap={d}", .{
+                    current_process.pid,
+                    pool.used_pages(0), pool.region_page_count(0),
+                    pool.used_pages(1), pool.region_page_count(1),
+                });
+            }
 
             // TODO: move loader to struct, pass allocator to loading functions
             const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
+
+            // Mark the load/relocate boundary so process exit can report real
+            // execution time separately from dynamic-load time (perf profiling).
+            // Also reset the memory-pool peak marks so the run's peak SRAM/PSRAM
+            // usage (spill detection) is attributable to this exec'd image.
+            if (perf.enabled) {
+                current_process._exec_loaded_time = hal.time.get_time_us();
+                self.get_process_memory_pool().reset_peaks();
+            }
 
             // Free the path now — it's no longer needed, and this function may
             // not return normally (process_get_back_to_parent_vfork bypasses
@@ -421,11 +488,10 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 alloc.free(path);
             }
             const exec_allocator = current_process.get_process_memory_allocator();
-            const argv_copy = try clone_exec_args(exec_allocator, argv);
+            // argv_copy holds argv and envp contiguously (see clone_exec_args);
+            // crt1 recovers `environ` from &argv[argc + 1].
+            const argv_copy = try clone_exec_args(exec_allocator, argv, envp);
             const argc = argv_copy.argc;
-
-            var envpc: usize = 0;
-            while (envp[envpc] != null) : (envpc += 1) {}
 
             var symbol: SymbolEntry = undefined;
             if (executable.module.entry) |entry| {
@@ -437,7 +503,36 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 return -1;
             }
 
+            // An exec'd image is a user program and must run unprivileged so the
+            // MPU keeps it out of the kernel heap and stack.
+            current_process.privileged = false;
+
+            // Apply the per-image stack hint from the YAFF header so an applet
+            // sizes its stack to what it declared (e.g. shell tools want far
+            // less than the 32 KiB default that tcc needs). 0xFFFFFFFF means
+            // "OS default". An *explicit* RLIMIT_STACK (raised/lowered via
+            // setrlimit/ulimit, i.e. differing from the default) always wins so
+            // dynamic raises — e.g. the tcc suite's deep-recursion tests,
+            // inherited across exec — still take effect. Otherwise the header
+            // hint overrides the inherited default.
+            const stack_hint = executable.module.stack_size;
+            if (stack_hint != 0xFFFFFFFF) {
+                const default_stack = self.runtime_configuration.default_stack_size;
+                const cur = try current_process.get_resource_limit(c.RLIMIT_STACK);
+                if (cur.rlim_cur == default_stack) {
+                    var limit = cur;
+                    limit.rlim_cur = stack_hint;
+                    limit.rlim_max = @max(limit.rlim_max, stack_hint);
+                    try current_process.set_resource_limit(c.RLIMIT_STACK, limit);
+                }
+            }
+
             try current_process.reallocate_stack();
+
+            // Apply the per-image heap profile now that the image + stack are
+            // resident: bound dynamic growth to heap_size beyond this baseline.
+            // 0xFFFFFFFF = free to grow in the shared paged pool (the default).
+            current_process.set_heap_limit_bytes(executable.module.heap_size);
 
             try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv_copy.argv), symbol.address, symbol.target_got_address);
             self._scheduler.set_next(&current_process._parent.?.node);
@@ -547,6 +642,26 @@ pub export fn process_set_next_task() *const u8 {
 
 export fn get_stack_bottom() *const u8 {
     return instance.core[hal.cpu.coreid()].get_stack_bottom();
+}
+
+// Read directly from `core` without locking: this is called from the context
+// switch (handler mode) where taking the context-switch lock would be unsafe.
+// Returns 1 for a privileged process, 0 for an unprivileged one; the assembly
+// switch path uses it to set CONTROL.nPRIV for the resumed thread.
+//
+// When kernel MPU protection is disabled, every scheduled process runs
+// unprivileged (the historical behaviour), so this always reports unprivileged
+// and the privilege distinction has no effect.
+const mpu_kernel_protection = if (@hasDecl(config.process, "use_mpu_kernel_protection"))
+    config.process.use_mpu_kernel_protection
+else
+    false;
+
+export fn process_current_is_privileged() usize {
+    if (!mpu_kernel_protection) {
+        return 0;
+    }
+    return if (instance.core[hal.cpu.coreid()].is_privileged()) 1 else 0;
 }
 
 // Read directly from `core` without locking: this is called from the HardFault

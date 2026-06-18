@@ -33,6 +33,12 @@ const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
 
 const panic_helper = @import("arch").panic;
+const arch = @import("arch");
+
+const mpu_kernel_protection = if (@hasDecl(config.process, "use_mpu_kernel_protection"))
+    config.process.use_mpu_kernel_protection
+else
+    false;
 
 // RP2350-only board bring-up (overclock + external PSRAM). Other targets (e.g.
 // the QEMU mps2-an505 build) skip it entirely — see initialize_board().
@@ -102,20 +108,6 @@ pub const os = struct {
     pub const PATH_MAX = 128;
 };
 
-const TmpRamPageSize = 256;
-const TmpMemoryPoolType = kernel.memory.heap.TmpMemoryPool(TmpRamPageSize);
-const TmpPageAllocatorType = kernel.memory.heap.TmpPageAllocator(TmpMemoryPoolType);
-
-var tmp_memory_pool: ?TmpMemoryPoolType = null;
-var tmp_page_allocator: ?TmpPageAllocatorType = null;
-
-pub fn get_tmp_memory_usage() usize {
-    if (tmp_memory_pool) |pool| {
-        return pool.get_used_size();
-    }
-    return 0;
-}
-
 fn initialize_board() void {
     try board.uart.uart0.init(.{
         .baudrate = 921600,
@@ -143,32 +135,6 @@ fn initialize_board() void {
             kernel.log.err("No external memory found", .{});
         }
     }
-}
-
-fn tmp_filesystem_allocator(kernel_allocator: std.mem.Allocator) !std.mem.Allocator {
-    if (comptime !std.mem.eql(u8, config.cpu.cpu, "rp2350")) {
-        return kernel_allocator;
-    }
-
-    if (tmp_page_allocator) |*allocator_state| {
-        return allocator_state.allocator();
-    }
-
-    const Linker = struct {
-        extern var __process_ram_start__: u8;
-        extern var __process_ram_end__: u8;
-    };
-
-    const tmp_start: [*]align(TmpRamPageSize) u8 = @ptrCast(@alignCast(&Linker.__process_ram_start__));
-    const tmp_end = @intFromPtr(&Linker.__process_ram_end__);
-    const tmp_len = tmp_end - @intFromPtr(tmp_start);
-
-    tmp_memory_pool = try TmpMemoryPoolType.init(kernel_allocator, tmp_start[0..tmp_len]);
-    if (tmp_memory_pool) |*pool| {
-        tmp_page_allocator = TmpPageAllocatorType.init(pool);
-    }
-
-    return tmp_page_allocator.?.allocator();
 }
 
 // must be in root module file, otherwise won't be used
@@ -333,8 +299,14 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
                 kernel.log.err("can't mount fallback RamFs at /root: {s}", .{@errorName(err)});
             };
         }
-        const tmp_allocator = try tmp_filesystem_allocator(allocator);
-        try mount_filesystem(try allocate_filesystem(tmp_allocator, RamFs.InstanceType.init(tmp_allocator)), "/tmp");
+        // /tmp is a romfs symlink to /root/tmp (so the fast process memory pool
+        // can reclaim the SRAM the old /tmp RamFs used). Ensure the target dir
+        // exists on whichever filesystem backs /root (SD FatFs or RamFs fallback).
+        kernel.fs.get_ivfs().interface.mkdir("/root/tmp", 0o777) catch |err| {
+            if (err != kernel.errno.ErrnoSet.FileExists) {
+                kernel.log.err("can't create /root/tmp: {s}", .{@errorName(err)});
+            }
+        };
         try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
         try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
 
@@ -398,7 +370,10 @@ export fn kernel_process() void {
     };
 
     var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };
-    var args: [2][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0) };
+    // Layout: [ argv0, NULL (argv terminator), NULL (empty-env terminator) ].
+    // crt1 derives `environ = &argv[argc + 1]`, so the trailing NULL must be
+    // present even though the init process starts with an empty environment.
+    var args: [3][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0), @ptrFromInt(0) };
 
     _ = sh.main(@ptrCast(&args[0]), 1) catch |err| {
         kernel.log.err("Cannot execute main: {s}", .{@errorName(err)});
@@ -417,6 +392,12 @@ pub export fn main() void {
         const allocator = kernel_allocator.allocator();
         initialize_board();
         splashscreen();
+
+        // Lock the kernel heap and stack away from unprivileged user processes.
+        // Must run before any process is scheduled.
+        if (mpu_kernel_protection) {
+            arch.mpu.enable_kernel_protection();
+        }
 
         kernel.process.process_manager.initialize_process_manager(allocator);
         defer kernel.process.process_manager.deinitialize_process_manager();

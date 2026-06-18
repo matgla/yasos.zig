@@ -30,6 +30,22 @@ config CONFIG_PROCESS_USE_MPU_STACK_PROTECTION
     Use hardware unit for stack protection of process
   depends on CPU_HAS_MPU
 
+config CONFIG_PROCESS_USE_MPU_KERNEL_PROTECTION
+  bool "Protect kernel heap and stack with the MPU"
+  default y
+  depends on CPU_HAS_MPU
+  help
+    Configure the MPU at boot so that unprivileged user processes cannot access
+    the kernel heap or the kernel stack. The kernel keeps full access through the
+    privileged background memory map; user processes run unprivileged and may only
+    touch code (flash), the romfs image and the user RAM pool. An unprivileged
+    access to kernel memory faults and terminates the offending process.
+
+    Per-process isolation (a process restricted to only its own memory) is not
+    provided: PMSAv8 has no sub-regions and only 8 regions, while a process
+    accumulates ~12 scattered page allocations, so its memory cannot be covered
+    by static regions. This option protects the kernel only.
+
 config CONFIG_PROCESS_USE_STACK_OVERFLOW_DETECTION
   bool "Use stack overflow detection"
   default y

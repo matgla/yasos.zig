@@ -25,6 +25,7 @@ import contextlib
 import datetime
 import subprocess
 import re
+import time
 import logging
 
 import serial
@@ -48,6 +49,12 @@ class Session:
     backend = None
     target_needs_reset = True
     target_crashed = False
+    # remote_source_path -> local sha256 of content last uploaded-and-verified
+    # to that path during this session. Lets upload_testcase skip the device
+    # side sha256sum on a cache hit (the device copy cannot drift between our
+    # own commands). Cleared in reset_target() because a board reboot / QEMU
+    # relaunch wipes the (RAM-backed) device filesystem.
+    confirmed_uploads = {}
     # While True, _record_serial_output does not scan for crash markers. Set
     # during post-crash log collection so the markers contained in the dumped
     # kernel.prev.log don't re-flag the (already rebooted) target as crashed.
@@ -128,16 +135,42 @@ class Session:
             self.serial.timeout = old_timeout
 
     def _read_until(self, marker, timeout=None):
+        # Idle (silence) timeout rather than a total deadline: keep reading as
+        # long as the target emits *anything*, and only give up after `timeout`
+        # seconds of complete silence.  pyserial's read_until() uses a total
+        # deadline, which under heavy parallel load (one QEMU per xdist worker,
+        # host CPU oversubscribed) spuriously trips on slow-but-alive targets —
+        # a sha256sum or compile that is making progress (loader logs, output
+        # still streaming) gets cut off mid-flight.  An idle timeout tolerates
+        # that wall-clock slowness while still failing fast on a genuine hang
+        # (a hung target emits nothing, so the silence window elapses).
+        idle_timeout = self.serial.timeout if timeout is None else timeout
+        marker_b = marker.encode('utf-8')
+        lenterm = len(marker_b)
+        poll = min(0.1, idle_timeout) if idle_timeout else 0.1
         old_timeout = self.serial.timeout
-        if timeout is not None:
-            self.serial.timeout = timeout
+        self.serial.timeout = poll
+        buf = bytearray()
         try:
-            data = self.serial.read_until(marker.encode('utf-8'))
+            deadline = time.monotonic() + idle_timeout
+            while True:
+                # Read one byte at a time so we stop exactly at the marker
+                # (matching pyserial read_until semantics) and never over-read
+                # into the next command's output.  read(1) returns immediately
+                # while bytes are available and blocks up to `poll` when idle,
+                # which is how we sample the silence deadline.
+                c = self.serial.read(1)
+                if c:
+                    buf += c
+                    deadline = time.monotonic() + idle_timeout
+                    if buf[-lenterm:] == marker_b:
+                        break
+                elif time.monotonic() >= deadline:
+                    break
         finally:
-            if timeout is not None:
-                self.serial.timeout = old_timeout
+            self.serial.timeout = old_timeout
 
-        text = data.decode('utf-8', 'ignore')
+        text = buf.decode('utf-8', 'ignore')
         self._record_serial_output(text)
         return text
 
@@ -331,11 +364,57 @@ class Session:
     def write_raw(self, data, timeout):
         self.serial.write(data)
 
-    def write_command(self, command):
-        self.serial.write((command + '\n').encode('utf-8'))
-        data = self.wait_for_data(command + '\n');
-        line = data.strip()
-        assert command in line, f"expected command '{command}' not found in: {line}"
+    def write_command(self, command, retries=2):
+        """Send *command* and confirm the device echoed it back intact.
+
+        The host blasts the whole line at 921600 baud; if a byte is dropped
+        (UART RX overrun while the device is mid-transmit, or a hiccup in the
+        debug-probe's USB<->UART bridge) the device runs a *truncated* command
+        and our echo marker never appears. Rather than fail the whole test on
+        that transient, verify the echo and resend up to ``retries`` times,
+        recovering a clean prompt between attempts. The success path is
+        unchanged (wait for the echo, return), so callers that stream data
+        right after the echo -- e.g. the zmodem ``rz`` handshake -- are
+        unaffected.
+        """
+        marker = command + '\n'
+        last_error = None
+        for attempt in range(retries + 1):
+            self.serial.write(marker.encode('utf-8'))
+            try:
+                data = self.wait_for_data(marker)
+            except RuntimeError as exc:
+                # Echo never completed -> the line was truncated in flight (or
+                # the target crashed, which we must not paper over).
+                last_error = exc
+                if Session.target_crashed or attempt == retries:
+                    raise
+                self.file.write(
+                    f"write_command: echo mismatch for {command!r}, "
+                    f"resending ({attempt + 1}/{retries})\n"
+                )
+                self.file.flush()
+                self._recover_after_truncated_command()
+                continue
+            line = data.strip()
+            assert command in line, f"expected command '{command}' not found in: {line}"
+            return
+        raise last_error
+
+    def _recover_after_truncated_command(self):
+        """Drain the garbled (truncated) command's output and resync to a prompt.
+
+        A truncation usually still delivered the trailing newline, so the bad
+        command already ran and the shell is at (or heading toward) a fresh
+        prompt. Drain stale output and nudge with a newline until the prompt
+        reappears, so the resend starts from a known-good state.
+        """
+        for _ in range(3):
+            try:
+                if self._try_recover_prompt():
+                    return
+            except (OSError, serial.SerialException):
+                break
 
     def read_line(self):
         line = self.serial.readline().decode('utf-8', 'ignore')
@@ -362,6 +441,9 @@ class Session:
             return line.strip()
 
     def reset_target(self):
+        # A reset wipes the device filesystem, so previously uploaded sources
+        # are gone; drop their cached hashes to force re-verification/upload.
+        Session.confirmed_uploads.clear()
         if Session.backend is not None:
             self.file.write("Resetting QEMU target (relaunching qemu).\n")
             self.file.flush()

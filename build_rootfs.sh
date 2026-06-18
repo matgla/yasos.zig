@@ -6,7 +6,7 @@ else
 GETOPT_CMD="/usr/bin/getopt"
 fi
 OPTIONS=co:d
-LONGOPTIONS=clear,output:,debug-regalloc,debug
+LONGOPTIONS=clear,output:,debug-regalloc,debug,no-kernel
 
 PARSED=$($GETOPT_CMD --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
 if [[ $? -ne 0 ]]; then
@@ -26,6 +26,16 @@ CLEAR=false
 BUILD_IMAGE=false
 DEBUG_REGALLOC=false
 DEBUG_TCC=false
+# Precompiled headers trade flash space for a compile-time speedup that turned
+# out to be too small to justify the size on rp2350. Off by default; re-enable
+# with --with-pch.
+GENERATE_PCH=false
+# When a rootfs image is produced (-o), also rebuild the kernel so the freshly
+# built image (which the kernel .incbin's) is actually embedded. Without this the
+# kernel/QEMU silently runs a STALE romfs (e.g. an old armv8m-tcc) after a tcc or
+# rootfs change. Opt out with --no-kernel (e.g. when the caller runs zig build
+# itself, like scripts/run_qemu_smoke.sh).
+REBUILD_KERNEL=true
 
 # Process the options
 while true; do
@@ -47,6 +57,14 @@ while true; do
           DEBUG_TCC=true
           shift
           ;;
+        --no-kernel)
+          REBUILD_KERNEL=false
+          shift
+          ;;
+        --with-pch)
+          GENERATE_PCH=true
+          shift
+          ;;
         --)
             shift
             break
@@ -62,7 +80,7 @@ SCRIPT_DIR=$(dirname "$(realpath "$0")")
 PREFIX=$SCRIPT_DIR/rootfs/usr
 TARGET_BUILD_EXTRA_CFLAGS=""
 if ! $DEBUG_TCC; then
-  TARGET_BUILD_EXTRA_CFLAGS="-O1"
+  TARGET_BUILD_EXTRA_CFLAGS="-O2"
 fi
 
 echo "Building rootfs from $SCRIPT_DIR..."
@@ -110,7 +128,12 @@ fi
 ls -lah
 pwd
 cd ..
-mkdir -p rootfs/tmp
+# /tmp is a symbolic link to /root/tmp rather than a RamFs backed by the SRAM
+# `process_ram` region. Freeing that SRAM lets the fast process memory pool use
+# it. genromfs encodes this as a romfs symlink; the VFS resolves it across the
+# mount boundary into the writable /root filesystem.
+rm -rf rootfs/tmp
+ln -s /root/tmp rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
 cp $SCRIPT_DIR/hello_script.sh rootfs/usr
 
@@ -174,17 +197,21 @@ build_cross_compiler()
   mkdir -p bin
   # Use explicit workspace paths to avoid system newlib
   YASOS_SYSROOT="$SCRIPT_DIR/rootfs"
-  YASOS_LIBPATHS="{B}:$SCRIPT_DIR/rootfs/usr/lib:$SCRIPT_DIR/rootfs/lib"
+  YASOS_LIBPATHS="$SCRIPT_DIR/rootfs/usr/lib:{B}:$SCRIPT_DIR/rootfs/lib"
   YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
-  YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
+  # rootfs/usr/include first (the tcc intrinsic headers are mirrored there
+  # byte-identically), so libc headers resolve on the first probe instead of
+  # missing {B}/include with an ENOENT every time -- each failed open is a VFS
+  # path-walk + dir scan on device.  {B}/include stays as fallback for tcclib.h.
+  YASOS_SYSINCLUDES="$SCRIPT_DIR/rootfs/usr/include:{B}/include"
 
   CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0"
-  CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -DCONFIG_TCC_BCHECK=0 -Wall -Werror"
+  CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O2 -DTARGETOS_YasOS=1 -DCONFIG_TCC_BCHECK=0 -Wall -Werror"
   CROSS_CONFIG_DEBUG=""
   if $DEBUG_TCC; then
-    CROSS_CONFIG_DEBUG="--debug --enable-O1"
+    CROSS_CONFIG_DEBUG="--debug --enable-O2"
     CROSS_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1"
-    CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O1 -DTARGETOS_YasOS=1 -DCONFIG_TCC_BCHECK=0 -Wall -Werror"
+    CROSS_EXTRA_CFLAGS="$CROSS_TCC_DEBUG_DEFINE -g -O2 -DTARGETOS_YasOS=1 -DCONFIG_TCC_BCHECK=0 -Wall -Werror"
   fi
   if $DEBUG_REGALLOC; then
     CROSS_EXTRA_CFLAGS="$CROSS_EXTRA_CFLAGS -DTCC_REGALLOC_DEBUG"
@@ -252,20 +279,20 @@ build_c_compiler()
 
   # Use the workspace rootfs as sysroot to avoid linking against system newlib
   YASOS_SYSROOT="$SCRIPT_DIR/rootfs"
-  YASOS_LIBPATHS="{B}:$SCRIPT_DIR/rootfs/usr/lib:$SCRIPT_DIR/rootfs/lib"
+  YASOS_LIBPATHS="$SCRIPT_DIR/rootfs/usr/lib:{B}:$SCRIPT_DIR/rootfs/lib"
   YASOS_CRTPREFIX="$SCRIPT_DIR/rootfs/usr/lib"
-  YASOS_SYSINCLUDES="{B}/include:$SCRIPT_DIR/rootfs/usr/include"
+  YASOS_SYSINCLUDES="$SCRIPT_DIR/rootfs/usr/include:{B}/include"
 
   NATIVE_TCC_DEBUG_CONFIG=""
   # -DCONFIG_TCC_DEBUG enables the on-target `-dump-ir` / `-dump-ir-passes=` flags
   # (libtcc.c gates them under #ifdef CONFIG_TCC_DEBUG) so the native compiler can
   # dump IR on-device for HW-vs-QEMU codegen comparison.
   NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0 -DCONFIG_TCC_DEBUG"
-  NATIVE_TCC_DEBUG_OPT="${NATIVE_TCC_OPT_OVERRIDE:--O1}"
+  NATIVE_TCC_DEBUG_OPT="${NATIVE_TCC_OPT_OVERRIDE:--O2}"
   if $DEBUG_TCC; then
-    NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O1"
+    NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O2"
     NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=1 -DCONFIG_TCC_DEBUG"
-    NATIVE_TCC_DEBUG_OPT="-O1"
+    NATIVE_TCC_DEBUG_OPT="-O2"
   fi
 
   NATIVE_STAGE1_OUTPUT="$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.elf"
@@ -344,9 +371,9 @@ build_c_compiler()
 
   # Second stage build with target prefix for correct embedded paths
   # Use target-relative paths for the native compiler
-  NATIVE_LIBPATHS="{B}:/usr/lib:/lib"
+  NATIVE_LIBPATHS="/usr/lib:{B}:/lib"
   NATIVE_CRTPREFIX="/usr/lib"
-  NATIVE_SYSINCLUDES="{B}/include:/usr/include"
+  NATIVE_SYSINCLUDES="/usr/include:{B}/include"
   if $SKIP_NATIVE_STAGE2; then
     echo "Native compiler stage 2 already up to date."
   else
@@ -549,26 +576,45 @@ cd ..
 # ---- Stage 4: Precompile common headers for the native TCC ----
 # Generate PCH files using the cross compiler.  The sysroot-stripping
 # logic in tccpp.c ensures the stored paths match the target filesystem.
-# The native on-target TCC uses the "native" PCH subdir.
-PCH_DIR="$SCRIPT_DIR/rootfs/usr/lib/tcc/pch/armv8m-"
+#
+# The set of predefined macros depends on the optimization level
+# (-O1 and up define __OPTIMIZE__, while -O0/-Os do not), and the PCH
+# loader rejects a header whose predefine state differs from the current
+# compile.  So we emit one PCH per predefine state: an unoptimized variant
+# (foo.pch, matches -O0/-Os) and an optimized variant (foo.opt.pch, matches
+# -O1/-O2/-O3).  Both are listed in auto.index against the same header; the
+# loader silently picks whichever matches the current invocation.
+PCH_DIR="$SCRIPT_DIR/rootfs/usr/lib/tcc/pch/armv8m"
+if ! $GENERATE_PCH; then
+  # Disabled to save flash on rp2350. Remove any stale PCH left in the tree by a
+  # previous build so it does not get packed into the image (the loader silently
+  # falls back to parsing the real headers when no auto.index is present).
+  rm -rf "$SCRIPT_DIR/rootfs/usr/lib/tcc/pch"
+  echo "Skipping precompiled headers (pass --with-pch to enable)"
+else
 mkdir -p "$PCH_DIR"
 PCH_HEADERS="stdio.h stdlib.h string.h"
+# "<opt-flags>:<pch-suffix>" — one entry per distinct predefine state.
+PCH_VARIANTS=":  -O1:.opt"
 PCH_INDEX=""
 echo "Generating precompiled headers..."
 for hdr in $PCH_HEADERS; do
-  pch_name="${hdr%.h}.pch"
   hdr_path="$SCRIPT_DIR/rootfs/usr/include/$hdr"
-  if [ -f "$hdr_path" ]; then
-    armv8m-tcc -generate-pch "$hdr_path" -o "$PCH_DIR/$pch_name"
-    if [ $? -eq 0 ]; then
+  if [ ! -f "$hdr_path" ]; then
+    echo "  WARNING: Header $hdr_path not found, skipping PCH"
+    continue
+  fi
+  for variant in $PCH_VARIANTS; do
+    oflags="${variant%:*}"
+    suffix="${variant#*:}"
+    pch_name="${hdr%.h}${suffix}.pch"
+    if armv8m-tcc $oflags -generate-pch "$hdr_path" -o "$PCH_DIR/$pch_name"; then
       PCH_INDEX="${PCH_INDEX}/usr/include/${hdr}\t${pch_name}\n"
-      echo "  Generated $pch_name"
+      echo "  Generated $pch_name (${oflags:-unoptimized})"
     else
       echo "  WARNING: Failed to generate $pch_name"
     fi
-  else
-    echo "  WARNING: Header $hdr_path not found, skipping PCH"
-  fi
+  done
 done
 if [ -n "$PCH_INDEX" ]; then
   printf "$PCH_INDEX" > "$PCH_DIR/auto.index"
@@ -578,32 +624,38 @@ fi
 # Validate that generated PCH files can be loaded by the native compiler.
 # The cross-compiler (armv8m-tcc) and native compiler share the same
 # keyword table and predefines, so validating with the cross-compiler
-# catches mismatches before flashing.
+# catches mismatches before flashing.  Each variant is validated at the
+# optimization level it was generated for.
 echo "Validating precompiled headers..."
 PCH_VALID=true
 for hdr in $PCH_HEADERS; do
-  pch_name="${hdr%.h}.pch"
-  pch_path="$PCH_DIR/$pch_name"
-  if [ -f "$pch_path" ]; then
-    # Create a minimal test file that includes the header
-    echo "#include <$hdr>" > /tmp/pch_validate_$$.c
-    echo "int main(void){return 0;}" >> /tmp/pch_validate_$$.c
-    output=$(armv8m-tcc -verbose-pch -use-pch "$pch_path" -c /tmp/pch_validate_$$.c -o /dev/null 2>&1)
-    if echo "$output" | grep -q "ignoring PCH"; then
-      echo "  ERROR: PCH validation failed for $pch_name:"
-      echo "$output" | grep -E "pch:|ignoring PCH" | sed 's/^/    /'
-      PCH_VALID=false
-    else
-      echo "  Validated $pch_name OK"
+  for variant in $PCH_VARIANTS; do
+    oflags="${variant%:*}"
+    suffix="${variant#*:}"
+    pch_name="${hdr%.h}${suffix}.pch"
+    pch_path="$PCH_DIR/$pch_name"
+    if [ -f "$pch_path" ]; then
+      # Create a minimal test file that includes the header
+      echo "#include <$hdr>" > /tmp/pch_validate_$$.c
+      echo "int main(void){return 0;}" >> /tmp/pch_validate_$$.c
+      output=$(armv8m-tcc $oflags -verbose-pch -use-pch "$pch_path" -c /tmp/pch_validate_$$.c -o /dev/null 2>&1)
+      if echo "$output" | grep -q "ignoring PCH"; then
+        echo "  ERROR: PCH validation failed for $pch_name:"
+        echo "$output" | grep -E "pch:|ignoring PCH" | sed 's/^/    /'
+        PCH_VALID=false
+      else
+        echo "  Validated $pch_name OK (${oflags:-unoptimized})"
+      fi
+      rm -f /tmp/pch_validate_$$.c
     fi
-    rm -f /tmp/pch_validate_$$.c
-  fi
+  done
 done
 if ! $PCH_VALID; then
   echo "ERROR: PCH validation failed! Cross and native compilers produce incompatible precompiled headers."
   echo "Check keyword table, predefines, and config.h defines for mismatches."
   exit 1
 fi
+fi # GENERATE_PCH
 
 if $BUILD_IMAGE; then
   echo "Outputing file to: $OUTPUT_FILE"
@@ -611,4 +663,33 @@ if $BUILD_IMAGE; then
   rm -f rootfs/lib/libc.a
   rm -rf rootfs/usr/share
   genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
+fi
+
+# Re-embed the freshly built rootfs image into the kernel. The kernel pulls the
+# romfs in via `.incbin "<image>"`. build.zig already busts zig's assembly cache
+# when the image changes (it hashes rootfs.img into the generated rootfs.S), so a
+# plain `zig build` re-embeds the fresh image — the staleness people hit is simply
+# forgetting to run `zig build` after regenerating rootfs.img. Do it here. Skip
+# when no image was produced, when --no-kernel was passed (caller drives its own
+# zig build, e.g. scripts/run_qemu_smoke.sh), when this target doesn't embed the
+# image (no matching .incbin), or when the kernel hasn't been configured yet.
+if $BUILD_IMAGE && $REBUILD_KERNEL; then
+  IMG_BASE=$(basename "$OUTPUT_FILE")
+  EMBEDS_IMG=$(grep -rlE "\.incbin[[:space:]]+\"$IMG_BASE\"" "$SCRIPT_DIR/hal" 2>/dev/null | head -1)
+  KERNEL_CONFIG="$SCRIPT_DIR/config/target/config.json"
+  if [ -z "$EMBEDS_IMG" ]; then
+    echo "Kernel: no source .incbin's '$IMG_BASE' — not a romfs-embedded target, skipping kernel rebuild."
+  elif [ ! -f "$KERNEL_CONFIG" ]; then
+    echo "Kernel: not configured ($KERNEL_CONFIG missing). Run 'zig build defconfig -Ddefconfig_file=<cfg>' first; skipping kernel rebuild."
+  elif ! command -v zig >/dev/null 2>&1; then
+    echo "Kernel: zig not found in PATH; skipping kernel rebuild."
+  else
+    KERNEL_OPTIMIZE="${YASOS_KERNEL_OPTIMIZE:-${YASOS_QEMU_OPTIMIZE:-ReleaseFast}}"
+    echo "Kernel: re-embedding $IMG_BASE and rebuilding (-Doptimize=$KERNEL_OPTIMIZE)..."
+    if ! ( cd "$SCRIPT_DIR" && zig build -Doptimize="$KERNEL_OPTIMIZE" ); then
+      echo "ERROR: kernel rebuild failed."
+      exit 1
+    fi
+    echo "Kernel: rebuilt zig-out/bin/yasos_kernel with fresh romfs."
+  fi
 fi

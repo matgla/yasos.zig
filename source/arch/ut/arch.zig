@@ -41,6 +41,10 @@ pub fn enable_interrupts() void {}
 pub fn memory_barrier_release() void {}
 pub fn memory_barrier_acquire() void {}
 
+pub const mpu = struct {
+    pub fn enable_kernel_protection() void {}
+};
+
 pub const sync = struct {
     pub inline fn save_and_disable_interrupts() usize {
         return 0;

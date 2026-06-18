@@ -28,6 +28,7 @@ const kernel = @import("../kernel.zig");
 const log = std.log.scoped(.syscall);
 
 const systick = @import("systick.zig");
+const time = @import("../time.zig");
 
 const config = @import("config");
 
@@ -287,6 +288,28 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process.append_tty_newline_on_exit();
+    // Report real execution time (load/relocate boundary → exit), separate from
+    // the dynamic-load time emitted as `# tprof load`. Correlate by pid.
+    if (perf.enabled and process._exec_loaded_time != 0) {
+        const run_us = hal.time.get_time_us() - process._exec_loaded_time;
+        perf.trace("run pid={d} us={d} code={d}", .{ process.pid, run_us, context.* });
+        // Peak page usage per tier during this run: psram_pk > 0 means the
+        // process spilled out of fast SRAM into slow PSRAM (a likely cause of
+        // across-the-board slowness). Pages are 4 KiB.
+        const pool = process_manager.instance.get_process_memory_pool();
+        perf.trace("mem pid={d} sram_pk={d} sram_cap={d} psram_pk={d} psram_cap={d} kheap_now={d} kheap_pk={d} kheap_phys={d}", .{
+            process.pid,
+            pool.peak_used_pages(0), pool.region_page_count(0),
+            pool.peak_used_pages(1), pool.region_page_count(1),
+            kernel.memory.heap.malloc.get_usage(),
+            kernel.memory.heap.malloc.get_peak_usage(),
+            system_stubs.kernel_heap_physical_used(),
+        });
+        // Per-process footprint at this exit: attributes pool pages to each live
+        // pid (the exiting process + any vfork-suspended parent shell still
+        // resident) so toybox/tcc memory reductions are measurable per process.
+        pool.dump_usage_by_pid();
+    }
     // Encode in Linux wait-status format: normal exit = (code << 8)
     // so that WEXITSTATUS/WIFEXITED macros work correctly.
     const wait_status = @as(i32, context.*) << 8;
@@ -485,8 +508,18 @@ pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    const context: *const volatile c.nanosleep_context = @ptrCast(@alignCast(arg));
+    if (context.req) |req| {
+        const seconds = req.*.tv_sec;
+        const nanoseconds = req.*.tv_nsec;
+        if (seconds != 0) {
+            time.sleep_ms(@intCast(seconds * 1000));
+        }
+        if (nanoseconds != 0) {
+            time.sleep_us(@intCast(@divTrunc(nanoseconds, 1000)));
+        }
+    }
+    return 0;
 }
 pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch();
@@ -735,6 +768,7 @@ pub fn sys_ftruncate(arg: *const volatile anyopaque) !i32 {
 }
 
 const perf = @import("perf_profile.zig");
+const system_stubs = @import("system_stubs.zig");
 
 pub fn sys_perf_dump(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.perf_dump_context = @ptrCast(@alignCast(arg));
