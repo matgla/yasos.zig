@@ -1,5 +1,11 @@
 #!/bin/sh
 
+# Abort (with a non-zero status the caller checks) if any build step fails,
+# instead of silently continuing and returning the exit code of the final
+# `ln -sf`. The git-apply checks below stay tolerant because they run as `if`
+# conditions, which are exempt from `set -e`.
+set -e
+
 cd "$(dirname "$0")"
 pwd
 cp yasos.config ../toybox/.config

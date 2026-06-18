@@ -177,6 +177,10 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     kernel.log.err("KERNEL PANIC: {s}", .{msg});
     panic_helper.dump_stack_trace(kernel.log, @returnAddress());
     kernel.log.err("***********************************************", .{});
+    // Under QEMU (semihosting enabled) terminate the emulator with a non-zero
+    // status instead of spinning forever, so a hard fault / panic ends the run
+    // and surfaces as a failure to the test harness. No-op on real hardware.
+    panic_helper.exit_if_emulated(134);
     while (true) {}
 }
 

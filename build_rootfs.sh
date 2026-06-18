@@ -211,10 +211,25 @@ build_cross_compiler()
   fi
   # Save cross-compiler config for later comparison with native build
   cp config.h config.h.cross
+  # A previous run's native bootstrap (build_c_compiler) leaves ARM-target
+  # objects in armv8m-arch/arm/libarm.a and the armv8m-*.o files. The nested
+  # arch Makefile keys recompilation on source timestamps only — not on the
+  # active CC — so a cross rebuild here would re-archive those ARM objects and
+  # the host-gcc link of armv8m-tcc rejects them ("relocations in generic ELF
+  # (EM: 40)" / "file in wrong format"). Drop the prior build objects so the
+  # cross stage recompiles everything for the host. (Symmetric to the cleanup
+  # in build_c_compiler before the native bootstrap.)
+  rm -rf armv8m-arch armv8m-ir armv8m-*.o *.o
   make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
   make install INC-armv8m="$YASOS_SYSINCLUDES"
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
 
   # Verify cross-compiler was installed
   if [ ! -f "$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc" ]; then
@@ -370,6 +385,9 @@ build_c_compiler()
     # Copy the libtcc1.a files from cross-compiler install to build dir for make install
     cp $SCRIPT_DIR/libs/tinycc/lib/tcc/armv8m-libtcc1.a .
     make install armv8m-tcc DESTDIR=$SCRIPT_DIR/rootfs LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
+    if [ $? -ne 0 ]; then
+      exit -1;
+    fi
     mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
     cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
     # Install FP libraries (shared .so for dynamic linking, .a for static)
@@ -454,10 +472,10 @@ build_zork_makefile()
   mkdir -p $PREFIX/games/lib
 
   make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" install BINDIR=$PREFIX/games/ DATADIR=$PREFIX/games/lib/ MANDIR=$PREFIX/share/man/man6
-  mv $PREFIX/games/zork $PREFIX/games/hmm
   if [ $? -ne 0 ]; then
     exit -1;
   fi
+  mv $PREFIX/games/zork $PREFIX/games/hmm
   cd ..
 }
 
@@ -522,6 +540,9 @@ build_makefile sha
 # build_gnumake make
 
 TOYBOX_EXTRA_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
+if [ $? -ne 0 ]; then
+  exit -1;
+fi
 
 cd ..
 
