@@ -36,6 +36,18 @@ current_dir = os.path.dirname(os.path.abspath(__file__)) + "/.."
 logger = logging.getLogger(__name__)
 LOG_PREFIXES = ("[DBG]", "[ERR]", "[INF]", "[WRN]")
 
+# The device's interactive shell echoes normal typing one character at a time,
+# but draws its prompt with ANSI escapes (CR, "$ ", erase-to-EOL \x1b[K, cursor
+# move \x1b[<n>C) and redraws the whole line for editing keys (cursor moves,
+# deletes, history). Enter is echoed as CRLF. So a command's echo never appears
+# as a clean "command\n"; this strips CSI / Fe escape sequences and carriage
+# returns so the echo can be matched against its plain text.
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]')
+
+
+def _strip_ansi(text):
+    return _ANSI_RE.sub('', text).replace('\r', '')
+
 # Serial read timeout (seconds). Deliberately short so genuine hangs fail
 # fast; individual call sites that legitimately need longer (boot, compile,
 # slow programs) pass an explicit ``timeout=`` or use ``Session.timeout()``.
@@ -215,13 +227,136 @@ class Session:
             self.serial.reset_input_buffer()
         except (OSError, serial.SerialException):
             pass  # serial already dead; reset_target replaces/revives it
-        self.reset_target()
-        self.serial.reset_input_buffer()
-        self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
-        while self.serial.in_waiting > 0:
-            self.wait_for_prompt_except_logs()
-        Session.target_needs_reset = False
-        Session.target_crashed = False
+        # Escalating recovery ladder. Each rung first applies a stronger remedy
+        # (none -> USB power-cycle -> reflash), then resets and waits for a
+        # prompt; we stop at the first rung that yields one. A rung whose remedy
+        # isn't applicable (QEMU mode, probe/artifacts missing) returns False and
+        # we re-raise the last failure rather than escalate blindly. The classic
+        # trigger is a double-fault lockup ("clearing lockup after double fault")
+        # that sysresetreq + rescue DP can't clear.
+        last_exc = None
+        for remedy in (None, self.power_reset_target, self.reflash_target):
+            if remedy is not None and not remedy():
+                break
+            self.reset_target()
+            try:
+                self.serial.reset_input_buffer()
+            except (OSError, serial.SerialException):
+                pass
+            try:
+                self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
+            except RuntimeError as exc:
+                last_exc = exc
+                continue
+            while self.serial.in_waiting > 0:
+                self.wait_for_prompt_except_logs()
+            Session.target_needs_reset = False
+            Session.target_crashed = False
+            return
+        raise last_exc if last_exc is not None else RuntimeError(
+            "Prompt not found on serial port: '$ '"
+        )
+
+    def power_reset_target(self):
+        """Power-cycle the USB hub the debug probe sits on, to recover a board
+        the OpenOCD reset could not revive. Returns True only when a cycle
+        actually happened. No-op (returns False) in QEMU mode or when the probe
+        can't be located -- the caller then re-raises the original reset error.
+
+        The cycle also drops the probe (the board has no independently switchable
+        power on this rig), so the old serial handle dies; we reopen it on the
+        re-enumerated /dev node before returning.
+        """
+        if Session.backend is not None:
+            return False
+        self.file.write(
+            "OpenOCD reset did not recover the board; power-cycling via "
+            + current_dir + "/power_reset_target.sh\n"
+        )
+        self.file.flush()
+        output = subprocess.run(
+            "./power_reset_target.sh", shell=True, cwd=current_dir,
+            stderr=subprocess.STDOUT, stdout=subprocess.PIPE,
+        )
+        self.file.write(output.stdout.decode('utf-8'))
+        self.file.flush()
+        if output.returncode != 0:
+            self.file.write(
+                f"power_reset_target.sh exited {output.returncode}; no power reset performed.\n"
+            )
+            self.file.flush()
+            return False
+        # The whole hub (probe included) was power-cycled, so the old serial
+        # handle is dead -- reopen on the re-enumerated port.
+        self._reopen_serial()
+        return True
+
+    def _reopen_serial(self):
+        """Reopen the debug-probe serial port after a power cycle re-enumerated
+        it. The /dev node can change, so prefer the pinned SERIAL_DEVICE when it
+        reappears and otherwise re-detect the probe. Raises if it never returns.
+        """
+        try:
+            if Session.serial is not None and Session.serial.is_open:
+                Session.serial.close()
+        except (OSError, serial.SerialException):
+            pass
+        Session.serial = None
+
+        configured = (os.environ.get("SERIAL_DEVICE") or "").strip()
+        port = None
+        deadline = time.monotonic() + BOOT_TIMEOUT
+        while time.monotonic() < deadline:
+            if configured and os.path.exists(configured):
+                port = configured
+                break
+            try:
+                detected = detect_probe_serial_port()
+            except Exception:
+                detected = None
+            if detected:
+                port = detected
+                break
+            time.sleep(0.5)
+
+        if port is None:
+            Session.serial_port = None
+            raise RuntimeError("serial port did not re-enumerate after power cycle")
+
+        Session.serial_port = port
+        Session.serial = serial.Serial(port, 921600, timeout=SERIAL_TIMEOUT)
+        self.serial = Session.serial
+        self.file.write(f"Reopened serial on {port} after power cycle.\n")
+        self.file.flush()
+
+    def reflash_target(self):
+        """Reflash the board (rootfs + kernel) as the final reset escalation,
+        when even a power cycle won't bring it back to a prompt. Returns True
+        only when a reflash actually ran. No-op (returns False) in QEMU mode or
+        when the flash artifacts aren't available -- the caller then re-raises
+        the prior failure. The probe is untouched, so self.serial stays valid;
+        the caller's reset_target() + wait handles the post-flash boot.
+        """
+        if Session.backend is not None:
+            return False
+        self.file.write(
+            "Power cycle did not recover the board; reflashing via "
+            + current_dir + "/reflash_target.sh\n"
+        )
+        self.file.flush()
+        output = subprocess.run(
+            "./reflash_target.sh", shell=True, cwd=current_dir,
+            stderr=subprocess.STDOUT, stdout=subprocess.PIPE,
+        )
+        self.file.write(output.stdout.decode('utf-8'))
+        self.file.flush()
+        if output.returncode != 0:
+            self.file.write(
+                f"reflash_target.sh exited {output.returncode}; no reflash performed.\n"
+            )
+            self.file.flush()
+            return False
+        return True
 
     def collect_crash_logs(self):
         """After a crash: reboot the board and pull the persisted kernel logs
@@ -364,41 +499,81 @@ class Session:
     def write_raw(self, data, timeout):
         self.serial.write(data)
 
+    def _wait_for_echo(self, command):
+        """Read and confirm the device echoed *command* back intact.
+
+        The shell draws its prompt with ANSI escapes and echoes Enter as CRLF,
+        so a literal ``command\\n`` never appears verbatim. We match the command
+        against an ANSI/CR-stripped view of the stream (gating the whole-buffer
+        check on the command's last byte), then drain one byte at a time through
+        the newline that commits the line -- leaving the stream where the
+        command's own output (or the zmodem handshake) begins, without swallowing
+        the first byte of output.
+
+        Returns True if the command echoed back intact; False on idle timeout
+        (a byte was dropped in flight, or the target went quiet -> resend).
+        """
+        idle_timeout = self.serial.timeout
+        poll = min(0.1, idle_timeout) if idle_timeout else 0.1
+        tail = command.encode('utf-8')[-1:]
+        old_timeout = self.serial.timeout
+        self.serial.timeout = poll
+        buf = bytearray()
+        seen = False
+        try:
+            deadline = time.monotonic() + idle_timeout
+            while True:
+                c = self.serial.read(1)
+                if c:
+                    buf += c
+                    deadline = time.monotonic() + idle_timeout
+                    if not seen:
+                        if c == tail and command in _strip_ansi(
+                                buf.decode('utf-8', 'ignore')):
+                            seen = True
+                    elif c == b'\n':
+                        break
+                elif time.monotonic() >= deadline:
+                    break
+        finally:
+            self.serial.timeout = old_timeout
+        self._record_serial_output(buf.decode('utf-8', 'ignore'))
+        return seen
+
     def write_command(self, command, retries=2):
         """Send *command* and confirm the device echoed it back intact.
 
-        The host blasts the whole line at 921600 baud; if a byte is dropped
-        (UART RX overrun while the device is mid-transmit, or a hiccup in the
-        debug-probe's USB<->UART bridge) the device runs a *truncated* command
-        and our echo marker never appears. Rather than fail the whole test on
-        that transient, verify the echo and resend up to ``retries`` times,
-        recovering a clean prompt between attempts. The success path is
-        unchanged (wait for the echo, return), so callers that stream data
-        right after the echo -- e.g. the zmodem ``rz`` handshake -- are
-        unaffected.
+        The shell's line editor echoes normal typing one character at a time
+        (full-line redraws are reserved for actual editing -- cursor moves,
+        deletes, history), so the command comes back cleanly. We still verify it
+        and resend up to ``retries`` times to ride out a transient dropped byte
+        (a UART RX hiccup) without failing the whole test, recovering a clean
+        prompt between attempts. The success path leaves the stream positioned
+        right after the echoed line (past the committing newline), so callers
+        that stream data immediately afterwards -- e.g. the zmodem ``rz``
+        handshake -- are unaffected.
         """
-        marker = command + '\n'
         last_error = None
         for attempt in range(retries + 1):
-            self.serial.write(marker.encode('utf-8'))
-            try:
-                data = self.wait_for_data(marker)
-            except RuntimeError as exc:
-                # Echo never completed -> the line was truncated in flight (or
-                # the target crashed, which we must not paper over).
-                last_error = exc
-                if Session.target_crashed or attempt == retries:
-                    raise
-                self.file.write(
-                    f"write_command: echo mismatch for {command!r}, "
-                    f"resending ({attempt + 1}/{retries})\n"
-                )
-                self.file.flush()
-                self._recover_after_truncated_command()
-                continue
-            line = data.strip()
-            assert command in line, f"expected command '{command}' not found in: {line}"
-            return
+            self.serial.write((command + '\n').encode('utf-8'))
+            if self._wait_for_echo(command):
+                return
+            # Echo never completed -> a byte was dropped in flight, or the
+            # target crashed (which we must not paper over).
+            if Session.target_crashed:
+                raise RuntimeError(
+                    f"Target crashed while waiting for echo of {command!r}")
+            last_error = RuntimeError(
+                f"command echo not seen for {command!r} "
+                f"after {attempt + 1} attempt(s)")
+            if attempt == retries:
+                raise last_error
+            self.file.write(
+                f"write_command: echo mismatch for {command!r}, "
+                f"resending ({attempt + 1}/{retries})\n"
+            )
+            self.file.flush()
+            self._recover_after_truncated_command()
         raise last_error
 
     def _recover_after_truncated_command(self):

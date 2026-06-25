@@ -310,6 +310,20 @@ fn format_module(module: *const yasld.Module, buffer: []u8, depth: usize) usize 
     return written;
 }
 
+/// Fault-context dump of a process's module map. Called from the ARM hardfault
+/// handler so a crash's stacked_pc/lr can be mapped to <module>+offset without
+/// guessing load bases. Logs each section line via the loader scope.
+export fn dump_fault_maps(pid: c.pid_t) void {
+    var buffer: [4096]u8 = undefined;
+    const n = format_maps(pid, buffer[0..]);
+    log.err("maps for pid={d}:", .{pid});
+    var it = std.mem.splitScalar(u8, buffer[0..n], '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        log.err("  {s}", .{line});
+    }
+}
+
 /// Render the load mapping (executable then shared libraries) for `pid` into
 /// `buffer` as lines of "<module> <section> 0x<addr> 0x<size>". Returns the
 /// number of bytes written. Used by /proc/<pid>/maps so module load addresses

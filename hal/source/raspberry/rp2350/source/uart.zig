@@ -36,7 +36,14 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         const Register = get_register_address(index);
         const RegisterVolatile = get_volatile_register_address(index);
 
-        var rx_buffer: common.utils.RingBuffer(u8, 64) = common.utils.RingBuffer(u8, 64).init();
+        // The interactive shell drains RX one byte per read()+echo cycle, far
+        // slower than the host blasts a whole command line at 921600 baud. The
+        // ring must therefore be big enough to absorb an entire pasted/sent line
+        // while the shell catches up; a 64-byte ring overflowed mid-line and
+        // dropped characters (a 180-byte command came back as a corrupted
+        // subsequence). 512 covers the longest commands the smoke harness sends
+        // (~200 bytes) with margin.
+        var rx_buffer: common.utils.RingBuffer(u8, 512) = common.utils.RingBuffer(u8, 512).init();
         var is_initialized: bool = false;
 
         fn uart_is_readable() linksection(".time_critical") bool {

@@ -34,6 +34,7 @@ const HardwareStoredRegisters = arch_process.HardwareStoredRegisters;
 extern fn get_stack_top() *const u8;
 extern fn get_current_pid() c.pid_t;
 extern fn file_log_disable() void;
+extern fn dump_fault_maps(pid: c.pid_t) void;
 extern fn _exit(code: c_int) void;
 
 const usage_fault_stkof_mask: u32 = 1 << 20;
@@ -106,6 +107,35 @@ fn dump_memory_window(label: []const u8, start: usize, count: usize) void {
         const p2: *const volatile u32 = @ptrFromInt(a0 + 8);
         const p3: *const volatile u32 = @ptrFromInt(a0 + 12);
         log.err("    0x{X:0>8}: {X:0>8} {X:0>8} {X:0>8} {X:0>8}", .{ a0, p0.*, p1.*, p2.*, p3.* });
+    }
+}
+
+// Scan the faulting process stack for plausible return addresses (odd =
+// Thumb, in the user text window) and dump the code bytes ending at each, so
+// the call chain can be byte-matched against the ELF (the YAFF load skew makes
+// raw address arithmetic unreliable). Reusable backtrace aid for self-host
+// crash triage.
+fn dump_backtrace_codes(stack_ptr: usize, words: usize) void {
+    const base = stack_ptr & ~@as(usize, 0x3);
+    if (!is_readable_ram(base)) return;
+    log.err("  backtrace (code bytes ending at each stacked return addr):", .{});
+    var i: usize = 0;
+    var dumped: usize = 0;
+    while (i < words and dumped < 16) : (i += 1) {
+        const a = base + i * 4;
+        if (!is_readable_ram(a)) break;
+        const v = (@as(*const volatile u32, @ptrFromInt(a))).*;
+        // Candidate return address: Thumb (odd) in the user text window.
+        if ((v & 1) == 0) continue;
+        if (!is_user_text(v)) continue;
+        const ret = v & ~@as(usize, 1);
+        const win = (ret -% 10) & ~@as(usize, 0x3);
+        if (!is_readable_ram(win)) continue;
+        const w0 = (@as(*const volatile u32, @ptrFromInt(win))).*;
+        const w1 = (@as(*const volatile u32, @ptrFromInt(win + 4))).*;
+        const w2 = (@as(*const volatile u32, @ptrFromInt(win + 8))).*;
+        log.err("    [sp+0x{X:0>3}] ret=0x{X:0>8} code@0x{X:0>8}: {X:0>8} {X:0>8} {X:0>8}", .{ i * 4, v, win, w0, w1, w2 });
+        dumped += 1;
     }
 }
 
@@ -196,6 +226,12 @@ export fn hard_fault_main() void {
     // instruction can be disassembled directly from loaded memory (the loader's
     // reported .text base can be skewed vs the ELF, so trust these bytes).
     dump_memory_window("code", (frame.pc & ~@as(usize, 0xF)) -% 16, 12);
+    // Resolve stacked_pc/lr to <module>+offset: dump the faulting process's
+    // module load map (executable + shared libs).
+    if (uses_process_stack(exc_return)) {
+        dump_fault_maps(get_current_pid());
+        dump_backtrace_codes(psp, 64);
+    }
 
     // A fault that originated in a user process (PSP) — whether a stack
     // overflow or any other fault (bus/usage/etc., e.g. from a miscompiled

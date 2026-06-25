@@ -38,6 +38,7 @@ cp $SCRIPT_DIR/zig-out/bin/yasos_kernel $SCRIPT_DIR/output/target_package/${PACK
 cp $SCRIPT_DIR/rootfs.img $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/
 cp $SCRIPT_DIR/scripts/flash_rp2350_image.cfg $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/flash_rp2350.cfg
 cp $SCRIPT_DIR/scripts/flash_kernel_rp2350_image.cfg $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/flash_kernel_rp2350.cfg
+cp $SCRIPT_DIR/scripts/run_hw_smoke.sh $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/
 
 tar -czvf ${PACKAGE_NAME}.tar.gz -C $SCRIPT_DIR/output/target_package .
 mv ${PACKAGE_NAME}.tar.gz $SCRIPT_DIR/output/

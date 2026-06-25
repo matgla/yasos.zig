@@ -20,11 +20,15 @@ MEMORY
   flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 1024K
   romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 4096K
   kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 76K
-  process_ram(rxw)  : ORIGIN = 0x20013000, LENGTH = 436K
-  /* The two 4 KB scratch banks merged into one 8 KB region holding the kernel
-   * stack (single-core: core1's stack bank is unused). Non-striped SRAM is ideal
-   * for the stack. kernel_ram is now just .bss + ~64 KB heap. */
-  scratch(rxw)      : ORIGIN = 0x20080000, LENGTH = 8K
+  process_ram(rxw)  : ORIGIN = 0x20013000, LENGTH = 428K
+  /* Kernel MSP stack: 16 KB ending at the top of SRAM (0x20082000). The top
+   * 8 KB (0x20080000..0x20082000) is the two 4 KB scratch banks merged (single-
+   * core: core1's stack bank is unused) — non-striped SRAM, used first since the
+   * stack grows down. The lower 8 KB (0x2007E000..0x20080000) is carved off the
+   * top of process_ram and only reached on deep stack usage (e.g. the hardfault
+   * handler's diagnostics, which dump a multi-KB maps buffer). kernel_ram is now
+   * just .bss + ~64 KB heap. */
+  scratch(rxw)      : ORIGIN = 0x2007E000, LENGTH = 16K
 }
 
 SECTIONS
@@ -139,7 +143,7 @@ SECTIONS
 
   __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
 
-  /* Any scratch-bank data + the kernel stack live in the merged 8 KB scratch
+  /* Any scratch-bank data + the kernel stack live in the 16 KB scratch
    * region. Stack grows down from the top; MSPLIM is the bottom. */
   .scratch (NOLOAD) :
   {

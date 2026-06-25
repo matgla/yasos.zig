@@ -13,6 +13,8 @@
 # Options:
 #   --no-build         Skip configure/build; use the existing kernel ELF.
 #   --rebuild-rootfs   Regenerate rootfs.img (needed when userspace changed).
+#   --fast             Build the kernel -Doptimize=ReleaseFast instead of the
+#                      default ReleaseSafe (which keeps safety checks on).
 #   -h, --help         Show this help.
 #
 # Any non-option arguments are passed through to pytest. With none, the default
@@ -40,7 +42,8 @@
 # Environment overrides (consumed by tests/smoke/framework/qemu.py):
 #   YASOS_QEMU_BIN, YASOS_QEMU_MACHINE, YASOS_QEMU_CPU,
 #   YASOS_QEMU_EXTRA_ARGS, YASOS_QEMU_BOOT_TIMEOUT
-#   YASOS_QEMU_OPTIMIZE   zig optimize mode for the build (default ReleaseFast)
+#   YASOS_QEMU_OPTIMIZE   zig optimize mode for the build (default ReleaseSafe;
+#                         --fast selects ReleaseFast)
 #   YASOS_SMOKE_ENABLE_GCC_TORTURE   default 1 here; set 0 to skip GCC torture
 #   YASOS_SMOKE_XDIST     pytest-xdist worker count (default auto = all CPUs);
 #                         set 0 to run serially
@@ -54,7 +57,10 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
 DEFCONFIG="configs/qemu_mps2_an505_defconfig"
-OPTIMIZE="${YASOS_QEMU_OPTIMIZE:-ReleaseFast}"
+# Default to ReleaseSafe so safety checks (overflow, bounds, etc.) stay on while
+# running the suite; --fast switches to ReleaseFast. An explicit
+# YASOS_QEMU_OPTIMIZE wins as the default but is still overridden by --fast.
+OPTIMIZE="${YASOS_QEMU_OPTIMIZE:-ReleaseSafe}"
 KERNEL="$REPO_ROOT/zig-out/bin/yasos_kernel"
 VENV="$REPO_ROOT/.qemu_smoke_venv"
 SMOKE_DIR="$REPO_ROOT/tests/smoke"
@@ -70,7 +76,8 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-build) DO_BUILD=0; shift ;;
         --rebuild-rootfs) REBUILD_ROOTFS=1; shift ;;
-        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+        --fast) OPTIMIZE="ReleaseFast"; shift ;;
+        -h|--help) sed -n '2,51p' "$0"; exit 0 ;;
         --) shift; while [ "$#" -gt 0 ]; do PYTEST_ARGS+=("$1"); shift; done ;;
         *) PYTEST_ARGS+=("$1"); shift ;;
     esac
@@ -156,7 +163,15 @@ cd "$SMOKE_DIR"
 
 # Start each run with an empty logs dir so the collected set reflects only this
 # run (mirrors the remote runner clearing the device's logs/ before a run).
-rm -rf "$SMOKE_DIR/logs"
+# A run accumulates thousands of per-test files in this one flat directory; on
+# btrfs (and NFS/overlayfs) rm can intermittently fail with "Directory not
+# empty" when its own readdir races the unlinks and the final rmdir then sees
+# leftover entries. Retry a few times before giving up — a second pass clears it.
+for _attempt in 1 2 3 4 5; do
+    rm -rf "$SMOKE_DIR/logs" && break
+    [ "$_attempt" = 5 ] && { echo "error: could not clear $SMOKE_DIR/logs" >&2; exit 1; }
+    sleep 0.2
+done
 
 # Don't let a non-zero pytest exit (expected while tcc tests fail) abort the
 # script before logs are collected.

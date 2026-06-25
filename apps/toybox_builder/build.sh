@@ -2,30 +2,18 @@
 
 # Abort (with a non-zero status the caller checks) if any build step fails,
 # instead of silently continuing and returning the exit code of the final
-# `ln -sf`. The git-apply checks below stay tolerant because they run as `if`
-# conditions, which are exempt from `set -e`.
+# `ln -sf`.
 set -e
 
 cd "$(dirname "$0")"
 pwd
 cp yasos.config ../toybox/.config
 
-
-for PATCH_FILE in *.patch; do
-    echo "Found patch file: $PATCH_FILE"
-    cp $PATCH_FILE ../toybox/
-done
+# The yasos downstream patches now live in the toybox fork
+# (git@github.com:matgla/toybox.git), so they are already present in the
+# submodule checkout — no patch step needed here.
 
 cd ../toybox
-
-for PATCH_FILE in *.patch; do
-    if git apply --check "$PATCH_FILE"; then
-        echo "Patch can be applied. Applying now..."
-        git apply "$PATCH_FILE"
-    else
-        echo "Patch already applied or conflicts exist. Skipping."
-    fi
-done
 
 TOYBOX_CFLAGS="-I$1/usr/include -g${TOYBOX_EXTRA_CFLAGS:+ }$TOYBOX_EXTRA_CFLAGS"
 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-Wl,-oformat=elf32-littlearm -lm" make toybox

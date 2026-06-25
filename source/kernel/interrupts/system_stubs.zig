@@ -172,7 +172,19 @@ export fn _sbrk(incr: usize) *allowzero anyopaque {
     const next_heap_end: *u8 = @ptrFromInt(@intFromPtr(heap_end) + incr);
 
     if (@intFromPtr(next_heap_end) >= @intFromPtr(&__heap_limit__)) {
-        return SBRK_FAILED;
+        // Kernel heap exhausted. Returning SBRK_FAILED lets newlib hand NULL
+        // back to the caller (the documented contract), but a kernel allocation
+        // that silently fails tends to resurface far away as corrupted
+        // bookkeeping — e.g. the process-tracking structs that live in
+        // kernel_ram get garbage, a process ends up pointed into kernel SRAM,
+        // and we see a MemManage DACCVIOL in an unrelated user process instead
+        // of here. The kernel heap is bounded kernel bookkeeping; running it dry
+        // is unrecoverable, so fail loudly at the source rather than corrupt.
+        std.log.scoped(.kernel_heap).err(
+            "kernel heap exhausted: _sbrk(+{d}) heap_end=0x{x} limit=0x{x} used={d}B",
+            .{ incr, @intFromPtr(heap_end), @intFromPtr(&__heap_limit__), kernel_heap_physical_used() },
+        );
+        @panic("kernel heap exhausted (_sbrk over __heap_limit__)");
     }
     heap_end = next_heap_end;
     return prev_heap_end;

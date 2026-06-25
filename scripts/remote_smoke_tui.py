@@ -1615,6 +1615,16 @@ if [[ -n "${extra_tcc_cflags}" ]]; then
     export YASOS_EXTRA_TCC_CFLAGS="${extra_tcc_cflags}"
 fi
 
+# Expose the flash artifacts so the in-test reset escalation
+# (tests/smoke/reflash_target.sh, called from session.py) can reflash a board
+# that neither OpenOCD reset nor a USB power-cycle could revive.
+export YASOS_SMOKE_REMOTE_KERNEL="${remote_kernel}"
+export YASOS_SMOKE_REMOTE_ROOTFS="${remote_rootfs}"
+export YASOS_SMOKE_ROOTFS_ADDRESS="${rootfs_address}"
+export YASOS_SMOKE_OPENOCD_INTERFACE_CFG="${interface_cfg}"
+export YASOS_SMOKE_OPENOCD_TARGET_CFG="${target_cfg}"
+export YASOS_SMOKE_OPENOCD_ADAPTER_SPEED="${adapter_speed}"
+
 pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -sv)
 if (( test_retries > 0 )); then
     pytest_cmd+=(--reruns "$test_retries" --reruns-delay 1)

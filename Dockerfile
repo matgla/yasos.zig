@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 ARG TARGETPLATFORM
 ARG ZIG_VERSION="0.15.2"
 
-ARG ARM_NONE_EABI_GCC_VERSION="14.2.rel1"
+ARG ARM_NONE_EABI_GCC_VERSION="15.2.rel1"
 
 ENV PATH="/opt/zig:/opt/arm-none-eabi-gcc/bin:$PATH"
 
@@ -11,7 +11,8 @@ RUN apt-get update -y
 RUN apt-get install -y make cmake
 RUN apt-get install -y python3 python3-pip python3-venv
 RUN apt-get install -y wget
-RUN apt-get install -y git
+RUN apt-get install -y gita
+RUN apt-get install -y qemu-system-arm
 
 RUN mkdir -p /opt/zig
 RUN mkdir -p /opt/arm-none-eabi-gcc

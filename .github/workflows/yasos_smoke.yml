@@ -1,30 +1,105 @@
 name: Yasos Smoke Tests
-on: 
-  push: 
+on:
+  push:
     branches: [main]
   pull_request:
 
 jobs:
-  smoke_tests:
+  # Gate: run the full smoke suite under QEMU in the cloud (no hardware) before
+  # the physical board is touched. Builds the mps2-an505 kernel and runs every
+  # suite at -O0/-O1/-O2 incl. gcc-torture (run_qemu_smoke.sh defaults). A
+  # failure here blocks build_hw + hardware_smoke.
+  qemu_gate:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/matgla/yasos.zig:v0.17
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+      - name: Run QEMU smoke gate (-O0/-O1/-O2, incl. gcc-torture)
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p tests/smoke/logs
+          ./scripts/run_qemu_smoke.sh
+      - name: Upload QEMU gate logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu_gate_logs
+          path: |
+            .cache/qemu_smoke_logs/**
+            tests/smoke/logs/**
+
+  # Build the hardware image once in the cloud and publish it as an artifact so
+  # the board runner never recompiles. Package = kernel + rootfs.img + flash
+  # cfgs + run_hw_smoke.sh (build_image.sh).
+  build_hw:
+    needs: qemu_gate
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/matgla/yasos.zig:v0.17
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+      - name: Build hardware smoke package (kernel + rootfs + run script)
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./build_image.sh pimoroni_pico_plus2_and_vga_defconfig
+      - name: Upload hardware smoke package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hw_smoke_package
+          path: output/*.tar.gz
+
+  # Flash the prebuilt package onto the real RP2350 and run the on-device suite
+  # at -O0/-O1/-O2 incl. gcc-torture. No host build happens here — the kernel +
+  # rootfs come straight from the build_hw artifact.
+  hardware_smoke:
+    needs: build_hw
     runs-on: [self-hosted, pimoroni_pico_plus2]
     steps:
-      - name: Cleanup workspace 
+      - name: Cleanup workspace
         run: |
-          rm -rf "$GITHUB_WORKSPACE" 
+          rm -rf "$GITHUB_WORKSPACE"
           mkdir -p "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v3
-        with: 
+        with:
           submodules: 'recursive'
-      - name: Run Smoke Tests
+      - name: Download hardware smoke package
+        uses: actions/download-artifact@v4
+        with:
+          name: hw_smoke_package
+          path: artifact
+      - name: Stage prebuilt kernel + rootfs (no rebuild on the board)
         run: |
-          mkdir -p ${{ github.workspace }}/tests/smoke/logs
-          make run_smoke_tests
+          pkg=$(find artifact -name '*.tar.gz' | head -n1)
+          if [ -z "$pkg" ]; then echo "no package tarball found in artifact/" >&2; exit 1; fi
+          tar -xzf "$pkg" -C artifact
+          kernel=$(find artifact -name yasos_kernel | head -n1)
+          rootfs=$(find artifact -name rootfs.img | head -n1)
+          if [ -z "$kernel" ] || [ -z "$rootfs" ]; then
+            echo "package missing yasos_kernel or rootfs.img" >&2; exit 1
+          fi
+          mkdir -p zig-out/bin
+          cp "$kernel" zig-out/bin/yasos_kernel
+          cp "$rootfs" rootfs.img
+      - name: Run hardware smoke (-O0/-O1/-O2, incl. gcc-torture, no rebuild)
+        run: make run_smoke_tests_packaged
       - name: Copy Firmware If Failed
         if: failure()
-        run: | 
+        run: |
           cp ${{ github.workspace }}/zig-out/bin/yasos_kernel ${{ github.workspace }}/tests/smoke/logs
-      
-      - name: Upload Test Logs  
+      - name: Upload Test Logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:

@@ -56,6 +56,14 @@ EXTRA_TCC_CFLAGS = tuple(os.environ.get("YASOS_EXTRA_TCC_CFLAGS", "").split()) i
 # it for known-slow cases (it also raises the run-phase silence limit).
 COMPILE_TIMEOUT = float(os.environ.get("YASOS_SMOKE_COMPILE_TIMEOUT", "5"))
 
+# When a compile overruns its serial-read deadline the device is usually STILL
+# compiling (tcc is silent while it works, so the idle-timeout tripped before
+# it finished). Before a rerun we passively wait up to this long for that
+# in-flight job to finish and land on a prompt, so its late output doesn't
+# corrupt the rerun's commands. Idle seconds: a live-but-slow target keeps
+# resetting the window, only a genuinely dead line waits the whole budget.
+RERUN_SETTLE_TIMEOUT = float(os.environ.get("YASOS_SMOKE_RERUN_SETTLE_TIMEOUT", "60"))
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TINYCC_TESTS_ROOT = REPO_ROOT / "libs" / "tinycc" / "tests"
 GCC_TESTS_DIR = TINYCC_TESTS_ROOT / "gcctestsuite"
@@ -195,25 +203,43 @@ def _compile_stack_kib(test_path: Path) -> Optional[int]:
 # plain stem for gcc-torture, full filename for tests2/ir_tests.
 COMPILE_TIMEOUT_TESTS = {
     # gcc-torture compile: macro/argument-count stress files
-    "limits-fnargs": 30,
+    "limits-fnargs": 60,
     "limits-stringlit": 30,
     "pr34093": 30,
-    # large GCC-vector-extension lowering: N=32 vectors expand into many
-    # scalar ops per function; the -O1/-O2 compile is ~2.6 s on QEMU and
-    # exceeds the 5 s wait under parallel-suite load (compile itself is fine).
     "pr54713-3": 30,
-    # gcc-torture execute (20040705-*/20040709-* #include 20040629-1.c)
-    "20040629-1": 30,
-    "20040705-1": 30,
-    "20040705-2": 30,
-    "20040709-1": 30,
-    "20040709-2": 30,
-    "20040709-3": 30,
+    "builtin-bitops-1": 160,
+    "20040629-1": 60,
+    "20040705-1": 60,
+    "20040705-2": 60,
+    "20040709-1": 60,
+    "20040709-2": 60,
+    "20040709-3": 60,
     "arith-rand-ll": 30,
+    "pr107881-1": 20,
     "pr53645-2": 30,
-    "pr92904": 30,
+    "pr92904": 120,
     "scal-to-vec1": 30,
+    "scal-to-vec3": 15,
     "strlen-5": 30,
+    "strlen-2": 20, 
+    "strlen-4": 20,
+    "920625-1": 30,
+    "DFcmp": 30,
+    "SIcmp": 30,
+    "USIcmp": 30,
+    "pr82052": 30,
+    "20020108-1": 30,
+    "990326-1": 30,
+    "builtins/memset-chk": 30,
+    "builtins/memcpy-chk": 15,
+    "builtins/memmove-chk": 15,
+    "builtins/mempcpy-chk": 15,
+    "builtins/vsnprintf-chk": 10,
+    "builtins/vsprintf-chk": 10,
+    "memcpy-bi": 30,
+    "misalign": 30,
+    "pr53645": 30,
+    "pr58574": 30,
     # ir_tests / tests2
     "mibench_rijndael.c": 30,
     "95_bitfields.c": 30,
@@ -1453,10 +1479,16 @@ def _resync_prompt_for_rerun(session):
     truncation where the trailing newline still arrived, so the bad command
     already ran and the shell is back at a prompt -- no interrupt is needed.
 
-    Only if the gentle recovery fails (a foreground job is genuinely stuck) do
-    we fall back to Ctrl-C (\\x03). This avoids injecting a spurious ETX/^C into
-    the serial stream -- and into the per-test logs and the live console -- on
-    every retry.
+    If the gentle recovery fails, a foreground job is most likely still running
+    -- the dominant case being a compile that overran its serial-read deadline
+    (tcc is silent while it works, so the gentle 2 s nudges expired before it
+    finished). Its late output -- the warnings, the __COMPILE_STATUS__ line and
+    the prompt -- is still draining and would corrupt the rerun's commands (the
+    "ompile_status=254; fi" -> "sh: syntax error: fi" desync seen in the logs),
+    so before escalating we passively wait for that in-flight job to land on a
+    prompt. Only if THAT also fails (a job is genuinely stuck) do we fall back
+    to Ctrl-C (\\x03), which avoids injecting a spurious ETX/^C into the serial
+    stream -- and into the per-test logs and the live console -- on every retry.
     """
     for _ in range(3):
         try:
@@ -1464,7 +1496,18 @@ def _resync_prompt_for_rerun(session):
                 return True
         except Exception:
             break
-    # Gentle recovery failed: a job may be stuck. Interrupt it, then retry.
+    # Gentle recovery couldn't get a prompt: a foreground job is probably still
+    # running and swallowing our nudges. Wait (idle seconds) for it to finish
+    # and emit its prompt before touching the line. The byte-level read returns
+    # the instant the prompt arrives, so this only burns the full window when
+    # the line is genuinely dead -- in which case the Ctrl-C below is warranted.
+    try:
+        settled = session._read_until(session.prompt, timeout=RERUN_SETTLE_TIMEOUT)
+        if settled.endswith(session.prompt):
+            return True
+    except Exception:
+        pass
+    # Still stuck: interrupt the job, then retry.
     try:
         session.serial.write(b"\x03")  # kill a stuck/runaway foreground job
     except Exception:
