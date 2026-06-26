@@ -39,7 +39,7 @@ jobs:
   # the board runner never recompiles. Package = kernel + rootfs.img + flash
   # cfgs + run_hw_smoke.sh (build_image.sh).
   build_hw:
-    needs: qemu_smoke_tests
+    needs: qemu_gate
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/matgla/yasos.zig:v0.18
