@@ -59,7 +59,10 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
 
     pub fn sync(self: *Self) i32 {
         const memory_used: usize = kernel.memory.heap.malloc.get_usage();
-        const memory_used_slow = kernel.process.process_manager.instance.get_process_memory_pool().get_used_size();
+        const memory_used_slow = if (kernel.process.process_manager.is_initialized())
+            kernel.process.process_manager.instance.get_process_memory_pool().get_used_size()
+        else
+            0;
         const memory_used_tmp = get_tmp_memory_usage();
         const memory_used_combined = memory_used + memory_used_slow;
         var buffer = &interface.base(self)._buffer;
@@ -138,7 +141,11 @@ test "MemInfoFile.ShouldShowMemInfo" {
         \\MemProcessUsed:         0 B
         \\
     ;
-    try std.testing.expectEqualStrings(expected_text, buffer[0..readed]);
+    // sync() appends AllocCount + allocator-bucket diagnostics after the memory
+    // accounting block; this test validates the accounting, so compare just that
+    // leading block rather than the full (and volatile) bucket dump.
+    try std.testing.expect(readed >= expected_text.len);
+    try std.testing.expectEqualStrings(expected_text, buffer[0..expected_text.len]);
 
     var malloc = kernel.memory.heap.malloc.MallocAllocator(.{}).init();
     defer malloc.deinit();
@@ -158,7 +165,8 @@ test "MemInfoFile.ShouldShowMemInfo" {
         \\MemProcessUsed:      2048 KB
         \\
     ;
-    try std.testing.expectEqualStrings(expected_allocated_text, buffer[0..readed_after_alloc]);
+    try std.testing.expect(readed_after_alloc >= expected_allocated_text.len);
+    try std.testing.expectEqualStrings(expected_allocated_text, buffer[0..expected_allocated_text.len]);
 
     const b = try malloc.allocator().alloc(u8, 1024 * 1024 * 2048);
     defer malloc.allocator().free(b);
@@ -175,5 +183,6 @@ test "MemInfoFile.ShouldShowMemInfo" {
         \\MemProcessUsed:      4096 KB
         \\
     ;
-    try std.testing.expectEqualStrings(expected_allocated2_text, buffer[0..readed_after_alloc2]);
+    try std.testing.expect(readed_after_alloc2 >= expected_allocated2_text.len);
+    try std.testing.expectEqualStrings(expected_allocated2_text, buffer[0..expected_allocated2_text.len]);
 }

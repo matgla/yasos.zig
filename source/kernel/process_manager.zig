@@ -617,15 +617,27 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 pub const ProcessManager = ProcessManagerGenerator(Scheduler);
 
 pub var instance: ProcessManager = undefined;
+var instance_initialized: bool = false;
 
 pub fn initialize_process_manager(allocator: std.mem.Allocator) void {
     log.info("Process manager initialization...", .{});
     process.init();
     instance = ProcessManager.init(allocator);
+    instance_initialized = true;
 }
 
 pub fn deinitialize_process_manager() void {
     instance.deinit();
+    instance_initialized = false;
+}
+
+/// Whether the global `instance` has been initialized. Code that reads global
+/// process/memory-pool state from contexts that may run before the process
+/// manager exists (e.g. /proc files constructed during early filesystem setup,
+/// or unit tests that don't spin up the manager) must guard on this — `instance`
+/// is `undefined` until initialize_process_manager runs.
+pub fn is_initialized() bool {
+    return instance_initialized;
 }
 
 pub export fn process_set_next_task() *const u8 {
@@ -736,7 +748,9 @@ test "ProcessManager.ShouldUseRuntimeDefaultStackSizeWhenRequestedStackIsZero" {
     const proc = sut.get_process_for_pid(1).?;
     const stack_limit = try proc.get_resource_limit(c.RLIMIT_STACK);
     try std.testing.expectEqual(@as(c.rlim_t, 32 * 1024), stack_limit.rlim_cur);
-    try std.testing.expectEqual(@as(c.rlim_t, 32 * 1024), stack_limit.rlim_max);
+    // rlim_max is the hard ceiling (config max_stack_size); lowering the default
+    // stack size only changes the soft limit (rlim_cur), never the hard max.
+    try std.testing.expectEqual(@as(c.rlim_t, config.process.max_stack_size), stack_limit.rlim_max);
 }
 
 test "ProcessManager.ShouldApplyCachedDefaultLimitsToNewProcesses" {
@@ -893,17 +907,20 @@ test "ProcessManager.ShouldForkProcess" {
     const block_data: *const Process.BlockedProcessAction = @fieldParentPtr("node", child.?._blocks.first.?);
     try std.testing.expect(block_data.blocked == parent);
 
-    // Create argv - array of C string pointers
-    var args_storage = [_][*:0]const u8{
+    // Create argv - NULL-terminated array of C string pointers (clone_exec_args
+    // counts entries until the NULL sentinel, mirroring userspace argv).
+    var args_storage = [_]?[*:0]const u8{
         "arg0",
         "arg1",
+        null,
     };
     const argv: [*c][*c]u8 = @ptrCast(@constCast(&args_storage));
 
-    // Create envp - array of environment variable pointers
-    var envp_storage = [_][*:0]const u8{
+    // Create envp - NULL-terminated array of environment variable pointers
+    var envp_storage = [_]?[*:0]const u8{
         "ENV0=VALUE0",
         "ENV1=VALUE1",
+        null,
     };
     const envp: [*c][*c]u8 = @ptrCast(@constCast(&envp_storage));
 

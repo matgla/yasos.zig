@@ -1,4 +1,4 @@
-CONTAINER_VERSION ?= v0.17
+CONTAINER_VERSION ?= v0.18
 RUN_CONTAINER ?= ./scripts/run_container.sh -v ${CONTAINER_VERSION}
 
 start_env:

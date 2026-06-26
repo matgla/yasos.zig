@@ -7,6 +7,12 @@ ARG ARM_NONE_EABI_GCC_VERSION="15.2.rel1"
 
 ENV PATH="/opt/zig:/opt/arm-none-eabi-gcc/bin:$PATH"
 
+# Pin Zig's global package cache to a baked /opt path. GitHub Actions container
+# jobs bind-mount over $HOME=/github/home, which would shadow the default
+# ~/.cache/zig. /opt is untouched by those mounts, and this ENV is inherited by
+# the CI job, so packages pre-fetched here (see below) survive into CI.
+ENV ZIG_GLOBAL_CACHE_DIR="/opt/zig-global-cache"
+
 RUN apt-get update -y
 RUN apt-get install -y make cmake
 RUN apt-get install -y python3 python3-pip python3-venv
@@ -31,6 +37,21 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
     && cd /opt/arm-none-eabi-gcc && tar -xf gcc.tar.xz --strip-components=1 \
     && rm /opt/zig/zig.tar.xz \
     && rm /opt/arm-none-eabi-gcc/gcc.tar.xz
+
+# Pre-fetch the flaky transitive FatFs source into the baked global cache. The
+# zfat dependency pulls https://elm-chan.org/fsw/ff/arc/ff15a.zip, a single
+# un-CDN'd host that frequently times out and breaks CI fetches. The package is
+# content-addressed, so once it lives in the cache a `zig build` resolves it by
+# hash with no network access. Retry to survive a flaky elm-chan during the
+# (infrequent) image build, then assert the package landed so we never publish
+# an image silently missing it.
+RUN mkdir -p "$ZIG_GLOBAL_CACHE_DIR" \
+    && for i in 1 2 3 4 5; do \
+         zig fetch "https://elm-chan.org/fsw/ff/arc/ff15a.zip" && break; \
+         echo "zig fetch ff15a.zip attempt $i failed; retrying in 15s"; \
+         sleep 15; \
+       done \
+    && test -d "$ZIG_GLOBAL_CACHE_DIR/p/N-V-__8AAFQITQCnpmdR7PARImvk-cgb-9lZmjKolexSWkUL"
 
 COPY tests/smoke/requirements.txt /opt/smoke/requirements.txt
 RUN pip3 install --break-system-packages -r /opt/smoke/requirements.txt

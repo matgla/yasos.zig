@@ -50,6 +50,14 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
             self._pool.release_pages_for(self._pid);
         }
 
+        /// The backing pool this process draws from. In production this is the
+        /// process manager's shared pool; in unit tests it is the pool the
+        /// process was constructed with. Used by deinit diagnostics so they read
+        /// the owning pool rather than a global singleton.
+        pub fn get_pool(self: *Self) *MemoryPoolType {
+            return self._pool;
+        }
+
         /// Bound the process to `limit` total pages (image+stack+heap). A request
         /// that would push the process past this ceiling fails the allocation
         /// (user malloc gets NULL), enforcing the per-image heap profile.
@@ -256,15 +264,15 @@ test "ProcessPageAllocator.AllocateAndReleasePages" {
 
     const mem1 = allocator.allocate_pages(4);
     try std.testing.expect(mem1 != null);
-    try std.testing.expect(mem1.?.len == 4096 * 4);
+    try std.testing.expect(mem1.?.len == PagePool.page_size * 4);
     const mem2 = allocator.allocate_pages(2);
     try std.testing.expect(mem2 != null);
-    try std.testing.expect(mem2.?.len == 4096 * 2);
+    try std.testing.expect(mem2.?.len == PagePool.page_size * 2);
     try std.testing.expect(mem1.?.ptr != mem2.?.ptr);
     allocator.release_pages(mem1.?.ptr, 4);
     const mem3 = allocator.allocate_pages(2);
     try std.testing.expect(mem3 != null);
-    try std.testing.expect(mem3.?.len == 4096 * 2);
+    try std.testing.expect(mem3.?.len == PagePool.page_size * 2);
     try std.testing.expect(mem3.?.ptr == mem1.?.ptr);
 
     allocator.release_pages(mem2.?.ptr, 2);

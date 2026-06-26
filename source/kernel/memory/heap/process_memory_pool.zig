@@ -688,11 +688,17 @@ test "ProcessMemoryPool.ShouldHandleNoAvailableMemory" {
     defer pool.deinit();
 
     const pid: c.pid_t = 1;
-    const total_pages = pool.total_page_count();
 
-    // No single region can satisfy more than the whole pool, and allocations
-    // never span regions, so this must fail.
-    const pages = pool.allocate_pages(@intCast(total_pages + 1), pid);
+    // Allocations never span regions, and tiers use different page grains, so the
+    // total page count mixes units. Size the request from the largest region's
+    // byte capacity instead: a request larger (in bytes) than the biggest region
+    // can never be satisfied by any single region, so it must fail.
+    var largest_region_bytes: usize = 0;
+    for (pool.regions) |region| {
+        largest_region_bytes = @max(largest_region_bytes, region.page_count * region.page_size);
+    }
+    const pages_exceeding_any_region: i32 = @intCast(largest_region_bytes / ProcessMemoryPool.page_size + 1);
+    const pages = pool.allocate_pages(pages_exceeding_any_region, pid);
     try std.testing.expectEqual(@as(?[]u8, null), pages);
 }
 

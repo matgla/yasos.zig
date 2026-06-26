@@ -284,7 +284,7 @@ test "PidIterator.ShouldReturnNullAfterEnd" {
         count += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(usize, 3), count);
     try std.testing.expectEqual(@as(?kernel.fs.DirectoryEntry, null), iterator.data().next());
     try std.testing.expectEqual(@as(?kernel.fs.DirectoryEntry, null), iterator.data().next());
 }

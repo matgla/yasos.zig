@@ -253,7 +253,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn deinit(self: *Self) void {
-            const pool = kernel.process.process_manager.instance.get_process_memory_pool();
+            const pool = self._process_memory_allocator.get_pool();
             log.info("deinit pid={d}: kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             self.impl.deinit(self._process_memory_allocator.allocator());
             log.info("deinit pid={d}: after impl.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
@@ -716,6 +716,7 @@ const ProcessMemoryPoolForTests = struct {
     release_address: ?*anyopaque = null,
     release_pages: i32 = 0,
     release_pid: c.pid_t = 0,
+    tag_next_heap: bool = false,
 
     pub fn release_pages_for(self: *Self, pid: c.pid_t) void {
         _ = self;
@@ -725,6 +726,11 @@ const ProcessMemoryPoolForTests = struct {
     pub fn used_pages_for(self: *const Self, pid: c.pid_t) usize {
         _ = self;
         _ = pid;
+        return 0;
+    }
+
+    pub fn get_used_size(self: *const Self) usize {
+        _ = self;
         return 0;
     }
 

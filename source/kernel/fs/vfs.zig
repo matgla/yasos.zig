@@ -416,8 +416,7 @@ test "VirtualFileSystem.CreateShouldFailIfNoFilesystemMounted" {
     const sut = get_vfs();
     defer vfs_deinit();
 
-    // No error is returned currently, but this documents the behavior
-    try sut.create("/file.txt", 0);
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.create("/file.txt", 0));
 }
 
 test "VirtualFileSystem.ShouldRedirectDirectoryCreation" {
