@@ -2,23 +2,29 @@
  * linker_script.ld for QEMU `mps2-an505` (Cortex-M33 / ARMv8-M)
  *
  * Memory map (verified against `info mtree` on qemu-system-arm 10.2 — the an505
- * model backs these three banks with RAM):
- *   - ssram-0 at 0x10000000 (4 MB) holds .text/.rodata (the "flash").
- *   - ssram-1+2 at 0x28000000 (4 MB) is the fast user "process_ram" pool.
- *   - Flat 16 MB block ("mps.ram") at 0x80000000 holds everything else:
- *       romfs       (embedded rootfs image, LOADed by `-kernel`)
- *       kernel_ram  (.data/.bss/.heap/.stack)
- *       psram       (large "slow" user process pool)
- *       fatdisk     (host-readable FAT block-device window)
- *       kstack      (kernel MSP stack, see below)
+ * model backs these three banks with RAM, 24 MB total):
+ *   - ssram-0 at 0x10000000 (4 MB): 1 MB code "flash" (.text/.rodata) + the
+ *     3 MB fast user "process_ram" pool. (.text is only ~250 KB, so dedicating
+ *     a whole 4 MB bank to it would waste 3.75 MB — the tail is a RAM pool.)
+ *   - ssram-1+2 at 0x28000000 (4 MB): the kernel RAM (.data/.bss/.heap).
+ *   - Flat 16 MB block ("mps.ram") at 0x80000000 holds the rest:
+ *       romfs       (embedded rootfs image, LOADed by `-kernel`)   5 MB
+ *       psram       (large "slow" user pool)                       9.75 MB
+ *       fatdisk     (host-readable FAT block-device window)        1 MB
+ *       kstack      (kernel MSP stack, see below)                  256 K
  *
- * The embedded romfs outgrew the 4 MB ssram-1+2 bank (toybox/zork/... were
- * added), and that bank is the edge of backed RAM so it cannot be enlarged. The
- * romfs therefore moved to the base of the 16 MB block where it has room to
- * grow, and the freed ssram-1+2 bank became the fast process_ram pool. The
- * romfs blob is a normal LOADed section, so `qemu-system-arm -kernel` copies it
- * to its VMA (0x80000000); the board's Flash HAL points there so the kernel's
- * RomFs mount path is unchanged.
+ * Sizing is driven by the on-device tcc compile tests. A large translation unit
+ * needs both a big user "slow" pool AND a big kernel heap (its multi-MB
+ * allocations grow the kernel heap via _sbrk — the gcc-torture limits-stringlit
+ * 1 MB string literal OOMed a 2 MB kernel_ram). So kernel_ram gets the whole
+ * 4 MB ssram-1+2 bank and psram gets 9.75 MB, leaving the romfs a 5 MB window
+ * (the image is ~4.3 MB). This is the an505's ceiling: with only 24 MB total and
+ * fatdisk+kstack pinned at the top of the 16 MB bank, romfs and the slow pool
+ * trade off directly — a roomier romfs would need a bigger board (see the parked
+ * mps3-an524 port under hal/source/arm/qemu_mps3, which has 2 GB DDR). The romfs
+ * blob is a normal LOADed section, so `qemu-system-arm -kernel` copies it to its
+ * VMA (0x80000000); the board's Flash HAL points there so the RomFs mount path
+ * is unchanged.
  *
  * kstack stays at the very top of the 16 MB block — ABOVE every process pool —
  * so the vfork register-rescue path (process_vfork_child /
@@ -32,19 +38,23 @@
 
 MEMORY
 {
-  flash       (rx!w) : ORIGIN = 0x10000000, LENGTH = 4096K
-  /* Fast user process pool — the freed ssram-1+2 bank. Backs the /tmp RamFs
-     (see tmp_filesystem_allocator in source/main.zig) and non-XIP user code. */
-  process_ram (rwx)  : ORIGIN = 0x28000000, LENGTH = 4096K
-  /* Embedded romfs image at the base of the 16 MB block. 6 MB leaves headroom
-     over the current ~4.3 MB image for more apps. LOADed by `-kernel`. */
-  romfs       (rw)   : ORIGIN = 0x80000000, LENGTH = 6144K
-  kernel_ram  (rwx)  : ORIGIN = 0x80600000, LENGTH = 2048K
-  /* psram is the large "slow" user process pool (memory region[2] — the pool
-     every process actually allocates from, see process_memory_pool.zig). It
-     ends exactly where the fatdisk window begins, and sits BELOW kstack so the
-     kernel MSP stack stays ABOVE every process PSPLIM (see header comment). */
-  psram       (rw)   : ORIGIN = 0x80800000, LENGTH = 6912K
+  /* ssram-0 (4 MB), split: 1 MB code "flash" + 3 MB fast user pool. */
+  flash       (rx!w) : ORIGIN = 0x10000000, LENGTH = 1024K
+  /* Fast user process pool — the tail of ssram-0. Backs the /tmp RamFs (see
+     tmp_filesystem_allocator in source/main.zig) and non-XIP user code. */
+  process_ram (rwx)  : ORIGIN = 0x10100000, LENGTH = 3072K
+  /* Kernel .data/.bss/.heap — the whole ssram-1+2 bank. 4 MB so large on-device
+     tcc compiles don't exhaust it: a big translation unit (e.g. the gcc-torture
+     limits-stringlit 1 MB string literal) grows the kernel heap via _sbrk by
+     >1 MB, which OOMed a smaller kernel_ram. */
+  kernel_ram  (rwx)  : ORIGIN = 0x28000000, LENGTH = 4096K
+  /* Embedded romfs image at the base of the 16 MB block — 5 MB (image is
+     ~4.3 MB). Kept small so the slow pool below can be large. LOADed by `-kernel`. */
+  romfs       (rw)   : ORIGIN = 0x80000000, LENGTH = 5120K
+  /* "Slow" user process pool (memory region[2], the bulk pool every process
+     allocates from — see process_memory_pool.zig). 9.75 MB so tcc's user-side
+     allocations for big translation units fit. Ends where fatdisk begins. */
+  psram       (rw)   : ORIGIN = 0x80500000, LENGTH = 9984K
   /* fatdisk is a 1 MB window backing a host-readable FAT block device (the
      board's `fatdisk0`). Under a host-mmap'd RAM launch
      (`memory-backend-file,share=on`) it maps to a fixed offset in the backing

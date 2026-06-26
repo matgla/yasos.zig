@@ -74,11 +74,11 @@ fn is_kernel_stack_leak(addr: usize) bool {
 const romfs_begin: usize = 0x10100000;
 fn is_user_text(pc: usize) bool {
     // RP2350: romfs/app in flash (0x10100000) or PSRAM (0x11xxxxxx).
-    // QEMU mps2-an505: non-XIP user code in the fast process_ram pool
-    // (0x28000000..0x28400000), or the romfs image / slow psram pool in the
-    // 16 MB block (0x80000000..0x80EC0000). See linker_script.ld.
+    // QEMU mps2-an505 (see linker_script.ld): non-XIP user code runs from the
+    // fast process_ram pool (0x10100000..0x10400000, which the RP2350 clause
+    // below already covers); XIP user binaries (romfs) and the slow psram pool
+    // span 0x80000000..0x80EC0000 in the 16 MB block. (0x28000000 is kernel RAM.)
     return (pc >= romfs_begin and pc < 0x12000000) or
-        (pc >= 0x28000000 and pc < 0x28400000) or
         (pc >= 0x80000000 and pc < 0x80EC0000);
 }
 
@@ -86,8 +86,9 @@ fn is_user_text(pc: usize) bool {
 fn is_readable_ram(addr: usize) bool {
     return (addr >= 0x11000000 and addr < 0x11800000) or // RP2350 PSRAM
         (addr >= kernel_sram_begin and addr < kernel_sram_end) or // RP2350 SRAM
-        (addr >= 0x80000000 and addr < 0x81000000) or // QEMU mps2-an505 16 MB block (romfs/kernel/psram)
-        (addr >= 0x28000000 and addr < 0x28400000); // QEMU mps2-an505 fast process_ram pool
+        (addr >= 0x10000000 and addr < 0x10400000) or // QEMU mps2-an505 ssram-0 (flash + fast process_ram pool)
+        (addr >= 0x28000000 and addr < 0x28400000) or // QEMU mps2-an505 ssram-1+2 (kernel RAM)
+        (addr >= 0x80000000 and addr < 0x81000000); // QEMU mps2-an505 16 MB block (romfs/kernel/fatdisk/kstack)
 }
 
 // Dump up to `count` words starting at `start` (word-aligned), 4 per line,

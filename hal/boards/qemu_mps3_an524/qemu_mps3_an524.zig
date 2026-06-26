@@ -30,14 +30,12 @@ pub const uart = struct {
 };
 
 pub const flash = struct {
-    // The romfs image is embedded into the ELF and loaded to the base of the
-    // 16 MB block at 0x80000000 (see hal/source/arm/qemu_mps2/startup/rootfs.S +
-    // linker_script.ld). It used to live in the spare ssram-1+2 bank at
-    // 0x28000000, but the image outgrew that 4 MB bank, so it moved here where it
-    // has room to grow (the 12.75 MB `romfs` region — the most that fits while
-    // keeping >= 9 MB of RAM). The Flash HAL memory-maps it; with romfs_offset =
-    // 0 the RomFs reads from the blob's base directly.
-    pub const flash0 = hal.flash.Flash(hal.internal.Flash(0x80000000, 5 * 1024 * 1024)).create(0);
+    // The romfs image is embedded into the ELF and loaded to the base of DDR at
+    // 0x60000000 (see hal/source/arm/qemu_mps3/startup/rootfs.S + linker_script.ld).
+    // The MPS3 an524 backs a 2 GB DDR region, so the romfs gets a roomy 64 MB
+    // window with no contention against the user pools or kernel heap. The Flash
+    // HAL memory-maps it; with romfs_offset = 0 the RomFs reads from the base.
+    pub const flash0 = hal.flash.Flash(hal.internal.Flash(0x60000000, 64 * 1024 * 1024)).create(0);
 
     // Writable, host-readable FAT block device. Backed by the 1 MB `fatdisk`
     // window carved off the top of the PSRAM pool (see linker_script.ld). Under
@@ -54,5 +52,5 @@ pub const flash = struct {
 pub const romfs_offset: usize = 0;
 
 // FAT block-device window — MUST match the `fatdisk` region in linker_script.ld.
-pub const fatdisk_address: usize = 0x80EC0000;
+pub const fatdisk_address: usize = 0x70000000;
 pub const fatdisk_size: usize = 1024 * 1024;
