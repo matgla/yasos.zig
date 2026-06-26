@@ -13,3 +13,6 @@ build/
 rootfs.img
 __pycache__/
 output/.qemu_smoke_venv/
+
+# decode bundle produced by scripts/collect_decode_bundle.sh on smoke failure
+decode_bundle/

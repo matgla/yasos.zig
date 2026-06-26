@@ -68,16 +68,16 @@ export YASOS_SMOKE_REMOTE_KERNEL="$KERNEL"
 export YASOS_SMOKE_REMOTE_ROOTFS="$ROOTFS"
 export YASOS_SMOKE_ROOTFS_ADDRESS="$ROOTFS_ADDR"
 
-# gcc-torture sources live in a submodule nested under libs/tinycc; CI fetches it
-# via the recursive checkout, but fetch it here too (shallow, idempotent) so a
-# manual run outside CI still works. Mirrors scripts/run_qemu_smoke.sh.
+# gcc-torture sources live in a submodule nested under libs/tinycc that points
+# at the whole gcc repo. Fetch only gcc.c-torture sparsely (~16 MB, idempotent)
+# via download_gcc_tests.sh so a manual run outside CI still works without the
+# ~1.3 GB full submodule clone. Mirrors scripts/run_qemu_smoke.sh.
 case "$YASOS_SMOKE_ENABLE_GCC_TORTURE" in
     1|true|yes|on)
         GCC_TORTURE_DIR="$REPO_ROOT/libs/tinycc/tests/gcctestsuite/gcc-testsuite/gcc/testsuite/gcc.c-torture"
         if [ -z "${GCC_TORTURE_PATH:-}" ] && [ ! -d "$GCC_TORTURE_DIR" ]; then
-            echo ">> Fetching gcc-testsuite submodule (first run, shallow clone)"
-            git -C "$REPO_ROOT/libs/tinycc" submodule update --init --depth 1 \
-                tests/gcctestsuite/gcc-testsuite
+            echo ">> Fetching gcc-torture tests (sparse + partial, ~16 MB)"
+            bash "$REPO_ROOT/libs/tinycc/tests/gcctestsuite/download_gcc_tests.sh"
         fi
         ;;
 esac

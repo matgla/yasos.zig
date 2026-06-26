@@ -40,6 +40,11 @@ cp $SCRIPT_DIR/scripts/flash_rp2350_image.cfg $SCRIPT_DIR/output/target_package/
 cp $SCRIPT_DIR/scripts/flash_kernel_rp2350_image.cfg $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/flash_kernel_rp2350.cfg
 cp $SCRIPT_DIR/scripts/run_hw_smoke.sh $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/
 
+# Bundle the symbol-bearing ELFs so on-device HardFault stacktraces can be
+# decoded later (kernel + rootfs.img are already at the package top level).
+$SCRIPT_DIR/scripts/collect_decode_bundle.sh \
+    $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/decode_bundle --symbols-only
+
 tar -czvf ${PACKAGE_NAME}.tar.gz -C $SCRIPT_DIR/output/target_package .
 mv ${PACKAGE_NAME}.tar.gz $SCRIPT_DIR/output/
 echo "Packaging completed successfully."

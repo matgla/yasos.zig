@@ -123,7 +123,9 @@ fi
 
 # GCC torture smoke tests run by default; pass YASOS_SMOKE_ENABLE_GCC_TORTURE=0
 # to skip them. The test sources live in the gcc-testsuite submodule nested
-# inside libs/tinycc — fetch it (shallow) on first use. A user-provided
+# inside libs/tinycc, which points at the whole gcc repo — so instead of a full
+# submodule clone (~1.3 GB, minutes) we fetch only gcc.c-torture sparsely (~16
+# MB, seconds) via download_gcc_tests.sh on first use. A user-provided
 # GCC_TORTURE_PATH points at an external checkout, so no fetch is needed then.
 # Exercise all optimization levels under QEMU by default. This iterates every
 # suite (tests2, ir_tests, gcc-torture) at -O0/-O1/-O2 — tests2/ir_tests ids get
@@ -136,9 +138,8 @@ case "$YASOS_SMOKE_ENABLE_GCC_TORTURE" in
     1|true|yes|on)
         GCC_TORTURE_DIR="$REPO_ROOT/libs/tinycc/tests/gcctestsuite/gcc-testsuite/gcc/testsuite/gcc.c-torture"
         if [ -z "${GCC_TORTURE_PATH:-}" ] && [ ! -d "$GCC_TORTURE_DIR" ]; then
-            echo ">> Fetching gcc-testsuite submodule (first run, shallow clone)"
-            git -C "$REPO_ROOT/libs/tinycc" submodule update --init --depth 1 \
-                tests/gcctestsuite/gcc-testsuite
+            echo ">> Fetching gcc-torture tests (sparse + partial, ~16 MB)"
+            bash "$REPO_ROOT/libs/tinycc/tests/gcctestsuite/download_gcc_tests.sh"
         fi
         ;;
 esac
