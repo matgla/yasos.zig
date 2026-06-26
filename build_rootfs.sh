@@ -108,8 +108,8 @@ if $CLEAR; then
 
   rm -rf libs/tinycc/bin
   rm -rf libs/tinycc/.yasos-build
-  cd libs/tinycc && make clean && cd ../..
-  cd apps/zork && make clean && cd ../..
+  ( cd libs/tinycc && make clean ) || true
+  ( cd apps/zork && make clean ) || true
 fi
 mkdir -p rootfs
 mkdir -p rootfs/usr/include

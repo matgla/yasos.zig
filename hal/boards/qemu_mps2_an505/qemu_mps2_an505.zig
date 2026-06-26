@@ -30,13 +30,13 @@ pub const uart = struct {
 };
 
 pub const flash = struct {
-    // The romfs image is embedded into the ELF and loaded into the spare SSRAM
-    // bank at 0x28000000 (see hal/source/arm/qemu_mps2/startup/rootfs.S +
-    // linker_script.ld). It lives there rather than in the 0x80000000 PSRAM so
-    // that block is free for the ~8 MB user "psram" pool. The Flash HAL
-    // memory-maps it; with romfs_offset = 0 the RomFs reads from the blob's
-    // base directly.
-    pub const flash0 = hal.flash.Flash(hal.internal.Flash(0x28000000, 4 * 1024 * 1024)).create(0);
+    // The romfs image is embedded into the ELF and loaded to the base of the
+    // 16 MB block at 0x80000000 (see hal/source/arm/qemu_mps2/startup/rootfs.S +
+    // linker_script.ld). It used to live in the spare ssram-1+2 bank at
+    // 0x28000000, but the image outgrew that 4 MB bank, so it moved here where it
+    // has room to grow (the 6 MB `romfs` region). The Flash HAL memory-maps it;
+    // with romfs_offset = 0 the RomFs reads from the blob's base directly.
+    pub const flash0 = hal.flash.Flash(hal.internal.Flash(0x80000000, 6 * 1024 * 1024)).create(0);
 
     // Writable, host-readable FAT block device. Backed by the 1 MB `fatdisk`
     // window carved off the top of the PSRAM pool (see linker_script.ld). Under

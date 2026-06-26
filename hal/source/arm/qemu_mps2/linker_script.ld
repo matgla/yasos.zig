@@ -1,22 +1,31 @@
 /*
  * linker_script.ld for QEMU `mps2-an505` (Cortex-M33 / ARMv8-M)
  *
- * Memory map (verified against `info mtree` / a gdb RAM-probe on qemu-system-arm
- * 10.2.1 — the an505 model backs these banks with RAM):
- *   - Code SSRAM at 0x10000000 (4 MB) holds .text/.rodata.
- *   - Spare SSRAM-1+2 bank at 0x28000000 (4 MB) holds the embedded romfs image.
- *   - Flat 16 MB PSRAM at 0x80000000 holds everything else, carved into:
+ * Memory map (verified against `info mtree` on qemu-system-arm 10.2 — the an505
+ * model backs these three banks with RAM):
+ *   - ssram-0 at 0x10000000 (4 MB) holds .text/.rodata (the "flash").
+ *   - ssram-1+2 at 0x28000000 (4 MB) is the fast user "process_ram" pool.
+ *   - Flat 16 MB block ("mps.ram") at 0x80000000 holds everything else:
+ *       romfs       (embedded rootfs image, LOADed by `-kernel`)
  *       kernel_ram  (.data/.bss/.heap/.stack)
- *       process_ram (fast user process pool)
- *       psram       (large "slow" user pool — now ~8 MB)
+ *       psram       (large "slow" user process pool)
+ *       fatdisk     (host-readable FAT block-device window)
  *       kstack      (kernel MSP stack, see below)
  *
- * The romfs lives in its own SSRAM bank (rather than eating into the 0x80000000
- * PSRAM) so the whole bottom of the 16 MB block is available to the user pools.
- * Freeing the old 4 MB romfs slot doubles the "psram" pool to ~8 MB. The romfs
- * blob is a normal LOADed section so `qemu-system-arm -kernel` copies it to its
- * VMA (0x28000000); the board's Flash HAL points there so the kernel's RomFs
- * mount path is unchanged.
+ * The embedded romfs outgrew the 4 MB ssram-1+2 bank (toybox/zork/... were
+ * added), and that bank is the edge of backed RAM so it cannot be enlarged. The
+ * romfs therefore moved to the base of the 16 MB block where it has room to
+ * grow, and the freed ssram-1+2 bank became the fast process_ram pool. The
+ * romfs blob is a normal LOADed section, so `qemu-system-arm -kernel` copies it
+ * to its VMA (0x80000000); the board's Flash HAL points there so the kernel's
+ * RomFs mount path is unchanged.
+ *
+ * kstack stays at the very top of the 16 MB block — ABOVE every process pool —
+ * so the vfork register-rescue path (process_vfork_child /
+ * process_get_back_to_parent_vfork) temporarily does
+ * `mov sp, <rescue block on the kernel stack>`, and ARMv8-M enforces PSPLIM on
+ * MOV SP; a kernel stack below a process stack would fault with STKOF (as on the
+ * rp2350, the kernel stack is the highest RAM).
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
  */
@@ -24,31 +33,26 @@
 MEMORY
 {
   flash       (rx!w) : ORIGIN = 0x10000000, LENGTH = 4096K
-  /* Spare on-board SSRAM (ssram-1 + ssram-2) — unused by the rest of the
-     system, so the romfs blob lives here instead of in the 0x80000000 PSRAM. */
-  romfs       (rw)   : ORIGIN = 0x28000000, LENGTH = 4096K
-  kernel_ram  (rwx)  : ORIGIN = 0x80000000, LENGTH = 4096K
-  /* process_ram backs the /tmp RamFs (see tmp_filesystem_allocator in
-     source/main.zig). The 256K kernel MSP stack is carved off its top, so /tmp
-     is 4 MB - 256K. */
-  process_ram (rwx)  : ORIGIN = 0x80400000, LENGTH = 4096K - 256K
-  /* psram is the large user process pool (memory region[2] — the pool every
-     process actually allocates from, see process_memory_pool.zig). With romfs
-     relocated to its own SSRAM bank, this is now a clean 8 MB. It sits BELOW the
-     kstack so the kernel MSP stack stays ABOVE every process PSPLIM: the vfork
-     register-rescue path (process_vfork_child / process_get_back_to_parent_vfork)
-     temporarily does `mov sp, <rescue block on the kernel stack>`, and ARMv8-M
-     enforces PSPLIM on MOV SP, so a kernel stack below a process stack would
-     fault with STKOF (as on the rp2350, the kernel stack is the highest RAM). */
-  psram       (rw)   : ORIGIN = 0x807C0000, LENGTH = 8192K - 1024K
+  /* Fast user process pool — the freed ssram-1+2 bank. Backs the /tmp RamFs
+     (see tmp_filesystem_allocator in source/main.zig) and non-XIP user code. */
+  process_ram (rwx)  : ORIGIN = 0x28000000, LENGTH = 4096K
+  /* Embedded romfs image at the base of the 16 MB block. 6 MB leaves headroom
+     over the current ~4.3 MB image for more apps. LOADed by `-kernel`. */
+  romfs       (rw)   : ORIGIN = 0x80000000, LENGTH = 6144K
+  kernel_ram  (rwx)  : ORIGIN = 0x80600000, LENGTH = 2048K
+  /* psram is the large "slow" user process pool (memory region[2] — the pool
+     every process actually allocates from, see process_memory_pool.zig). It
+     ends exactly where the fatdisk window begins, and sits BELOW kstack so the
+     kernel MSP stack stays ABOVE every process PSPLIM (see header comment). */
+  psram       (rw)   : ORIGIN = 0x80800000, LENGTH = 6912K
   /* fatdisk is a 1 MB window backing a host-readable FAT block device (the
-     board's `fatdisk0`). It is carved off the TOP of the psram pool so the user
-     allocator never touches it. Under a host-mmap'd RAM launch
+     board's `fatdisk0`). Under a host-mmap'd RAM launch
      (`memory-backend-file,share=on`) it maps to a fixed offset in the backing
-     file (0x80EC0000 - 0x80000000 = 0x00EC0000), so the host can drop in test
-     sources and read out device-compiled binaries via scripts/fatimg without a
-     kernel rebuild. It is NOT a LOADed section; under a plain-RAM launch the
-     window is garbage, the FatFs mount fails and is skipped (source/main.zig). */
+     file (0x80EC0000 - 0x80000000 = 0x00EC0000) that scripts/* hardcode, so the
+     host can drop in test sources and read out device-compiled binaries via
+     scripts/fatimg without a kernel rebuild. It is NOT a LOADed section; under a
+     plain-RAM launch the window is garbage, the FatFs mount fails and is skipped
+     (source/main.zig). Keep it at 0x80EC0000. */
   fatdisk     (rw)   : ORIGIN = 0x80EC0000, LENGTH = 1024K
   kstack      (rw)   : ORIGIN = 0x80FC0000, LENGTH = 256K
 }

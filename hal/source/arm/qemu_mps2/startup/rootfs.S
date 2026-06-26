@@ -2,7 +2,7 @@
 // rootfs.S
 //
 // Embeds the prebuilt rootfs (romfs) image into the kernel ELF. The linker
-// script places this `.romfs` section at 0x80800000; QEMU's `-kernel` loader
+// script places this `.romfs` section at 0x80000000; QEMU's `-kernel` loader
 // copies it there, and the board's Flash HAL points at that address so the
 // kernel mounts it exactly as it would the on-flash image on real hardware.
 //

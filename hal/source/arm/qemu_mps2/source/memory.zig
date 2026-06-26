@@ -15,9 +15,11 @@
 
 const MemoryInfo = @import("hal_interface").memory.MemoryInfo;
 
-// QEMU MPS2-AN505 has a flat 16 MB SRAM at 0x80000000, carved by the linker
-// script into kernel RAM, process RAM, and a large "psram" pool (the equivalent
-// of the real board's external PSRAM, but just more on-board RAM here).
+// QEMU MPS2-AN505 RAM (see linker_script.ld): the fast "process_ram" user pool
+// is the ssram-1+2 bank at 0x28000000; the flat 16 MB block at 0x80000000 holds
+// the romfs image, kernel RAM, and the large "slow" psram user pool (the
+// equivalent of the real board's external PSRAM, but just more on-board RAM
+// here). All three memory_layout entries are filled from linker symbols below.
 extern var __kernel_ram_start__: u8;
 extern var __kernel_ram_end__: u8;
 extern var __process_ram_start__: u8;
