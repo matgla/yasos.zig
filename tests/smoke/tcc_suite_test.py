@@ -132,6 +132,10 @@ NATIVE_TARGET_SKIP_TESTS = {
     "compile/limits-structnest": "compile-time process stack overflow on target",
     "compile/limits-caselabels": "memory and performance optimization needed",
     "compile/limits-declparen": "compile-time process stack overflow on target",
+    # 1 MB string-literal array (STR6 ~10^6 bytes): exhausts target memory and
+    # crashes QEMU. gcc's own testsuite dg-skip-if's this as "Array too big" on
+    # small-memory targets (avr/m32c/pdp11/msp430); same rationale here.
+    "compile/limits-stringlit": "1 MB string-literal array: target OOM (gcc dg-skip-if 'Array too big')",
     # execute/ tests — compile phase exhausts process stack before link/run
     "memcpy-a1": "test is to huge to run on the embedded target",
     "memclr": "test is to huge to run on the embedded target",
