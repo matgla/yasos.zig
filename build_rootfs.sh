@@ -95,6 +95,7 @@ if $CLEAR; then
   rm -rf apps/ascii_animations/build
   rm -rf apps/textvaders/build
   rm -rf apps/hello_world/build
+  rm -rf apps/fbdemo/build
   rm -rf libs/libc/build
   rm -rf libs/libdl/build
   rm -rf libs/pthread/build
@@ -136,6 +137,11 @@ rm -rf rootfs/tmp
 ln -s /root/tmp rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
 cp $SCRIPT_DIR/hello_script.sh rootfs/usr
+
+# yasos-specific userspace headers (kept in-tree under include/, since
+# rootfs/ is generated). yasos/fb.h is the /dev/fb0 interface.
+mkdir -p rootfs/usr/include/yasos
+cp $SCRIPT_DIR/include/yasos/*.h rootfs/usr/include/yasos
 
 mkdir -p rootfs/dev
 pwd
@@ -557,6 +563,7 @@ build_makefile cowsay
 build_makefile ascii_animations
 build_makefile textvaders
 build_makefile hello_world
+build_makefile fbdemo
 build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs

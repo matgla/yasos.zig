@@ -33,6 +33,7 @@ pub const internal = struct {
     pub const Memory = @import("source/memory.zig").Memory;
     pub const Flash = @import("source/flash.zig").Flash;
     pub const RamFlash = @import("source/ramflash.zig").RamFlash;
+    pub const SharedMemoryDisplay = @import("source/display_shm.zig").SharedMemoryDisplay;
 };
 
 pub const uart = @import("hal_interface").uart;
@@ -43,6 +44,7 @@ pub const atomic = @import("hal_interface").atomic.AtomicInterface(internal.Hard
 pub var external_memory = @import("hal_interface").external_memory.ExternalMemory(internal.ExternalMemory).create();
 pub const memory = @import("hal_interface").memory.Memory(internal.Memory).create();
 pub const flash = @import("hal_interface").flash;
+pub const display = @import("hal_interface").display;
 
 pub const hw_atomic = internal.HardwareAtomic;
 

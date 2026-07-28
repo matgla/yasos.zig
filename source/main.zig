@@ -252,6 +252,23 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     } else {
         kernel.log.debug("Board has no mmc interfaces", .{});
     }
+
+    // Display, when the board has one. Registered as /dev/fb0. On the QEMU
+    // host-test target this is the shared-memory framebuffer that
+    // scripts/fbview.py renders into a window; on a real board it will be the
+    // VGA/DVI extension panel behind the same hal interface.
+    if (@hasDecl(board, "display")) {
+        inline for (@typeInfo(board.display).@"struct".decls, 0..) |d, i| {
+            const name = std.fmt.comptimePrint("fb{d}", .{i});
+            const display = &@field(board.display, d.name);
+            const display_driver = try (try kernel.driver.DisplayDriver(@TypeOf(display.*)).InstanceType.create(allocator, display, name)).interface.new(allocator);
+            driverfs.data().append(display_driver, name) catch {};
+            kernel.log.info("adding display driver: {s}", .{name});
+        }
+    } else {
+        kernel.log.debug("Board has no display interfaces", .{});
+    }
+
     try driverfs.data().load_all();
 
     if (maybe_mmcnode) |*mmcnode| {

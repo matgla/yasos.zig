@@ -9,7 +9,8 @@
  *   - ssram-1+2 at 0x28000000 (4 MB): the kernel RAM (.data/.bss/.heap).
  *   - Flat 16 MB block ("mps.ram") at 0x80000000 holds the rest:
  *       romfs       (embedded rootfs image, LOADed by `-kernel`)   5 MB
- *       psram       (large "slow" user pool)                       9.75 MB
+ *       psram       (large "slow" user pool)                       8.75 MB
+ *       fbdev       (shared-memory framebuffer window)             1 MB
  *       fatdisk     (host-readable FAT block-device window)        1 MB
  *       kstack      (kernel MSP stack, see below)                  256 K
  *
@@ -52,9 +53,20 @@ MEMORY
      ~4.3 MB). Kept small so the slow pool below can be large. LOADed by `-kernel`. */
   romfs       (rw)   : ORIGIN = 0x80000000, LENGTH = 5120K
   /* "Slow" user process pool (memory region[2], the bulk pool every process
-     allocates from — see process_memory_pool.zig). 9.75 MB so tcc's user-side
-     allocations for big translation units fit. Ends where fatdisk begins. */
-  psram       (rw)   : ORIGIN = 0x80500000, LENGTH = 9984K
+     allocates from — see process_memory_pool.zig). 8.75 MB so tcc's user-side
+     allocations for big translation units fit. Ends where fbdev begins. */
+  psram       (rw)   : ORIGIN = 0x80500000, LENGTH = 8960K
+  /* fbdev is a 1 MB window backing the shared-memory framebuffer (the board's
+     `display0`). Same host-mmap trick as fatdisk below: under
+     `memory-backend-file,share=on` it maps to a fixed offset in the backing file
+     (0x80DC0000 - 0x80000000 = 0x00DC0000), so scripts/fbview.py can mmap the
+     very same pages the guest renders into and put them in an SDL window with no
+     QEMU device model and no per-pixel MMIO trap. Holds a control header, a
+     host->guest input ring and two 640x480 8bpp buffers (0x97000 bytes used of
+     the 1 MB). NOT a LOADed section — the guest driver initialises the header at
+     boot. Keep in sync with qemu_mps2_an505.zig fbdev_address/fbdev_size and the
+     FB_* constants in scripts/fbview.py. */
+  fbdev       (rw)   : ORIGIN = 0x80DC0000, LENGTH = 1024K
   /* fatdisk is a 1 MB window backing a host-readable FAT block device (the
      board's `fatdisk0`). Under a host-mmap'd RAM launch
      (`memory-backend-file,share=on`) it maps to a fixed offset in the backing

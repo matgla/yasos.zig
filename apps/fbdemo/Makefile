@@ -1,0 +1,30 @@
+CC ?= armv8m-tcc
+CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
+CFLAGS += $(ROOTFS_OPT_CFLAGS)
+LDFLAGS = -g -fvisibility=hidden -g -L../../rootfs/lib
+SRCS = $(wildcard *.c)
+OBJS = $(patsubst %.c, build/%.o, $(SRCS))
+
+TARGET = build/fbdemo
+
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+
+all: $(TARGET) $(TARGET).elf
+
+build/%.o: %.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) -Wl,-oformat=yaff $^ -o $@
+
+$(TARGET).elf: $(OBJS)
+	$(CC) $(LDFLAGS) -Wl,-oformat=elf32-littlearm $^ -o $@
+
+install: $(TARGET)
+	mkdir -p $(BINDIR)
+	cp $(TARGET) $(BINDIR)
+
+clean:
+	rm -rf build

@@ -56,3 +56,17 @@ pub const romfs_offset: usize = 0;
 // FAT block-device window — MUST match the `fatdisk` region in linker_script.ld.
 pub const fatdisk_address: usize = 0x80EC0000;
 pub const fatdisk_size: usize = 1024 * 1024;
+
+// Shared-memory framebuffer window — MUST match the `fbdev` region in
+// linker_script.ld and the FB_WINDOW_* constants in scripts/fbview.py. Same
+// host-mmap trick as fatdisk: under `memory-backend-file,share=on` this maps to
+// file offset 0x00DC0000, which the host viewer mmaps and renders from.
+pub const fbdev_address: usize = 0x80DC0000;
+pub const fbdev_size: usize = 1024 * 1024;
+
+pub const display = struct {
+    // Stands in for the real extension board. The driver above it never learns
+    // that the framebuffer happens to be plain RAM here rather than across a
+    // link — see hal/interface/display.zig.
+    pub var display0 = hal.display.Display(hal.internal.SharedMemoryDisplay(fbdev_address, fbdev_size)).create();
+};
