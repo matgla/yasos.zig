@@ -19,6 +19,8 @@
 
 pub const fs = @import("driverfs.zig");
 pub const UartDriver = @import("uart/uart_driver.zig").UartDriver;
+pub const console_baudrate = @import("uart/uart_driver.zig").console_baudrate;
+pub const VtDriver = @import("vt/vt_driver.zig").VtDriver;
 pub const FlashDriver = @import("flash/flash_driver.zig").FlashDriver;
 pub const MmcDriver = @import("mmc/mmc_driver.zig").MmcDriver;
 pub const MmcPartitionDriver = @import("mmc/mmc_partition_driver.zig").MmcPartitionDriver;

@@ -33,9 +33,49 @@ config CONFIG_BUILD_BUNDLE_COMPILER_RT
         Bundle compiler RT. Compiler RT may not be compatible with GCC based environment, i.e. for newlib nano
 
 config CONFIG_BUILD_USE_NEWLIB
-    bool "Use newlib libc library" 
-    help 
-        Newlib may be incompatible with host environment 
+    bool "Use newlib libc library"
+    help
+        Newlib may be incompatible with host environment
+
+config CONFIG_BUILD_USERSPACE_HARDWARE_FP
+    bool "Hardware floating point for userspace code"
+    default y
+    depends on CONFIG_CPU_USE_FPU
+    help
+      Build the rootfs -- every library, every application and the on-device C
+      compiler -- against this CPU's floating point hardware instead of pure
+      software floating point.
+
+      This sets the default -mfpu of the tcc toolchain that build_rootfs.sh uses
+      (CONFIG_BUILD_USERSPACE_FP_MFPU, chosen by the CPU), so it reaches targets
+      whose Makefiles pass no FP flags of their own, and it selects the matching
+      __aeabi_* runtime at link time. The float ABI is unchanged (softfp: FP
+      arguments stay in general-purpose registers), so objects built with and
+      without this option remain link-compatible -- no flag day, and a .so built
+      either way keeps working.
+
+      On RP2350 this means single precision on the FPv5-SP FPU and doubles
+      through the DCP coprocessor: measured 21-29x on double add/sub/compare and
+      ~2.8x on multiply against soft float. Two caveats worth knowing:
+
+        - Doubles are not fully IEEE-754 under the DCP. Subnormal operands and
+          results are flushed to zero; there is no DCP path that does not. Every
+          other value, including all NaN/Inf/zero handling, is bit-exact against
+          the software implementation. Single precision is unaffected (FPv5-SP is
+          fully IEEE). This matches what pico-sdk does.
+        - The context switch grows a DCP save/restore (CONFIG_CPU_HAS_DCP): a
+          non-engaging peek per switch, and 6 words of coprocessor state only
+          when a process is preempted mid-sequence.
+
+      Turn this off to build a rootfs that touches no FP hardware at all.
+
+config CONFIG_BUILD_USERSPACE_FP_MFPU
+    string
+    help
+      The -mfpu name the rootfs toolchain defaults to when
+      CONFIG_BUILD_USERSPACE_HARDWARE_FP is set. Selected by the CPU, since it
+      names silicon: "rp2350" (FPv5-SP + DCP) or "fpv5-sp-d16" (FPv5-SP only,
+      e.g. the QEMU Cortex-M33 models, which have no CP4).
 
 
 endmenu
@@ -58,10 +98,87 @@ config FLASH_MEMORY_SIZE
     string "Flash memory size in format like: 1024K" 
     depends on FIRMWARE_IN_FLASH
 
+menu "XIP Flash"
+config CONFIG_FLASH_XIP_MAX_FREQUENCY_HZ
+    int "Maximum XIP flash frequency in Hz"
+    depends on FIRMWARE_IN_FLASH
+
+config CONFIG_FLASH_XIP_MAX_SELECT_US
+    int "Maximum XIP chip select assertion time in us"
+    depends on FIRMWARE_IN_FLASH
+
+config CONFIG_FLASH_XIP_DESELECT_NS
+    int "Chip-select high time enforced between XIP reads, in ns"
+    depends on FIRMWARE_IN_FLASH
+    help
+      The part's /CS deselect time for READ instructions (W25Q128JV: tSHSL1 =
+      10 ns), plus whatever margin the board wants. Every XIP miss that cannot
+      continue a burst waits this long before the next transaction can start,
+      so it is worth stating per part rather than reusing the much larger
+      erase/program figure. Boards that do not set it keep the conservative
+      50 ns, which is tSHSL2.
+
+config CONFIG_FLASH_XIP_CONTINUOUS_READ
+    bool "Keep the flash in continuous-read mode"
+    depends on FIRMWARE_IN_FLASH
+    help
+      Send the quad-read mode byte as 0xA0 instead of 0xFF, so the part expects
+      an address rather than an opcode on the next transaction, and stop
+      clocking the opcode out at all. Saves 8 SCK periods on every XIP cache
+      miss, which is what code fetch from flash spends most of its time waiting
+      for. Applied at the end of external-memory bring-up and CRC-verified
+      against the configuration it replaces; a part that does not read back its
+      own reference falls back to sending the opcode.
+endmenu
+
 menu "PSRAM"
 config CONFIG_PSRAM_CS_PIN
     int "Pin for PSRAM chip selection"
     depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_MAX_FREQUENCY_HZ
+    int "Maximum PSRAM frequency in Hz"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_CE_MAX_LOW_US
+    int "Maximum PSRAM chip select low pulse width in us"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_CE_MIN_DESELECT_NS
+    int "Minimum PSRAM chip select deselect time in ns"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_RXDELAY_LO
+    int "PSRAM RX delay below the high-speed threshold"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_RXDELAY_HI
+    int "PSRAM RX delay at or above the high-speed threshold"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+
+config CONFIG_PSRAM_RXDELAY_HI_FREQ_THRESHOLD_HZ
+    int "PSRAM frequency threshold for the high RX delay in Hz"
+    depends on CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+endmenu
+
+menu "SD Card"
+choice CONFIG_MMC_BUS_MODE
+    prompt "SD Card Bus Mode"
+    default CONFIG_MMC_BUS_MODE_SPI
+    help
+      Select the SD card bus mode. SPI uses single data line,
+      SDIO uses native 4-bit wide bus via PIO.
+
+    config CONFIG_MMC_BUS_MODE_SPI
+      bool "SPI"
+      help
+        Use SPI mode for SD card communication (1-bit, MOSI/MISO)
+
+    config CONFIG_MMC_BUS_MODE_SDIO
+      bool "SDIO"
+      help
+        Use native SDIO mode for SD card communication (4-bit DAT bus via PIO)
+endchoice
 endmenu
 
 endmenu

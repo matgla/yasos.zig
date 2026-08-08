@@ -33,19 +33,110 @@ if BOARD_PIMORONI_PICO_PLUS2_DISCARD_IN_CONF
   endchoice
 
   config CONFIG_BUILD_LINKER_SCRIPT_PATH
-    default "${hal_root}/source/raspberry/rp2350/linker_script.ld" 
+    default "${hal_root}/source/raspberry/rp2350/linker_script.ld"
 
   config FLASH_MEMORY_ADDRESS
     default "0x10000000"
-  
-  config FLASH_MEMORY_SIZE
-    default "2MB"
 
-  config CONFIG_PSRAM_CS_PIN 
+  config FLASH_MEMORY_SIZE
+    default "16MB"
+
+  config CONFIG_PSRAM_CS_PIN
     default 47
 
-  config CONFIG_BUILD_USE_NEWLIB 
+  config CONFIG_CPU_CLOCK_FREQUENCY_MHZ
+    # 618 MHz (VCO 1236 / postdiv 2) is the highest clock this board runs
+    # stably. QMI divider 5, so flash and PSRAM SCK is 618/5 = 123.6 MHz.
+    #
+    # Everything above it has now been tried and failed (2026-08-03):
+    #   636 MHz  unstable under the smoke suite — booted and ran, then failed
+    #            in gcc torture. This is the interesting one: it is only +2.9%
+    #            and it still does not hold, so the ceiling is genuinely here
+    #            and not a round number someone picked.
+    #   678 MHz  HardFault in flash XIP shortly after the banner, with PSRAM
+    #            and flash rxdelay calibration both passing first — the memory
+    #            link came up and the core did not.
+    #   798 MHz  untested, and further out than either.
+    #
+    # Do not raise this for the CPU alone even if a higher clock is someday
+    # stable. Flash/PSRAM SCK is clk_sys/N for an integer N =
+    # ceil(clk_sys/133 MHz), and both sit on the bus that XIP code fetches
+    # from, so crossing a divider boundary is paid by every instruction. 678 is
+    # a worked example: N goes 5 -> 6 and SCK DROPS to 113.0 MHz, 9% below what
+    # 618 has. See the table in hal/source/KConfig.
+    #
+    # Do not reach for core voltage to buy more clock either — it is already at
+    # 2100 mV against a 1100 mV nominal core, and the regulator's next step is
+    # +100 mV. See requiredVregCode() in
+    # hal/source/raspberry/rp2350/startup/crt.zig.
+    #
+    # The open question here is the opposite direction: whether 618 still needs
+    # 2100 mV at all, now that PSRAM, /tmp, the pool and the logging have all
+    # changed since that was measured. CONFIG_CPU_CORE_VOLTAGE_MV sweeps it.
+    default 618
+
+  config CONFIG_FLASH_XIP_MAX_FREQUENCY_HZ
+    default 133000000
+
+  config CONFIG_FLASH_XIP_MAX_SELECT_US
+    default 8
+
+  config CONFIG_FLASH_XIP_DESELECT_NS
+    # W25Q128JV tSHSL1 (/CS deselect, read) is 10 ns; tSHSL2's 50 ns covers
+    # erase, program and write-status, none of which the XIP window issues.
+    # 12 ns asks for 20% over spec before the half-SCK the QMI adds on its own.
+    default 12
+
+  config CONFIG_FLASH_XIP_CONTINUOUS_READ
+    # W25Q128JV: mode bits M[7:4] = 0xA hold continuous-read across transactions.
     default y
 
-endif
+  config CONFIG_PSRAM_MAX_FREQUENCY_HZ
+    # APS6404L spec ceiling (~133 MHz SCK). The previous 84 MHz cap worked
+    # around pagebreak=NONE, where QMI ran one linear burst across page
+    # boundaries toward the tCEM limit; QMI M1 timing now uses pagebreak=1024
+    # (external_memory.zig), which breaks bursts at the page boundary and keeps
+    # them in spec, so the cap is no longer needed. Note: at clkdiv = max(2,
+    # ceil(sysclk/this)), SCK == sysclk/2 == 75 MHz at the 150 MHz sysclk either
+    # way; this ceiling only raises SCK when the CPU is overclocked higher.
+    default 133000000
 
+  config CONFIG_PSRAM_CE_MAX_LOW_US
+    default 8
+
+  config CONFIG_PSRAM_CE_MIN_DESELECT_NS
+    # APS6404L tCPH (CE# high between subsequent operations) is 18 ns; 22 ns
+    # asks for the same ~20% over spec that CONFIG_FLASH_XIP_DESELECT_NS takes
+    # above the W25Q128JV's tSHSL1.  The 50 ns this used to carry had no
+    # datasheet row behind it -- it was the same unexamined default that the
+    # flash side turned out to be paying, where sizing it from the read row
+    # instead of the erase/program row was worth 20 cycles a miss.
+    #
+    # The compiler's heap lives in PSRAM (the shell holds the SRAM tier), so
+    # every heap line fill through the XIP cache waits this out.  At 532 MHz
+    # and a 133 MHz SCK it is 25 system clocks against 11.
+    #
+    # Unlike the flash change this one is NOT self-verifying at boot: it is
+    # covered by the whole-array POST and rxdelay calibration in
+    # external_memory.zig, and this part has a history of intermittent
+    # corruption on this board (see CONFIG_PSRAM_MAX_FREQUENCY_HZ), so a single
+    # clean boot is not evidence.  Revert this line first on any instability.
+    default 22
+
+  config CONFIG_PSRAM_RXDELAY_LO
+    default 2
+
+  config CONFIG_PSRAM_RXDELAY_HI
+    default 3
+
+  config CONFIG_PSRAM_RXDELAY_HI_FREQ_THRESHOLD_HZ
+    default 90000000
+
+  config CONFIG_BUILD_USE_NEWLIB
+    default y
+
+  choice CONFIG_MMC_BUS_MODE
+    default CONFIG_MMC_BUS_MODE_SDIO
+  endchoice
+
+endif

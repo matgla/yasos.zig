@@ -1,5 +1,6 @@
 CC ?= tcc
 CFLAGS = -std=c11 -Wall -gdwarf -fpic -pedantic -nostdlib -nostdinc -I. -I../../rootfs/usr/include -L../../rootfs/lib
+CFLAGS += $(ROOTFS_OPT_CFLAGS)
 LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nodefaultlibs
 LDFLAGS = -shared -fPIC -gdwarf ${LDFLAGS_STATIC}
 
@@ -20,7 +21,7 @@ all: $(TARGET_SHARED) $(TARGET_STATIC) $(TARGET_SHARED).elf
 prepare:
 	mkdir -p build
 
-build/%.o: %.c prepare
+build/%.o: %.c | prepare
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(TARGET_SHARED).elf: $(OBJS)

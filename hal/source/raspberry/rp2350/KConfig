@@ -31,6 +31,13 @@ if CPU_RP2350
   config CONFIG_CPU_USE_FPU
     def_bool y
 
+  # FPv5-SP for single precision plus the DCP double coprocessor on CP4.
+  config CONFIG_CPU_HAS_DCP
+    def_bool y
+
+  config CONFIG_BUILD_USERSPACE_FP_MFPU
+    def_string "rp2350"
+
   config CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
     def_bool y
 

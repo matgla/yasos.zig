@@ -1,77 +1,23 @@
+/*
+ * readyaff - dump the header and architecture section of a YAFF module.
+ *
+ *   gcc -I libs/tinycc -o readyaff scripts/readyaff.c
+ *   ./readyaff rootfs/usr/bin/hello
+ *
+ * The layout comes from the compiler's own tccyaff.h rather than a copy kept
+ * here: this tool exists to check what the writer produced, so a private
+ * duplicate of the struct is the one thing it must not have. (It used to keep
+ * one, drifted five fields behind, and printed garbage for the module name.)
+ */
+
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
-typedef struct __attribute__((packed)) YaffHeader {
-  uint8_t magic[4];
-  uint8_t module_type;
-  uint16_t arch;
-  uint8_t yaff_version;
-  uint32_t code_length;
-  uint32_t init_length;
-  uint32_t data_length;
-  uint32_t bss_length;
-  uint32_t entry;
-  uint16_t external_libraries_amount;
-  uint8_t alignment;
-  uint8_t text_and_data_separation;
-  uint16_t version_major;
-  uint16_t version_minor;
-  uint16_t symbol_table_relocations_amount;
-  uint16_t local_relocations_amount;
-  uint16_t data_relocations_amount;
-  uint16_t _reserved2;
-  uint16_t exported_symbols_amount;
-  uint16_t imported_symbols_amount;
-  uint32_t got_length;
-  uint32_t got_plt_length;
-  uint32_t plt_length;
-  // TODO: remove or move to the arch section
-  uint16_t arch_section_offset;
-  uint16_t imported_libraries_offset;
-  uint16_t relocations_offset;
-  uint16_t imported_symbols_offset;
-  uint16_t exported_symbols_offset;
-  uint16_t text_offset;
-} YaffHeader;
-
-typedef enum YaffSectionCode {
-  YAFF_SECTION_CODE = 0,
-  YAFF_SECTION_DATA = 1,
-  YAFF_SECTION_INIT = 2,
-  YAFF_SECTION_UNKNOWN = 3,
-} YaffSectionCode;
-
-typedef struct __attribute__((packed)) YaffSymbolTableRelocationEntry {
-  uint32_t is_exported_symbol : 1;
-  uint32_t index : 31;
-  uint32_t symbol_index;
-} YaffSymbolTableRelocationEntry;
-
-typedef struct __attribute__((packed)) YaffDataRelocationEntry {
-  uint32_t to;
-  uint32_t section : 2;
-  uint32_t from : 30;
-} YaffDataRelocationEntry;
-
-typedef struct __attribute__((packed)) YaffLocalRelocationEntry {
-  uint32_t section : 2;
-  uint32_t index : 30;
-  uint32_t target_offset;
-} YaffLocalRelocationEntry;
-
-typedef struct __attribute__((packed)) YaffSymbolEntry {
-  uint32_t section : 2;
-  uint32_t offset : 30;
-  char name[0];
-} YaffSymbolEntry;
-
-typedef enum YaffModuleType {
-  YAFF_MODULE_TYPE_EXECUTABLE = 1,
-  YAFF_MODULE_TYPE_SHARED_LIBRARY = 2,
-} YaffModuleType;
+#include "tccyaff.h"
 
 const char *get_module_type_str(uint8_t module_type) {
   switch (module_type) {
@@ -83,21 +29,104 @@ const char *get_module_type_str(uint8_t module_type) {
   return "unknown";
 }
 
-typedef enum YaffArch {
-  YAFF_ARCH_ARMV6M = 1,
-} YaffArch;
-
 const char *get_arch_str(uint16_t arch) {
   switch (arch) {
-  case YAFF_ARCH_ARMV6M:
-    return "armv6m";
+  case YAFF_ARCH_ARMV6_M:
+    return "armv6-m";
+  case YAFF_ARCH_ARMV7_M:
+    return "armv7-m";
+  case YAFF_ARCH_ARMV7E_M:
+    return "armv7e-m";
+  case YAFF_ARCH_ARMV8_M:
+    return "armv8-m";
   }
   return "unknown";
+}
+
+const char *get_fpu_str(uint8_t fpu) {
+  switch (fpu) {
+  case YAFF_FPU_NONE:
+    return "none";
+  case YAFF_FPU_FPV4_SP_D16:
+    return "fpv4-sp-d16";
+  case YAFF_FPU_FPV5_SP_D16:
+    return "fpv5-sp-d16";
+  case YAFF_FPU_FPV5_D16:
+    return "fpv5-d16";
+  case YAFF_FPU_RP2350:
+    return "rp2350";
+  case YAFF_FPU_VFP:
+    return "vfp";
+  case YAFF_FPU_VFPV3:
+    return "vfpv3";
+  case YAFF_FPU_VFPV4:
+    return "vfpv4";
+  case YAFF_FPU_NEON:
+    return "neon";
+  case YAFF_FPU_NEON_VFPV4:
+    return "neon-vfpv4";
+  case YAFF_FPU_NEON_FP_ARMV8:
+    return "neon-fp-armv8";
+  }
+  return "unknown";
+}
+
+const char *get_float_abi_str(uint8_t abi) {
+  switch (abi) {
+  case YAFF_FLOAT_ABI_SOFT:
+    return "soft";
+  case YAFF_FLOAT_ABI_SOFTFP:
+    return "softfp";
+  case YAFF_FLOAT_ABI_HARD:
+    return "hard";
+  }
+  return "unknown";
+}
+
+void print_features(uint32_t features) {
+  static const struct {
+    uint32_t bit;
+    const char *name;
+  } known[] = {
+      {YAFF_ARCH_FEATURE_FPU_SP, "fpu-sp"},
+      {YAFF_ARCH_FEATURE_FPU_DP, "fpu-dp"},
+      {YAFF_ARCH_FEATURE_DCP, "dcp"},
+  };
+  if (features == 0) {
+    printf("none");
+    return;
+  }
+  uint32_t rest = features;
+  int first = 1;
+  for (unsigned i = 0; i < sizeof(known) / sizeof(known[0]); ++i) {
+    if (features & known[i].bit) {
+      printf("%s%s", first ? "" : "+", known[i].name);
+      first = 0;
+      rest &= ~known[i].bit;
+    }
+  }
+  /* A bit this build does not know about is exactly what a dump should show:
+   * the image needs something newer than this tool. */
+  if (rest)
+    printf("%sunknown(0x%x)", first ? "" : "+", rest);
+}
+
+void print_arch_section(const YaffArchSection *arch) {
+  printf("  Architecture section:\n");
+  printf("    size:            %d\n", arch->size);
+  printf("    arch:            %s\n", get_arch_str(arch->arch));
+  printf("    fpu:             %s\n", get_fpu_str(arch->fpu));
+  printf("    float abi:       %s\n", get_float_abi_str(arch->float_abi));
+  printf("    requires:        ");
+  print_features(arch->required_features);
+  printf("\n");
 }
 
 void print_header(const YaffHeader *header, const char *name) {
   printf("YAFF Header:\n");
   printf("  Magic:         %4s\n", header->magic);
+  printf("  Format:        v%d (this tool reads v%d)\n", header->yaff_version,
+         YAFF_VERSION);
   printf("  Type:          %s\n", get_module_type_str(header->module_type));
   printf("  Arch:          %s\n", get_arch_str(header->arch));
   printf("  Alignemnt:     %d\n", header->alignment);
@@ -149,9 +178,24 @@ int main(int argc, char *argv[]) {
   }
 
   YaffHeader header;
-  read(fd, &header, sizeof(YaffHeader));
+  if (read(fd, &header, sizeof(YaffHeader)) != (ssize_t)sizeof(YaffHeader)) {
+    printf("Not a YAFF file (too short): %s\n", argv[1]);
+    close(fd);
+    return -1;
+  }
+  if (memcmp(header.magic, "YAFF", 4) != 0) {
+    printf("Not a YAFF file (bad magic): %s\n", argv[1]);
+    close(fd);
+    return -1;
+  }
+
   char name[64];
-  uint32_t name_length = header.imported_libraries_offset - sizeof(YaffHeader);
+  /* The name runs from the end of the header to the architecture section (or,
+   * in a pre-v2 image with no such section, to the imported-library table). */
+  uint32_t name_end = header.arch_section_offset
+                          ? header.arch_section_offset
+                          : header.imported_libraries_offset;
+  uint32_t name_length = name_end - sizeof(YaffHeader);
   if (name_length > sizeof(name)) {
     read(fd, name, sizeof(name));
     for (uint32_t i = 0; i < name_length - sizeof(name); ++i) {
@@ -164,6 +208,16 @@ int main(int argc, char *argv[]) {
   }
 
   print_header(&header, name);
+
+  if (header.arch_section_offset) {
+    YaffArchSection arch;
+    if (lseek(fd, header.arch_section_offset, SEEK_SET) >= 0 &&
+        read(fd, &arch, sizeof(arch)) == (ssize_t)sizeof(arch)) {
+      print_arch_section(&arch);
+    }
+  } else {
+    printf("  Architecture section: none\n");
+  }
 
   close(fd);
 }

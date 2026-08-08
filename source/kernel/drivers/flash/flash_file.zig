@@ -125,6 +125,12 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return FlashType.BlockSize * self._flash.get_number_of_blocks();
             }
 
+            pub fn truncate(self: *Self, length: u64) anyerror!void {
+                _ = self;
+                _ = length;
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
             pub fn filetype(self: *const Self) FileType {
                 _ = self;
                 return FileType.BlockDevice;

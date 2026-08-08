@@ -40,6 +40,27 @@ fn void_or_value(comptime value: anytype) void_or_register() {
     return {};
 }
 
+/// The DCP (RP2350's double coprocessor on CP4) keeps state the hardware does
+/// not stack on exception entry, and the instruction sequences that use it are
+/// not atomic: preempting one and letting another process start its own
+/// corrupts the first. So when user code may execute those sequences, the
+/// context switch saves and restores that state -- see the DCP block in
+/// context_switch.S. Present in the software frame only then; the assembly is
+/// gated on the same condition through YASOS_SAVE_DCP_STATE.
+///
+/// @hasDecl-guarded so a config.zig generated before these symbols existed
+/// still builds (as `false`) instead of failing to compile.
+pub const saves_dcp_state = @hasDecl(config.cpu, "has_dcp") and config.cpu.has_dcp and
+    @hasDecl(config.build, "userspace_hardware_fp") and config.build.userspace_hardware_fp;
+
+fn void_or_dcp_register() type {
+    return if (saves_dcp_state) u32 else void;
+}
+
+fn void_or_dcp_value(comptime value: anytype) void_or_dcp_register() {
+    return if (saves_dcp_state) value else {};
+}
+
 pub const HardwareStoredRegisters = extern struct {
     r0: u32,
     r1: u32,
@@ -96,6 +117,18 @@ pub const SoftwareStoredRegisters = extern struct {
     s29: void_or_register(),
     s30: void_or_register(),
     s31: void_or_register(),
+    /// DCP state, at the top of the software frame (pushed first, popped last)
+    /// so the layout below the FP registers is untouched. `dcp_engaged` is
+    /// non-zero only when the process was preempted in the middle of a DCP
+    /// sequence, which is the only case where the X/Y/EFD words hold anything
+    /// worth restoring. See `saves_dcp_state`.
+    dcp_xl: void_or_dcp_register(),
+    dcp_xh: void_or_dcp_register(),
+    dcp_yl: void_or_dcp_register(),
+    dcp_yh: void_or_dcp_register(),
+    dcp_el: void_or_dcp_register(),
+    dcp_eh: void_or_dcp_register(),
+    dcp_engaged: void_or_dcp_register(),
 };
 
 fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
@@ -160,6 +193,15 @@ fn create_default_software_registers(lr: usize) SoftwareStoredRegisters {
         .s29 = void_or_value(0),
         .s30 = void_or_value(0),
         .s31 = void_or_value(0),
+        // A process starts outside any DCP sequence, so there is nothing to
+        // restore on its first switch-in.
+        .dcp_xl = void_or_dcp_value(0),
+        .dcp_xh = void_or_dcp_value(0),
+        .dcp_yl = void_or_dcp_value(0),
+        .dcp_yh = void_or_dcp_value(0),
+        .dcp_el = void_or_dcp_value(0),
+        .dcp_eh = void_or_dcp_value(0),
+        .dcp_engaged = void_or_dcp_value(0),
     };
 }
 
@@ -204,11 +246,59 @@ pub fn init() void {
     hal.time.systick.disable();
 }
 
+// FPCCR.LSPEN (bit 30), the FPU's lazy state-preservation enable. Reset value
+// is 1.
+const fpccr: *volatile u32 = @ptrFromInt(0xE000EF34);
+const fpccr_lspen: u32 = 1 << 30;
+
+// Turn OFF lazy FP state preservation, so exception entry writes s0-s15 and
+// FPSCR into the frame immediately instead of only reserving 68 bytes for them
+// and arming a deferred write at FPCAR.
+//
+// Lazy stacking assumes every exception entry that sets LSPACT is matched by an
+// exception return that clears it (EXC_RETURN.FType == 0). This kernel breaks
+// that pairing on purpose: process_syscall_entry (context_switch.S) is entered
+// from a user `svc` with FType == 0 but returns with a hardcoded 0xfffffffd
+// (FType == 1) to run the syscall body in thread mode. LSPACT stays set and
+// FPCAR keeps pointing into the *old* frame; the process then goes on using
+// that memory as ordinary stack, and whenever the deferred save finally fires
+// it writes 17 words straight through live data.
+//
+// That is not theoretical -- it is what the intermittent smoke crashes were.
+// In mibench_dijkstra the four words of memmove's saved r5/r6/r8/lr all landed
+// inside [FPCAR, FPCAR+0x44) of a dead frame, so its `ldmia sp!, {r4,r5,r6,r8,pc}`
+// branched to 0x000000C2. Same signature in 370_ptr_struct_copy_inline,
+// bug_struct_slot_reuse, bug_switch_default_chain, bug_mla64_non_inplace and
+// ieee/pr50310: a zeroed saved-LR, or a saved r9 (the GOT base) reloaded as
+// garbage so the next PLT stub faulted. It only became reachable when userspace
+// got hardware FP -- before that nothing set CONTROL.FPCA, so the deferred save
+// was never armed with anything to write.
+//
+// Eager stacking costs ~17 stores per exception entry taken from FP context and
+// makes the frame layout unconditionally match HardwareStoredRegisters above.
+// ASPEN (bit 31) stays on: CONTROL.FPCA must still track FP use automatically.
+fn disable_lazy_fp_stacking() void {
+    if (!(config.cpu.has_fpu and config.cpu.use_fpu)) return;
+    fpccr.* = fpccr.* & ~fpccr_lspen;
+    asm volatile ("dsb" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
+}
+
 pub fn initialize_context_switching() void {
     std.log.err("Initializing ARM Cortex-M context switching...", .{});
+    disable_lazy_fp_stacking();
     hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
-    hal.irq.set_priority(.pendsv, 0xfe);
-    hal.irq.set_priority(.systick, 0xff);
+    // PendSV MUST be the lowest-priority exception. The context switch performed
+    // inside the PendSV handler exits via an exception-return into the switched-to
+    // task instead of returning to whatever it interrupted. If PendSV could
+    // preempt SysTick (or SVCall), that preempted handler's exception frame is
+    // abandoned and its ACTIVE bit (SHCSR.SYSTICKACT/PENDSVACT) is stranded set,
+    // which corrupts exception nesting so PendSV can never become pending->active
+    // again -> all further context switches stall. Keeping PendSV strictly below
+    // SysTick makes SysTick return first (clearing SYSTICKACT) and PendSV
+    // tail-chain afterwards.
+    hal.irq.set_priority(.systick, 0xfe);
+    hal.irq.set_priority(.pendsv, 0xff);
 }
 
 pub const ArmProcess = struct {
@@ -246,6 +336,10 @@ pub const ArmProcess = struct {
         return @ptrCast(self.stack.ptr);
     }
 
+    pub fn get_stack_top(self: *const Self) *const u8 {
+        return @ptrFromInt(@intFromPtr(self.stack.ptr) + self.stack.len);
+    }
+
     pub fn set_stack_pointer(self: *Self, ptr: *u8, blocked_by_process: ?*Self) void {
         _ = blocked_by_process;
         self.stack_position = ptr;
@@ -267,8 +361,8 @@ pub const ArmProcess = struct {
         };
     }
 
-    pub fn reallocate_stack(self: *Self) !void {
-        self.stack = try self.process_allocator.alignedAlloc(u8, .@"8", self.stack.len);
+    pub fn reallocate_stack(self: *Self, stack_size: u32) !void {
+        self.stack = try self.process_allocator.alignedAlloc(u8, .@"8", stack_size);
         self.stack_is_shared = false;
     }
 

@@ -39,8 +39,24 @@ const MemInfoFile = @import("meminfo_file.zig").MemInfoFile;
 const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
 const MaxProcFile = @import("maxproc_file.zig").MaxProcFile;
+const LeakStartFile = @import("leakdetect_file.zig").LeakStartFile;
+const LeakDumpFile = @import("leakdetect_file.zig").LeakDumpFile;
+const UartStatFile = @import("uartstat_file.zig").UartStatFile;
+const XipStatFile = @import("xipstat_file.zig").XipStatFile;
 
 const ProcFsDirectory = @import("procfs_directory.zig").ProcFsDirectory;
+
+fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
+    data.* = std.mem.zeroes(c.struct_stat);
+
+    const normalized_path = if (path.len == 0) "/" else path;
+    const device_hash = std.hash.Wyhash.hash(0, "procfs") | 1;
+    const inode_hash = std.hash.Wyhash.hash(device_hash, normalized_path) | 1;
+
+    data.st_dev = @truncate(device_hash);
+    data.st_ino = @truncate(inode_hash);
+    data.st_nlink = 1;
+}
 
 pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     const Self = @This();
@@ -74,6 +90,15 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
         try root_directory.data().append(meminfo);
         try root_directory.data().append(sys_directory_node);
+
+        const leakstart = try LeakStartFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(leakstart);
+        const leakdump = try LeakDumpFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(leakdump);
+        const uartstat = try UartStatFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(uartstat);
+        const xipstat = try XipStatFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(xipstat);
         return procfs;
     }
 
@@ -152,6 +177,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         _ = follow_links;
+        initialize_stat_identity(data, path);
         var node = try self.get(path);
         defer node.delete();
         if (node.is_directory()) {

@@ -42,8 +42,9 @@ pub const HardwareProcess = struct {
         };
     }
 
-    pub fn reallocate_stack(self: *HardwareProcess) !void {
+    pub fn reallocate_stack(self: *HardwareProcess, stack_size: u32) !void {
         _ = self;
+        _ = stack_size;
     }
 
     pub fn deinit(self: *HardwareProcess, allocator: std.mem.Allocator) void {
@@ -59,6 +60,13 @@ pub const HardwareProcess = struct {
     }
 
     pub fn get_stack_bottom(self: *const HardwareProcess) *const u8 {
+        if (self._sp) |sp| {
+            return @ptrFromInt(@intFromPtr(sp) + 0x1000);
+        }
+        return @ptrFromInt(@intFromPtr(&stack_dat) + 0x1000);
+    }
+
+    pub fn get_stack_top(self: *const HardwareProcess) *const u8 {
         if (self._sp) |sp| {
             return @ptrFromInt(@intFromPtr(sp) + 0x1000);
         }

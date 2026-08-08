@@ -30,6 +30,22 @@ config CONFIG_PROCESS_USE_MPU_STACK_PROTECTION
     Use hardware unit for stack protection of process
   depends on CPU_HAS_MPU
 
+config CONFIG_PROCESS_USE_MPU_KERNEL_PROTECTION
+  bool "Protect kernel heap and stack with the MPU"
+  default y
+  depends on CPU_HAS_MPU
+  help
+    Configure the MPU at boot so that unprivileged user processes cannot access
+    the kernel heap or the kernel stack. The kernel keeps full access through the
+    privileged background memory map; user processes run unprivileged and may only
+    touch code (flash), the romfs image and the user RAM pool. An unprivileged
+    access to kernel memory faults and terminates the offending process.
+
+    Per-process isolation (a process restricted to only its own memory) is not
+    provided: PMSAv8 has no sub-regions and only 8 regions, while a process
+    accumulates ~12 scattered page allocations, so its memory cannot be covered
+    by static regions. This option protects the kernel only.
+
 config CONFIG_PROCESS_USE_STACK_OVERFLOW_DETECTION
   bool "Use stack overflow detection"
   default y
@@ -44,11 +60,18 @@ config CONFIG_PROCESS_CONTEXT_SWITCH_PERIOD
   help
     Context switch period in milliseconds, process may be interrupted earlier if blocked on IO
 
-config CONFIG_PROCESS_ROOT_STACK_SIZE
-  int "Root process stack size"
-  default 4096
+config CONFIG_PROCESS_DEFAULT_STACK_SIZE
+  int "Default process stack size"
+  default 32768
   help
-    Size of kernel root process stack size
+    Default stack size for newly spawned processes, including the root process.
+
+config CONFIG_PROCESS_MAX_STACK_SIZE
+  int "Maximum process stack size"
+  default 1048576
+  help
+    Hard stack size limit for processes. Soft stack limits may be raised up to
+    this value.
 
 config CONFIG_PROCESS_HW_SPINLOCK_NUMBER
   int "HW spinlock number for process synchronization"
@@ -84,12 +107,39 @@ menu "Logging & Instrumentation"
   config CONFIG_INSTRUMENTATION_ENABLE_MEMORY_LEAK_DETECTION
     prompt "Enable leak detection"
     def_bool "false"
+  config CONFIG_INSTRUMENTATION_LEAK_REPORT_DEAD_ONLY
+    prompt "Report leaks only from dead processes"
+    def_bool "true"
+    depends on CONFIG_INSTRUMENTATION_ENABLE_MEMORY_LEAK_DETECTION
   config CONFIG_INSTRUMENTATION_VERBOSE_ALLOCATORS
     prompt "Enable verbose kernel allocator"
     def_bool "false"
   config CONFIG_INSTRUMENTATION_PRINT_MEMORY_USAGE
     prompt "Enable kernel allocator memory usage"
     def_bool "false"
+
+  config CONFIG_INSTRUMENTATION_PERF_PROFILING
+    prompt "Enable performance profiling"
+    def_bool "false"
+    help
+      Enable per-syscall cycle counting and performance profiling.
+      When enabled the kernel accumulates DWT cycle counts per syscall type
+      and exposes a sys_perf_dump syscall to retrieve the results.
+      TCC will also emit a detailed bench breakdown when this is active.
+
+  config CONFIG_INSTRUMENTATION_LOG_TO_SD
+    prompt "Mirror kernel log to SD card (/root/logs)"
+    def_bool "false"
+    help
+      Mirror every kernel log line to /root/logs/kernel.log on the SD card
+      (rotating the previous boot to kernel.prev.log), in addition to the
+      serial console. Only takes effect when /root is the MMC-backed rootfs.
+
+      EXPERIMENTAL / may be unstable: the mirror writes synchronously from the
+      logging context, and the RP2350 SDIO driver (PIO+DMA, non-reentrant) can
+      bus-fault when driven from arbitrary log contexts (e.g. the dynamic
+      loader). Leave disabled unless you are actively debugging and accept the
+      risk; the serial console captures the same lines safely.
 
   choice "Log level"
     prompt "Log level"

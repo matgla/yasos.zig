@@ -56,6 +56,28 @@ pub const NVIC = extern struct {
     stir: mmio.Mmio(u32),
 };
 
+// ARMv6-M Memory Protection Unit (PMSAv6, optional, present on the RP2040
+// Cortex-M0+). Regions are naturally-aligned power-of-two; RASR carries size,
+// access permission, execute-never and the sub-region disable mask.
+pub const Mpu = extern struct {
+    type: mmio.Mmio(packed struct(u32) {
+        separate: u1,
+        reserved0: u7,
+        dregion: u8,
+        iregion: u8,
+        reserved1: u8,
+    }),
+    ctrl: mmio.Mmio(packed struct(u32) {
+        enable: u1,
+        hfnmiena: u1,
+        privdefena: u1,
+        reserved0: u29,
+    }),
+    rnr: mmio.Mmio(u32),
+    rbar: mmio.Mmio(u32),
+    rasr: mmio.Mmio(u32),
+};
+
 pub const Registers = struct {
     pub const ppb_base: u32 = 0xe0000000;
     pub const scb_base: u32 = ppb_base + 0xed00;
@@ -68,4 +90,7 @@ pub const Registers = struct {
 
     pub const nvic_base: u32 = scs_base + 0x0100;
     pub const nvic: *volatile NVIC = @ptrFromInt(nvic_base);
+
+    pub const mpu_base: u32 = scs_base + 0x0d90;
+    pub const mpu: *volatile Mpu = @ptrFromInt(mpu_base);
 };

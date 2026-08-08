@@ -18,6 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 const std = @import("std");
+const builtin = @import("builtin");
 
 const hal = @import("hal");
 
@@ -32,6 +33,7 @@ const SymbolEntry = @import("yasld").SymbolEntry;
 const system_call = @import("interrupts/system_call.zig");
 const c = @import("libc_imports").c;
 const handlers = @import("interrupts/syscall_handlers.zig");
+const perf = @import("interrupts/perf_profile.zig");
 
 const arch = @import("arch");
 
@@ -50,6 +52,65 @@ extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 
 extern fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32;
 extern fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize) i32;
+
+pub const RuntimeConfiguration = struct {
+    default_stack_size: u32,
+    default_resource_limits: [c.RLIM_NLIMITS]c.rlimit,
+
+    pub fn init() RuntimeConfiguration {
+        const default_stack_size = config.process.default_stack_size;
+        return .{
+            .default_stack_size = default_stack_size,
+            .default_resource_limits = process.create_default_resource_limits(default_stack_size),
+        };
+    }
+
+    pub fn resolve_stack_size(self: RuntimeConfiguration, requested_stack_size: u32) u32 {
+        if (requested_stack_size == 0) {
+            return self.default_stack_size;
+        }
+        return requested_stack_size;
+    }
+
+    pub fn create_process_limits(self: RuntimeConfiguration, stack_size: u32) [c.RLIM_NLIMITS]c.rlimit {
+        var limits = self.default_resource_limits;
+        limits[c.RLIMIT_STACK] = .{
+            .rlim_cur = stack_size,
+            .rlim_max = @max(stack_size, limits[c.RLIMIT_STACK].rlim_max),
+        };
+        return limits;
+    }
+
+    pub fn set_default_stack_size(self: *RuntimeConfiguration, stack_size: u32) void {
+        self.default_stack_size = stack_size;
+        self.default_resource_limits[c.RLIMIT_STACK] = .{
+            .rlim_cur = stack_size,
+            .rlim_max = @max(stack_size, self.default_resource_limits[c.RLIMIT_STACK].rlim_max),
+        };
+    }
+
+    pub fn set_default_resource_limit(self: *RuntimeConfiguration, resource: i32, limit: c.rlimit) !void {
+        if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+        if (limit.rlim_cur > limit.rlim_max) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        self.default_resource_limits[@intCast(resource)] = limit;
+        if (resource == c.RLIMIT_STACK) {
+            self.default_stack_size = @intCast(limit.rlim_cur);
+        }
+    }
+
+    pub fn get_default_resource_limit(self: RuntimeConfiguration, resource: i32) !c.rlimit {
+        if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        return self.default_resource_limits[@intCast(resource)];
+    }
+};
 
 fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
     return struct {
@@ -70,6 +131,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         core: [hal.cpu.number_of_cores()]*ProcessType,
         mutex: kernel.sync.Mutex,
         terminate_list: std.DoublyLinkedList,
+        runtime_configuration: RuntimeConfiguration,
 
         pub fn init(allocator: std.mem.Allocator) Self {
             log.debug("Using scheduler '{s}'", .{SchedulerType.Name});
@@ -87,18 +149,39 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 .core = undefined,
                 .mutex = .{},
                 .terminate_list = .{},
+                .runtime_configuration = RuntimeConfiguration.init(),
             };
+        }
+
+        pub fn get_default_stack_size(self: *const Self) u32 {
+            return self.runtime_configuration.default_stack_size;
+        }
+
+        pub fn set_default_stack_size(self: *Self, stack_size: u32) void {
+            self.runtime_configuration.set_default_stack_size(stack_size);
+        }
+
+        pub fn get_runtime_configuration(self: *Self) *RuntimeConfiguration {
+            return &self.runtime_configuration;
         }
 
         pub fn schedule_next(self: *Self) kernel.scheduler.Action {
             var next = self.terminate_list.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                const pool = self.get_process_memory_pool();
+                log.info("schedule_next: reaping pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
+                // Advance BEFORE deinit: `node` lives inside the Process struct
+                // that deinit frees, so reading node.next afterwards is a
+                // use-after-free that walks a dead list when two or more
+                // processes are reaped in one pass.
+                next = node.next;
+                ctx_trace(.reap, p.pid, @intFromPtr(p.get_stack_bottom()), @intFromPtr(p.get_stack_top()));
                 self._scheduler.remove_process(&p.node);
                 self.terminate_list.remove(&p.node);
                 self.release_pid(p.pid);
                 p.deinit();
-                next = node.next;
+                log.info("schedule_next: reaped pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
             }
 
             if (self.processes.first) |first| {
@@ -149,7 +232,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: ?*const anyopaque, cwd: []const u8) !void {
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
-                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
+                const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
+                var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
+                new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
 
                 kernel.process.block_context_switch();
                 defer kernel.process.unblock_context_switch();
@@ -162,7 +247,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         pub fn create_root_process(self: *Self, stack_size: u32, process_entry: anytype, args: ?*const anyopaque, cwd: []const u8) !void {
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
-                var new_process = try Process.init(self.allocator, stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
+                const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
+                var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
+                new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
                 self.processes.append(&new_process.node);
                 self.core[hal.cpu.coreid()] = new_process;
                 return;
@@ -175,6 +262,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
+
+            // If a vfork child exits without calling exec, restore parent's
+            // writable sections that may have been corrupted. Keyed by the
+            // exiting (child) pid; a no-op if it wasn't a vfork child.
+            dynamic_loader.restore_parent_writable_sections(pid);
+
             var next = self.processes.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -226,7 +319,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 arch.enable_interrupts();
                 return kernel.errno.ErrnoSet.TryAgain;
             }
-            const new_process = current_process.vfork(&self._process_memory_pool, maybe_pid.?) catch {
+            const new_process = current_process.vfork(&self._process_memory_pool, maybe_pid.?) catch |err| {
+                log.err("vfork failed creating child for pid={d}: {s}", .{ current_process.pid, @errorName(err) });
                 arch.enable_interrupts();
                 return -1;
             };
@@ -238,7 +332,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             };
 
-            current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch {
+            current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch |err| {
+                log.err("vfork failed registering wait for parent pid={d} child pid={d}: {s}", .{ current_process.pid, new_process.pid, @errorName(err) });
                 arch.enable_interrupts();
                 return -1;
             };
@@ -252,6 +347,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             }
             context.pid.* = new_process.pid;
+
+            // Save parent's writable sections before child runs on shared memory
+            dynamic_loader.save_parent_writable_sections(current_process.pid, new_process.pid);
 
             self.processes.append(&new_process.node);
             self._scheduler.set_next(&new_process.node);
@@ -282,17 +380,137 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             current_process._vfork_context = ctx;
         }
 
-        // TODO: exec on currently running process is not supported yet
-        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8) !i32 {
-            kernel.process.block_context_switch();
-            const current_process = self.get_current_process();
-            // TODO: move loader to struct, pass allocator to loading functions
-            const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
+        /// Clone the exec argv and envp into a single array owned by the new
+        /// process. The layout follows the SysV convention so the C runtime can
+        /// recover the environment without extra register plumbing:
+        ///
+        ///   [ argv0 .. argv(argc-1), NULL, env0 .. env(envc-1), NULL ]
+        ///
+        /// argv[argc] is the argv terminator; the environment starts at
+        /// argv[argc + 1] (crt1 sets `environ = &argv[argc + 1]`). The trailing
+        /// NULL is always present (even for an empty environment), so the
+        /// derivation is valid regardless of env size.
+        fn clone_exec_args(allocator: std.mem.Allocator, argv: [*c][*c]u8, envp: [*c][*c]u8) !struct {
+            argc: usize,
+            argv: [*c][*c]u8,
+        } {
             var argc: usize = 0;
             while (argv[argc] != null) : (argc += 1) {}
 
-            var envpc: usize = 0;
-            while (envp[envpc] != null) : (envpc += 1) {}
+            var envc: usize = 0;
+            if (envp != null) {
+                while (envp[envc] != null) : (envc += 1) {}
+            }
+
+            // Lay out the pointer array (argv, NULL, envp, NULL) followed by all
+            // string bytes in ONE contiguous block. The exec target's process
+            // memory pool is page-granular (4 KiB minimum per allocation), so the
+            // old one-dupeZ-per-string scheme burned a whole page on every argv
+            // and envp entry — ~14 pages (~56 KiB) for a typical command. Packing
+            // them collapses that to a single page. crt1 still recovers `environ`
+            // from &argv[argc + 1] because the pointer array stays contiguous.
+            const n_ptrs = argc + 1 + envc + 1;
+            const ptr_bytes = n_ptrs * @sizeOf([*c]u8);
+            var str_bytes: usize = 0;
+            {
+                var i: usize = 0;
+                while (i < argc) : (i += 1) str_bytes += std.mem.span(argv[i]).len + 1;
+                i = 0;
+                while (i < envc) : (i += 1) str_bytes += std.mem.span(envp[i]).len + 1;
+            }
+
+            const block = try allocator.alloc(u8, ptr_bytes + str_bytes);
+            errdefer allocator.free(block);
+            // The process page allocator returns page-aligned memory, so the
+            // pointer array at offset 0 is safely aligned for [*c]u8.
+            const ptrs: [*][*c]u8 = @ptrCast(@alignCast(block.ptr));
+
+            var str_off: usize = ptr_bytes;
+            var i: usize = 0;
+            while (i < argc) : (i += 1) {
+                const source = std.mem.span(argv[i]);
+                @memcpy(block[str_off .. str_off + source.len], source);
+                block[str_off + source.len] = 0;
+                ptrs[i] = @ptrCast(block.ptr + str_off);
+                str_off += source.len + 1;
+            }
+            ptrs[argc] = null;
+
+            i = 0;
+            while (i < envc) : (i += 1) {
+                const source = std.mem.span(envp[i]);
+                @memcpy(block[str_off .. str_off + source.len], source);
+                block[str_off + source.len] = 0;
+                ptrs[argc + 1 + i] = @ptrCast(block.ptr + str_off);
+                str_off += source.len + 1;
+            }
+            ptrs[argc + 1 + envc] = null;
+
+            return .{
+                .argc = argc,
+                .argv = @ptrCast(ptrs),
+            };
+        }
+
+        // TODO: exec on currently running process is not supported yet
+        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator) !i32 {
+            kernel.process.block_context_switch();
+            const current_process = self.get_current_process();
+
+            // Restore parent's writable sections that may have been corrupted
+            // by the vfork child running on shared memory before exec. Keyed by
+            // this (child) process's pid — the snapshot save() stored at vfork.
+            dynamic_loader.restore_parent_writable_sections(current_process.pid);
+
+            // Pre-exec pool occupancy: how much of each tier is already resident
+            // (suspended parent shell + its libs) BEFORE this image's pages load.
+            // This is the baseline a new process — e.g. tcc — inherits and must
+            // share, so its own headroom before PSRAM spill is cap - this.
+            if (perf.enabled) {
+                const pool = self.get_process_memory_pool();
+                perf.trace("base pid={d} sram_used={d} sram_cap={d} psram_used={d} psram_cap={d}", .{
+                    current_process.pid,
+                    pool.used_pages(0),
+                    pool.region_page_count(0),
+                    pool.used_pages(1),
+                    pool.region_page_count(1),
+                });
+            }
+
+            // TODO: move loader to struct, pass allocator to loading functions
+            const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
+            // Taken from inside the loader, not measured around this call: on a
+            // profiling build the loader's own trace lines are written before
+            // it returns, and billing those to the load overstated it 6x.
+            current_process._load_us = dynamic_loader.last_executable_load_us;
+
+            // Mark the load/relocate boundary so process exit can report real
+            // execution time separately from dynamic-load time (perf profiling).
+            // Also reset the memory-pool peak marks so the run's peak SRAM/PSRAM
+            // usage (spill detection) is attributable to this exec'd image.
+            if (perf.enabled) {
+                current_process._exec_loaded_time = hal.time.get_time_us();
+                self.get_process_memory_pool().reset_peaks();
+                // The syscall counters are system-wide, so they only mean "this
+                // process" if the window starts here. It holds for the smoke
+                // suite because the parent shell is blocked in waitpid for the
+                // whole run: whatever it was doing before landed in the
+                // previous window, and its waitpid is recorded after this
+                // image's dump. Concurrent processes would mix.
+                perf.reset();
+            }
+
+            // Free the path now — it's no longer needed, and this function may
+            // not return normally (process_get_back_to_parent_vfork bypasses
+            // all defers in the caller).
+            if (path_allocator) |alloc| {
+                alloc.free(path);
+            }
+            const exec_allocator = current_process.get_process_memory_allocator();
+            // argv_copy holds argv and envp contiguously (see clone_exec_args);
+            // crt1 recovers `environ` from &argv[argc + 1].
+            const argv_copy = try clone_exec_args(exec_allocator, argv, envp);
+            const argc = argv_copy.argc;
 
             var symbol: SymbolEntry = undefined;
             if (executable.module.entry) |entry| {
@@ -304,9 +522,38 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 return -1;
             }
 
+            // An exec'd image is a user program and must run unprivileged so the
+            // MPU keeps it out of the kernel heap and stack.
+            current_process.privileged = false;
+
+            // Apply the per-image stack hint from the YAFF header so an applet
+            // sizes its stack to what it declared (e.g. shell tools want far
+            // less than the 32 KiB default that tcc needs). 0xFFFFFFFF means
+            // "OS default". An *explicit* RLIMIT_STACK (raised/lowered via
+            // setrlimit/ulimit, i.e. differing from the default) always wins so
+            // dynamic raises — e.g. the tcc suite's deep-recursion tests,
+            // inherited across exec — still take effect. Otherwise the header
+            // hint overrides the inherited default.
+            const stack_hint = executable.module.stack_size;
+            if (stack_hint != 0xFFFFFFFF) {
+                const default_stack = self.runtime_configuration.default_stack_size;
+                const cur = try current_process.get_resource_limit(c.RLIMIT_STACK);
+                if (cur.rlim_cur == default_stack) {
+                    var limit = cur;
+                    limit.rlim_cur = stack_hint;
+                    limit.rlim_max = @max(limit.rlim_max, stack_hint);
+                    try current_process.set_resource_limit(c.RLIMIT_STACK, limit);
+                }
+            }
+
             try current_process.reallocate_stack();
 
-            try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv), symbol.address, symbol.target_got_address);
+            // Apply the per-image heap profile now that the image + stack are
+            // resident: bound dynamic growth to heap_size beyond this baseline.
+            // 0xFFFFFFFF = free to grow in the shared paged pool (the default).
+            current_process.set_heap_limit_bytes(executable.module.heap_size);
+
+            try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv_copy.argv), symbol.address, symbol.target_got_address);
             self._scheduler.set_next(&current_process._parent.?.node);
             self.core[hal.cpu.coreid()] = current_process._parent.?;
 
@@ -389,21 +636,37 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 pub const ProcessManager = ProcessManagerGenerator(Scheduler);
 
 pub var instance: ProcessManager = undefined;
+var instance_initialized: bool = false;
 
 pub fn initialize_process_manager(allocator: std.mem.Allocator) void {
     log.info("Process manager initialization...", .{});
     process.init();
     instance = ProcessManager.init(allocator);
+    instance_initialized = true;
 }
 
 pub fn deinitialize_process_manager() void {
     instance.deinit();
+    instance_initialized = false;
+}
+
+/// Whether the global `instance` has been initialized. Code that reads global
+/// process/memory-pool state from contexts that may run before the process
+/// manager exists (e.g. /proc files constructed during early filesystem setup,
+/// or unit tests that don't spin up the manager) must guard on this — `instance`
+/// is `undefined` until initialize_process_manager runs.
+pub fn is_initialized() bool {
+    return instance_initialized;
 }
 
 pub export fn process_set_next_task() *const u8 {
+    // The first invocation is from switch_to_the_first_task; from here on PendSV
+    // is allowed to drive context switches (see system_call.scheduler_running).
+    system_call.mark_scheduler_running();
     if (instance._scheduler.get_next()) |task| {
         instance._scheduler.update_current();
         instance.core[hal.cpu.coreid()] = task;
+        ctx_trace(.load, task.pid, @intFromPtr(task.stack_pointer()), @intFromPtr(task.get_stack_bottom()));
         return task.stack_pointer();
     }
     @panic("Context switch called without tasks available");
@@ -413,9 +676,103 @@ export fn get_stack_bottom() *const u8 {
     return instance.core[hal.cpu.coreid()].get_stack_bottom();
 }
 
+// Read directly from `core` without locking: this is called from the context
+// switch (handler mode) where taking the context-switch lock would be unsafe.
+// Returns 1 for a privileged process, 0 for an unprivileged one; the assembly
+// switch path uses it to set CONTROL.nPRIV for the resumed thread.
+//
+// When kernel MPU protection is disabled, every scheduled process runs
+// unprivileged (the historical behaviour), so this always reports unprivileged
+// and the privilege distinction has no effect.
+const mpu_kernel_protection = if (@hasDecl(config.process, "use_mpu_kernel_protection"))
+    config.process.use_mpu_kernel_protection
+else
+    false;
+
+export fn process_current_is_privileged() usize {
+    if (!mpu_kernel_protection) {
+        return 0;
+    }
+    return if (instance.core[hal.cpu.coreid()].is_privileged()) 1 else 0;
+}
+
+// Privilege to restore when the PendSV switch path RESUMES a stored context —
+// the live CONTROL.nPRIV captured at store time (update_stack_pointer), not the
+// static per-process flag. A process preempted inside the privileged
+// thread-mode phase of a syscall must come back privileged, or its next kernel
+// access (e.g. the UART STATE register in sys_read's polling loop) HardFaults
+// with a MemManage DACCVIOL and the process is silently killed.
+export fn process_resume_is_privileged() usize {
+    if (!mpu_kernel_protection) {
+        return 0;
+    }
+    return if (instance.core[hal.cpu.coreid()].resume_privileged) 1 else 0;
+}
+
+// Read directly from `core` without locking: this is called from the HardFault
+// handler where the system is already wedged and taking the context-switch lock
+// would be unsafe.
+// ── Context-switch event ring ────────────────────────────────────────────────
+// Diagnostic aid for the intermittent user-stack corruption (mibench_dijkstra /
+// 20090113-1): the last N scheduler events, dumped by the HardFault handler so
+// a crash shows what the switch machinery did just before it. Store events
+// carry the PSP the outgoing context was written below; load events carry the
+// incoming SP and its stack bottom; reap events carry the freed stack range.
+// Written only from handler context on one core, so a plain ring suffices.
+const CtxEventKind = enum(u8) { store, load, reap };
+
+const CtxEvent = struct {
+    seq: u32 = 0,
+    kind: CtxEventKind = .store,
+    pid: c.pid_t = 0,
+    a: usize = 0,
+    b: usize = 0,
+};
+
+var ctx_ring: [24]CtxEvent = @splat(.{});
+var ctx_seq: u32 = 0;
+
+fn ctx_trace(kind: CtxEventKind, pid: c.pid_t, a: usize, b: usize) void {
+    ctx_seq +%= 1;
+    ctx_ring[ctx_seq % ctx_ring.len] = .{ .seq = ctx_seq, .kind = kind, .pid = pid, .a = a, .b = b };
+}
+
+// Called from the HardFault handler; oldest first. log.err so it is visible in
+// the normal smoke configuration (log_info is off there).
+export fn dump_ctx_ring() void {
+    log.err("context-switch ring (oldest first, seq={d}):", .{ctx_seq});
+    var i: usize = 1;
+    while (i <= ctx_ring.len) : (i += 1) {
+        const e = ctx_ring[(ctx_seq +% i) % ctx_ring.len];
+        if (e.seq == 0) continue;
+        log.err("  [{d}] {s} pid={d} a=0x{X:0>8} b=0x{X:0>8}", .{ e.seq, @tagName(e.kind), e.pid, e.a, e.b });
+    }
+}
+
+export fn get_current_pid() c.pid_t {
+    return instance.core[hal.cpu.coreid()].pid;
+}
+
+export fn get_stack_top() *const u8 {
+    return instance.core[hal.cpu.coreid()].get_stack_top();
+}
+
 export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
     _ = uses_fpu;
-    instance.core[hal.cpu.coreid()].set_stack_pointer(ptr);
+    const current = instance.core[hal.cpu.coreid()];
+    // Capture the interrupted thread's live privilege (CONTROL.nPRIV) alongside
+    // its stored context. This runs in the PendSV handler; exception entry does
+    // not modify CONTROL, so bit 0 still reflects the preempted thread. See
+    // process_resume_is_privileged() for why the static flag is not enough.
+    if (comptime builtin.cpu.arch.isThumb()) {
+        var control: u32 = undefined;
+        asm volatile ("mrs %[ctl], control"
+            : [ctl] "=r" (control),
+        );
+        current.resume_privileged = (control & 1) == 0;
+    }
+    ctx_trace(.store, current.pid, @intFromPtr(ptr), @intFromPtr(current.get_stack_top()));
+    current.set_stack_pointer(ptr);
 }
 
 export fn arch_store_vfork_back_point(back_point: usize, stack_pointer: usize) void {
@@ -460,6 +817,41 @@ test "ProcessManager.ShouldCreateProcesses" {
 
     const arg = "argument";
     try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
+}
+
+test "ProcessManager.ShouldUseRuntimeDefaultStackSizeWhenRequestedStackIsZero" {
+    var sut = ProcessManagerGenerator(StubScheduler).init(std.testing.allocator);
+    defer sut.deinit();
+
+    sut.set_default_stack_size(32 * 1024);
+
+    const arg = "argument";
+    try sut.create_process(0, &test_entry, @ptrCast(&arg), "/test");
+
+    const proc = sut.get_process_for_pid(1).?;
+    const stack_limit = try proc.get_resource_limit(c.RLIMIT_STACK);
+    try std.testing.expectEqual(@as(c.rlim_t, 32 * 1024), stack_limit.rlim_cur);
+    // rlim_max is the hard ceiling (config max_stack_size); lowering the default
+    // stack size only changes the soft limit (rlim_cur), never the hard max.
+    try std.testing.expectEqual(@as(c.rlim_t, config.process.max_stack_size), stack_limit.rlim_max);
+}
+
+test "ProcessManager.ShouldApplyCachedDefaultLimitsToNewProcesses" {
+    var sut = ProcessManagerGenerator(StubScheduler).init(std.testing.allocator);
+    defer sut.deinit();
+
+    try sut.get_runtime_configuration().set_default_resource_limit(c.RLIMIT_NOFILE, .{
+        .rlim_cur = 64,
+        .rlim_max = 128,
+    });
+
+    const arg = "argument";
+    try sut.create_process(0, &test_entry, @ptrCast(&arg), "/test");
+
+    const proc = sut.get_process_for_pid(1).?;
+    const nofile_limit = try proc.get_resource_limit(c.RLIMIT_NOFILE);
+    try std.testing.expectEqual(@as(c.rlim_t, 64), nofile_limit.rlim_cur);
+    try std.testing.expectEqual(@as(c.rlim_t, 128), nofile_limit.rlim_max);
 }
 
 test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {
@@ -598,17 +990,20 @@ test "ProcessManager.ShouldForkProcess" {
     const block_data: *const Process.BlockedProcessAction = @fieldParentPtr("node", child.?._blocks.first.?);
     try std.testing.expect(block_data.blocked == parent);
 
-    // Create argv - array of C string pointers
-    var args_storage = [_][*:0]const u8{
+    // Create argv - NULL-terminated array of C string pointers (clone_exec_args
+    // counts entries until the NULL sentinel, mirroring userspace argv).
+    var args_storage = [_]?[*:0]const u8{
         "arg0",
         "arg1",
+        null,
     };
     const argv: [*c][*c]u8 = @ptrCast(@constCast(&args_storage));
 
-    // Create envp - array of environment variable pointers
-    var envp_storage = [_][*:0]const u8{
+    // Create envp - NULL-terminated array of environment variable pointers
+    var envp_storage = [_]?[*:0]const u8{
         "ENV0=VALUE0",
         "ENV1=VALUE1",
+        null,
     };
     const envp: [*c][*c]u8 = @ptrCast(@constCast(&envp_storage));
 
@@ -654,7 +1049,7 @@ test "ProcessManager.ShouldForkProcess" {
     _ = sut.schedule_next();
     _ = process_set_next_task();
 
-    _ = try sut.prepare_exec("/test", argv, envp);
+    _ = try sut.prepare_exec("/test", argv, envp, null);
 
     const p = sut.get_process_for_pid(4).?;
     p.unblock_parent();

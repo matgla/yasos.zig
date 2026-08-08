@@ -42,6 +42,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     /// Current position in file
     _position: isize,
     _name: []const u8,
+    /// Regular file by default; a symbolic link stores its target in `_data`.
+    _filetype: FileType,
 
     pub fn create(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) RamFsFile {
         return RamFsFile.init(.{
@@ -49,6 +51,17 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
             ._allocator = allocator,
             ._position = 0,
             ._name = filename,
+            ._filetype = .File,
+        });
+    }
+
+    pub fn create_symlink(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) RamFsFile {
+        return RamFsFile.init(.{
+            ._data = data,
+            ._allocator = allocator,
+            ._position = 0,
+            ._name = filename,
+            ._filetype = .SymbolicLink,
         });
     }
 
@@ -57,6 +70,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         self._allocator = other._allocator;
         self._position = 0;
         self._name = other._name;
+        self._filetype = other._filetype;
     }
 
     pub fn create_node(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) anyerror!kernel.fs.Node {
@@ -64,27 +78,25 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return kernel.fs.Node.create_file(file);
     }
 
+    pub fn create_symlink_node(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) anyerror!kernel.fs.Node {
+        const file = try create_symlink(allocator, data, filename).interface.new(allocator);
+        return kernel.fs.Node.create_file(file);
+    }
+
     pub fn read(self: *Self, buffer: []u8) isize {
-        if (self._position >= self._data.data.items.len) {
-            return 0;
+        const length = self._data.read_at(@intCast(self._position), buffer);
+        if (length > 0) {
+            self._position += length;
         }
-        const length = @min(@as(isize, @intCast(self._data.data.items.len)) - self._position, @as(isize, @intCast(buffer.len)));
-        @memcpy(buffer[0..@as(usize, @intCast(length))], self._data.data.items[@as(usize, @intCast(self._position))..@as(usize, @intCast(self._position + length))]);
-        self._position += length;
-        return @intCast(length);
+        return length;
     }
 
     pub fn write(self: *Self, data: []const u8) isize {
-        if (@as(isize, @intCast(self._data.data.items.len)) < @as(isize, @intCast(data.len)) + self._position) {
-            self._data.data.resize(self._allocator, @as(usize, @intCast(self._position)) + data.len) catch {
-                return 0;
-            };
-        }
-        self._data.data.replaceRange(self._allocator, @as(usize, @intCast(self._position)), data.len, data) catch {
+        const written = self._data.write_at(@intCast(self._position), data) catch {
             return 0;
         };
-        self._position += @as(isize, @intCast(data.len));
-        return @intCast(data.len);
+        self._position += @as(isize, @intCast(written));
+        return @intCast(written);
     }
 
     pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
@@ -96,7 +108,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
                 self._position = @intCast(offset);
             },
             c.SEEK_END => {
-                const new_position: i64 = @as(i64, @intCast(self._data.data.items.len)) + offset;
+                const new_position: i64 = @as(i64, @intCast(self._data.len())) + offset;
                 if (new_position < 0) {
                     return kernel.errno.ErrnoSet.InvalidArgument;
                 }
@@ -112,9 +124,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
             },
             else => return kernel.errno.ErrnoSet.InvalidArgument,
         }
-        const outside_of_buffer = @as(i64, @intCast(self._position)) - @as(i64, @intCast(self._data.data.items.len));
-        if (outside_of_buffer > 0) {
-            _ = self._data.data.appendNTimes(self._allocator, ' ', @as(usize, @intCast(outside_of_buffer))) catch {
+        if (@as(i64, @intCast(self._position)) > @as(i64, @intCast(self._data.len()))) {
+            self._data.resize(@intCast(self._position), ' ') catch {
                 // set errno
                 return kernel.errno.ErrnoSet.OutOfMemory;
             };
@@ -140,7 +151,17 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     }
 
     pub fn size(self: *const Self) u64 {
-        return @intCast(@sizeOf(RamFsData) + self._data.data.items.len);
+        return @intCast(@sizeOf(RamFsData) + self._data.len());
+    }
+
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        const len: usize = @intCast(length);
+        self._data.resize(len, 0) catch {
+            return kernel.errno.ErrnoSet.OutOfMemory;
+        };
+        if (self._position > @as(isize, @intCast(len))) {
+            self._position = @intCast(len);
+        }
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -154,8 +175,14 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
                     return -1;
                 }
                 var attr: *FileMemoryMapAttributes = @ptrCast(@alignCast(data.?));
-                attr.is_memory_mapped = true;
-                attr.mapped_address_r = self._data.data.items.ptr;
+                // Report not-memory-mapped so the dynamic loader copies any
+                // executed file into the (user-mapped) process memory pool
+                // instead of executing in place. RamFs data lives in the kernel
+                // heap, which is unmapped for unprivileged code under the
+                // kernel-protection MPU — XIP from there would fault (IACCVIOL).
+                _ = self;
+                attr.is_memory_mapped = false;
+                attr.mapped_address_r = null;
             },
             else => {
                 return -1;
@@ -170,8 +197,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     }
 
     pub fn filetype(self: *const Self) FileType {
-        _ = self;
-        return .File;
+        return self._filetype;
     }
 
     pub fn delete(self: *Self) void {
@@ -238,4 +264,40 @@ test "RamFsFile.ShouldSeekFile" {
     try std.testing.expectEqual(132, file.interface.tell());
 
     try std.testing.expectEqual(132 + @sizeOf(RamFsData), file.interface.size());
+}
+
+test "RamFsFile.ShouldTruncateFile" {
+    const data = std.testing.allocator.create(RamFsData) catch unreachable;
+    data.* = try RamFsData.create(std.testing.allocator);
+
+    var file = try RamFsFile.InstanceType.create(std.testing.allocator, data, "trunc_file").interface.new(std.testing.allocator);
+    defer file.interface.delete();
+
+    // Write some data
+    try std.testing.expectEqual(11, file.interface.write("hello world"));
+
+    // Truncate to shorter length
+    try file.interface.truncate(5);
+    try std.testing.expectEqual(5 + @sizeOf(RamFsData), file.interface.size());
+
+    // Read back truncated data
+    _ = try file.interface.seek(0, c.SEEK_SET);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqual(5, file.interface.read(&buf));
+    try std.testing.expectEqualStrings("hello", buf[0..5]);
+
+    // Truncate to larger length (extends with zeros)
+    try file.interface.truncate(8);
+    try std.testing.expectEqual(8 + @sizeOf(RamFsData), file.interface.size());
+    _ = try file.interface.seek(0, c.SEEK_SET);
+    try std.testing.expectEqual(8, file.interface.read(&buf));
+    try std.testing.expectEqualStrings("hello", buf[0..5]);
+    try std.testing.expectEqual(0, buf[5]);
+    try std.testing.expectEqual(0, buf[6]);
+    try std.testing.expectEqual(0, buf[7]);
+
+    // Truncate to zero
+    try file.interface.truncate(0);
+    try std.testing.expectEqual(@sizeOf(RamFsData), file.interface.size());
+    try std.testing.expectEqual(0, file.interface.tell());
 }

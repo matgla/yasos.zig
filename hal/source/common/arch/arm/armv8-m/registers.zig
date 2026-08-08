@@ -111,6 +111,37 @@ pub const CpuCpacr = extern struct {
         _res2: u8,
     }),
 };
+// ARMv8-M Memory Protection Unit (PMSAv8). Region attributes are split between
+// RBAR (base, shareability, access permission, execute-never) and RLAR (limit,
+// MAIR attribute index, enable), with the actual memory attributes living in the
+// indirection registers MAIR0/MAIR1.
+pub const Mpu = extern struct {
+    type: mmio.Mmio(packed struct(u32) {
+        separate: u1,
+        reserved0: u7,
+        dregion: u8,
+        reserved1: u16,
+    }),
+    ctrl: mmio.Mmio(packed struct(u32) {
+        enable: u1,
+        hfnmiena: u1,
+        privdefena: u1,
+        reserved0: u29,
+    }),
+    rnr: mmio.Mmio(u32),
+    rbar: mmio.Mmio(u32),
+    rlar: mmio.Mmio(u32),
+    rbar_a1: mmio.Mmio(u32),
+    rlar_a1: mmio.Mmio(u32),
+    rbar_a2: mmio.Mmio(u32),
+    rlar_a2: mmio.Mmio(u32),
+    rbar_a3: mmio.Mmio(u32),
+    rlar_a3: mmio.Mmio(u32),
+    reserved0: u32,
+    mair0: mmio.Mmio(u32),
+    mair1: mmio.Mmio(u32),
+};
+
 pub const NVIC = extern struct {
     iser: [16]u32,
     reserved0: [16]u32,
@@ -150,6 +181,9 @@ pub const Registers = struct {
     pub const systick: *volatile SysTick = @ptrFromInt(systick_base);
 
     pub const cpacr: *volatile CpuCpacr = @ptrFromInt(ppb_base + 0xed88);
+
+    pub const mpu_base: u32 = scs_base + 0x0d90;
+    pub const mpu: *volatile Mpu = @ptrFromInt(mpu_base);
 
     pub const nvic_base: u32 = scs_base + 0x0100;
     pub const nvic: *volatile NVIC = @ptrFromInt(nvic_base);

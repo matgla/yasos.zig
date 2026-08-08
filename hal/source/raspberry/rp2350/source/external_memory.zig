@@ -124,6 +124,12 @@ pub const Qmi = extern struct {
 
 const qmi: *volatile Qmi = @ptrFromInt(0x400d0000);
 
+// Uncached, translated XIP window for chip-select 1 (PSRAM). Offset 0x1000000
+// past XIP_NOCACHE_NOALLOC_BASE (0x14000000) skips the 16 MB CS0 (flash)
+// aperture. Accesses here bypass the XIP cache, so reads exercise the real
+// PSRAM read pipeline — essential for rxdelay calibration to be meaningful.
+const psram_nocache_base: usize = 0x15000000;
+
 const PsramCommands = struct {
     const QuadEnable: u32 = 0x35;
     const QuadEnd: u32 = 0xf5;
@@ -137,49 +143,136 @@ const PsramCommands = struct {
     const KdgPass: u32 = 0x5d;
 };
 
-const microsecond_to_femtosecond: u64 = 1000000000;
-const nanosecond_to_femtosecond: u64 = 1000000;
-const second_to_femtosecond: u64 = 1000000000000000;
+fn div_ceil_u64(numerator: u64, denominator: u64) u64 {
+    return (numerator + denominator - 1) / denominator;
+}
 
-// move this into config
-const psram_max_frequency: u64 = 109000000;
-// 8us in datasheet
-const psram_ce_max_low_pulse_width_us: u64 = 8;
-const psram_ce_min_deselect_ns: u64 = 50;
-
-const qpi_ce_max_low_pulse_width_us: u64 = 125000000; //;psram_ce_max_low_pulse_width_us * microsecond_to_femtosecond / 64;
-const qpi_ce_min_deselect_ns: u64 = 50000000; //psram_ce_min_deselect_ns * nanosecond_to_femtosecond;
-
-// const config = @import("config").external_memory;
+fn clamp_int(comptime T: type, value: u64) T {
+    return @intCast(@min(value, std.math.maxInt(T)));
+}
 
 fn qmi_configure_timings() void {
-    const system_clock = c.clock_get_hz(c.clk_sys);
-    const clock_divider: u8 = @intCast((system_clock + psram_max_frequency - 1) / psram_max_frequency);
-    // delay is in femtoseconds
-    // const femtoseconds_per_cycle = second_to_femtosecond / system_clock;
-    const max_select: u32 = 0x10; //@intCast(qpi_ce_max_low_pulse_width_us / femtoseconds_per_cycle);
-    const min_deselect: u32 = 0x7; ////@intCast((qpi_ce_min_deselect_ns + femtoseconds_per_cycle - 1) / femtoseconds_per_cycle);
-    // const max_select: u32 = 0x10;
-    // const min_deselect: u32 = 0x7;
-    const cooldown: u32 = 1;
-    const select_hold: u32 = 3;
-    const rx_delay: u32 = 1;
-    const page_break = c.QMI_M1_TIMING_PAGEBREAK_VALUE_1024;
+    const system_clock: u64 = c.clock_get_hz(c.clk_sys);
 
-    // if (system_clock > 266000000) rx_delay = 3;
+    // M0 (flash) timing is managed by apply_overclock() in crt.zig — do not touch it here.
+
+    const psram_clock_divider = clamp_int(u8, @max(2, div_ceil_u64(system_clock, config.psram.max_frequency_hz)));
+    const psram_frequency = system_clock / psram_clock_divider;
+    const psram_half_sck_ns = 500_000_000 / psram_frequency;
+    const psram_extra_deselect_ns = if (config.psram.ce_min_deselect_ns > psram_half_sck_ns)
+        config.psram.ce_min_deselect_ns - psram_half_sck_ns
+    else
+        0;
+    const psram_extra_deselect_cycles = div_ceil_u64(psram_extra_deselect_ns * system_clock, 1_000_000_000);
+    const psram_max_select_cycles = (config.psram.ce_max_low_us * system_clock) / (4 * 1_000_000);
+    const psram_rx_delay: u3 = if (psram_frequency >= config.psram.rxdelay_hi_freq_threshold_hz)
+        clamp_int(u3, config.psram.rxdelay_hi)
+    else
+        clamp_int(u3, config.psram.rxdelay_lo);
+
+    // Add a half-SCK of CS-to-first-edge setup at high system clocks, matching
+    // the flash (M0) path (which uses select_setup=1 for sys >= 200 MHz). At an
+    // overclocked ~123 MHz PSRAM SCK the APS6404 needs that extra tCSS margin;
+    // rxdelay calibration (run right after this) then re-centres around it.
+    const psram_select_setup: u1 = if (system_clock >= 200_000_000) 1 else 0;
 
     qmi.*.m[1].timing.write(.{
-        .clkdiv = @intCast(clock_divider),
-        .rxdelay = @intCast(rx_delay),
+        .clkdiv = psram_clock_divider,
+        .rxdelay = psram_rx_delay,
         ._reserved0 = 0,
-        .min_deselect = @intCast(min_deselect),
-        .max_select = @intCast(max_select),
-        .select_hold = select_hold,
-        .select_setup = 0,
+        .min_deselect = clamp_int(u5, psram_extra_deselect_cycles),
+        .max_select = clamp_int(u6, psram_max_select_cycles / 64),
+        .select_hold = 3,
+        .select_setup = psram_select_setup,
         ._reserved1 = 0,
-        .pagebreak = page_break,
-        .cooldown = cooldown,
+        // Force CE to deassert at every 1024-byte page (matches Pimoroni's
+        // reference PSRAM driver). With NONE, a single CE-low QMI burst runs
+        // linearly across APS6404L page boundaries toward the tCEM limit, which
+        // caps the reliable SCK at ~84 MHz and produces intermittent single-bit
+        // read corruption above that (see CONFIG_PSRAM_MAX_FREQUENCY_HZ note).
+        // Breaking at the page boundary respects tCEM and resets the read
+        // pipeline, allowing a higher SCK to be re-tried via rxdelay tuning.
+        .pagebreak = c.QMI_M1_TIMING_PAGEBREAK_VALUE_1024,
+        .cooldown = 1,
     });
+}
+
+// Maximum value of the 3-bit rxdelay field in QMI_M1_TIMING.
+const psram_rxdelay_max: u8 = 7;
+
+fn qmi_set_rxdelay(rxdelay: u3) void {
+    // Read-modify-write so the rest of the calibrated timing word is preserved.
+    qmi.*.m[1].timing.update(.{ .rxdelay = rxdelay });
+    // Flush the QMI read pipeline so the next access samples with the new delay.
+    qmi_dummy_read();
+}
+
+// Write a wrapping-LCG pattern over an uncached PSRAM region and read it back.
+// Two complementary seeds toggle every data line in both directions, stressing
+// the rxdelay sample point. Returns true only if every byte read back matches.
+fn qmi_rxdelay_probe() bool {
+    // 8 KiB crosses several 1024-byte page boundaries (the pagebreak unit) while
+    // staying fast enough to sweep all eight delays during boot.
+    const probe_len: u32 = 8 * 1024;
+    const data = slicify(@as([*]volatile u8, @ptrFromInt(psram_nocache_base)), probe_len);
+    const seeds = [_]u8{ 0xa5, 0x5a };
+    for (seeds) |seed| {
+        var v: u8 = seed;
+        for (data) |*i| {
+            i.* = v;
+            v = v *% 31 +% 17;
+        }
+        v = seed;
+        for (data) |*i| {
+            const expected = v;
+            v = v *% 31 +% 17;
+            if (i.* != expected) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Sweep every rxdelay value, find the widest contiguous window that reads back
+// cleanly, and park rxdelay in the centre of that window for maximum setup/hold
+// margin. This makes the PSRAM interface self-tune to whatever system clock the
+// board is actually running at (e.g. 618 MHz overclock) instead of relying on a
+// fixed frequency-threshold guess. Leaves the configured default untouched if
+// nothing passes, so a failed sweep degrades to the previous behaviour.
+fn qmi_calibrate_rxdelay() void {
+    var best_start: i32 = -1;
+    var best_len: u32 = 0;
+    var run_start: i32 = -1;
+
+    var d: u8 = 0;
+    while (d <= psram_rxdelay_max) : (d += 1) {
+        qmi_set_rxdelay(@intCast(d));
+        const ok = qmi_rxdelay_probe();
+        log.err("PSRAM rxdelay {d}: {s}", .{ d, if (ok) "pass" else "fail" });
+        if (ok) {
+            if (run_start < 0) run_start = @intCast(d);
+            const run_len = d - @as(u8, @intCast(run_start)) + 1;
+            if (run_len > best_len) {
+                best_len = run_len;
+                best_start = run_start;
+            }
+        } else {
+            run_start = -1;
+        }
+    }
+
+    if (best_len == 0) {
+        log.err("PSRAM rxdelay calibration failed, keeping configured default", .{});
+        // Restore the configured default that the sweep last overwrote.
+        qmi_configure_timings();
+        return;
+    }
+
+    const start: u32 = @intCast(best_start);
+    const chosen: u3 = @intCast(start + (best_len - 1) / 2);
+    log.err("PSRAM rxdelay calibrated: window [{d}..{d}], chosen {d}", .{ start, start + best_len - 1, chosen });
+    qmi_set_rxdelay(chosen);
 }
 
 fn qmi_configure_commands() void {
@@ -261,6 +354,42 @@ fn slicify(ptr: [*]volatile u8, len: usize) []volatile u8 {
 extern fn qmi_initialize_m1() usize;
 extern fn qmi_dummy_read() void;
 extern fn qmi_reinitialize_flash() void;
+// RAM-resident flash (M0) rxdelay calibration in startup/overclock.c.
+extern fn overclock_calibrate_flash_rxdelay(out_lo: *u32, out_hi: *u32) u32;
+// RAM-resident flash read-path probe and continuous-read switch, same file.
+extern fn overclock_flash_probe_read_cost(out_miss: *u32, out_seq: *u32, out_rnd: *u32, out_ctl: *u32) void;
+extern fn overclock_flash_enable_continuous_read() c_int;
+extern fn overclock_flash_probe_deselect(out_cycles_lo: *u32, out_cycles_hi: *u32, out_ok_mask: *u32, out_configured: *u32) void;
+
+/// Report what a flash read costs, before and after the mode change. Off by
+/// default — it is thousands of extra flash transactions on every boot, for a
+/// number that only changes when the QMI configuration does. Flip it to ask the
+/// question, not to ship.
+const probe_read_cost = false;
+
+/// Report what the enforced chip-select-high time costs a miss. Off by default,
+/// for the same reason, and one more: it sweeps a live bus timing parameter.
+const probe_deselect_cost = false;
+
+/// Whether this board wants the quad-read mode byte to hold the part in
+/// continuous-read mode, so XIP transactions can skip the opcode. Boards that
+/// do not declare it keep the conservative 0xFF mode byte.
+const want_continuous_read = @hasDecl(config.flash, "xip_continuous_read") and
+    config.flash.xip_continuous_read;
+
+/// Core cycles per access on the flash read path — a cache-line fill, an
+/// uncached sequential word, an uncached word 512 B away, and the measuring
+/// loop's own cost against a cache hit. See overclock_flash_probe_read_cost.
+const FlashReadCost = struct {
+    miss: u32 = 0,
+    seq: u32 = 0,
+    rnd: u32 = 0,
+    ctl: u32 = 0,
+
+    fn probe(self: *FlashReadCost) void {
+        overclock_flash_probe_read_cost(&self.miss, &self.seq, &self.rnd, &self.ctl);
+    }
+};
 const log = std.log.scoped(.hal_external_memory);
 
 pub const ExternalMemory = struct {
@@ -396,7 +525,25 @@ pub const ExternalMemory = struct {
             qmi_configure_commands();
             qmi_configure_timings();
             qmi_dummy_read();
-            const addr: *volatile u32 = @ptrFromInt(0x15000000);
+            // Auto-tune the read sample point for the current system clock; the
+            // fixed rxdelay from qmi_configure_timings() only holds at stock
+            // speeds and corrupts reads once the core is overclocked.
+            qmi_calibrate_rxdelay();
+
+            // Calibrate the flash (M0) rxdelay the same way. Flash and PSRAM
+            // share the QMI bus, so a mis-sampled flash read can desync the read
+            // pipeline for the very next PSRAM access; the boot formula in
+            // computeQmiConfig() under-delays flash once overclocked. Runs from
+            // RAM and flushes the XIP cache internally.
+            var flash_rx_lo: u32 = 0;
+            var flash_rx_hi: u32 = 0;
+            const flash_rx = overclock_calibrate_flash_rxdelay(&flash_rx_lo, &flash_rx_hi);
+            if (flash_rx_lo <= flash_rx_hi) {
+                log.err("Flash rxdelay calibrated: window [{d}..{d}], chosen {d}", .{ flash_rx_lo, flash_rx_hi, flash_rx });
+            } else {
+                log.err("Flash rxdelay calibration inconclusive, keeping {d}", .{flash_rx});
+            }
+            const addr: *volatile u32 = @ptrFromInt(psram_nocache_base);
             addr.* = 0x12345678;
             if (addr.* != 0x12345678) {
                 self._initialized = false;
@@ -406,5 +553,67 @@ pub const ExternalMemory = struct {
             self._initialized = false;
         }
         return self._initialized;
+    }
+
+    /// Take the opcode off the wire if the board asked for it, and — when asked
+    /// — say what that is worth in cycles per access.
+    ///
+    /// Called from the kernel once storage is up, NOT from `init`. Two reasons,
+    /// one hard and one empirical:
+    ///
+    ///   - Hard: nothing may drive CS0 in QMI direct mode after this, because
+    ///     from here the part reads an opcode as address bits. Everything that
+    ///     does (qmi_reinitialize_flash, overclock_flash_enable_qe in crt.zig)
+    ///     runs during init above, and the runtime flash driver never writes.
+    ///   - Historical: this switch made instruction fetch fast enough to expose
+    ///     a PIO autopull race in the SDIO command path, and SD bring-up failed
+    ///     17 boots in 20 until that was fixed (`rp2350_sdio_command`, and the
+    ///     soak in `tests/smoke/sd_bringup_soak_test.py` that measured it).
+    ///     Deferring past storage bring-up was tried as a workaround and did
+    ///     not help, which is what said the cause was elsewhere. Keeping the
+    ///     call here is still right — the hard ordering rule above stands — but
+    ///     it is no longer load-bearing for the SD card.
+    pub fn enable_fast_reads(self: *ExternalMemory) void {
+        _ = self;
+        configure_flash_read_mode();
+    }
+
+    fn configure_flash_read_mode() void {
+        if (probe_read_cost) {
+            var before: FlashReadCost = .{};
+            before.probe();
+            log.err("Flash read cost (cycles/access): miss {d}, seq {d}, rnd {d}, loop {d}", .{
+                before.miss, before.seq, before.rnd, before.ctl,
+            });
+        }
+
+        if (!want_continuous_read) {
+            return;
+        }
+
+        if (overclock_flash_enable_continuous_read() == 0) {
+            if (probe_read_cost) {
+                var after: FlashReadCost = .{};
+                after.probe();
+                log.err("Flash continuous-read enabled: miss {d}, seq {d}, rnd {d}, loop {d} (cycles/access)", .{
+                    after.miss, after.seq, after.rnd, after.ctl,
+                });
+            } else {
+                log.err("Flash continuous-read enabled", .{});
+            }
+        } else {
+            log.err("Flash continuous-read verify failed, kept the opcode prefix", .{});
+        }
+
+        if (probe_deselect_cost) {
+            var cycles_lo: u32 = 0;
+            var cycles_hi: u32 = 0;
+            var ok_mask: u32 = 0;
+            var configured: u32 = 0;
+            overclock_flash_probe_deselect(&cycles_lo, &cycles_hi, &ok_mask, &configured);
+            log.err("Flash min_deselect {d}: {d} cycles/miss, at 0: {d}, verified mask 0x{x:0>8}", .{
+                configured, cycles_hi, cycles_lo, ok_mask,
+            });
+        }
     }
 };

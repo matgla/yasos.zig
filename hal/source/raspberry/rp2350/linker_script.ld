@@ -18,11 +18,33 @@ linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/
 MEMORY
 {
   flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 1024K
-  romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 2048K
-  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 256K
-  process_ram(rxw)  : ORIGIN = 0x20040000, LENGTH = 128K
-  scratch_x(rxw)    : ORIGIN = 0x20080000, LENGTH = 4K
-  scratch_y(rxw)    : ORIGIN = 0x20081000, LENGTH = 4K
+  romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 4096K
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 76K
+  /* Arena for the hybrid /tmp filesystem (source/fs/ramfs, mounted by
+   * source/main.zig). Carved out of process_ram so a compile's process image
+   * can never eat it; files larger than CONFIG_TMPFS_MAX_FILE_SIZE (or anything
+   * that no longer fits here) spill to CONFIG_TMPFS_SPILL_DIRECTORY on the SD
+   * card. Kernel-owned: not mapped by the MPU for unprivileged code.
+   *
+   * 128K -> 32K (2026-08-06). This side of the split was over-provisioned and
+   * the other side was the binding constraint: a compile wants ~315 KiB (213
+   * heap + 100 image/stack) and could only have 300, so its heap spilled to
+   * PSRAM, where the kernel's page clear runs at 55 MB/s against SRAM's 777.
+   * Measured /tmp usage after a compile is 3 KiB (MemTmpUsed, /proc/meminfo).
+   * The cost is a spill tail: objects are tiny (p99 ~2 KiB) but linked
+   * executables are not -- 14 KiB typically, 49 KiB for strlen-5 and 52 KiB for
+   * mibench_rijndael -- so those now go to the SD card instead of RAM. Watch
+   * MemTmpPeak: if it pins at the ceiling, this went too far. */
+  temp_ram(rxw)     : ORIGIN = 0x20013000, LENGTH = 32K
+  process_ram(rxw)  : ORIGIN = 0x2001B000, LENGTH = 396K
+  /* Kernel MSP stack: 16 KB ending at the top of SRAM (0x20082000). The top
+   * 8 KB (0x20080000..0x20082000) is the two 4 KB scratch banks merged (single-
+   * core: core1's stack bank is unused) — non-striped SRAM, used first since the
+   * stack grows down. The lower 8 KB (0x2007E000..0x20080000) is carved off the
+   * top of process_ram and only reached on deep stack usage (e.g. the hardfault
+   * handler's diagnostics, which dump a multi-KB maps buffer). kernel_ram is now
+   * just .bss + ~64 KB heap. */
+  scratch(rxw)      : ORIGIN = 0x2007E000, LENGTH = 16K
 }
 
 SECTIONS
@@ -88,9 +110,14 @@ SECTIONS
 
    .romfs :
   {
-    __romfs_start__ = .;
+    /* The rootfs image is flashed SEPARATELY into the romfs flash region (it is
+     * not linked into this section, so *(.romfs) is empty). Span the symbols
+     * over the whole romfs memory region so the kernel MPU maps it executable —
+     * otherwise unprivileged execve'd processes whose XIP .text lives above the
+     * 1 MB kernel-flash region fault with IACCVIOL. */
+    __romfs_start__ = ORIGIN(romfs);
     KEEP(*(.romfs))
-    __romfs_end__ = .;
+    __romfs_end__ = ORIGIN(romfs) + LENGTH(romfs);
   } > romfs
   /* keep this at beginning of ram or align to arm alignment requirement for
    cortex-m0plus */
@@ -132,45 +159,31 @@ SECTIONS
 
   __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
 
-  .scratch_x :
+  /* Any scratch-bank data + the kernel stack live in the 16 KB scratch
+   * region. Stack grows down from the top; MSPLIM is the bottom. */
+  .scratch (NOLOAD) :
   {
-    __scratch_x_start__ = .;
-    *(.scratch_x.*)
+    *(.scratch_x.* .scratch_y.*)
     . = ALIGN(4);
-    __scratch_x_end__ = .;
-  } > scratch_x AT > flash
-  __scratch_x_source__ = LOADADDR(.scratch_x);
-
-  .scratch_y :
-  {
-    __scratch_y_start__ = .;
-    *(.scratch_y.*)
-    . = ALIGN(4);
-    __scratch_y_end__ = .;
-  } > scratch_y AT > flash
-  __scratch_y_source__ = LOADADDR(.scratch_y);
-
-  .stack1_dummy (NOLOAD):
-  {
-    *(.stack1*)
-  } > scratch_x
+  } > scratch
 
   .stack_dummy (NOLOAD):
   {
-    KEEP(*(.stack*))
-  } > scratch_y
+    KEEP(*(.stack* .stack1*))
+  } > scratch
 
-  __stack_limit__ = ORIGIN(process_ram) + LENGTH(process_ram);
-  __stack1_top__ = ORIGIN(scratch_x) + LENGTH(scratch_x);
-  __stack1_bottom__ = ORIGIN(scratch_x);
-  __stack_top__ = ORIGIN(scratch_y) + LENGTH(scratch_y);
-  __stack_bottom__ = __stack_limit__;
+  __stack_top__ = ORIGIN(scratch) + LENGTH(scratch);
+  __stack_bottom__ = ORIGIN(scratch);
 
+  __flash_start__ = ORIGIN(flash);
+  __flash_end__ = ORIGIN(flash) + LENGTH(flash);
   __kernel_ram_start__ = ORIGIN(kernel_ram);
   __kernel_ram_end__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
   __process_ram_start__ = ORIGIN(process_ram);
   __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
+  __temp_ram_start__ = ORIGIN(temp_ram);
+  __temp_ram_end__ = ORIGIN(temp_ram) + LENGTH(temp_ram);
 
   PROVIDE(__stack = __stack_top__);
-  ASSERT(__stack_limit__ >= __heap_limit__, "region RAM overflowed")
+  ASSERT(__end__ <= __heap_limit__, "kernel_ram too small: .bss/heap exceed kernel_ram")
 }

@@ -33,6 +33,18 @@ const LittleFsFile = @import("littlefs_file.zig").LittleFsFile;
 const LittleFsDirectory = @import("littlefs_directory.zig").LittleFsDirectory;
 const errno_converter = @import("errno_converter.zig");
 
+fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
+    data.* = std.mem.zeroes(c.struct_stat);
+
+    const normalized_path = if (path.len == 0) "/" else path;
+    const device_hash = std.hash.Wyhash.hash(0, "littlefs") | 1;
+    const inode_hash = std.hash.Wyhash.hash(device_hash, normalized_path) | 1;
+
+    data.st_dev = @truncate(device_hash);
+    data.st_ino = @truncate(inode_hash);
+    data.st_nlink = 1;
+}
+
 pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     const Self = @This();
     _allocator: std.mem.Allocator,
@@ -221,6 +233,7 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         _ = follow_symlinks;
+        initialize_stat_identity(data, path);
 
         const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
         defer self._allocator.free(path_c);
@@ -242,6 +255,26 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         _ = old_path;
         _ = new_path;
         return error.NotSupported;
+    }
+
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        _ = self;
+        _ = target;
+        _ = linkpath;
+        return error.NotSupported;
+    }
+
+    pub fn supports_symlinks(self: *const Self) bool {
+        _ = self;
+        // littlefs stores files and directories only.
+        return false;
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        _ = self;
+        _ = path;
+        _ = buffer;
+        return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {

@@ -39,18 +39,18 @@ with open(args.input, "r") as dump:
     encoded_dump_lines = dump.readlines()
   
 dumps = []
-current_dump = 0
 for line in encoded_dump_lines:
     line = line.strip()
-    match = re.search(r"0x", line)
-    if match: 
-        index = match.start()
-        line_number = line[0:index].split()[1][:-1]
-        if int(line_number) == 0:
+    # Match lines with format: "[prefix] N: 0xADDRESS" (stack trace entries)
+    # where N is a line number (0, 1, 2, etc.)
+    match = re.search(r"(\d+):\s+(0x[0-9a-fA-F]+)", line)
+    if match:
+        line_number = int(match.group(1))
+        address = match.group(2)
+        if line_number == 0:
             dumps.append([])
-        dumps[-1].append(line[index:])
-    else:
-        continue
+        if dumps:  # Only append if we have an active dump
+            dumps[-1].append(address)
 
 for dump_lines in dumps:
     print("===========================================")

@@ -18,7 +18,7 @@
 .syntax unified
 .arch armv7-m
 .cpu cortex-m33
-.thumb 
+.thumb
 
 #include "hardware/regs/addressmap.h"
 #include "hardware/regs/qmi.h"
@@ -36,13 +36,13 @@
 .section .time_critical, "ax"
 .align 2
 
-.global qmi_initialize_m1 
+.global qmi_initialize_m1
 .type qmi_initialize_m1, %function
-.thumb_func 
+.thumb_func
 qmi_initialize_m1:
     push {r1, r2, r3, lr}
-    cpsid i 
-qmi_initialize_direct_access:    
+    cpsid i
+qmi_initialize_direct_access:
     mov r1, #30
     lsl r1, r1, #QMI_DIRECT_CSR_CLKDIV_LSB
     orr r1, r1, #1
@@ -59,15 +59,15 @@ qmi_initialize_direct_access:
     push {r0}
     ldr r3, =XIP_CTRL_BASE
     ldr r1, [r3, 0]
-    ldr r0, =XIP_CTRL_WRITABLE_M1_BITS 
+    ldr r0, =XIP_CTRL_WRITABLE_M1_BITS
     orr r1, r0
-    str r1, [r3, 0]  
+    str r1, [r3, 0]
     pop {r0}
 
 
 qmi_disable_direct_access:
     ldr r1, [r0, #QMI_DIRECT_CSR_OFFSET]
-    ldr r3, =~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS | QMI_DIRECT_CSR_EN_BITS) 
+    ldr r3, =~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS | QMI_DIRECT_CSR_EN_BITS)
     and r1, r3
     str r1, [r0, #QMI_DIRECT_CSR_OFFSET]
     mov r0, #0
@@ -77,7 +77,7 @@ qmi_disable_direct_access:
 
 qmi_wait_until_busy:
     ldr r1, [r0, #QMI_DIRECT_CSR_OFFSET]
-    tst r1, #QMI_DIRECT_CSR_BUSY_BITS 
+    tst r1, #QMI_DIRECT_CSR_BUSY_BITS
     bne qmi_wait_until_busy
     mov pc, lr
 
@@ -90,17 +90,17 @@ qmi_enable_m1:
 
 qmi_disable_m1:
     ldr r1, [r0, #QMI_DIRECT_CSR_OFFSET]
-    ldr r3, =~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS) 
+    ldr r3, =~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS)
     and r1, r3
     str r1, [r0, #QMI_DIRECT_CSR_OFFSET]
-    mov pc, lr 
+    mov pc, lr
 
 qmi_transmit_quad_exit:
-    push {lr} 
+    push {lr}
     bl qmi_enable_m1
-    ldr r1, =(QMI_DIRECT_TX_OE_BITS | QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB | PSRAM_CMD_QUAD_EXIT) 
+    ldr r1, =(QMI_DIRECT_TX_OE_BITS | QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB | PSRAM_CMD_QUAD_EXIT)
     str r1, [r0, #QMI_DIRECT_TX_OFFSET]
-    bl qmi_wait_until_tx 
+    bl qmi_wait_until_tx
     bl qmi_wait_until_busy
     ldr r1, [r0, #QMI_DIRECT_RX_OFFSET]
     bl qmi_disable_m1
@@ -117,17 +117,17 @@ qmi_wait_until_tx:
 // r2 - data received
 qmi_transmit_next:
     push {r1, lr}
-    str r1, [r0, #QMI_DIRECT_TX_OFFSET] 
+    str r1, [r0, #QMI_DIRECT_TX_OFFSET]
     bl qmi_wait_until_tx
     bl qmi_wait_until_busy
     ldr r2, [r0, #QMI_DIRECT_RX_OFFSET]
     pop {r1, pc}
 
-// r2 - result 
+// r2 - result
 qmi_read_id:
     push {lr}
     bl qmi_enable_m1
-    mov r1, #PSRAM_CMD_READ_ID 
+    mov r1, #PSRAM_CMD_READ_ID
     bl qmi_transmit_next
     mov r1, #0xff
     bl qmi_transmit_next
@@ -136,8 +136,8 @@ qmi_read_id:
     bl qmi_transmit_next
     bl qmi_transmit_next
     mov r3, #PSRAM_KNOWN_GOOD_DIE
-    cmp r2, r3 
-    bne qmi_read_id_failed 
+    cmp r2, r3
+    bne qmi_read_id_failed
 
 qmi_read_id_success:
     mov r3, r2
@@ -147,43 +147,43 @@ qmi_read_id_success:
     bl qmi_disable_m1
     pop {pc}
 
-qmi_read_id_failed: 
-    mov r2, #0 
+qmi_read_id_failed:
+    mov r2, #0
     bl qmi_disable_m1
     pop {pc}
 
 qmi_delay:
-    mov r2, #0 
-    cmp r1, #0 
+    mov r2, #0
+    cmp r1, #0
     bne qmi_delay_loop
-    mov pc, lr 
+    mov pc, lr
 qmi_delay_loop:
     add r2, #1
     cmp r2, r1
-    bne qmi_delay_loop 
+    bne qmi_delay_loop
     mov pc, lr
 
 qmi_entry_quad_mode:
     push {r2, lr}
-    
+
     bl qmi_enable_m1
     mov r1, #PSRAM_CMD_RESET_ENABLE
     bl qmi_transmit_next
-    bl qmi_disable_m1 
+    bl qmi_disable_m1
     mov r1, #20
     bl qmi_delay
 
     bl qmi_enable_m1
     mov r1, #PSRAM_CMD_RESET
     bl qmi_transmit_next
-    bl qmi_disable_m1 
+    bl qmi_disable_m1
     mov r1, #20
     bl qmi_delay
 
     @ bl qmi_enable_m1
     @ mov r1, #PSRAM_CMD_WRAP_BURST
     @ bl qmi_transmit_next
-    @ bl qmi_disable_m1 
+    @ bl qmi_disable_m1
     @ mov r1, #20
     @ bl qmi_delay
 
@@ -192,7 +192,7 @@ qmi_entry_quad_mode:
     bl qmi_enable_m1
     mov r1, #PSRAM_CMD_QUAD_ENTRY
     bl qmi_transmit_next
-    bl qmi_disable_m1 
+    bl qmi_disable_m1
     pop {r2, pc}
 
 .global qmi_dummy_read
@@ -201,17 +201,17 @@ qmi_entry_quad_mode:
 qmi_dummy_read:
     push {r1, r2, r3, lr}
     ldr r1, =1000
-    bl qmi_delay 
+    bl qmi_delay
     ldr r0, =XIP_NOCACHE_NOALLOC_BASE + 0x1000000
     ldrb r0, [r0]
     ldr r1, =1000
-    bl qmi_delay 
-    
+    bl qmi_delay
+
     pop {r1, r2, r3, pc}
 
 
 
-// taken from: 
+// taken from:
 // https://github.com/raspberrypi/pico-sdk/blob/ee68c78d0afae2b69c03ae1a72bf5cc267a2d94c/src/rp2350/boot_stage2/boot2_w25q080.S#L189
 
 #ifndef PICO_FLASH_SPI_CLKDIV
@@ -283,7 +283,7 @@ qmi_dummy_read:
 .type qmi_reinitialize_flash, %function
 .thumb_func
 qmi_reinitialize_flash:
-    push {lr} 
+    push {lr}
     ldr r3, =PADS_QSPI_BASE
     movs r0, INIT_PAD_SCLK
     str r0, [r3, #PADS_QSPI_GPIO_QSPI_SCLK_OFFSET]
@@ -310,7 +310,7 @@ qmi_program_sreg:
     movs r0, #CMD_WRITE_ENABLE
     str r0, [r3, #QMI_DIRECT_TX_OFFSET]
     bl wait_qmi_ready
-    ldr r0, [r3, #QMI_DIRECT_RX_OFFSET] 
+    ldr r0, [r3, #QMI_DIRECT_RX_OFFSET]
 
     movs r0, #CMD_WRITE_STATUS
     str r0, [r3, #QMI_DIRECT_TX_OFFSET]
@@ -323,35 +323,24 @@ qmi_program_sreg:
     ldr r0, [r3, #QMI_DIRECT_RX_OFFSET]
     ldr r0, [r3, #QMI_DIRECT_RX_OFFSET]
 
-1: 
+1:
     movs r0, #CMD_READ_STATUS
     bl read_flash_sreg
     lsrs r0, #1
-    bcs 1b 
+    bcs 1b
 
 _skip_sreg_programming:
     bics r1, #QMI_DIRECT_CSR_EN_BITS
     str r1, [r3, #QMI_DIRECT_CSR_OFFSET]
 
-_qmi_config:
-    ldr r0, =INIT_M0_TIMING
-    str r0, [r3, #QMI_M0_TIMING_OFFSET]
-    ldr r0, =INIT_M0_RCMD
-    str r0, [r3, #QMI_M0_RCMD_OFFSET]
-    ldr r0, =INIT_M0_RFMT
-    str r0, [r3, #QMI_M0_RFMT_OFFSET]
-
-    mov r1, #XIP_NOCACHE_NOALLOC_BASE
-    ldrb r1, [r1]
-    
-    bic r0, #QMI_M0_RFMT_PREFIX_LEN_BITS 
-    str r0, [r3, #QMI_M0_RFMT_OFFSET]
+    @ M0 (flash) config is now managed by apply_overclock() in crt.zig.
+    @ Do NOT touch M0 timing/rfmt/rcmd here.
 
     pop {pc}
 
 
 read_flash_sreg:
-    push {lr} 
+    push {lr}
     str r0, [r3, #QMI_DIRECT_TX_OFFSET]
     str r0, [r3, #QMI_DIRECT_TX_OFFSET]
 

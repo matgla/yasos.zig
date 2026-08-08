@@ -20,4 +20,6 @@ comptime {
     _ = @import("maxproc_file.zig");
     _ = @import("pidstat_file.zig");
     _ = @import("procfs.zig");
+    _ = @import("uartstat_file.zig");
+    _ = @import("xipstat_file.zig");
 }

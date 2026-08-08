@@ -24,4 +24,7 @@ pub const Section = enum(u3) {
     Init = 2,
     Unknown = 3,
     Bss = 4,
+    // RELRO: pure-const .rodata shared XIP across processes (the rodata anchor
+    // + R_ARM_RODATA_OFF mechanism). Needs the 3-bit reloc section field.
+    Rodata = 5,
 };

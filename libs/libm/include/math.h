@@ -20,9 +20,141 @@
 
 #pragma once
 
-double ldexp(double x, int exp);
-double fabs(double x);
+#include <limits.h>
+
+#ifndef FP_ILOGB0
+#define FP_ILOGB0 (-INT_MAX)
+#endif
+
+#ifndef FP_ILOGBNAN
+#define FP_ILOGBNAN INT_MAX
+#endif
+
+// C99 floating-point classification (values match newlib)
+#define FP_NAN 0
+#define FP_INFINITE 1
+#define FP_ZERO 2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL 4
+
+int __fpclassifyd(double x);
+int __fpclassifyf(float x);
+int __signbitd(double x);
+int __signbitf(float x);
+
+#define fpclassify(x) \
+  (sizeof(x) == sizeof(float) ? __fpclassifyf((float)(x)) : __fpclassifyd((double)(x)))
+#define isinf(x) (fpclassify(x) == FP_INFINITE)
+#define isnan(x) (fpclassify(x) == FP_NAN)
+#define isfinite(x) (fpclassify(x) != FP_INFINITE && fpclassify(x) != FP_NAN)
+#define isnormal(x) (fpclassify(x) == FP_NORMAL)
+#define signbit(x) \
+  (sizeof(x) == sizeof(float) ? __signbitf((float)(x)) : __signbitd((double)(x)))
+
+// Trigonometric functions
 double sin(double x);
+double cos(double x);
+double tan(double x);
+double asin(double x);
+double acos(double x);
+double atan(double x);
+double atan2(double y, double x);
+
+// Hyperbolic functions
+double sinh(double x);
+double cosh(double x);
+double tanh(double x);
+
+// Exponential and logarithmic functions
+double exp(double x);
+double log(double x);
+double log10(double x);
+int ilogb(double x);
+
+// Power functions
+double pow(double base, double exponent);
+double sqrt(double x);
+double cbrt(double x);
+double ldexp(double x, int exp);
+
+// Rounding functions
+double round(double x);
+double ceil(double x);
+double floor(double x);
+double trunc(double x);
+
+// Absolute value
+double fabs(double x);
+
+// Remainder and sign functions
+double fmod(double x, double y);
+double remainder(double x, double y);
+double copysign(double x, double y);
+double modf(double value, double *iptr);
+
+// Float variants
 float sinf(float x);
+float cosf(float x);
+float tanf(float x);
+float asinf(float x);
+float acosf(float x);
+float atanf(float x);
+float atan2f(float y, float x);
+float sinhf(float x);
+float coshf(float x);
+float tanhf(float x);
+float expf(float x);
+float logf(float x);
+float log10f(float x);
+int ilogbf(float x);
+float powf(float base, float exponent);
+float sqrtf(float x);
+float roundf(float x);
+float ceilf(float x);
+float floorf(float x);
+float fabsf(float x);
+float ldexpf(float x, int exp);
+float cbrtf(float x);
+float truncf(float x);
+float fmodf(float x, float y);
+float remainderf(float x, float y);
+float copysignf(float x, float y);
+float modff(float value, float *iptr);
+
+// Long double variants
 long double sinl(long double x);
+long double cosl(long double x);
+long double tanl(long double x);
+long double asinl(long double x);
+long double acosl(long double x);
+long double atanl(long double x);
+long double atan2l(long double y, long double x);
+long double sinhl(long double x);
+long double coshl(long double x);
+long double tanhl(long double x);
+long double expl(long double x);
+long double logl(long double x);
+long double log10l(long double x);
+int ilogbl(long double x);
+long double powl(long double base, long double exponent);
+long double sqrtl(long double x);
+long double roundl(long double x);
+long double ceill(long double x);
+long double floorl(long double x);
 long double fabsl(long double x);
+long double ldexpl(long double x, int exp);
+long double cbrtl(long double x);
+long double truncl(long double x);
+long double fmodl(long double x, long double y);
+long double remainderl(long double x, long double y);
+long double copysignl(long double x, long double y);
+long double modfl(long double value, long double *iptr);
+
+// Mathematical constants (if not already defined)
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#ifndef M_E
+#define M_E 2.71828182845904523536
+#endif

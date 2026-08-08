@@ -1,0 +1,39 @@
+# KConfig
+#
+# Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
+#
+# This program is free software: you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation, either version
+# 3 of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be
+# useful, but WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+# PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General
+# Public License along with this program. If not, see
+# <https://www.gnu.org/licenses/>.
+#
+
+config BOARD_QEMU_MPS3_AN524
+  bool "QEMU MPS3-AN524 (Cortex-M33, SSE-200)"
+
+if BOARD_QEMU_MPS3_AN524
+  config CONFIG_BOARD
+    def_string "qemu_mps3_an524"
+
+  choice CHOICE_CPU
+    default CPU_QEMU_MPS3
+  endchoice
+
+  config CONFIG_BUILD_LINKER_SCRIPT_PATH
+    default "${hal_root}/source/arm/qemu_mps3/linker_script.ld"
+
+  config FLASH_MEMORY_ADDRESS
+    default "0x10000000"
+
+  config FLASH_MEMORY_SIZE
+    default "512K"
+endif

@@ -30,4 +30,99 @@ config CONFIG_FS_MAX_PATH_LENGTH
   help 
     Maximum path size used inside kernel
 
+config CONFIG_FATFS_CACHE_LINE_SECTORS
+  int "Sectors fetched as one run into the FAT metadata cache"
+  default 4
+  help
+    FatFs reads file data straight into the caller's buffer, but reaches
+    directory entries and the allocation table one sector at a time. On an SD
+    card almost all of a read is the command sequence around it rather than the
+    512 bytes, so a sector fetched alone costs roughly ten times a sector
+    fetched inside a multi-block transfer. Fetching a run of them amortises
+    that, and directory walks are sequential, so the run is used.
+
+    The run cannot grow without limit: the transfer holds interrupts disabled,
+    and the console UART has only its 32-byte FIFO to cover the gap -- 0.69 ms
+    at 460800 baud. Eight sectors keeps the critical section close to what a
+    single-sector read already costs. Set to 0 to disable the cache.
+
+config CONFIG_FATFS_CACHE_LINES
+  int "How many such runs are kept"
+  default 8
+  help
+    Total cache size is this times CONFIG_FATFS_CACHE_LINE_SECTORS times 512
+    bytes, taken from the kernel heap per mounted FAT filesystem. A sequential
+    walk only needs a couple, but the walk is interleaved with reads of the
+    allocation table at every cluster boundary, which would otherwise evict the
+    directory run each time.
+
+    Keep it modest: the kernel heap is what is left of the 76 KB kernel RAM
+    bank. A filesystem that cannot get the memory falls back to reading through,
+    so this is a performance setting, never a correctness one.
+
+    Count matters more than length here, because resolving a path touches one
+    directory per component and each wants a line of its own. Measured on the
+    rig with 4 lines: a file two directories deep cost 1.2 ms cold and 0.2 ms
+    on a second open, while one seven deep cost 5.7 ms and did not improve on
+    the second open at all -- its levels evicted each other. The default trades
+    run length for line count (4 x 8 -> 8 x 4) at the same 16 KiB.
+
+menu "Temporary filesystem (/tmp)"
+
+config CONFIG_TMPFS_ENABLE
+  bool "Mount a hybrid RAM/disk filesystem at /tmp"
+  default y
+  help
+    Mount a RamFs at /tmp backed by the board's `temp_ram` region instead of
+    letting /tmp be a symbolic link into the SD-backed /root/tmp. Every compile
+    writes its output to /tmp and every execute reads it straight back, so both
+    become memcpy-speed for the common case.
+
+    Files stay in RAM only while they fit: anything larger than
+    CONFIG_TMPFS_MAX_FILE_SIZE, and anything that no longer fits in the arena,
+    spills transparently to CONFIG_TMPFS_SPILL_DIRECTORY and behaves exactly as
+    it does today. That bound is the point -- an unbounded RamFs at /tmp starved
+    the process pool and was a net loss.
+
+    Boards whose memory layout has no Temp-owned region silently keep the
+    symlink behaviour.
+
+config CONFIG_TMPFS_MAX_FILE_SIZE
+  int "Largest file kept in RAM, in bytes"
+  default 65536
+  help
+    A write that would push a file past this size moves the whole file to
+    CONFIG_TMPFS_SPILL_DIRECTORY first, and every later access goes there. Keep
+    it well below the arena size so one large file cannot evict everything else.
+
+config CONFIG_TMPFS_ARENA_RESERVE
+  int "Arena bytes kept free for filesystem metadata"
+  default 8192
+  help
+    Once free arena space drops below this, a file that wants to grow spills
+    instead. Without it the arena can fill with file bodies until there is no
+    room left even to create the next file, and /tmp starts answering ENOMEM
+    rather than falling back to the spill directory.
+
+config CONFIG_TMPFS_PAGE_SIZE
+  int "Arena page size, in bytes"
+  default 256
+  help
+    Allocation granularity of the /tmp arena. Must be a power of two and at
+    least 16. Smaller wastes less on file metadata; larger keeps the page bitmap
+    and the first-fit scan shorter.
+
+config CONFIG_TMPFS_SPILL_DIRECTORY
+  string "Directory holding spilled file bodies"
+  default "/root/tmp"
+  help
+    Must live on a writable filesystem (the SD-backed rootfs on hardware). Files
+    here are named yNNNNNNN.tmp and are removed when the /tmp file that owns them
+    is unlinked. A reset leaves them behind, but the names restart at y0000001
+    and a spill truncates whatever it finds, so the directory holds at most as
+    many entries as the run that spilled the most -- it does not grow without
+    bound.
+
+endmenu
+
 rsource "ramfs/KConfig"

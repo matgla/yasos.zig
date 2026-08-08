@@ -18,7 +18,24 @@
  * <https://www.gnu.org/licenses/>.
  */
 
-// X-modem is easier
+/*
+ * File transfer receiver.
+ *
+ * Supports two protocols:
+ *
+ * 1. Simple chunked protocol (default):
+ *   1. Host runs: rz <filename>
+ *   2. Target prints "READY\n" on stderr
+ *   3. Host sends 4-byte file size (little-endian uint32)
+ *   4. Host streams file data in CHUNK_SIZE byte chunks
+ *   5. Target sends ACK (0x06) after each chunk for flow control
+ *   6. Host sends 4-byte CRC32 (little-endian uint32)
+ *   7. Target verifies CRC, prints "OK <size>\n" or "ERROR: ...\n" on stderr
+ *
+ * 2. Zmodem protocol (--zmodem):
+ *   Standard Zmodem receive using ZBIN frames with CRC-16.
+ */
+
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -27,242 +44,144 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "crc16.h"
-#include "packet.h"
+#include "crc32.h"
 #include "terminal.h"
+#include "zmodem/zmodem.h"
 
-#define MAX_RETRIES 20
+#include <sys/klog.h>
 
-typedef enum {
-  SOH = 0x01,
-  STX = 0x02,
-  EOT = 0x04,
-  ACK = 0x06,
-  NAK = 0x15,
-  ETB = 0x17,
-  CAN = 0x18,
-  C = 0x43,
-} ymodem_commands_t;
+#define CHUNK_SIZE 4096
+#define ACK 0x06
 
-typedef enum {
-  STATE_IDLE,
-  STATE_METADATA,
-  STATE_DATA,
-  STATE_EOT,
-  STATE_END,
-} ymodem_state_t;
-
-typedef enum {
-  STATUS_OK = 0,
-  STATUS_ERROR = -1,
-  STATUS_INVALID_START = -2,
-  STATUS_CRC_ERROR = -3,
-  STATUS_TIMEOUT = -4,
-  STATUS_INVALID_COMPLEMENTARY = -5,
-} ymodem_status_t;
-
-typedef struct {
-  ymodem_state_t state;
-  int retries;
-  int fd;
-  int filesize;
-  int received_bytes;
-} ymodem_statemachine_t;
-
-void send_command(char c) {
-  putchar(c);
-  fflush(stdout);
+static int read_exact(uint8_t *buf, size_t count) {
+  size_t total = 0;
+  while (total < count) {
+    int rc = read(STDIN_FILENO, buf + total, count - total);
+    if (rc <= 0)
+      return -1;
+    total += rc;
+  }
+  return 0;
 }
 
-void send_nack(ymodem_statemachine_t *sm) {
-  // drop remaining input
+static uint32_t read_le32(const uint8_t *buf) {
+  return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) |
+         ((uint32_t)buf[3] << 24);
+}
+
+static void send_ack(void) {
+  uint8_t ack = ACK;
+  write(STDOUT_FILENO, &ack, 1);
+}
+
+static int receive_chunked(const char *filename) {
+  prepare_terminal();
   flush_stdin();
-  putchar(NAK);
-  fflush(stdout);
-  sm->retries++;
-}
 
-ymodem_status_t read_packet(ymodem_packet_t *packet) {
-  do {
-    if (read(STDIN_FILENO, &packet->start, 1) <= 0) {
-      // fprintf(stderr, "Timeout waiting for start byte\n");
-      return STATUS_ERROR;
+  fprintf(stderr, "READY\n");
+
+  /* Read 4-byte file size (little-endian) */
+  uint8_t hdr[4];
+  if (read_exact(hdr, 4) < 0) {
+    fprintf(stderr, "ERROR: failed to read file size\n");
+    restore_terminal();
+    return 1;
+  }
+  uint32_t filesize = read_le32(hdr);
+
+  int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    fprintf(stderr, "ERROR: cannot open %s\n", filename);
+    restore_terminal();
+    return 1;
+  }
+
+  uint8_t chunk[CHUNK_SIZE];
+  uint32_t remaining = filesize;
+  uint32_t file_crc = 0;
+
+  while (remaining > 0) {
+    uint32_t to_read = remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining;
+    if (read_exact(chunk, to_read) < 0) {
+      fprintf(stderr, "ERROR: read failed at offset %u\n",
+              filesize - remaining);
+      close(fd);
+      restore_terminal();
+      return 1;
     }
-    // fprintf(stderr, "Got start byte: 0x%02X\n", packet->start);
-  } while (packet->start != SOH && packet->start != STX &&
-           packet->start != EOT && packet->start != EOF);
 
-  if (packet->start == EOT) {
-    return STATUS_OK;
-  }
-  packet->id = read_byte();
-  uint8_t complementary_packet_id = read_byte();
-  // fprintf(stderr, "Got packet ID: 0x%02X, complement: 0x%02X\n", packet->id,
-          // complementary_packet_id);
+    write(fd, chunk, to_read);
+    file_crc = crc32(file_crc, chunk, to_read);
+    remaining -= to_read;
 
-  if (packet->id + complementary_packet_id != 0xFF) {
-    // fprintf(stderr, "Packet ID and its complement do not match\n");
-    flush_stdin();
-    return STATUS_ERROR;
+    send_ack();
   }
 
-  int packet_size = 0;
+  close(fd);
 
-  if (packet->start == SOH) {
-    packet_size = 128;
-  } else if (packet->start == STX) {
-    packet_size = 1024;
-  } else if (packet->start == EOF) {
-    packet_size = 0;
-    return STATUS_OK;
-  } else {
-    // fprintf(stderr, "Invalid start byte: 0x%02X\n", packet->start);
-    flush_stdin();
-    return STATUS_ERROR;
+  /* Read expected CRC32 (4 bytes, little-endian) */
+  uint8_t crc_buf[4];
+  if (read_exact(crc_buf, 4) < 0) {
+    fprintf(stderr, "ERROR: failed to read CRC\n");
+    restore_terminal();
+    return 1;
   }
 
-  int readed = 0;
-  while (readed < packet_size) {
-    int rc = read(STDIN_FILENO, packet->data + readed, packet_size - readed);
-    // fprintf(stderr, "Read %d bytes, total readed: %d/%d\n", rc, readed + rc,
-    //         packet_size);
-    // for (int i = 0; i < rc; i++) {
-    //   fprintf(stderr, "[%c]%d", packet->data[readed + i], packet->data[readed + i]);
-    // }
-    // fprintf(stderr, "\n");
-    if (rc <= 0) {
-      // fprintf(stderr, "Timeout reading packet data\n");
-      return STATUS_ERROR;
-    }
-    readed += rc;
-  }
-  packet->crc[0] = read_byte();
-  packet->crc[1] = read_byte();
-  uint16_t computed_crc = crc16_ccitt(packet->data, packet_size);
+  uint32_t expected_crc = read_le32(crc_buf);
 
-  if (packet->crc[0] != computed_crc >> 8 ||
-      packet->crc[1] != (computed_crc & 0xFF)) {
-    // fprintf(stderr, "CRC mismatch: received 0x%02X%02X, computed 0x%04X\n",
-            // packet->crc[0], packet->crc[1], computed_crc);
-    return STATUS_ERROR;
+  if (file_crc != expected_crc) {
+    fprintf(stderr, "ERROR: CRC mismatch (got %08x, expected %08x)\n", file_crc,
+            expected_crc);
+    restore_terminal();
+    return 1;
   }
-  return STATUS_OK;
+
+  fprintf(stderr, "OK %u\n", filesize);
+  restore_terminal();
+  return 0;
 }
 
-bool ymodem_should_continue(ymodem_statemachine_t *sm) {
-  return sm->retries < MAX_RETRIES;
+static int receive_zmodem(const char *filename) {
+  prepare_terminal();
+  int rc = filename != NULL ? zmodem_receive(filename) : zmodem_receive_batch();
+  klog_ctl(1);
+  restore_terminal();
+  return rc < 0 ? 1 : 0;
 }
 
-void ymodem_process_idle(ymodem_statemachine_t *sm) {
-  // fprintf(stderr, "Sending initial C to start transfer...\n");
-  flush_stdin();
-  send_command(C);
-  sm->state = STATE_METADATA;
-}
-
-void ymodem_process_metadata(ymodem_statemachine_t *sm) {
-  ymodem_packet_t packet;
-  // fprintf(stderr, "Waiting for metadata packet...\n");
-  ymodem_status_t status = read_packet(&packet);
-  // fprintf(stderr, "Metadata packet received, status: %d\n", status);
-  if (status == STATUS_OK) {
-    if (packet.id == 0) {
-      // Process metadata packet
-      sm->state = STATE_DATA;
-      sm->retries = 0;
-      sm->filesize =
-          atoi((char *)packet.data + strlen((char *)packet.data) + 1);
-      sm->fd = open((char *)packet.data, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-      send_command(ACK);
-      // fprintf(stderr, "Receiving file: %s, with size: %d\n", packet.data,
-      // sm->filesize);
-      send_command(C);
-      sm->state = STATE_DATA;
-      return;
-    }
-  }
-  sm->state = STATE_IDLE;
-  sm->retries++;
-  flush_stdin();
-}
-
-void ymodem_process_data(ymodem_statemachine_t *sm) {
-  ymodem_packet_t packet;
-  memset(&packet, 0, sizeof(ymodem_packet_t));
-  ymodem_status_t status = read_packet(&packet);
-  if (status == STATUS_OK) {
-    if (packet.start == EOT) {
-      send_command(NAK);
-      sm->state = STATE_EOT;
-      return;
-    } else if (packet.start == SOH || packet.start == STX) {
-      // Here you would write packet.data to the file
-      int to_write = (packet.start == SOH) ? 128 : 1024;
-      if (sm->received_bytes + to_write > sm->filesize) {
-        to_write = sm->filesize - sm->received_bytes;
-      }
-      write(sm->fd, packet.data, to_write);
-      sm->received_bytes += to_write;
-      sm->retries = 0;
-      send_command(ACK);
-      return;
-    }
-  }
-  send_nack(sm);
-}
-
-void ymodem_process_eot(ymodem_statemachine_t *sm) {
-  if (read_byte() == EOT) {
-    send_command(ACK);
-    send_command(C);
-    ymodem_packet_t empty_packet;
-    ymodem_status_t empty_status = read_packet(&empty_packet);
-    if (empty_status == STATUS_OK && empty_packet.id == 0) {
-      send_command(ACK);
-      sm->state = STATE_END;
-      return;
-    }
-  }
-  send_nack(sm);
-}
-
-void ymodem_receiver_loop() {
-  ymodem_statemachine_t sm;
-  sm.state = STATE_IDLE;
-  sm.filesize = 0;
-  sm.retries = 0;
-  sm.received_bytes = 0;
-
-  while (ymodem_should_continue(&sm)) {
-    switch (sm.state) {
-    case STATE_IDLE:
-      ymodem_process_idle(&sm);
-      break;
-    case STATE_METADATA:
-      ymodem_process_metadata(&sm);
-      break;
-    case STATE_DATA:
-      ymodem_process_data(&sm);
-      break;
-    case STATE_EOT:
-      ymodem_process_eot(&sm);
-      // Handle end of transmission
-      break;
-    case STATE_END:
-      // Finalize and exit
-      close(sm.fd);
-      return;
-    }
-  }
+static bool starts_with(const char *arg, const char *prefix) {
+  return strcmp(arg, prefix) == 0;
 }
 
 int main(int argc, char *argv[]) {
-  prepare_terminal();
-  flush_stdin();
-  fprintf(stderr, "Starting YMODEM receiver...\n");
-  ymodem_receiver_loop();
-  flush_stdin();
-  fprintf(stderr, "YMODEM transfer completed...\n");
-  restore_terminal();
-  return 0;
+  bool use_zmodem = false;
+  bool batch = false;
+  const char *filename = NULL;
+
+  for (int i = 1; i < argc; i++) {
+    if (starts_with(argv[i], "--zmodem")) {
+      use_zmodem = true;
+    } else if (starts_with(argv[i], "--batch")) {
+      /* Every file names itself, so there is no filename argument. */
+      use_zmodem = true;
+      batch = true;
+    } else {
+      filename = argv[i];
+    }
+  }
+
+  if (batch) {
+    return receive_zmodem(NULL);
+  }
+
+  if (filename == NULL) {
+    fprintf(stderr, "Usage: rz [--zmodem] <filename>\n");
+    fprintf(stderr, "       rz --batch\n");
+    return 1;
+  }
+
+  if (use_zmodem) {
+    return receive_zmodem(filename);
+  }
+  return receive_chunked(filename);
 }

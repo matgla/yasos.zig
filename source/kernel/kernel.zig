@@ -21,6 +21,7 @@ pub const memory = @import("memory/memory.zig");
 pub const log = @import("kernel_log.zig").log;
 pub const kernel_stdout_log = @import("kernel_log.zig").kernel_stdout_log;
 pub const stdout = @import("stdout.zig");
+pub const file_log = @import("file_log.zig");
 
 pub const process = struct {
     pub const process_manager = @import("process_manager.zig");
@@ -30,8 +31,11 @@ pub const process = struct {
     pub const get_offset_of_hardware_stored_registers = @import("arch").process.get_offset_of_hardware_stored_registers;
     pub const init = @import("process.zig").init;
     pub const ProcFs = @import("process/procfs.zig").ProcFs;
+    pub const uart_stats = @import("process/uartstat_file.zig");
+    pub const xip_stats = @import("process/xipstat_file.zig");
     pub const block_context_switch = @import("interrupts/system_call.zig").block_context_switch;
     pub const unblock_context_switch = @import("interrupts/system_call.zig").unblock_context_switch;
+    pub const create_default_resource_limits = @import("process.zig").create_default_resource_limits;
 };
 
 pub const sync = struct {

@@ -78,6 +78,35 @@ pub const IFileSystem = interface.ConstructInterface(struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         return interface.VirtualCall(self, "stat", .{ path, data, follow_links }, anyerror!void);
     }
+
+    // Read a symbolic link's target into `buffer`, returning the number of bytes
+    // written. Filesystems that do not support symlinks return InvalidArgument
+    // (EINVAL: "not a symbolic link").
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        return interface.VirtualCall(self, "readlink", .{ path, buffer }, anyerror!usize);
+    }
+
+    // Create a symbolic link at `linkpath` pointing to `target`.
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        return interface.VirtualCall(self, "symlink", .{ target, linkpath }, anyerror!void);
+    }
+
+    /// Whether this filesystem can hold a symbolic link at all.
+    ///
+    /// Not a question about a path -- a question about the format. FAT and
+    /// littlefs have nowhere to put one and always will not; romfs and ramfs
+    /// do. The VFS asks so it can skip work that cannot pay: every failed
+    /// lookup runs a resolution pass that stats each path component hunting
+    /// for a link, one directory walk apiece, and library and include searches
+    /// are made of failed lookups. On a filesystem that answers false, that
+    /// pass can only ever confirm what the format already guarantees.
+    ///
+    /// Answer for the format, not for the current contents: a filesystem that
+    /// supports links but happens to hold none must still answer true, or a
+    /// link created later would stop resolving.
+    pub fn supports_symlinks(self: *const Self) bool {
+        return interface.VirtualCall(self, "supports_symlinks", .{}, bool);
+    }
 });
 
 pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
@@ -123,5 +152,26 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     pub fn format(self: *Self) anyerror!void {
         _ = self;
         return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem cannot be formatted
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        _ = self;
+        _ = path;
+        _ = buffer;
+        return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
+    }
+
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        _ = self;
+        _ = target;
+        _ = linkpath;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem does not allow symlinking
+    }
+
+    /// Matches the `readlink` above: a read-only filesystem that has not said
+    /// otherwise cannot hold a link. One that can -- romfs -- overrides both.
+    pub fn supports_symlinks(self: *const Self) bool {
+        _ = self;
+        return false;
     }
 });

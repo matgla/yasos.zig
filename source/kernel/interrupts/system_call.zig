@@ -33,6 +33,7 @@ const process_manager = @import("../process_manager.zig");
 
 const handlers = @import("syscall_handlers.zig");
 const arch = @import("arch");
+const perf = @import("perf_profile.zig");
 comptime {
     _ = @import("arch");
     const config = @import("config");
@@ -47,6 +48,20 @@ const SyscallHandler = *const fn (arg: *const volatile anyopaque) anyerror!i32;
 
 var context_switch_enabled: bool = true;
 var counter: i32 = 0;
+
+// Set true once the very first task has been switched in by
+// switch_to_the_first_task (via process_set_next_task). Until then PendSV must
+// NOT perform a context switch: the first switch into the root process is done
+// with a plain `bx entry` (the root's saved EXC_RETURN slot holds the raw entry
+// address, not a 0xFFxxxxxx magic). Doing that from a PendSV handler is not an
+// exception return, so PendSV would be left permanently ACTIVE
+// (SHCSR.PENDSVACT), silently killing all future context switches.
+var scheduler_running: bool = false;
+
+pub fn mark_scheduler_running() void {
+    const ptr: *volatile bool = &scheduler_running;
+    ptr.* = true;
+}
 
 pub fn block_context_switch() void {
     const blocked: usize = arch.sync.save_and_disable_interrupts();
@@ -75,6 +90,13 @@ export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") us
     const ptr: *volatile bool = &context_switch_enabled;
 
     if (!ptr.*) {
+        return 3;
+    }
+    // The first task switch is performed by switch_to_the_first_task, not by
+    // PendSV. Ignore PendSV until then so an early SysTick cannot strand
+    // SHCSR.PENDSVACT (see scheduler_running above).
+    const running: *volatile bool = &scheduler_running;
+    if (!running.*) {
         return 3;
     }
     switch (process_manager.instance.schedule_next()) {
@@ -134,6 +156,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_nanosleep => return handlers.sys_nanosleep,
             c.sys_mmap => return handlers.sys_mmap,
             c.sys_munmap => return handlers.sys_munmap,
+            c.sys_mremap => return handlers.sys_mremap,
             c.sys_getcwd => return handlers.sys_getcwd,
             c.sys_chdir => return handlers.sys_chdir,
             c.sys_time => return handlers.sys_time,
@@ -150,6 +173,10 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_sysinfo => return handlers.sys_sysinfo,
             c.sys_sysconf => return handlers.sys_sysconf,
             c.sys_access => return handlers.sys_access,
+            c.sys_prlimit => return handlers.sys_prlimit,
+            c.sys_klog_ctl => return handlers.sys_klog_ctl,
+            c.sys_ftruncate => return handlers.sys_ftruncate,
+            c.sys_perf_dump => return handlers.sys_perf_dump,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -165,6 +192,46 @@ fn create_syscall_lookup_table(comptime count: usize) [count]SyscallHandler {
 
 const syscall_lookup_table = create_syscall_lookup_table(c.SYSCALL_COUNT);
 
+// A "fast" syscall is one whose handler provably never blocks, never invokes the
+// scheduler / triggers a context switch, and never vforks/execs. Such calls can
+// run entirely in the SVCall handler (already privileged) and exception-return
+// directly to the user, skipping the trampoline-to-thread-mode + second SVC +
+// CONTROL juggling. The result is delivered through the `out` pointer, so no
+// stacked-frame patching is needed. Keep this set conservative and audited:
+// misclassifying a blocking syscall would deadlock at SVCall priority.
+fn is_fast_syscall(comptime index: usize) bool {
+    return switch (index) {
+        c.sys_getpid,
+        c.sys_getuid,
+        c.sys_geteuid,
+        c.sys_time,
+        c.sys_gettimeofday,
+        c.sys_sysconf,
+        c.sys_getentropy,
+        => true,
+        else => false,
+    };
+}
+
+fn create_fast_syscall_table(comptime count: usize) [count]bool {
+    var table: [count]bool = undefined;
+    for (&table, 0..) |*f, index| {
+        f.* = is_fast_syscall(index);
+    }
+    return table;
+}
+
+const fast_syscall_table = create_fast_syscall_table(c.SYSCALL_COUNT);
+
+// Called from the SVCall handler (context_switch.S) to decide whether the
+// incoming syscall can take the handler-mode fast path. Returns 1 for fast, 0
+// otherwise (including out-of-range numbers, which fall through to the trampoline
+// where _irq_svcall reports NotImplemented).
+pub export fn syscall_is_fast(number: u32) linksection(".time_critical") callconv(.c) usize {
+    if (number >= c.SYSCALL_COUNT) return 0;
+    return if (fast_syscall_table[number]) 1 else 0;
+}
+
 fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") isize {
     const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
     const result: i32 = result_or_error catch |err| {
@@ -178,21 +245,73 @@ fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksec
     return result;
 }
 
+// Debug aid for kernel-heap corruption, off in normal builds: revalidate the
+// newlib free list after every syscall and name the first one that leaves it
+// broken (the reported tag is the syscall number). The alternative is the bare
+// _free_r HardFault, which fires an arbitrary number of syscalls after the write
+// that actually did the damage -- that is how the dup2(fd, fd) refcount
+// use-after-free in sys_dup was found. Costs a full free-list walk per syscall,
+// so it is not something to leave on.
+const trap_heap_corruption = false;
+
+/// Bytes a just-completed read/write actually moved, 0 for anything else.
+///
+/// Not the syscall's return value: read and write return 0 through `out` and
+/// deliver the count in their context's `result` pointer, which is why reading
+/// `result` here reported 0 bytes moved against nonzero read/write time.
+fn transferred_bytes(number: u32, arg: *const volatile anyopaque) u32 {
+    const moved: isize = switch (number) {
+        c.sys_read => blk: {
+            const context: *const volatile c.read_context = @ptrCast(@alignCast(arg));
+            break :blk if (context.result != null) context.result.* else 0;
+        },
+        c.sys_write => blk: {
+            const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
+            break :blk if (context.result != null) context.result.* else 0;
+        },
+        else => 0,
+    };
+    return if (moved > 0) @intCast(moved) else 0;
+}
+
 pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) linksection(".time_critical") callconv(.c) isize {
-    process_manager.instance.get_current_process().processes_syscall = true;
+    // Two stamps: `entry_cycles` was taken in the SVC handler before the
+    // fast-path decision, so it carries exception entry plus (for a non-fast
+    // syscall) the trampoline; `start_cycles` starts the handler body. The
+    // difference between the two totals is what syscall *dispatch* costs, which
+    // is the number that decides whether to make calls cheaper or make them
+    // fewer.
+    const entry_cycles = if (perf.enabled) perf.perf_svc_entry_cycles else 0;
+    const start_cycles = if (perf.enabled) perf.read_cycles() else 0;
     // log.err("System call processing started for: {d}", .{number});
     if (number >= c.SYSCALL_COUNT) {
         return write_result(out, kernel.errno.ErrnoSet.NotImplemented);
     }
     const result = write_result(out, syscall_lookup_table[number](arg));
+    if (trap_heap_corruption) kernel.memory.heap.malloc.probe(number);
     // log.err("System call processing finished for: {d}", .{number});
-    process_manager.instance.get_current_process().processes_syscall = false;
+    // execve and vfork are deliberately not accounted, because neither one's
+    // elapsed time belongs to the process it would be charged to:
+    //
+    //   execve resets the counters partway through (that is what makes the
+    //   window mean "this image"), and its handler time *is* the dynamic load,
+    //   already reported as load_us -- recording it bills the loader twice;
+    //
+    //   vfork in the parent does not complete until the child execs, so its
+    //   window spans the child's whole pre-exec life *and* the image load, and
+    //   it lands after the reset. Left in, it put ~22 ms of loader time into
+    //   `cat`'s syscall total -- more than cat's entire run.
+    if (perf.enabled and number != c.sys_execve and number != c.sys_vfork) {
+        const now = perf.read_cycles();
+        perf.record(number, now -% entry_cycles, now -% start_cycles, transferred_bytes(number, arg));
+    }
     return result;
 }
 
 pub fn init(kernel_allocator: std.mem.Allocator) void {
     log.info("initialization...", .{});
     handlers.init(kernel_allocator);
+    perf.init();
 }
 
 test "SystemCall.VerifyLookupTable" {
@@ -243,6 +362,8 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_sysinfo, syscall_lookup_table[c.sys_sysinfo]);
     try std.testing.expectEqual(handlers.sys_sysconf, syscall_lookup_table[c.sys_sysconf]);
     try std.testing.expectEqual(handlers.sys_access, syscall_lookup_table[c.sys_access]);
+    try std.testing.expectEqual(handlers.sys_prlimit, syscall_lookup_table[c.sys_prlimit]);
+    try std.testing.expectEqual(handlers.sys_perf_dump, syscall_lookup_table[c.sys_perf_dump]);
 }
 
 test "SystemCall.UnhandledSyscallReturnsError" {

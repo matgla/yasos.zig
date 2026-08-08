@@ -133,6 +133,12 @@ pub const MmcPartitionFile =
             return @as(u64, @intCast(self._size_in_sectors)) << 9;
         }
 
+        pub fn truncate(self: *Self, length: u64) anyerror!void {
+            _ = self;
+            _ = length;
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
         pub fn filetype(self: *const Self) kernel.fs.FileType {
             _ = self;
             return kernel.fs.FileType.BlockDevice;

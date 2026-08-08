@@ -167,4 +167,13 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         }
         return 0;
     }
+
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        if (self._file) |*file| {
+            file.seekTo(@intCast(length)) catch |err| return fatfs_error_to_errno(err);
+            file.truncate() catch |err| return fatfs_error_to_errno(err);
+            return;
+        }
+        return kernel.errno.ErrnoSet.BadFileDescriptor;
+    }
 });

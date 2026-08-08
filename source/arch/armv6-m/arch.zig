@@ -22,4 +22,5 @@ const std = @import("std");
 
 const config = @import("config");
 pub const process = @import("arm-m/process.zig");
+pub const mpu = @import("mpu.zig");
 const irq_handlers = @import("arm-m/irq_handlers.zig");

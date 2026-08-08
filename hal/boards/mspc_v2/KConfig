@@ -39,7 +39,7 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
     default "0x10000000"
   
   config FLASH_MEMORY_SIZE
-    default "2MB"
+    default "16MB"
 
   config CONFIG_PSRAM_CS_PIN 
     default 0

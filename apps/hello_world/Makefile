@@ -1,6 +1,7 @@
 CC ?= armv8m-tcc
-CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
-LDFLAGS = -g -fvisibility=hidden -g -L../../rootfs/lib
+CFLAGS = $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
+CFLAGS += $(ROOTFS_OPT_CFLAGS)
+LDFLAGS = $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden -L../../rootfs/lib
 SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 

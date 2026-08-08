@@ -37,6 +37,34 @@ const arch = @import("arch");
 
 const hal = @import("hal");
 
+const default_nofile_limit: c.rlim_t = 256;
+
+pub fn create_default_resource_limits(stack_size: u32) [c.RLIM_NLIMITS]c.rlimit {
+    const max_stack_size = @max(stack_size, config.process.max_stack_size);
+    var limits: [c.RLIM_NLIMITS]c.rlimit = undefined;
+    for (&limits) |*limit| {
+        limit.* = .{
+            .rlim_cur = c.RLIM_INFINITY,
+            .rlim_max = c.RLIM_INFINITY,
+        };
+    }
+
+    limits[c.RLIMIT_NOFILE] = .{
+        .rlim_cur = default_nofile_limit,
+        .rlim_max = default_nofile_limit,
+    };
+    limits[c.RLIMIT_NPROC] = .{
+        .rlim_cur = config.process.max_pid_value - 1,
+        .rlim_max = config.process.max_pid_value - 1,
+    };
+    limits[c.RLIMIT_STACK] = .{
+        .rlim_cur = stack_size,
+        .rlim_max = max_stack_size,
+    };
+
+    return limits;
+}
+
 var pid_counter: u32 = 0;
 
 pub fn init() void {
@@ -123,6 +151,20 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pid: c.pid_t,
         _kernel_allocator: std.mem.Allocator,
         current_core: u8,
+        // Whether this process runs as a privileged thread. The root/init process
+        // runs kernel code (file descriptor setup, the dynamic loader, logging) in
+        // thread mode and must stay privileged; all spawned user processes run
+        // unprivileged so the MPU can keep them out of the kernel heap and stack.
+        privileged: bool,
+        // Live thread privilege (CONTROL.nPRIV == 0) captured when this process's
+        // context was last stored by a context switch. A process preempted INSIDE
+        // the privileged thread-mode phase of a syscall must be resumed privileged
+        // — restoring from the static `privileged` flag resumes it unprivileged
+        // mid-syscall and the next kernel access (e.g. a UART register in
+        // sys_read's polling loop) takes a MemManage DACCVIOL HardFault. Written
+        // by update_stack_pointer() on every context store; read by the PendSV
+        // resume path via process_resume_is_privileged().
+        resume_privileged: bool,
         waiting_for: ?*const Semaphore = null,
         _fds: std.AutoHashMap(u16, FileHandle),
         cwd: []u8,
@@ -136,11 +178,23 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _vfork_context: ?VForkContext = null,
         _initialized: bool = false,
         _start_time: u64,
-        processes_syscall: bool = false,
+        // Wall-clock (us) captured right after this process's exec'd image is
+        // loaded and relocated. Used to separate dynamic-load time from real
+        // execution time when perf profiling is enabled. 0 means the process was
+        // never exec'd (e.g. a forked process that did not call execve).
+        _exec_loaded_time: u64 = 0,
+        // How long (us) the dynamic loader spent producing this process's
+        // image: path lookup, image copy for a non-XIP file, relocation and
+        // every library it pulled in. A process cannot measure this itself, so
+        // it is handed back through sys_perf_dump. 0 = never exec'd.
+        _load_us: u64 = 0,
         vfork_return: usize = 0,
         vfork_sp: usize = 0,
         vfork_fp: usize = 0,
         child_exit_code: i32 = 0,
+        _last_tty_output_fd: ?u16 = null,
+        _pending_tty_newline_on_exit: bool = false,
+        resource_limits: [c.RLIM_NLIMITS]c.rlimit,
 
         pub const State = enum(u3) {
             Initialized,
@@ -166,6 +220,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .pid = pid,
                 ._kernel_allocator = kernel_allocator,
                 .current_core = 0,
+                .privileged = is_root,
+                .resume_privileged = is_root,
                 ._fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
                 .cwd = cwd_handle,
                 .node = .{},
@@ -176,6 +232,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._stack_shared_with_parent = false,
                 ._vfork_context = null,
                 ._start_time = hal.time.get_time_us(),
+                .resource_limits = create_default_resource_limits(stack_size),
             };
             process.impl = try ImplType.init(process._process_memory_allocator.allocator(), stack_size, process_entry, exit_handler_impl, args[0..], is_root);
             return process;
@@ -211,10 +268,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn deinit(self: *Self) void {
+            const pool = self._process_memory_allocator.get_pool();
+            log.info("deinit pid={d}: kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             self.impl.deinit(self._process_memory_allocator.allocator());
+            log.info("deinit pid={d}: after impl.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             self.clear_fds();
+            log.info("deinit pid={d}: after clear_fds kernel_used={d} process_pages={d} alloc_count={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
             self._kernel_allocator.free(self.cwd);
             self._process_memory_allocator.deinit();
+            log.info("deinit pid={d}: after proc_mem.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             var it = self._blocked_by.first;
             while (it) |blocked| {
                 const blocker: *BlockedByProcess = @fieldParentPtr("node", blocked);
@@ -238,6 +300,16 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn get_process_memory_allocator(self: *Self) std.mem.Allocator {
             return self._process_memory_allocator.allocator();
         }
+
+        /// Bound this process's heap to `heap_bytes` beyond its current footprint
+        /// (the image + stack already resident at exec time). Enforces the YAFF
+        /// heap_size profile: once set, dynamic allocations that would exceed the
+        /// ceiling fail (user malloc returns NULL) instead of growing the shared
+        /// paged pool without bound. 0xFFFFFFFF = unbounded. Call after the stack
+        /// is reallocated so the baseline captures the fixed sections.
+        pub fn set_heap_limit_bytes(self: *Self, heap_bytes: u32) void {
+            self._process_memory_allocator.set_heap_limit_bytes(heap_bytes);
+        }
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
         pub fn vfork(self: *Self, process_memory_pool: *ProcessMemoryPoolType, pid: c.pid_t) !*Self {
@@ -253,6 +325,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .pid = pid,
                 ._kernel_allocator = self._kernel_allocator,
                 .current_core = 0,
+                // A vfork child is a user process on its way to exec; it must run
+                // unprivileged regardless of whether its parent (e.g. the init
+                // process) is privileged.
+                .privileged = false,
+                .resume_privileged = false,
                 ._fds = try self.dupe_fds(),
                 .cwd = cwd_handle,
                 .node = .{},
@@ -264,6 +341,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._vfork_context = null,
                 ._initialized = false,
                 ._start_time = hal.time.get_time_us(),
+                .resource_limits = self.resource_limits,
             };
             process.impl = try self.impl.vfork(process._process_memory_allocator.allocator());
             self._child = process;
@@ -296,8 +374,16 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return self.impl.stack_pointer();
         }
 
+        pub fn is_privileged(self: Self) bool {
+            return self.privileged;
+        }
+
         pub fn get_stack_bottom(self: Self) *const u8 {
             return self.impl.get_stack_bottom();
+        }
+
+        pub fn get_stack_top(self: Self) *const u8 {
+            return self.impl.get_stack_top();
         }
 
         pub fn set_stack_pointer(self: *Self, ptr: *u8) void {
@@ -435,7 +521,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn reallocate_stack(self: *Self) !void {
-            try self.impl.reallocate_stack();
+            const stack_limit = try self.get_resource_limit(c.RLIMIT_STACK);
+            const requested_stack_size = std.math.cast(u32, stack_limit.rlim_cur) orelse return kernel.errno.ErrnoSet.InvalidArgument;
+            log.debug("Reallocating stack to new size: {d}", .{requested_stack_size});
+            try self.impl.reallocate_stack(requested_stack_size);
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
@@ -446,20 +535,77 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
-
                 self._process_memory_allocator.release_pages(addr, number_of_pages);
             }
         }
 
-        pub fn get_free_fd(self: *Self) u16 {
+        /// Try to extend an existing mmap allocation in-place.
+        /// Returns the same address on success (with extended size), or error.
+        pub fn mremap(self: *Self, addr: *anyopaque, old_length: i32, new_length: i32, flags: i32) !*anyopaque {
+            kernel.process.block_context_switch();
+            defer kernel.process.unblock_context_switch();
+            _ = flags;
+            var old_pages = @divTrunc(old_length, ProcessMemoryPoolType.page_size);
+            if (@rem(old_length, ProcessMemoryPoolType.page_size) != 0) {
+                old_pages += 1;
+            }
+            var new_pages = @divTrunc(new_length, ProcessMemoryPoolType.page_size);
+            if (@rem(new_length, ProcessMemoryPoolType.page_size) != 0) {
+                new_pages += 1;
+            }
+            if (self._process_memory_allocator.try_extend_pages(addr, old_pages, new_pages)) |extended| {
+                return extended.ptr;
+            }
+            return kernel.errno.ErrnoSet.OutOfMemory;
+        }
+
+        fn can_allocate_fd(self: *const Self, fd: u16) bool {
+            const limit = self.resource_limits[c.RLIMIT_NOFILE].rlim_cur;
+            if (limit == c.RLIM_INFINITY) {
+                return true;
+            }
+
+            return @as(c.rlim_t, fd) < limit;
+        }
+
+        pub fn get_resource_limit(self: *const Self, resource: i32) !c.rlimit {
+            if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            return self.resource_limits[@intCast(resource)];
+        }
+
+        pub fn set_resource_limit(self: *Self, resource: i32, limit: c.rlimit) !void {
+            if (resource < 0 or resource >= c.RLIM_NLIMITS) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            if (limit.rlim_cur > limit.rlim_max) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            self.resource_limits[@intCast(resource)] = limit;
+        }
+
+        pub fn set_resource_limits(self: *Self, limits: [c.RLIM_NLIMITS]c.rlimit) void {
+            self.resource_limits = limits;
+        }
+
+        pub fn get_free_fd(self: *Self) ?u16 {
             var fd: u16 = 0;
             while (true) {
+                if (!self.can_allocate_fd(fd)) {
+                    return null;
+                }
                 if (self._fds.get(fd) == null) {
-                    break;
+                    return fd;
+                }
+                if (fd == std.math.maxInt(u16)) {
+                    return null;
                 }
                 fd += 1;
             }
-            return fd;
         }
 
         pub fn get_parent(self: Self) ?*Self {
@@ -496,11 +642,19 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn attach_file(self: *Self, path: []const u8, node: kernel.fs.Node) !i32 {
-            const fd = self.get_free_fd();
+            const fd = self.get_free_fd() orelse return kernel.errno.ErrnoSet.TooManyOpenFiles;
             return try self.attach_file_with_fd(@intCast(fd), path, node);
         }
 
         pub fn attach_file_with_fd(self: *Self, fd: i16, path: []const u8, node: kernel.fs.Node) !i32 {
+            if (fd < 0) {
+                return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            if (!self.can_allocate_fd(@intCast(fd))) {
+                return kernel.errno.ErrnoSet.TooManyOpenFiles;
+            }
+
             const handle = try FileHandle.create(self._kernel_allocator, path, node);
             try self._fds.put(@intCast(fd), handle);
             return @intCast(fd);
@@ -509,6 +663,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn release_file(self: *Self, fd: i32) void {
             const maybe_handle = self._fds.getPtr(@intCast(fd));
             if (maybe_handle) |handle| {
+                if (self._last_tty_output_fd != null and self._last_tty_output_fd.? == @as(u16, @intCast(fd))) {
+                    self._last_tty_output_fd = null;
+                    self._pending_tty_newline_on_exit = false;
+                }
                 handle.close();
                 _ = self._fds.remove(@intCast(fd));
             }
@@ -520,6 +678,39 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 return handle;
             }
             return null;
+        }
+
+        pub fn record_tty_output(self: *Self, fd: i32, data: []const u8) void {
+            if (fd < 0 or data.len == 0) {
+                return;
+            }
+            self._last_tty_output_fd = @intCast(fd);
+            self._pending_tty_newline_on_exit = data[data.len - 1] != '\n';
+        }
+
+        pub fn should_append_tty_newline_on_exit(self: *const Self) bool {
+            return self._last_tty_output_fd != null and self._pending_tty_newline_on_exit;
+        }
+
+        pub fn append_tty_newline_on_exit(self: *Self) void {
+            if (!self.should_append_tty_newline_on_exit()) {
+                return;
+            }
+
+            const fd = self._last_tty_output_fd.?;
+            const maybe_handle = self._fds.getPtr(fd);
+            if (maybe_handle) |handle| {
+                if (handle.node.is_file()) {
+                    var maybe_file = handle.node.as_file();
+                    if (maybe_file) |*file| {
+                        if (file.interface.filetype() == kernel.fs.FileType.CharDevice) {
+                            _ = file.interface.write("\n");
+                        }
+                    }
+                }
+            }
+
+            self._pending_tty_newline_on_exit = false;
         }
     };
 }
@@ -541,10 +732,22 @@ const ProcessMemoryPoolForTests = struct {
     release_address: ?*anyopaque = null,
     release_pages: i32 = 0,
     release_pid: c.pid_t = 0,
+    tag_next_heap: bool = false,
 
     pub fn release_pages_for(self: *Self, pid: c.pid_t) void {
         _ = self;
         _ = pid;
+    }
+
+    pub fn used_pages_for(self: *const Self, pid: c.pid_t) usize {
+        _ = self;
+        _ = pid;
+        return 0;
+    }
+
+    pub fn get_used_size(self: *const Self) usize {
+        _ = self;
+        return 0;
     }
 
     pub fn allocate_pages(self: *Self, number_of_pages: i32, pid: c.pid_t) ?[]u8 {
@@ -557,6 +760,17 @@ const ProcessMemoryPoolForTests = struct {
         self.release_address = address;
         self.release_pages = number_of_pages;
         self.release_pid = pid;
+    }
+
+    /// The reuse cache asks before parking a run. These tests assert what the
+    /// process forwarded to the pool, so nothing may be swallowed by the cache
+    /// on the way -- refusing every run keeps free_pages observable.
+    pub fn owns_mapping(self: *const Self, pid: c.pid_t, address: *const anyopaque, bytes: usize) bool {
+        _ = self;
+        _ = pid;
+        _ = address;
+        _ = bytes;
+        return false;
     }
 
     pub fn will_return(self: *Self, buffer: []u8) void {
@@ -927,6 +1141,41 @@ test "Process.ShouldDuplicateFileHandlesOnVfork" {
     parent.release_file(fd1);
     try std.testing.expect(parent.get_file_handle(fd1) == null);
     try std.testing.expect(child.get_file_handle(fd1) != null);
+}
+
+test "Process.ShouldTrackPendingTtyNewlineOnExit" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 0;
+    hal.time.impl.set_time(0);
+
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 220, false);
+    defer sut.deinit();
+
+    sut.record_tty_output(1, "17");
+    try std.testing.expect(sut.should_append_tty_newline_on_exit());
+
+    sut.record_tty_output(1, "\n");
+    try std.testing.expect(!sut.should_append_tty_newline_on_exit());
+}
+
+test "Process.ShouldClearPendingTtyNewlineWhenFdReleased" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 0;
+    hal.time.impl.set_time(0);
+
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 221, false);
+    defer sut.deinit();
+
+    var file_mock = try FileMock.create(std.testing.allocator);
+    defer file_mock.delete();
+    const node = kernel.fs.Node.create_file(file_mock.interface);
+
+    const fd = try sut.attach_file("/dev/stdout", node);
+    sut.record_tty_output(fd, "17");
+    try std.testing.expect(sut.should_append_tty_newline_on_exit());
+
+    sut.release_file(fd);
+    try std.testing.expect(!sut.should_append_tty_newline_on_exit());
 }
 
 const DirectoryMock = @import("fs/tests/directory_mock.zig").DirectoryMock;
