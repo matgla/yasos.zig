@@ -147,6 +147,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
         \\MemUsed:                0 B
         \\MemKernelUsed:          0 B
         \\MemTmpUsed:             0 B
+        \\MemTmpPeak:             0 B
         \\MemProcessUsed:         0 B
         \\
     ;
@@ -171,6 +172,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
         \\MemUsed:             3072 KB
         \\MemKernelUsed:       1024 KB
         \\MemTmpUsed:             0 B
+        \\MemTmpPeak:             0 B
         \\MemProcessUsed:      2048 KB
         \\
     ;
@@ -189,6 +191,7 @@ test "MemInfoFile.ShouldShowMemInfo" {
         \\MemUsed:             2053 MB
         \\MemKernelUsed:       2049 MB
         \\MemTmpUsed:             0 B
+        \\MemTmpPeak:             0 B
         \\MemProcessUsed:      4096 KB
         \\
     ;
