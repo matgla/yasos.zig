@@ -1,4 +1,0 @@
-  gcc_execute       1799     722.46s       0.00s      19.05s     741.52s    412.2ms
-
-Full timing data saved to: /home/mateusz/yasos-remote-smoke/logs/tcc_timing_report.json
-================ 4466 passed, 72 skipped in 2020.91s (0:33:40) =================
