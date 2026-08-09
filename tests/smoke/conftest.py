@@ -105,7 +105,11 @@ def pytest_collection_modifyitems(config, items):
     _test_progress_current = 0
 
 
-@pytest.hookimpl
+# tryfirst so the counter is incremented before the terminal reporter asks
+# pytest_report_teststatus for the word it prints -- that call happens inside
+# the reporter's own pytest_runtest_logreport, so a later hook would label the
+# first test [0/N] and the last [N-1/N].
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_logreport(report):
     global _test_progress_current
     if report.when == "setup":
