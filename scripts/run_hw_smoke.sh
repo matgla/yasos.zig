@@ -69,12 +69,19 @@ OPT_LEVELS="${OPT_LEVELS//,/ }"
 KERNEL="$REPO_ROOT/zig-out/bin/yasos_kernel"
 ROOTFS="$REPO_ROOT/rootfs.img"
 ROOTFS_ADDR="${YASOS_SMOKE_ROOTFS_ADDRESS:-0x10100000}"
+# yaff_arch_test.py corrupts one field of this executable per case and checks the
+# loader refuses it, so it needs the unpacked YAFF image, not just rootfs.img.
+# It is a build product (rootfs/ is gitignored), so a checkout that only staged
+# the kernel + rootfs.img does not have it -- hence the check, next to the other
+# staged artifacts, rather than six confusing FileNotFoundErrors 45 minutes in.
+YAFF_DONOR="$REPO_ROOT/rootfs/usr/bin/hello"
 
-for artifact in "$KERNEL" "$ROOTFS"; do
+for artifact in "$KERNEL" "$ROOTFS" "$YAFF_DONOR"; do
     if [ ! -f "$artifact" ]; then
         echo "error: prebuilt artifact missing: $artifact" >&2
         echo "       stage the build_hw package first (kernel ->" >&2
-        echo "       zig-out/bin/yasos_kernel, rootfs.img -> repo root)." >&2
+        echo "       zig-out/bin/yasos_kernel, rootfs.img -> repo root," >&2
+        echo "       rootfs/usr/bin/hello -> rootfs/usr/bin/)." >&2
         exit 1
     fi
 done

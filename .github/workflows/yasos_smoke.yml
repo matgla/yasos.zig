@@ -128,12 +128,17 @@ jobs:
           # kernel + rootfs (the bundle holds symbol ELFs for decoding only).
           kernel=$(find artifact -name yasos_kernel -not -path '*/decode_bundle/*' | head -n1)
           rootfs=$(find artifact -name rootfs.img -not -path '*/decode_bundle/*' | head -n1)
-          if [ -z "$kernel" ] || [ -z "$rootfs" ]; then
-            echo "package missing yasos_kernel or rootfs.img" >&2; exit 1
+          # yaff_arch_test.py corrupts this executable field by field and checks
+          # the loader refuses it; rootfs/ is gitignored, so the checkout has no
+          # copy and it has to come from the package.
+          donor=$(find artifact -path '*/rootfs/usr/bin/hello' -not -path '*/decode_bundle/*' | head -n1)
+          if [ -z "$kernel" ] || [ -z "$rootfs" ] || [ -z "$donor" ]; then
+            echo "package missing yasos_kernel, rootfs.img or rootfs/usr/bin/hello" >&2; exit 1
           fi
-          mkdir -p zig-out/bin
+          mkdir -p zig-out/bin rootfs/usr/bin
           cp "$kernel" zig-out/bin/yasos_kernel
           cp "$rootfs" rootfs.img
+          cp "$donor" rootfs/usr/bin/hello
       # Same reasoning as the QEMU gate: the levels are explicit. Comma-separated
       # because make hands the command to run_container.sh, which expands it
       # unquoted -- a space-separated value would word-split before it reached

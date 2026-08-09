@@ -322,6 +322,12 @@ COMPILE_TIMEOUT_TESTS = {
     # ir_tests / tests2
     "mibench_rijndael.c": 60,
     "95_bitfields.c": 30,
+    # The two densest fuzz cases: ~2x the compile work of the next-slowest
+    # ir_test at -O2, which puts them just past the 5 s default on the board.
+    # Both compiles finish and exit 0 -- the harness only stopped listening
+    # first, which surfaces as "Prompt not found" and reads like a miscompile.
+    "219_fuzz_strd_spill_dryrun_offset.c": 30,
+    "337_fuzz_genopif_double_round.c": 30,
 }
 
 

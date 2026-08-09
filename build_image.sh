@@ -36,6 +36,12 @@ mkdir -p $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}
 
 cp $SCRIPT_DIR/zig-out/bin/yasos_kernel $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/
 cp $SCRIPT_DIR/rootfs.img $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/
+# yaff_arch_test.py needs one unpacked YAFF executable to corrupt and re-upload;
+# rootfs/ is a build product, so a board runner that only unpacks this package
+# has no other copy of it. Ships from the same build as rootfs.img, so the donor
+# always matches the flashed image.
+mkdir -p $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/rootfs/usr/bin
+cp $SCRIPT_DIR/rootfs/usr/bin/hello $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/rootfs/usr/bin/
 cp $SCRIPT_DIR/scripts/flash_rp2350_image.cfg $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/flash_rp2350.cfg
 cp $SCRIPT_DIR/scripts/flash_kernel_rp2350_image.cfg $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/flash_kernel_rp2350.cfg
 cp $SCRIPT_DIR/scripts/run_hw_smoke.sh $SCRIPT_DIR/output/target_package/${PACKAGE_NAME}/
