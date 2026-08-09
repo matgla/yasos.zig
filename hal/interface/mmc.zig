@@ -65,6 +65,30 @@ pub fn Mmc(comptime MmcType: anytype) type {
         pub fn is_busy(self: *const Self) bool {
             return self.impl.is_busy();
         }
+
+        pub fn send_sdio_command(self: *Self, cmd: u6, arg: u32) SdioResponse {
+            return self.impl.send_sdio_command(cmd, arg);
+        }
+
+        pub fn send_sdio_data_command(self: *Self, cmd: u6, arg: u32) SdioResponse {
+            return self.impl.send_sdio_data_command(cmd, arg);
+        }
+
+        pub fn send_sdio_command_long(self: *Self, cmd: u6, arg: u32) SdioLongResponse {
+            return self.impl.send_sdio_command_long(cmd, arg);
+        }
+
+        pub fn read_sdio_data(self: *Self, buf: []u8) anyerror!void {
+            return self.impl.read_sdio_data(buf);
+        }
+
+        pub fn write_sdio_data(self: *Self, buf: []const u8) anyerror!void {
+            return self.impl.write_sdio_data(buf);
+        }
+
+        pub fn set_wide_bus(self: *Self, wide: bool) void {
+            return self.impl.set_wide_bus(wide);
+        }
     };
 }
 
@@ -80,6 +104,17 @@ pub const Mode = enum {
     SPI,
     SDIO,
     MMC,
+};
+
+pub const SdioResponse = struct {
+    command_index: u6,
+    card_status: u32,
+    crc_ok: bool,
+};
+
+pub const SdioLongResponse = struct {
+    data: [16]u8,
+    valid: bool,
 };
 
 pub const MmcConfig = struct {

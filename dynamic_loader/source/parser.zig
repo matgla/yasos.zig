@@ -33,6 +33,7 @@ const YaffHashTable = @import("hashtable.zig").YaffHashTable;
 const SymbolTableRelocations = relocation.RelocationTable(relocation.SymbolTableRelocation);
 const LocalRelocations = relocation.RelocationTable(relocation.LocalRelocation);
 const DataRelocations = relocation.RelocationTable(relocation.DataRelocation);
+const CopyRelocations = relocation.RelocationTable(relocation.CopyRelocation);
 
 pub const Parser = struct {
     name: []const u8,
@@ -40,6 +41,7 @@ pub const Parser = struct {
     symbol_table_relocations: SymbolTableRelocations,
     local_relocations: LocalRelocations,
     data_relocations: DataRelocations,
+    copy_relocations: CopyRelocations,
     imported_symbols: SymbolTable,
     exported_symbols: SymbolTable,
     text_address: usize,
@@ -54,10 +56,13 @@ pub const Parser = struct {
 
     pub fn create(header: *const Header) Parser {
         const name: []const u8 = std.mem.span(@as([*:0]const u8, @ptrFromInt(@intFromPtr(header) + @sizeOf(Header))));
+        // The table no longer follows the name directly -- the architecture
+        // section sits between them -- so take the offset the writer recorded
+        // rather than recomputing the layout here.
         const imported_libraries = DependencyTable{
             .number_of_items = header.external_libraries_amount,
             .alignment = header.alignment,
-            .root = @as(*const Dependency, @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(name.ptr) + name.len + 1, header.alignment))),
+            .root = @as(*const Dependency, @ptrFromInt(@intFromPtr(header) + header.imported_libraries_offset)),
             .lookup = &[_]u16{},
         };
 
@@ -77,27 +82,16 @@ pub const Parser = struct {
             .relocations = data_relocation_array[0..header.data_relocations_amount],
         };
 
-        const imported_array = SymbolTable{
-            .number_of_items = header.imported_symbols_amount,
-            .alignment = header.alignment,
-            .root = @as(*const Symbol, @ptrFromInt(data_relocations.address() + data_relocations.size())),
-            .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.imported_symbols_lookup_offset))[0..header.imported_symbols_amount],
+        const copy_relocation_array: [*]align(4) relocation.CopyRelocation = @ptrFromInt(data_relocations.address() + data_relocations.size());
+        const copy_relocations = CopyRelocations{
+            .relocations = copy_relocation_array[0..header.copy_relocations_amount],
         };
 
-        const imported_array_size = imported_array.size();
-        const exported_array = SymbolTable{
-            .number_of_items = header.exported_symbols_amount,
-            .alignment = header.alignment,
-            .root = @as(*const Symbol, @ptrFromInt(imported_array.address() + imported_array_size)),
-            .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.exported_symbols_lookup_offset))[0..header.exported_symbols_amount],
-        };
-
-        const text: usize = @intFromPtr(header) + header.text_offset;
-        const init: usize = text + header.code_length;
-        const plt: usize = init + header.init_length;
-        const data: usize = plt + header.plt_length;
-        const got: usize = data + header.data_length;
-        const got_plt: usize = got + header.got_length;
+        // Parsed before the symbol tables are built, because they are handed to
+        // those tables. Every image carries these -- the writer has always
+        // emitted them -- but until 2026-08-03 nothing attached them, so
+        // `element_by_name` took its linear-scan fallback on every lookup and a
+        // process spawn cost ~48 ms of strlen-strided walking through XIP flash.
         var imported_symbols_hash_table: YaffHashTable = .{
             .nbucket = 0,
             .nchain = 0,
@@ -127,12 +121,37 @@ pub const Parser = struct {
             exported_symbols_hash_table.chain = exported_hash_table_data[2 + exported_hash_table_data[0] ..][0..exported_hash_table_data[1]];
         }
 
+        const imported_array = SymbolTable{
+            .number_of_items = header.imported_symbols_amount,
+            .alignment = header.alignment,
+            .root = @as(*const Symbol, @ptrFromInt(copy_relocations.address() + copy_relocations.size())),
+            .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.imported_symbols_lookup_offset))[0..header.imported_symbols_amount],
+            .hashtable = if (header.imported_symbols_amount > 0) imported_symbols_hash_table else null,
+        };
+
+        const imported_array_size = imported_array.size();
+        const exported_array = SymbolTable{
+            .number_of_items = header.exported_symbols_amount,
+            .alignment = header.alignment,
+            .root = @as(*const Symbol, @ptrFromInt(imported_array.address() + imported_array_size)),
+            .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.exported_symbols_lookup_offset))[0..header.exported_symbols_amount],
+            .hashtable = if (header.exported_symbols_amount > 0) exported_symbols_hash_table else null,
+        };
+
+        const text: usize = @intFromPtr(header) + header.text_offset;
+        const init: usize = text + header.code_length;
+        const plt: usize = init + header.init_length;
+        const data: usize = plt + header.plt_length;
+        const got: usize = data + header.data_length;
+        const got_plt: usize = got + header.got_length;
+
         return Parser{
             .name = name,
             .imported_libraries = imported_libraries,
             .symbol_table_relocations = symbol_table_relocations,
             .local_relocations = local_relocations,
             .data_relocations = data_relocations,
+            .copy_relocations = copy_relocations,
             .imported_symbols = imported_array,
             .exported_symbols = exported_array,
             .text_address = text,
@@ -195,6 +214,19 @@ pub const Parser = struct {
     pub fn get_data(self: Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.data_address);
         return ptr[0..self.header.data_length];
+    }
+
+    // RELRO: the first const_rodata_length bytes of the data region are
+    // pure-const .rodata shared XIP across processes (borrowed, never copied).
+    pub fn get_rodata(self: Parser) []const u8 {
+        const ptr: [*]const u8 = @ptrFromInt(self.data_address);
+        return ptr[0..self.header.const_rodata_length];
+    }
+
+    // The per-process data (everything after the shared rodata prefix).
+    pub fn get_process_data(self: Parser) []const u8 {
+        const ptr: [*]const u8 = @ptrFromInt(self.data_address + self.header.const_rodata_length);
+        return ptr[0 .. self.header.data_length - self.header.const_rodata_length];
     }
 
     pub fn get_text(self: Parser) []const u8 {

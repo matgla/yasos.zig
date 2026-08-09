@@ -27,6 +27,11 @@ pub const MemoryInfo = struct {
     pub const Owner = enum {
         Kernel,
         User,
+        // A region reserved for the hybrid /tmp arena (source/fs/ramfs +
+        // source/main.zig). Kernel-owned in the MPU sense — it is deliberately
+        // NOT mapped for unprivileged code — but kept out of the process memory
+        // pool's tiers so a growing process image can never eat it.
+        Temp,
     };
 
     speed: MemorySpeed,
@@ -54,6 +59,22 @@ pub fn Memory(comptime MemoryImpl: anytype) type {
 
         pub fn get_memory_section(self: Self, selector: anytype) MemoryInfo {
             return self.impl.get_memory_section(selector);
+        }
+
+        /// Zero a run of pages on its way out of the page pool.
+        ///
+        /// Semantically just `@memset(slice, 0)`. It exists because a board can
+        /// know a cheaper route to the same result: on the rp2350 the PSRAM
+        /// tier lives behind a write-allocate cache, so the obvious memset
+        /// fetches every line it is about to overwrite and evicts the running
+        /// process's code doing it. Boards that do not implement it get the
+        /// memset, resolved at compile time.
+        pub fn zero_pages(self: Self, slice: []u8) void {
+            if (comptime @hasDecl(MemoryImpl, "zero_pages")) {
+                self.impl.zero_pages(slice);
+            } else {
+                @memset(slice, 0);
+            }
         }
     };
 }

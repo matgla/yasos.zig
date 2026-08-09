@@ -1,7 +1,8 @@
 CC ?= armv8m-tcc
-CFLAGS = -g -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
-LDFLAGS = -fvisibility=hidden -g -L../../rootfs/lib
-SRCS = $(wildcard *.c)
+CFLAGS = $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib -I.
+CFLAGS += $(ROOTFS_OPT_CFLAGS)
+LDFLAGS = -fvisibility=hidden $(ROOTFS_DEBUG_CFLAGS) -L../../rootfs/lib
+SRCS = main.c crc32.c crc16.c terminal.c zmodem/zmodem.c
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 LDFLAGS_ELF = $(LDFLAGS)
 
@@ -20,7 +21,7 @@ endif
 all: $(TARGET) $(TARGET).elf
 
 build/%.o: %.c
-	mkdir -p build
+	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(TARGET): $(OBJS)
@@ -35,3 +36,5 @@ install: $(TARGET)
 
 clean:
 	rm -rf build
+
+-include $(OBJS:.o=.d)

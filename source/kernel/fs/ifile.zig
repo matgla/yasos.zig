@@ -22,6 +22,8 @@ const c = @import("libc_imports").c;
 
 const interface = @import("interface");
 
+const kernel = @import("../kernel.zig");
+
 const std = @import("std");
 
 pub const FileType = enum(u8) {
@@ -112,6 +114,10 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "size", .{}, u64);
     }
 
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        return interface.CountingInterfaceVirtualCall(self, "truncate", .{length}, anyerror!void);
+    }
+
     pub fn delete(self: *Self) void {
         interface.CountingInterfaceDestructorCall(self);
     }
@@ -130,6 +136,12 @@ pub const ReadOnlyFile = interface.DeriveFromBase(IFile, struct {
         _ = self;
         return -1;
     }
+
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        _ = self;
+        _ = length;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+    }
 });
 
 pub const IDirectory = interface.DeriveFromBase(IFile, struct {
@@ -144,5 +156,11 @@ pub const IDirectory = interface.DeriveFromBase(IFile, struct {
     pub fn sync(self: *Self) i32 {
         _ = self;
         return -1;
+    }
+
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        _ = self;
+        _ = length;
+        return kernel.errno.ErrnoSet.IsADirectory;
     }
 });

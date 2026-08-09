@@ -27,50 +27,121 @@ const interface = @import("hal_interface");
 const picosdk = @import("picosdk.zig").picosdk;
 
 const MmcSpi = @import("mmc/mmc_spi.zig").MmcSpi;
+const MmcSdio = @import("mmc/mmc_sdio.zig").MmcSdio;
 
 pub const Mmc = union(enum) {
     const Self = @This();
     spi: MmcSpi,
+    sdio: MmcSdio,
 
     pub fn create(comptime config: interface.mmc.MmcConfig) Mmc {
         switch (config.mode) {
             .SPI => return .{
                 .spi = MmcSpi.create(config),
             },
+            .SDIO => return .{
+                .sdio = MmcSdio.create(config),
+            },
             else => unreachable,
         }
     }
 
     pub fn init(self: *Self) !void {
-        try self.spi.init();
+        switch (self.*) {
+            .spi => |*s| try s.init(),
+            .sdio => |*s| try s.init(),
+        }
     }
 
     pub fn get_config(self: Self) interface.mmc.MmcConfig {
-        return self.spi._config;
+        return switch (self) {
+            .spi => |s| s._config,
+            .sdio => |s| s._config,
+        };
     }
 
     pub fn build_command(self: Self, command: u6, argument: u32) [6]u8 {
-        return self.spi.build_command(command, argument);
+        return switch (self) {
+            .spi => |s| s.build_command(command, argument),
+            .sdio => |s| s.build_command(command, argument),
+        };
     }
 
-    pub fn transmit_blocking(self: Self, src: []const u8, dest: ?[]u8) void {
-        return self.spi.transmit_blocking(src, dest);
+    pub fn transmit_blocking(self: *Self, src: []const u8, dest: ?[]u8) void {
+        switch (self.*) {
+            .spi => |s| s.transmit_blocking(src, dest),
+            .sdio => |*s| s.transmit_blocking(src, dest),
+        }
     }
 
-    pub fn receive_blocking(self: Self, dest: []u8) void {
-        return self.spi.receive_blocking(dest);
+    pub fn receive_blocking(self: *Self, dest: []u8) void {
+        switch (self.*) {
+            .spi => |s| s.receive_blocking(dest),
+            .sdio => |*s| s.receive_blocking(dest),
+        }
     }
 
     pub fn chip_select(self: Self, select: bool) void {
-        return self.spi.chip_select(select);
+        return switch (self) {
+            .spi => |s| s.chip_select(select),
+            .sdio => |s| s.chip_select(select),
+        };
     }
 
-    pub fn change_speed_to(self: Self, speed_hz: u32) void {
-        return self.spi.change_speed_to(speed_hz);
+    pub fn change_speed_to(self: *Self, speed_hz: u32) void {
+        switch (self.*) {
+            .spi => |s| s.change_speed_to(speed_hz),
+            .sdio => |*s| s.change_speed_to(speed_hz),
+        }
     }
 
     pub fn is_busy(self: Self) bool {
-        return self.spi.is_busy();
+        return switch (self) {
+            .spi => |s| s.is_busy(),
+            .sdio => |s| s.is_busy(),
+        };
+    }
+
+    pub fn send_sdio_command(self: *Self, cmd: u6, arg: u32) interface.mmc.SdioResponse {
+        return switch (self.*) {
+            .sdio => |*s| s.send_sdio_command(cmd, arg),
+            else => unreachable,
+        };
+    }
+
+    pub fn send_sdio_data_command(self: *Self, cmd: u6, arg: u32) interface.mmc.SdioResponse {
+        return switch (self.*) {
+            .sdio => |*s| s.send_sdio_data_command(cmd, arg),
+            else => unreachable,
+        };
+    }
+
+    pub fn send_sdio_command_long(self: *Self, cmd: u6, arg: u32) interface.mmc.SdioLongResponse {
+        return switch (self.*) {
+            .sdio => |*s| s.send_sdio_command_long(cmd, arg),
+            else => unreachable,
+        };
+    }
+
+    pub fn read_sdio_data(self: *Self, buf: []u8) anyerror!void {
+        return switch (self.*) {
+            .sdio => |*s| s.read_sdio_data(buf),
+            else => unreachable,
+        };
+    }
+
+    pub fn write_sdio_data(self: *Self, buf: []const u8) anyerror!void {
+        return switch (self.*) {
+            .sdio => |*s| s.write_sdio_data(buf),
+            else => unreachable,
+        };
+    }
+
+    pub fn set_wide_bus(self: *Self, wide: bool) void {
+        switch (self.*) {
+            .sdio => |*s| s.set_wide_bus(wide),
+            else => {},
+        }
     }
 };
 

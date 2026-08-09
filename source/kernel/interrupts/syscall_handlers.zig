@@ -28,6 +28,7 @@ const kernel = @import("../kernel.zig");
 const log = std.log.scoped(.syscall);
 
 const systick = @import("systick.zig");
+const time = @import("../time.zig");
 
 const config = @import("config");
 
@@ -101,7 +102,13 @@ extern fn switch_to_main_task(lr: usize, with_fpu: bool) void;
 var main_process_stack_pointer_before_scheduler_started: usize = 0;
 
 pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
-    main_process_stack_pointer_before_scheduler_started = @intCast(@as(isize, @intCast(@intFromPtr(arg))) + kernel.process.get_offset_of_hardware_stored_registers(config.cpu.use_fpu));
+    // Apply the (signed, usually negative) register-frame offset to the stack
+    // pointer in unsigned/wrapping space. Casting the pointer through `isize`
+    // first overflows on targets whose stacks live at/above 0x80000000 (e.g.
+    // the QEMU mps2 kernel stack), tripping the "integer does not fit" panic.
+    const base: usize = @intFromPtr(arg);
+    const offset: isize = kernel.process.get_offset_of_hardware_stored_registers(config.cpu.use_fpu);
+    main_process_stack_pointer_before_scheduler_started = base +% @as(usize, @bitCast(offset));
     std.log.info("Starting root process with stack pointer: {x}", .{main_process_stack_pointer_before_scheduler_started});
     switch_to_the_first_task(if (config.cpu.use_fpu) 1 else 0);
     return 0;
@@ -157,8 +164,18 @@ pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+    const context: *const volatile c.fstat_context = @ptrCast(@alignCast(arg));
+    if (context.buf == null) {
+        return kernel.errno.ErrnoSet.InvalidArgument;
+    }
+    const path = try determine_path_for_file(kernel_allocator, null, context.fd);
+    defer kernel_allocator.free(path);
+    fs.get_ivfs().interface.stat(path, context.buf, true) catch |err| {
+        return err;
+    };
+    return 0;
 }
 
 pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
@@ -184,6 +201,9 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
     var prefix: []const u8 = "";
     if (maybe_path) |cpath| {
         const path = std.mem.span(@as([*:0]const u8, @ptrCast(cpath)));
+        if (path.len > 0 and path[0] == '/') {
+            return try allocator.dupe(u8, path);
+        }
         if (fd >= 0) {
             const current_process = process_manager.instance.get_current_process();
             prefix = current_process.get_current_directory();
@@ -200,7 +220,7 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
             const real = try std.fs.path.resolve(allocator, &.{full_path});
             return real;
         } else {
-            if (path.len > 0 and path[0] != '/') {
+            if (path.len > 0) {
                 const current_process = process_manager.instance.get_current_process();
                 const pwd = current_process.get_current_directory();
                 const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ pwd, prefix, path });
@@ -225,22 +245,43 @@ pub fn sys_open(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch();
     defer kernel.process.unblock_context_switch();
     const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
+    const t_resolve = if (perf.enabled) perf.read_cycles() else 0;
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
     const process = process_manager.instance.get_current_process();
+    const t_lookup = if (perf.enabled) perf.read_cycles() else 0;
+    perf.open_record(.resolve, t_lookup -% t_resolve);
     const maybe_node: ?kernel.fs.Node = fs.get_ivfs().interface.get(path) catch |err| blk: {
         break :blk switch (err) {
             error.NoEntry => null,
-            else => return err,
+            else => {
+                if (perf.enabled) {
+                    perf.open_record(.lookup, perf.read_cycles() -% t_lookup);
+                    perf.open_call(false);
+                }
+                return err;
+            },
         };
     };
+    const t_attach = if (perf.enabled) perf.read_cycles() else 0;
+    perf.open_record(.lookup, t_attach -% t_lookup);
     if (maybe_node) |file| {
-        return try process.attach_file(path, file);
+        const fd_result = try process.attach_file(path, file);
+        if (perf.enabled) {
+            perf.open_record(.attach, perf.read_cycles() -% t_attach);
+            perf.open_call(true);
+        }
+        return fd_result;
     } else if ((context.flags & c.O_CREAT) != 0) {
         try fs.get_ivfs().interface.create(path, context.mode);
         const ifile = try fs.get_ivfs().interface.get(path);
-        return try process.attach_file(path, ifile);
+        const fd_result = try process.attach_file(path, ifile);
+        perf.open_call(true);
+        return fd_result;
     }
+    // Nothing there and no O_CREAT: a probe that walked the filesystem for
+    // nothing. Library search is made of these, so they are counted apart.
+    perf.open_call(false);
     return -1;
 }
 
@@ -264,10 +305,85 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch();
     const context: *const volatile c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    if (process._parent) |parent| {
-        parent.child_exit_code = context.*;
+    process.append_tty_newline_on_exit();
+    // Report real execution time (load/relocate boundary → exit), separate from
+    // the dynamic-load time emitted as `# tprof load`. Correlate by pid.
+    if (perf.enabled and process._exec_loaded_time != 0) {
+        const run_us = hal.time.get_time_us() - process._exec_loaded_time;
+        perf.trace("run pid={d} us={d} code={d}", .{ process.pid, run_us, context.* });
+        // The same syscall/IO totals tcc prints for itself under -bench, but
+        // from the kernel at exit, so it works for every program -- ls, cat,
+        // vi, a compiled test binary -- none of which can be asked to dump.
+        // The window is this image's life (the counters were reset at exec);
+        // for tcc it shows only what happened after its own dump reset them.
+        const sys = perf.summary();
+        perf.trace("sysprof pid={d} calls={d} us={d} handler_us={d} load_us={d} read={d}/{d} write={d}/{d} dropped={d} top={d}:{d}/{d},{d}:{d}/{d},{d}:{d}/{d}", .{
+            process.pid,        sys.calls,          sys.total_us,
+            sys.handler_us,     process._load_us,   sys.read_bytes,
+            sys.read_us,        sys.write_bytes,    sys.write_us,
+            sys.dropped,        sys.top[0].id,      sys.top[0].calls,
+            sys.top[0].us,      sys.top[1].id,      sys.top[1].calls,
+            sys.top[1].us,      sys.top[2].id,      sys.top[2].calls,
+            sys.top[2].us,
+        });
+        const open_stats = perf.open_summary();
+        if (open_stats.calls != 0) {
+            perf.trace("openprof pid={d} calls={d} misses={d} resolve_us={d} lookup_us={d} attach_us={d}", .{
+                process.pid,
+                open_stats.calls,
+                open_stats.misses,
+                open_stats.us[@intFromEnum(perf.OpenPhase.resolve)],
+                open_stats.us[@intFromEnum(perf.OpenPhase.lookup)],
+                open_stats.us[@intFromEnum(perf.OpenPhase.attach)],
+            });
+        }
+        // Where mmap/munmap time actually goes. Printed next to sysprof so the
+        // syscall total and its dominant contributor are read together.
+        const pool_stats = perf.pool_summary();
+        if (pool_stats.allocs != 0 or pool_stats.frees != 0) {
+            perf.trace("poolclear pid={d} sram={d}B/{d}us psram={d}B/{d}us", .{
+                process.pid,
+                pool_stats.clear_bytes[0], pool_stats.clear_us[0],
+                pool_stats.clear_bytes[1], pool_stats.clear_us[1],
+            });
+            perf.trace("poolprof pid={d} allocs={d} frees={d} pages={d} cleared={d} max={d} hits={d} misses={d} sram={d} psram={d} scan_us={d} mark_us={d} book_us={d} clear_us={d} flookup_us={d} fmark_us={d}", .{
+                process.pid,             pool_stats.allocs,
+                pool_stats.frees,        pool_stats.pages,
+                pool_stats.cleared_bytes, pool_stats.max_bytes,
+                pool_stats.cache_hits,   pool_stats.cache_misses,
+                pool_stats.tier_allocs[0], pool_stats.tier_allocs[1],
+                pool_stats.us[@intFromEnum(perf.PoolPhase.scan)],
+                pool_stats.us[@intFromEnum(perf.PoolPhase.mark)],
+                pool_stats.us[@intFromEnum(perf.PoolPhase.book)],
+                pool_stats.us[@intFromEnum(perf.PoolPhase.clear)],
+                pool_stats.us[@intFromEnum(perf.PoolPhase.free_lookup)],
+                pool_stats.us[@intFromEnum(perf.PoolPhase.free_mark)],
+            });
+        }
+        // Peak page usage per tier during this run: psram_pk > 0 means the
+        // process spilled out of fast SRAM into slow PSRAM (a likely cause of
+        // across-the-board slowness). Pages are 4 KiB.
+        const pool = process_manager.instance.get_process_memory_pool();
+        perf.trace("mem pid={d} sram_pk={d} sram_cap={d} psram_pk={d} psram_cap={d} kheap_now={d} kheap_pk={d} kheap_phys={d}", .{
+            process.pid,
+            pool.peak_used_pages(0), pool.region_page_count(0),
+            pool.peak_used_pages(1), pool.region_page_count(1),
+            kernel.memory.heap.malloc.get_usage(),
+            kernel.memory.heap.malloc.get_peak_usage(),
+            system_stubs.kernel_heap_physical_used(),
+        });
+        // Per-process footprint at this exit: attributes pool pages to each live
+        // pid (the exiting process + any vfork-suspended parent shell still
+        // resident) so toybox/tcc memory reductions are measurable per process.
+        pool.dump_usage_by_pid();
     }
-    process_manager.instance.delete_process(process.pid, context.*);
+    // Encode in Linux wait-status format: normal exit = (code << 8)
+    // so that WEXITSTATUS/WIFEXITED macros work correctly.
+    const wait_status = @as(i32, context.*) << 8;
+    if (process._parent) |parent| {
+        parent.child_exit_code = wait_status;
+    }
+    process_manager.instance.delete_process(process.pid, wait_status);
 
     return context.*;
 }
@@ -285,7 +401,9 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
             context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
-
+            // Safe, serialized point to flush the buffered kernel log to SD
+            // (no-op unless CONFIG_INSTRUMENTATION_LOG_TO_SD and data pending).
+            kernel.file_log.drain();
             return 0;
         }
     }
@@ -313,8 +431,15 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
-            context.result.* = file.interface.write(@as([*]const u8, @ptrCast(context.buf.?))[0..context.count]);
+            const data = @as([*]const u8, @ptrCast(context.buf.?))[0..context.count];
+            const is_tty = file.interface.filetype() == FileType.CharDevice;
+            context.result.* = file.interface.write(data);
+            if (is_tty and context.result.* > 0) {
+                process.record_tty_output(context.fd, data[0..@intCast(context.result.*)]);
+            }
         }
+        // Safe, serialized point to flush the buffered kernel log to SD.
+        kernel.file_log.drain();
         return 0;
     }
     return -1;
@@ -353,7 +478,9 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     defer kernel.process.unblock_context_switch();
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
     defer kernel_allocator.free(path);
-    try fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0);
+    fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0) catch |err| {
+        return err;
+    };
     return 0;
 }
 
@@ -411,12 +538,27 @@ pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
 pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    return file.interface.ioctl(context.op, @ptrFromInt(@as(usize, @intCast(context.arg))));
+    // arg is a signed ssize_t carrying "int or void*"; a user pointer at/above
+    // 0x80000000 is negative as ssize_t, so reinterpret the bits (@bitCast)
+    // rather than @intCast (which would trip "integer does not fit").
+    return file.interface.ioctl(context.op, @ptrFromInt(@as(usize, @bitCast(context.arg))));
 }
 
 pub fn sys_gettimeofday(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    const context: *const volatile c.gettimeofday_context = @ptrCast(@alignCast(arg));
+    const now_us = hal.time.get_time_us();
+
+    if (context.tv) |tv| {
+        tv.*.tv_sec = @intCast(@divTrunc(now_us, 1_000_000));
+        tv.*.tv_usec = @intCast(@mod(now_us, 1_000_000));
+    }
+
+    if (context.tz) |tz| {
+        tz.*.tz_minuteswest = 0;
+        tz.*.tz_dsttime = 0;
+    }
+
+    return 0;
 }
 
 pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
@@ -426,12 +568,25 @@ pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
-    return process_manager.instance.prepare_exec(std.mem.span(context.filename.?), context.argv.?, context.envp.?);
+    const path = try determine_path_for_file(kernel_allocator, context.filename, -1);
+    // Path is freed inside prepare_exec after load_executable, because
+    // prepare_exec may not return normally (vfork context switch bypasses defers).
+    return process_manager.instance.prepare_exec(path, context.argv.?, context.envp.?, kernel_allocator);
 }
 
 pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
-    _ = arg;
-    return -1;
+    const context: *const volatile c.nanosleep_context = @ptrCast(@alignCast(arg));
+    if (context.req) |req| {
+        const seconds = req.*.tv_sec;
+        const nanoseconds = req.*.tv_nsec;
+        if (seconds != 0) {
+            time.sleep_ms(@intCast(seconds * 1000));
+        }
+        if (nanoseconds != 0) {
+            time.sleep_us(@intCast(@divTrunc(nanoseconds, 1000)));
+        }
+    }
+    return 0;
 }
 pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch();
@@ -451,6 +606,18 @@ pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process.munmap(context.addr, context.length);
+    return 0;
+}
+
+pub fn sys_mremap(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+    const context: *const volatile c.mremap_context = @ptrCast(@alignCast(arg));
+    const process = process_manager.instance.get_current_process();
+    context.result.* = process.mremap(context.addr.?, context.old_length, context.new_length, context.flags) catch {
+        context.result.* = c.MAP_FAILED;
+        return -1;
+    };
     return 0;
 }
 
@@ -504,8 +671,11 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
 
 pub fn sys_time(arg: *const volatile anyopaque) !i32 {
     const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
-    const ticks: c.time_t = @intCast(systick.get_system_ticks().*);
-    context.result.* = ticks;
+    const now_seconds: c.time_t = @intCast(hal.time.get_time());
+    if (context.timep) |timep| {
+        timep.* = now_seconds;
+    }
+    context.result.* = now_seconds;
     return 0;
 }
 pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
@@ -513,7 +683,8 @@ pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
     defer kernel.process.unblock_context_switch();
     const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
-    return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @intCast(context.arg))));
+    // See sys_ioctl: arg is a signed ssize_t that may hold a high user pointer.
+    return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @bitCast(context.arg))));
 }
 pub fn sys_remove(arg: *const volatile anyopaque) !i32 {
     _ = arg;
@@ -571,18 +742,40 @@ pub fn sys_geteuid(arg: *const volatile anyopaque) !i32 {
 }
 
 pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
+    // Frees (close_fd -> release_file -> FileHandle.close) and allocates
+    // (attach_file_with_fd) on the kernel heap, which newlib's allocator does
+    // not guard — the same contract sys_open and sys_close already follow.
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
     const context: *const volatile c.dup_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const maybe_handle = process.get_file_handle(@intCast(context.fd));
     if (maybe_handle) |handle| {
+        // dup2(fd, fd) on an open fd is a no-op that returns fd (POSIX).
+        // Falling through instead closed newfd first, which here IS the handle
+        // we are about to copy from: release_file frees its path and drops the
+        // node's last reference, so the share() below incremented an already
+        // freed refcount cell. That cell is by then a chunk on newlib's free
+        // list, and the increment lands on its `next` pointer -- the kernel
+        // free list ends up with a next of <chunk>+1 and the next unrelated
+        // free() faults walking it. toybox does exactly this dup2(0, 0) on
+        // every shell redirection, so `echo x > file` corrupted the kernel heap
+        // every single time.
+        if (context.newfd == context.fd) {
+            return context.fd;
+        }
+        // Take our own reference before releasing anything, so the acquire can
+        // never be ordered after a release of the same object.
+        var shared = handle.node.share();
+        errdefer shared.delete();
         var fd: i32 = 0;
         if (context.newfd >= 0) {
             fd = context.newfd;
             _ = close_fd(fd);
         } else {
-            fd = process.get_free_fd();
+            fd = process.get_free_fd() orelse return kernel.errno.ErrnoSet.TooManyOpenFiles;
         }
-        return try process.attach_file_with_fd(@intCast(fd), handle.path, handle.node.share());
+        return try process.attach_file_with_fd(@intCast(fd), handle.path, shared);
     }
     return -1;
 }
@@ -613,6 +806,31 @@ pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
     }
 }
 
+pub fn sys_prlimit(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+
+    const context: *const volatile c.prlimit_context = @ptrCast(@alignCast(arg));
+    if (context.pid < 0) {
+        return kernel.errno.ErrnoSet.InvalidArgument;
+    }
+
+    const process = if (context.pid == 0)
+        process_manager.instance.get_current_process()
+    else
+        process_manager.instance.get_process_for_pid(context.pid) orelse return kernel.errno.ErrnoSet.NoSuchProcess;
+
+    if (context.old_limit) |old_limit| {
+        old_limit.* = try process.get_resource_limit(context.resource);
+    }
+
+    if (context.new_limit) |new_limit| {
+        try process.set_resource_limit(context.resource, new_limit.*);
+    }
+
+    return 0;
+}
+
 pub fn sys_access(arg: *const volatile anyopaque) !i32 {
     kernel.process.block_context_switch();
     defer kernel.process.unblock_context_switch();
@@ -621,4 +839,77 @@ pub fn sys_access(arg: *const volatile anyopaque) !i32 {
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.access(path, context.mode, context.flags);
     return 0;
+}
+
+pub fn sys_klog_ctl(arg: *const volatile anyopaque) !i32 {
+    const context: *const volatile c.klog_ctl_context = @ptrCast(@alignCast(arg));
+    kernel.stdout.suppress(context.enable == 0);
+    return 0;
+}
+
+pub fn sys_ftruncate(arg: *const volatile anyopaque) !i32 {
+    kernel.process.block_context_switch();
+    defer kernel.process.unblock_context_switch();
+    const context: *const volatile c.ftruncate_context = @ptrCast(@alignCast(arg));
+    var file = try get_file_from_process(@intCast(context.fd));
+    try file.interface.truncate(@intCast(context.length));
+    return 0;
+}
+
+const perf = @import("perf_profile.zig");
+const system_stubs = @import("system_stubs.zig");
+
+pub fn sys_perf_dump(arg: *const volatile anyopaque) !i32 {
+    // The caller owns the struct and expects the summary fields written back
+    // into it, so the const on `arg` (shared by every syscall handler) is not
+    // the contract here.
+    const context: *volatile c.perf_dump_context = @ptrCast(@alignCast(@constCast(arg)));
+    if (!perf.enabled) {
+        context.num_entries.* = 0;
+        return 0;
+    }
+    // A process cannot time its own dynamic load -- it does not run until the
+    // load is over -- so the kernel hands it back here, which is what lets the
+    // smoke harness separate loader time from compile time without an extra
+    // serial round trip.
+    const process = process_manager.instance.get_current_process();
+    perf.dump(context, process._load_us);
+    if (context.reset != 0) {
+        perf.reset();
+    }
+    return 0;
+}
+
+fn test_process_entry() void {}
+
+test "DeterminePathForFile.ShouldResolveRelativePathAgainstCurrentWorkingDirectory" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+
+    init(std.testing.allocator);
+    try process_manager.instance.create_root_process(4096, &test_process_entry, null, "/mnt/bin");
+
+    const path = try std.testing.allocator.dupeZ(u8, "./a.out");
+    defer std.testing.allocator.free(path);
+
+    const resolved_path = try determine_path_for_file(std.testing.allocator, path.ptr, -1);
+    defer std.testing.allocator.free(resolved_path);
+
+    try std.testing.expectEqualStrings("/mnt/bin/a.out", resolved_path);
+}
+
+test "DeterminePathForFile.ShouldKeepAbsolutePathUnchanged" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+
+    init(std.testing.allocator);
+    try process_manager.instance.create_root_process(4096, &test_process_entry, null, "/mnt/bin");
+
+    const path = try std.testing.allocator.dupeZ(u8, "/usr/bin/a.out");
+    defer std.testing.allocator.free(path);
+
+    const resolved_path = try determine_path_for_file(std.testing.allocator, path.ptr, -1);
+    defer std.testing.allocator.free(resolved_path);
+
+    try std.testing.expectEqualStrings("/usr/bin/a.out", resolved_path);
 }

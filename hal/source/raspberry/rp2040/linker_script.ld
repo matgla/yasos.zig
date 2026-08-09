@@ -145,8 +145,10 @@ SECTIONS
   } > process_ram 
 
   __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
-   
-  .scratch_x : 
+  __flash_start__ = ORIGIN(flash);
+  __flash_end__ = ORIGIN(flash) + LENGTH(flash);
+
+  .scratch_x :
   {
     __scratch_x_start__ = .;
     *(.scratch_x.*)

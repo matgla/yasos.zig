@@ -1,7 +1,9 @@
 import serial
 from pyocd.core.helpers import ConnectHelper
 
-serial = serial.Serial('/dev/ttyACM0', 921600, timeout=10)
+# Keep in step with CONSOLE_BAUDRATE in framework/session.py, which is the
+# source of truth for the host end of the console rate.
+serial = serial.Serial("/dev/ttyACM0", 3000000, timeout=10)
 
 session = ConnectHelper.session_with_chosen_probe(options={
     "target_override": "rp2350",

@@ -24,6 +24,7 @@ const hal = @import("hal");
 const arch = @import("arch");
 
 const process_manager = @import("../process_manager.zig");
+const xip_stats = @import("../process/xipstat_file.zig");
 
 var tick_counter: u64 = 0;
 var last_time: u64 = 0;
@@ -31,6 +32,12 @@ var last_time: u64 = 0;
 pub export fn irq_systick() void {
     const state = arch.sync.save_and_disable_interrupts();
     defer arch.sync.restore_interrupts(state);
+
+    // Drain the XIP cache counters here because they saturate rather than wrap,
+    // so the only safe reading interval is one shorter than the time it takes
+    // to fill them -- seconds, against this tick's millisecond. Costs a null
+    // check on machines that publish no sampler.
+    xip_stats.accumulate();
 
     const tick_counter_ptr: *volatile u64 = &tick_counter;
     tick_counter_ptr.* += 1;

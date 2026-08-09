@@ -54,12 +54,21 @@ const R3 = struct {
 };
 const R7 = R3;
 
+const sd_switch_check: u32 = 0;
+const sd_switch_set: u32 = 1;
+const sd_switch_group_access: u32 = 0;
+const sd_switch_access_default: u32 = 0;
+const sd_switch_access_high_speed: u32 = 1;
+
 pub const MmcIo = struct {
     const Self = @This();
     _mmc: *hal.mmc.Mmc,
     _card_type: ?CardType,
     _size: u64,
     _initialized: bool,
+    // Kept past initialization because ACMD23 needs it on every multi-block
+    // write: an application command is addressed by CMD55 + RCA.
+    _rca: u16,
 
     pub fn create(mmc: *hal.mmc.Mmc) MmcIo {
         return .{
@@ -67,6 +76,7 @@ pub const MmcIo = struct {
             ._card_type = null,
             ._size = 0,
             ._initialized = false,
+            ._rca = 0,
         };
     }
 
@@ -79,6 +89,12 @@ pub const MmcIo = struct {
             .SPI => {
                 self.initialize_spi_mmc() catch |err| {
                     log.info("initialization failed with an error: {s}", .{@errorName(err)});
+                    return err;
+                };
+            },
+            .SDIO => {
+                self.initialize_sdio_mmc() catch |err| {
+                    log.info("SDIO initialization failed with an error: {s}", .{@errorName(err)});
                     return err;
                 };
             },
@@ -108,6 +124,11 @@ pub const MmcIo = struct {
         if (buf.len % 512 != 0 or buf.len == 0) {
             log.err("Buffer must be aligned to 512 bytes, got: {d}", .{buf.len});
             return -1;
+        }
+
+        const config = self._mmc.get_config();
+        if (config.mode == .SDIO) {
+            return self.sdio_read(address, buf);
         }
 
         const block_address = address >> 9;
@@ -142,6 +163,11 @@ pub const MmcIo = struct {
         if (buf.len % 512 != 0 or buf.len == 0) {
             log.err("Buffer must be aligned to 512 bytes, got: {d}", .{buf.len});
             return -1;
+        }
+
+        const config = self._mmc.get_config();
+        if (config.mode == .SDIO) {
+            return self.sdio_write(address, buf);
         }
 
         const block_address = address >> 9;
@@ -288,7 +314,7 @@ pub const MmcIo = struct {
         const crc = std.mem.bigToNative(u16, std.mem.bytesToValue(u16, &buffer));
         const received_crc = std.hash.crc.Crc16Xmodem.hash(output);
         if (crc != received_crc) {
-            log.err("Incorrect crc, received: 0x{x}, calculated: 0x{x}", .{ crc, received_crc });
+            log.debug("Incorrect crc, received: 0x{x}, calculated: 0x{x}", .{ crc, received_crc });
             return error.CrcVerificationFailure;
         }
     }
@@ -412,6 +438,437 @@ pub const MmcIo = struct {
                 log.debug("  {s}: {x}", .{ f.name, @field(t, f.name) });
             }
         }
+    }
+
+    /// One CMD0 / CMD8 / ACMD41 bring-up attempt. Null means the card answered
+    /// but never reported itself powered up, which is the case worth retrying
+    /// from CMD0; an error means it did not answer usably at all.
+    fn try_sdio_card_ready(self: *Self) anyerror!?CardType {
+        // A CMD12 STOP_TRANSMISSION was tried here, on the theory that bring-up
+        // was meeting a card left mid-read by the previous session (a card in
+        // that state answers nothing else). It changed nothing -- 85% of boots
+        // still failed -- because the command was not reaching the card at all:
+        // see the autopull race in rp2350_sdio_command. Not kept, since on an
+        // idle card it is an illegal-state command that costs a timeout and an
+        // error line on every boot.
+        //
+        // GO_IDLE, then let the card settle. Deliberately one CMD0: issuing a
+        // burst of them measured strictly worse (five bring-ups out of five
+        // failed, against one in four for a single CMD0), so whatever state the
+        // card is in, hammering GO_IDLE does not improve it.
+        _ = self._mmc.send_sdio_command(0, 0);
+        hal.time.sleep_ms(10);
+
+        const cmd8_resp = self._mmc.send_sdio_command(8, 0x000001aa);
+        if ((cmd8_resp.card_status & 0xfff) != 0x1aa) {
+            log.err("CMD8 voltage check failed, response: 0x{x}", .{cmd8_resp.card_status});
+            return error.CardInitializationFailure;
+        }
+
+        // 200 x 10 ms = 2 s per attempt, twice the initialisation time the spec
+        // allows a card. The observed failure is not a card that is slow, it is
+        // a card that answers ACMD41 with the busy bit set forever, so a longer
+        // wait buys nothing that the caller's retry from CMD0 does not.
+        var retries: u32 = 0;
+        const max_retries: u32 = 200;
+        while (retries < max_retries) : (retries += 1) {
+            const cmd55_resp = self._mmc.send_sdio_command(55, 0);
+            const acmd41_resp = self._mmc.send_sdio_command(41, 0x40ff8000);
+            if ((acmd41_resp.card_status & 0x80000000) != 0) {
+                return if ((acmd41_resp.card_status & 0x40000000) != 0)
+                    CardType.SDv2Block
+                else
+                    CardType.SDv2Byte;
+            }
+            if (retries + 1 == max_retries) {
+                // Three outcomes to tell apart, and they have different causes.
+                // A plausible OCR with the busy bit clear means the card is
+                // talking and simply not ready. A zero response with ok=false
+                // means the driver rejected the reply (timeout, CRC, or wrong
+                // command tag) -- and since CMD55 is checked with both CRC and
+                // tag while ACMD41 is checked with neither, a CMD55 that fails
+                // here takes ACMD41 down with it, because the card never sees
+                // the next command as an application command at all.
+                log.err("ACMD41 never ready: cmd55 ok={} status=0x{x}, acmd41 ok={} status=0x{x}", .{
+                    cmd55_resp.crc_ok,  cmd55_resp.card_status,
+                    acmd41_resp.crc_ok, acmd41_resp.card_status,
+                });
+            }
+            hal.time.sleep_ms(10);
+        }
+        return null;
+    }
+
+    fn initialize_sdio_mmc(self: *Self) anyerror!void {
+        log.info("initializing MMC using SDIO (native) mode", .{});
+
+        // Bring-up is retried from CMD0 rather than attempted once. A card that
+        // was mid-transfer when the board reset -- the SD supply is not cycled
+        // by a reset, so it keeps whatever state it was in -- can answer ACMD41
+        // with the busy bit indefinitely, and only a fresh GO_IDLE clears it.
+        // This became visible when the HAL started being built optimised and
+        // boot began reaching this code milliseconds after reset instead of
+        // comfortably later: bring-up failed roughly one run in four.
+        var attempt: u32 = 0;
+        const max_attempts: u32 = 3;
+        while (attempt < max_attempts) : (attempt += 1) {
+            self._card_type = try self.try_sdio_card_ready();
+            if (self._card_type != null) break;
+            log.err("SDIO bring-up attempt {d} timed out on ACMD41, restarting from CMD0", .{attempt});
+        }
+
+        if (self._card_type == null) {
+            log.err("Card did not respond to ACMD41 after {d} attempts", .{max_attempts});
+            return error.CardInitializationFailure;
+        }
+
+        log.info("Found card with type: {s}", .{@tagName(self._card_type.?)});
+
+        const cid_resp = self._mmc.send_sdio_command_long(2, 0);
+        if (!cid_resp.valid) {
+            log.warn("CID response invalid", .{});
+        }
+
+        const cmd3_resp = self._mmc.send_sdio_command(3, 0);
+        const rca: u16 = @intCast(cmd3_resp.card_status >> 16);
+        self._rca = rca;
+        log.info("Card RCA: 0x{x}", .{rca});
+
+        const csd_resp = self._mmc.send_sdio_command_long(9, @as(u32, rca) << 16);
+        if (csd_resp.valid) {
+            const csd = card_parser.CardParser.parse_csdv2(&csd_resp.data) catch |err| {
+                log.err("Failed to parse CSD: {s}", .{@errorName(err)});
+                return err;
+            };
+            self._size = csd.get_size() / csd.get_sector_size();
+            dump_struct(csd);
+        }
+
+        const cmd7_resp = self._mmc.send_sdio_command(7, @as(u32, rca) << 16);
+        if (cmd7_resp.command_index != 7) {
+            log.warn("Unexpected CMD7 response index: {d}", .{cmd7_resp.command_index});
+        }
+
+        try self.set_sdio_bus_width_4bit(rca);
+
+        const high_speed_enabled = hs: {
+            const enabled = self.try_enable_sdio_high_speed(rca) catch |err| {
+                log.warn("CMD6 high-speed switch failed: {s}", .{@errorName(err)});
+                break :hs false;
+            };
+            break :hs enabled;
+        };
+        self._mmc.change_speed_to(if (high_speed_enabled) 50 * 1000 * 1000 else 25 * 1000 * 1000);
+
+        const cmd16_resp = self._mmc.send_sdio_command(16, 512);
+        if (cmd16_resp.command_index != 16) {
+            log.err("CMD16 SET_BLOCKLEN failed during init", .{});
+            return error.CardInitializationFailure;
+        }
+
+        self._initialized = true;
+        log.info("SDIO initialization complete, size: {d} sectors", .{self._size});
+    }
+
+    /// ACMD6 SET_BUS_WIDTH argument for four data lines.
+    const sd_bus_width_4bit: u32 = 0x0000_0002;
+
+    /// Put the card on all four data lines, and do not proceed until it says so.
+    ///
+    /// The host reads DAT3..DAT0 unconditionally -- `set_wide_bus` is a no-op
+    /// because the PIO program has no 1-bit mode -- so a card left in 1-bit is
+    /// not slower, it is unreadable. Three lines idle high and every nibble
+    /// comes back `0xE`, which is the `0xeeeeeeee` + `DataCrc` signature that
+    /// ends in "Invalid MBR found" with the card otherwise perfectly healthy.
+    ///
+    /// This used to be two `_ =` discarded calls. A soak (20 resets,
+    /// `tests/smoke/sd_bringup_soak_test.py`) showed the whole failure riding on
+    /// them: one dropped response is common and survivable everywhere else in
+    /// bring-up, because everything else is either retried or checked -- but a
+    /// dropped CMD55 or ACMD6 silently left the card and the host disagreeing
+    /// about the bus, and nothing downstream could recover.
+    ///
+    /// ACMD41's own retry loop is the precedent for the shape: re-issue the
+    /// pair rather than fail, since what is being worked around is a lost
+    /// response, not a card that refuses.
+    fn set_sdio_bus_width_4bit(self: *Self, rca: u16) !void {
+        const max_attempts: u32 = 3;
+        var attempt: u32 = 0;
+        while (attempt < max_attempts) : (attempt += 1) {
+            if (attempt > 0) {
+                hal.time.sleep_ms(1);
+            }
+            // CMD55 is what makes the next command an *application* command.
+            // If it is lost the card reads the ACMD6 that follows as CMD6
+            // SWITCH_FUNC instead, so its response says nothing about the bus
+            // width and must not be trusted on its own.
+            const app_resp = self._mmc.send_sdio_command(55, @as(u32, rca) << 16);
+            if (!app_resp.crc_ok or app_resp.command_index != 55) {
+                log.warn("CMD55 before ACMD6 failed (attempt {d})", .{attempt});
+                continue;
+            }
+            const width_resp = self._mmc.send_sdio_command(6, sd_bus_width_4bit);
+            if (!width_resp.crc_ok or width_resp.command_index != 6) {
+                log.warn("ACMD6 SET_BUS_WIDTH failed (attempt {d})", .{attempt});
+                continue;
+            }
+            self._mmc.set_wide_bus(true);
+            if (attempt > 0) {
+                log.warn("ACMD6 SET_BUS_WIDTH needed {d} attempts", .{attempt + 1});
+            }
+            return;
+        }
+        log.err("Card never acknowledged ACMD6 SET_BUS_WIDTH; refusing to read a 4-bit bus from a 1-bit card", .{});
+        return error.CardInitializationFailure;
+    }
+
+    fn build_sd_switch_arg(mode: u32, group: u32, value: u32) u32 {
+        var arg: u32 = (mode << 31) | 0x00ff_ffff;
+        arg &= ~(@as(u32, 0xf) << @intCast(group * 4));
+        arg |= value << @intCast(group * 4);
+        return arg;
+    }
+
+    fn verify_sdio_transfer_mode(self: *Self, rca: u16) bool {
+        const status_resp = self._mmc.send_sdio_command(13, @as(u32, rca) << 16);
+        if (status_resp.command_index != 13) {
+            log.warn("CMD13 failed after SDIO speed change, falling back", .{});
+            return false;
+        }
+        return true;
+    }
+
+    fn try_enable_sdio_high_speed(self: *Self, rca: u16) !bool {
+        var status: [64]u8 align(4) = [_]u8{0} ** 64;
+
+        const check_arg = build_sd_switch_arg(sd_switch_check, sd_switch_group_access, sd_switch_access_default);
+        const check_resp = self._mmc.send_sdio_data_command(6, check_arg);
+        if (check_resp.command_index != 6) {
+            return error.CardInitializationFailure;
+        }
+        try self._mmc.read_sdio_data(status[0..]);
+        if ((status[13] & 0x02) == 0) {
+            log.info("SD card does not advertise high-speed mode support", .{});
+            return false;
+        }
+
+        const switch_arg = build_sd_switch_arg(sd_switch_set, sd_switch_group_access, sd_switch_access_high_speed);
+        const switch_resp = self._mmc.send_sdio_data_command(6, switch_arg);
+        if (switch_resp.command_index != 6) {
+            return error.CardInitializationFailure;
+        }
+        try self._mmc.read_sdio_data(status[0..]);
+        if ((status[16] & 0x0f) != sd_switch_access_high_speed) {
+            log.warn("SD card rejected CMD6 high-speed switch (status=0x{x})", .{status[16]});
+            return false;
+        }
+
+        self._mmc.change_speed_to(50 * 1000 * 1000);
+        if (!self.verify_sdio_transfer_mode(rca)) {
+            self._mmc.change_speed_to(25 * 1000 * 1000);
+            return false;
+        }
+
+        log.info("SD card switched to high-speed mode via CMD6", .{});
+        return true;
+    }
+
+    const sdio_io_retry_limit: usize = 6;
+
+    fn wait_for_card_dat0(self: *const Self) void {
+        var timeout: u32 = 100_000;
+        while (self._mmc.is_busy() and timeout > 0) : (timeout -= 1) {
+            hal.time.sleep_us(10);
+        }
+        if (timeout == 0) {
+            log.warn("DAT0 busy timeout waiting for card ready", .{});
+        }
+    }
+
+    fn sdio_read(self: *const Self, address: u64, buf: []u8) isize {
+        const block_address: u32 = @intCast(address >> 9);
+        const num_blocks = buf.len / 512;
+        const max_blocks_per_req = 128;
+
+        var i: usize = 0;
+        var retransmissions: usize = 0;
+        while (i < num_blocks) {
+            const remaining = num_blocks - i;
+            const chunk: u32 = @intCast(if (remaining > max_blocks_per_req) max_blocks_per_req else remaining);
+
+            self.wait_for_card_dat0();
+
+            if (chunk == 1) {
+                const resp = self._mmc.send_sdio_command(17, @intCast(block_address + i));
+                if (resp.command_index != 17) {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO read failed permanently: CMD17 did not respond for block {d} after {d} retries", .{ i, retransmissions });
+                    return -1;
+                }
+
+                self._mmc.read_sdio_data(buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO read failed permanently: block {d} returned {s} after {d} retries", .{ i, @errorName(err), retransmissions });
+                    return -1;
+                };
+                i += 1;
+            } else {
+                const resp = self._mmc.send_sdio_command(18, @intCast(block_address + i));
+                if (resp.command_index != 18) {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO multi-read failed permanently: CMD18 did not respond at block {d} after {d} retries", .{ i, retransmissions });
+                    return -1;
+                }
+
+                self._mmc.read_sdio_data(buf[512 * i .. 512 * (i + chunk)]) catch |err| {
+                    _ = self._mmc.send_sdio_command(12, 0);
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO multi-read failed permanently: {d} blocks at {d} returned {s} after {d} retries", .{ chunk, i, @errorName(err), retransmissions });
+                    return -1;
+                };
+
+                _ = self._mmc.send_sdio_command(12, 0);
+                i += chunk;
+            }
+            retransmissions = 0;
+        }
+
+        return @intCast(buf.len);
+    }
+
+    /// ACMD23: tell the card how many blocks the next CMD25 will write, so the
+    /// pre-erase happens once for the whole run.
+    ///
+    /// Silent on failure by design. It is a hint, not part of the write: a card
+    /// that rejects CMD55 or answers ACMD23 with the wrong index still stores
+    /// every byte the following CMD25 sends. Logging here would put a line on
+    /// the console for every chunk of every write on such a card, which is a
+    /// worse outcome than the lost optimisation.
+    fn set_write_block_erase_count(self: *const Self, blocks: u32) void {
+        const cmd55_resp = self._mmc.send_sdio_command(55, @as(u32, self._rca) << 16);
+        if (cmd55_resp.command_index != 55) {
+            return;
+        }
+        _ = self._mmc.send_sdio_command(23, blocks);
+    }
+
+    /// Note on where a write's time actually goes, measured 2026-08-06.
+    ///
+    /// FatFs clips every disk_write at the cluster boundary (ff.c, "Clip at
+    /// cluster boundary"), so with this volume's 16-sector cluster a 32 KiB
+    /// user write arrives here as *four* separate 8 KiB requests. Profiling the
+    /// block loop showed the transfer itself is already efficient -- 21 us per
+    /// 512-byte block against 21.5 us of bus time, with the per-block PIO
+    /// restart costing ~0.3 us and the card's status-plus-busy window 15-40 us.
+    /// What dominates is the ~1019 us of fixed cost each *request* pays outside
+    /// that loop: 57% of the write. Cutting four requests to one would be worth
+    /// roughly 1.74x, and the only lever for that is the cluster size chosen at
+    /// mkfs time -- there is no FatFs configuration for it.
+    fn sdio_write(self: *const Self, address: u64, buf: []const u8) isize {
+        const block_address: u32 = @intCast(address >> 9);
+        const num_blocks = buf.len / 512;
+        const max_blocks_per_req = 128;
+
+        var i: usize = 0;
+        var retransmissions: usize = 0;
+        while (i < num_blocks) {
+            const remaining = num_blocks - i;
+            const chunk: u32 = @intCast(if (remaining > max_blocks_per_req) max_blocks_per_req else remaining);
+
+            self.wait_for_card_dat0();
+
+            if (chunk == 1) {
+                const resp = self._mmc.send_sdio_command(24, @intCast(block_address + i));
+                if (resp.command_index != 24) {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO write failed permanently: CMD24 response mismatch for block {d} after {d} retries", .{ i, retransmissions });
+                    return -1;
+                }
+
+                self._mmc.write_sdio_data(buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                    _ = self._mmc.send_sdio_command(12, 0);
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO write failed permanently: block {d} returned {s} after {d} retries", .{ i, @errorName(err), retransmissions });
+                    return -1;
+                };
+            } else {
+                // ACMD23 SET_WR_BLK_ERASE_COUNT, which the spec wants issued
+                // immediately before CMD25: it tells the card how many blocks
+                // are coming so the pre-erase happens once rather than being
+                // discovered block by block. Advisory -- a card that declines it
+                // stores exactly the same data, so a failed response is stepped
+                // over rather than retried.
+                //
+                // Measured neutral on this card, twice (adding it changed
+                // nothing; removing it changed nothing, 4435 -> 4467 KiB/s
+                // against a 3993-4542 run-to-run band). It is kept because it is
+                // what the spec asks for and may matter on another card, not
+                // because it was shown to pay here. The write path's real cost
+                // is elsewhere -- see set_write_block_erase_count's caller notes
+                // and the cluster-size note in sdio_write.
+                self.set_write_block_erase_count(chunk);
+
+                // CMD25 multi-block: the card pipelines programming behind the
+                // transfer, so the program time that CMD24 pays per sector is
+                // paid once per chunk. A failed chunk is retried whole from
+                // its first block; rewriting sectors that already made it is
+                // the same data to the same place.
+                const resp = self._mmc.send_sdio_command(25, @intCast(block_address + i));
+                if (resp.command_index != 25) {
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO multi-write failed permanently: CMD25 did not respond at block {d} after {d} retries", .{ i, retransmissions });
+                    return -1;
+                }
+
+                self._mmc.write_sdio_data(buf[512 * i .. 512 * (i + chunk)]) catch |err| {
+                    _ = self._mmc.send_sdio_command(12, 0);
+                    self.wait_for_card_dat0();
+                    if (retransmissions < sdio_io_retry_limit) {
+                        retransmissions += 1;
+                        continue;
+                    }
+                    log.err("SDIO multi-write failed permanently: {d} blocks at {d} returned {s} after {d} retries", .{ chunk, i, @errorName(err), retransmissions });
+                    return -1;
+                };
+
+                _ = self._mmc.send_sdio_command(12, 0);
+            }
+
+            var timeout: u32 = 100_000;
+            while (self._mmc.is_busy() and timeout > 0) : (timeout -= 1) {
+                hal.time.sleep_us(10);
+            }
+            if (timeout == 0) {
+                log.err("Card busy timeout after write block {d}", .{i});
+                return -1;
+            }
+
+            i += chunk;
+            retransmissions = 0;
+        }
+
+        return @intCast(buf.len);
     }
 
     fn initialize_spi_mmc(self: *Self) anyerror!void {

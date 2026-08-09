@@ -23,21 +23,185 @@ const std = @import("std");
 const c = @import("c").c;
 
 const log = std.log.scoped(.malloc);
+// Dedicated scope so the heap-composition dump is trivially greppable
+// (`[ERR][heapprof] ...`) and parsed by scripts/heapdump_report.py.
+const heapprof_log = std.log.scoped(.heapprof);
 
 const arch = @import("arch");
+const config = @import("config");
+
+pub const KernelAllocatorType = MallocAllocator(.{
+    .leak_detection = config.instrumentation.enable_memory_leak_detection,
+    .verbose = config.instrumentation.verbose_allocators,
+    .dump_stats = config.instrumentation.print_memory_usage,
+});
 
 var memory_in_use: isize = 0;
+var peak_memory_in_use: isize = 0;
 var surpressed_memory: isize = 0;
+// One-shot kernel-heap composition dump: when tracked heap first crosses this,
+// walk the live allocation trackers and emit a parseable backtrace block to
+// serial (`[ERR][heapprof] ...`), symbolized offline by
+// scripts/heapdump_report.py. Captures the (boot) peak. Needs leak detection on.
+var heapdump_done: bool = false;
+const heapdump_threshold_bytes: isize = 50 * 1024;
 var counter: isize = 0;
+
+// Size-bucketed net allocation counters for leak diagnosis
+pub var bucket_1_4: isize = 0;
+pub var bucket_5: isize = 0;
+pub var bucket_6: isize = 0;
+pub var bucket_7: isize = 0;
+pub var bucket_8: isize = 0;
+pub var bucket_9_10: isize = 0;
+pub var bucket_11_12: isize = 0;
+pub var bucket_13_16: isize = 0;
+pub var bucket_17_plus: isize = 0;
+
+fn bucket_inc(len: usize) void {
+    if (len <= 4) {
+        bucket_1_4 += 1;
+    } else if (len == 5) {
+        bucket_5 += 1;
+    } else if (len == 6) {
+        bucket_6 += 1;
+    } else if (len == 7) {
+        bucket_7 += 1;
+    } else if (len == 8) {
+        bucket_8 += 1;
+    } else if (len <= 10) {
+        bucket_9_10 += 1;
+    } else if (len <= 12) {
+        bucket_11_12 += 1;
+    } else if (len <= 16) {
+        bucket_13_16 += 1;
+    } else {
+        bucket_17_plus += 1;
+    }
+}
+
+fn bucket_dec(len: usize) void {
+    if (len <= 4) {
+        bucket_1_4 -= 1;
+    } else if (len == 5) {
+        bucket_5 -= 1;
+    } else if (len == 6) {
+        bucket_6 -= 1;
+    } else if (len == 7) {
+        bucket_7 -= 1;
+    } else if (len == 8) {
+        bucket_8 -= 1;
+    } else if (len <= 10) {
+        bucket_9_10 -= 1;
+    } else if (len <= 12) {
+        bucket_11_12 -= 1;
+    } else if (len <= 16) {
+        bucket_13_16 -= 1;
+    } else {
+        bucket_17_plus -= 1;
+    }
+}
 
 pub fn get_usage() usize {
     return if (memory_in_use < 0) 0 else @intCast(memory_in_use);
 }
 
+/// High-water mark of kernel heap bytes in use since boot (or last reset).
+pub fn get_peak_usage() usize {
+    return if (peak_memory_in_use < 0) 0 else @intCast(peak_memory_in_use);
+}
+
+pub fn get_counter() isize {
+    return counter;
+}
+
 pub fn reset() void {
     memory_in_use = 0;
+    peak_memory_in_use = 0;
     surpressed_memory = 0;
     counter = 0;
+}
+
+// ── Kernel free-list integrity check ─────────────────────────────────────────
+// newlib-nano holds its free list as `chunk { long size; chunk *next; }` sorted
+// by ascending address (that ordering is what _free_r's insertion walk relies
+// on). A heap overflow shows up as a garbage `next`, and it is only noticed much
+// later — inside _free_r, faulting on `ldr r3,[r3,#4]`, with nothing left to say
+// who wrote it. Walking the list at a known point instead attributes the damage
+// to the operation that did it.
+const NanoChunk = extern struct {
+    size: isize,
+    next: ?*NanoChunk,
+};
+
+extern var __malloc_free_list: ?*NanoChunk;
+extern var end: u8;
+extern var __heap_limit__: u8;
+
+pub const FreeListFault = struct {
+    reason: []const u8,
+    node: usize,
+    prev: usize,
+    index: usize,
+};
+
+var free_list_fault_reported: bool = false;
+
+/// Report the first site at which the free list is found broken, then stay
+/// quiet, so the log names the operation that did the damage instead of the
+/// unrelated _free_r that trips over it some arbitrary number of calls later.
+/// `tag` identifies the call site (system_call.zig passes the syscall number).
+/// Sprinkle it through a suspect path to bisect down to the offending statement.
+pub fn probe(tag: u32) void {
+    if (free_list_fault_reported) return;
+    const fault = check_free_list() orelse return;
+    free_list_fault_reported = true;
+    log.err(
+        "free list corrupted at tag {d}: {s} node=0x{X:0>8} prev=0x{X:0>8} index={d}",
+        .{ tag, fault.reason, fault.node, fault.prev, fault.index },
+    );
+}
+
+/// Walk the kernel free list and return the first structural violation, or null
+/// when it is intact. Allocation-free and log-free so it is safe to call from
+/// anywhere, including the syscall path.
+pub fn check_free_list() ?FreeListFault {
+    const lo = @intFromPtr(&end);
+    const hi = @intFromPtr(&__heap_limit__);
+    var prev: usize = 0;
+    var node = __malloc_free_list;
+    var index: usize = 0;
+    while (node) |chunk| : (index += 1) {
+        const addr = @intFromPtr(chunk);
+        const fault = struct {
+            fn at(reason: []const u8, a: usize, p: usize, i: usize) FreeListFault {
+                return .{ .reason = reason, .node = a, .prev = p, .index = i };
+            }
+        };
+        // A corrupted `next` usually points outside the heap or into the middle
+        // of a word; both are cheaper to detect than the resulting fault.
+        if (index > 8192) return fault.at("cycle", addr, prev, index);
+        if (addr & 3 != 0) return fault.at("misaligned", addr, prev, index);
+        if (addr < lo or addr + @sizeOf(NanoChunk) > hi) return fault.at("out-of-heap", addr, prev, index);
+        if (chunk.size <= 0 or @as(usize, @intCast(chunk.size)) > hi - addr) return fault.at("bad-size", addr, prev, index);
+        // Sortedness is the invariant _free_r walks on, so a break here is
+        // exactly what would send it off the rails.
+        if (addr <= prev) return fault.at("unsorted", addr, prev, index);
+        prev = addr;
+        node = chunk.next;
+    }
+    return null;
+}
+
+var get_current_pid_fn: ?*const fn () i32 = null;
+
+pub fn set_get_current_pid(f: *const fn () i32) void {
+    get_current_pid_fn = f;
+}
+
+fn current_pid() i32 {
+    if (get_current_pid_fn) |f| return f();
+    return -1;
 }
 
 const Tracker = extern struct {
@@ -47,8 +211,14 @@ const Tracker = extern struct {
     data_len: usize,
     data: [*]usize,
     allocated_length: usize,
+    owner_pid: i32 = -1,
+
+    var push_count: usize = 0;
+    var remove_ok_count: usize = 0;
+    var remove_fail_count: usize = 0;
 
     pub fn push(self: *Tracker, next: *Tracker) void {
+        push_count += 1;
         var node: ?*Tracker = self;
         while (node != null) {
             if (node) |n| {
@@ -63,11 +233,11 @@ const Tracker = extern struct {
     }
 
     pub fn remove(self: *Tracker, ptr: *anyopaque, alloc_len: usize) void {
-        var node: ?*Tracker = self;
+        var node: ?*Tracker = self.next;
         while (node != null) {
             if (node) |n| {
                 node = n.next;
-                if (n.data_len > 0 and n.data[0] == @intFromPtr(ptr)) {
+                if (n.data[0] == @intFromPtr(ptr)) {
                     if (n.prev) |p| {
                         p.next = n.next;
                     }
@@ -79,11 +249,13 @@ const Tracker = extern struct {
                     }
                     c.free(n.data);
                     c.free(n);
+                    remove_ok_count += 1;
                     return;
                 }
             }
         }
-        log.err("Invalid free for: 0x{x}", .{@intFromPtr(ptr)});
+        remove_fail_count += 1;
+        log.err("Invalid free for: 0x{x} len={d}", .{ @intFromPtr(ptr), alloc_len });
     }
 
     pub fn suppress_all(self: *Tracker) void {
@@ -96,23 +268,66 @@ const Tracker = extern struct {
         }
     }
 
-    pub fn print_leaks(self: *Tracker) void {
-        var node: ?*Tracker = self;
+    pub fn print_leaks(self: *Tracker, is_pid_alive: ?*const fn (i32) bool) void {
+        const dead_only = config.instrumentation.leak_report_dead_only;
+        var node: ?*Tracker = self.next;
+        var printed: usize = 0;
+        var leaked_bytes: usize = 0;
         while (node != null) {
             if (node) |n| {
-                if (n.data_len > 0 and !n.surpressed) {
-                    log.err("---------------------------------", .{});
-                    log.err("leaked memory allocated at: ", .{});
-                    var index: usize = 0;
-                    while (index < n.data_len) {
-                        log.err("{d}: 0x{x}", .{ index, n.data[index + 1] });
-                        index += 1;
+                if (!n.surpressed) {
+                    const should_print = if (dead_only)
+                        (if (is_pid_alive) |alive_fn| !alive_fn(n.owner_pid) else true)
+                    else
+                        true;
+                    if (should_print) {
+                        printed += 1;
+                        leaked_bytes += n.allocated_length;
+                        log.err("----- pid={d} -----", .{n.owner_pid});
+                        log.err("leaked {d}B at 0x{x}", .{ n.allocated_length, n.data[0] });
+                        var index: usize = 0;
+                        while (index < n.data_len) {
+                            log.err("{d}: 0x{x}", .{ index, n.data[index + 1] });
+                            index += 1;
+                        }
                     }
-                    log.err("--------------------------------", .{});
                 }
                 node = n.next;
             }
         }
+    }
+
+    // Emit a parseable snapshot of every live allocation (size, owner pid, and the
+    // top backtrace frames as raw return addresses) for offline symbolization by
+    // scripts/heapdump_report.py. The kernel can't symbolize; Python does it
+    // against the kernel ELF. Routed through `.err` so the smoke harness filters
+    // these lines out of parsed command output while still capturing them in the
+    // raw serial log.
+    pub fn dump_composition(self: *Tracker) void {
+        var node: ?*Tracker = self.next;
+        var total: usize = 0;
+        var live: usize = 0;
+        while (node) |n| {
+            total += n.allocated_length;
+            live += 1;
+            node = n.next;
+        }
+        heapprof_log.err("begin total={d} live={d}", .{ total, live });
+        node = self.next;
+        while (node) |n| {
+            var bt: [6]usize = [_]usize{0} ** 6;
+            var i: usize = 0;
+            // data[0] is the allocation pointer; data[1..data_len] are the
+            // caller-first return addresses captured at alloc time.
+            while (i < bt.len and i < n.data_len) : (i += 1) {
+                bt[i] = n.data[i + 1];
+            }
+            heapprof_log.err("a {d} {d} {x} {x} {x} {x} {x} {x}", .{
+                n.allocated_length, n.owner_pid, bt[0], bt[1], bt[2], bt[3], bt[4], bt[5],
+            });
+            node = n.next;
+        }
+        heapprof_log.err("end", .{});
     }
 };
 
@@ -144,12 +359,16 @@ pub fn MallocAllocator(comptime options: anytype) type {
         }
 
         pub fn detect_leaks() isize {
+            return detect_leaks_filter(null);
+        }
+
+        pub fn detect_leaks_filter(is_pid_alive: ?*const fn (i32) bool) isize {
             if (comptime is_leaks_detection_enabled()) {
                 const leaked_memory = memory_in_use - surpressed_memory;
                 if (leaked_memory > 0) {
                     log.err("Memory leaks detected '{d}' bytes were left", .{leaked_memory});
                 }
-                tracker.print_leaks();
+                tracker.print_leaks(is_pid_alive);
                 return leaked_memory;
             }
             return 0;
@@ -181,29 +400,44 @@ pub fn MallocAllocator(comptime options: anytype) type {
             std.debug.assert(len > 0);
             const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
             memory_in_use += @as(isize, @intCast(len));
+            if (memory_in_use > peak_memory_in_use) {
+                peak_memory_in_use = memory_in_use;
+            }
             counter += 1;
+            bucket_inc(len);
             if (comptime is_leaks_detection_enabled()) {
                 log.debug("allocating {d}B at 0x{x}", .{ len, @intFromPtr(ptr) });
-                const stack_trace_depth = arch.panic.get_stack_trace_depth(return_address);
-                const stack_trace_size = @sizeOf(usize) * (stack_trace_depth);
+                const max_trace = arch.panic.max_stack_depth;
                 log.debug("allocating tracker object with size: {d}", .{@sizeOf(Tracker)});
                 const tracker_object = @as(*Tracker, @ptrCast(@alignCast(c.malloc(@sizeOf(Tracker)) orelse return null)));
                 tracker_object.next = null;
                 tracker_object.prev = null;
-                tracker_object.data_len = stack_trace_depth;
                 tracker_object.surpressed = false;
-                tracker_object.data = @as([*]usize, @ptrCast(@alignCast(c.malloc(@sizeOf(usize) * (stack_trace_size + 1)) orelse return null)));
+                tracker_object.data = @as([*]usize, @ptrCast(@alignCast(c.malloc(@sizeOf(usize) * (max_trace + 2)) orelse return null)));
                 tracker_object.data[0] = @intFromPtr(ptr);
+                tracker_object.data[1] = return_address; // always capture caller
                 tracker_object.allocated_length = len;
-                tracker.push(tracker_object);
-                var index: usize = 1;
+                tracker_object.owner_pid = current_pid();
+                var index: usize = 2;
                 var stack = std.debug.StackIterator.init(return_address, @frameAddress());
-                while (stack.next()) |ret| {
+                _ = stack.next(); // skip first (already stored as data[1])
+                while (index <= max_trace + 1) {
+                    if (!arch.panic.is_valid_stack_ptr(stack.fp)) break;
+                    const ret = stack.next() orelse break;
                     if (@hasField(@TypeOf(options), "verbose") and options.verbose) {
                         log.debug("{d}: 0x{x}", .{ index - 1, ret });
                     }
                     tracker_object.data[index] = ret;
                     index += 1;
+                }
+                tracker_object.data_len = index - 1;
+                tracker.push(tracker_object);
+                // One-shot heap-composition snapshot at the (boot) peak: the peak
+                // is transient and freed before the shell prompt, so dump it the
+                // first time we cross the threshold rather than at process exit.
+                if (!heapdump_done and memory_in_use > heapdump_threshold_bytes) {
+                    heapdump_done = true;
+                    tracker.dump_composition();
                 }
             }
             if (@hasField(@TypeOf(options), "dump_stats") and options.dump_stats) {
@@ -245,20 +479,14 @@ pub fn MallocAllocator(comptime options: anytype) type {
             return_address: usize,
         ) void {
             _ = log2_buf_align;
+            _ = return_address;
             c.free(buf.ptr);
             memory_in_use -= @as(isize, @intCast(buf.len));
             counter -= 1;
+            bucket_dec(buf.len);
 
             if (comptime is_leaks_detection_enabled()) {
                 tracker.remove(buf.ptr, buf.len);
-                var index: usize = 1;
-                var stack = std.debug.StackIterator.init(return_address, @frameAddress());
-                while (stack.next()) |ret| {
-                    if (@hasField(@TypeOf(options), "verbose") and options.verbose) {
-                        log.debug("{d}: 0x{x}", .{ index - 1, ret });
-                    }
-                    index += 1;
-                }
 
                 log.debug("releasing {d}B at 0x{x}, usage: {d}B", .{ buf.len, @intFromPtr(buf.ptr), memory_in_use });
             }

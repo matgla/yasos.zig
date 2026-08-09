@@ -27,6 +27,38 @@ const kernel = @import("../../kernel.zig");
 
 const interface = @import("interface");
 
+/// Serial console line rate.
+///
+/// Both ends have to agree, and the host end is set in three further places:
+/// `CONSOLE_BAUDRATE` in `scripts/remote_smoke_tui.py` (the runner and the
+/// remote scripts it generates) and in `tests/smoke/framework/session.py`. A
+/// mismatch does not fail loudly, it just turns the console into garbage.
+///
+/// 3 Mbaud is the PL011 ceiling here, not a round number picked for ambition:
+/// baud is clk_peri/(16*divisor), clk_peri is 48 MHz (`clk_peri_expected_khz`,
+/// hal/.../rp2350/startup/crt.zig), and the divisor bottoms out at 1. It is
+/// also *exact*, where the 921600 this replaces carried +0.16% error.
+///
+/// The rate was 460800 until the rig's debug probe was reflashed. At 921600
+/// the probe's USB-CDC-to-UART bridge silently dropped 32-48 bytes out of
+/// roughly every fourth 736-byte burst during bulk transfers -- measured, not
+/// guessed: the target's own counters showed no overrun, no ring drop and no
+/// framing error, while host-versus-target byte accounting showed the deficit
+/// accumulating on the wire (see docs/remote_smoke_speedup_plan.md). That was
+/// debugprobe 2.0.1, which predates the v2.2.1 "regression with long UART TX
+/// strings" and v2.2.2 "high uart TX baud rate corruption" fixes.
+///
+/// What bounds the rate on this end is RX FIFO slack. `uart_set_irqs_enabled`
+/// leaves RXIFLSEL=0, so the interrupt trips at 4 of 32 bytes and 28 bytes can
+/// still land while the ISR is blocked -- 93 us at 3 Mbaud, against 608 us at
+/// 460800. Several kernel `cpsid i` sections (FatFs, MMC/SDIO, __malloc_lock)
+/// are the things that have to fit inside that, and `Uart.write` already
+/// drains RX inline so the both-directions-at-once case is covered. If this is
+/// too fast, the symptom is `ovr` climbing in /proc/uart with `max_overrun_gap_us`
+/// naming the critical section responsible; step down through 2000000,
+/// 1500000, 1000000 (all exact from 48 MHz).
+pub const console_baudrate = 3_000_000;
+
 pub fn UartDriver(comptime UartType: anytype) type {
     const Internal = struct {
         const UartDriverImpl = interface.DeriveFromBase(IDriver, struct {
@@ -50,7 +82,7 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 _ = self;
                 uart.flush();
                 uart.init(.{
-                    .baudrate = 921600,
+                    .baudrate = console_baudrate,
                 }) catch |err| {
                     return err;
                 };
@@ -89,5 +121,5 @@ test "UartDriver.ShouldCreateAndDeleteDriver" {
     try std.testing.expectEqualStrings("uart0", node.name());
     try std.testing.expectEqual(kernel.fs.FileType.CharDevice, node.filetype());
 
-    try std.testing.expectEqual(UartMock.baudrate, 921600);
+    try std.testing.expectEqual(UartMock.baudrate, console_baudrate);
 }

@@ -53,5 +53,12 @@ pub fn Cpu(comptime cpu: anytype) type {
         pub fn set_stack_guard(_: Self, stack_guard: ?*const u8) void {
             CpuImplementation.set_stack_guard(stack_guard);
         }
+
+        pub fn vreg_vsel(_: Self) ?u8 {
+            if (@hasDecl(CpuImplementation, "vreg_vsel")) {
+                return CpuImplementation.vreg_vsel();
+            }
+            return null;
+        }
     };
 }

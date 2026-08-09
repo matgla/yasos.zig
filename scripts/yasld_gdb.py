@@ -33,6 +33,10 @@ ELF_MAP = {
     "libm.so":        "libs/libm/build/libm.so",
     "libncurses.so":  "libs/yasos_curses/build/libncurses.so.elf",
     "libtermcap.so":  "libs/termcap/build/libtermcap.so.elf",
+    "libsoftfp.so":   "libs/tinycc/lib/fp/libsoftfp.so.elf",
+    "libvfpv4sp.so":  "libs/tinycc/lib/fp/libvfpv4sp.so.elf",
+    "libvfpv5dp.so":  "libs/tinycc/lib/fp/libvfpv5dp.so.elf",
+    "librp2350fp.so": "libs/tinycc/lib/fp/librp2350fp.so.elf",
     "armv8m-tcc":     "libs/tinycc/bin/armv8m-tcc.elf",
     # Apps
     "hello":          "apps/hello_world/build/hello.elf",
@@ -52,9 +56,9 @@ ELF_MAP = {
 PLACEHOLDER_ADDR = "0xaaaaaaaa"
 
 # -- Parsing ----------------------------------------------------------------
-# Matches lines like:
-# [ERR][yasld] .text loaded at 0x101ce9d0, size: 0 for: libpthread.so
-# [ERR][yasld] .got  loaded at 0x11022000, entr: 3 for: libpthread.so
+# OLD format (one section per line):
+#   [ERR][yasld] .text loaded at 0x101ce9d0, size: 0 for: libpthread.so
+#   [ERR][yasld] .got  loaded at 0x11022000, entr: 3 for: libpthread.so
 LOG_PATTERN = re.compile(
     r"\[ERR\]\[yasld\]\s+"
     r"(?P<section>\.\w+)\s+"
@@ -63,24 +67,37 @@ LOG_PATTERN = re.compile(
     r"for:\s+(?P<name>\S+)"
 )
 
+# NEW format (one line per lib, all sections together):
+#   [INF][yasld] loaded 'toybox': .text=0x103da6e0(+0x35ef8) .data=0x20070000 .got=0x20079800
+NEW_LOG_PATTERN = re.compile(
+    r"\[\w+\]\[yasld\]\s+loaded\s+'(?P<name>[^']+)':\s+(?P<rest>.*)"
+)
+# Capture each ".<section>=0x<addr>" on the line (ignores the "(+0x..)" suffix on .text).
+NEW_SECTION_PATTERN = re.compile(r"(?P<section>\.\w+)=(?P<addr>0x[0-9a-fA-F]+)")
+
 
 def parse_log(text):
     """
     Parse yasld log text and return a dict:
         { "libc.so": { ".text": "0x10178270", ".data": "0x11024000", ... }, ... }
+    Supports both the old (per-section) and new (one-line-per-lib) log formats.
     """
     libs = {}
     for line in text.splitlines():
+        # New format first: a whole lib on one line.
+        mnew = NEW_LOG_PATTERN.search(line)
+        if mnew:
+            name = mnew.group("name")
+            entry = libs.setdefault(name, {})
+            for sec in NEW_SECTION_PATTERN.finditer(mnew.group("rest")):
+                entry[sec.group("section")] = sec.group("addr")
+            continue
+
+        # Old format: one section per line.
         m = LOG_PATTERN.search(line)
         if not m:
             continue
-        section = m.group("section")
-        addr = m.group("addr")
-        name = m.group("name")
-
-        if name not in libs:
-            libs[name] = {}
-        libs[name][section] = addr
+        libs.setdefault(m.group("name"), {})[m.group("section")] = m.group("addr")
 
     return libs
 
@@ -148,7 +165,7 @@ try:
             if not os.path.isfile(log_path):
                 gdb.write(f"Error: file not found: {log_path}\n")
                 return
-            with open(log_path, "r") as f:
+            with open(log_path, "r", errors="replace") as f:
                 text = f.read()
 
             libs = parse_log(text)
@@ -199,7 +216,7 @@ except ImportError:
 def main():
     if len(sys.argv) > 1:
         log_path = sys.argv[1]
-        with open(log_path, "r") as f:
+        with open(log_path, "r", errors="replace") as f:
             text = f.read()
     else:
         text = sys.stdin.read()

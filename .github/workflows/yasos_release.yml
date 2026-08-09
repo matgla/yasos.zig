@@ -62,7 +62,7 @@ jobs:
     needs: create_release
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.16
+      image: ghcr.io/matgla/yasos.zig:v0.18
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

@@ -25,11 +25,19 @@ pub const Module = @import("module.zig").Module;
 const loader = @import("loader.zig");
 pub const get_loader = loader.get_loader;
 pub const SymbolEntry = @import("module.zig").SymbolEntry;
+pub const Loader = loader.Loader;
+pub const MachineProfile = loader.MachineProfile;
+pub const ImageError = loader.ImageError;
+pub const Architecture = loader.Architecture;
+pub const FloatAbi = loader.FloatAbi;
+pub const Features = loader.Features;
 
-pub fn loader_init(file_resolver: anytype, allocator: std.mem.Allocator) void {
-    loader.init(file_resolver, allocator);
+pub fn loader_init(file_resolver: anytype, allocator: std.mem.Allocator, machine: MachineProfile) void {
+    loader.init(file_resolver, allocator, machine);
 }
 
 pub fn loader_deinit() void {
     loader.deinit();
 }
+
+pub const set_load_map_logging = loader.set_load_map_logging;

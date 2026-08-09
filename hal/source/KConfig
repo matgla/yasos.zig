@@ -22,9 +22,9 @@ menu "CPU Configuration"
 choice CHOICE_CPU_ARCHITECTURE
     prompt "CPU architecture"
     rsource "common/arch/**/**/KConfig"
-endchoice 
+endchoice
 
-choice CHOICE_CPU_CORE 
+choice CHOICE_CPU_CORE
     prompt "CPU core"
     rsource "common/cores/**/**/KConfig"
 endchoice
@@ -34,17 +34,111 @@ choice CHOICE_CPU_FAMILY
     rsource "**/KConfig"
 endchoice
 
-choice CHOICE_CPU 
+choice CHOICE_CPU
     prompt "CPU model"
     rsource "**/**/KConfig"
-endchoice 
+endchoice
+
+config CONFIG_CPU_CLOCK_FREQUENCY_MHZ
+    int "CPU clock frequency in MHz (150-800)"
+    default 150
+    range 150 800
+    depends on CPU_RP2350
+    help
+      Set the desired RP2350 system clock frequency in MHz.
+      The actual frequency is rounded down to the nearest value
+      achievable by the PLL (12 MHz XOSC, VCO 750-1600 MHz).
+      Values above 150 MHz require overclocking.
+      Core voltage is automatically adjusted (with ~10% safety margin):
+        <=250 MHz: 1.10V     <=370 MHz: 1.35V     <=480 MHz: 1.70V
+        <=324 MHz: 1.25V     <=384 MHz: 1.40V     <=512 MHz: 1.80V
+        <=348 MHz: 1.30V     <=424 MHz: 1.50V     <=560 MHz: 1.90V
+                             <=452 MHz: 1.60V     >560 MHz:  2.10V
+
+      2.10V is where it stops, for every frequency in this range. The
+      regulator's next step is 2.20V with nothing in between, and the core
+      is nominally 1.10V. If a clock is unstable, lower the clock.
+
+      DO NOT pick this number for the CPU alone. Flash and PSRAM SCK is
+      clk_sys/N for an INTEGER N = ceil(clk_sys / the 133 MHz part limit),
+      so raising clk_sys past a divider boundary makes external memory
+      SLOWER. Both are on the same QMI bus that XIP code fetches from, so
+      that is paid by every instruction, not just by data:
+
+        clk_sys   N   SCK       verdict
+        618 MHz   5   123.6     highest stable on pico_plus2; the default
+        636 MHz   5   127.2     UNSTABLE on hardware (fails gcc torture)
+        660 MHz   5   132.0     best SCK of the N=5 band, untested
+        678 MHz   6   113.0     TRAP: asking for 680 loses 9% vs 618,
+                                and it HardFaults in flash XIP anyway
+        696 MHz   6   116.0     TRAP: asking for 700 loses 6% of memory
+        750 MHz   6   125.0
+        792 MHz   6   132.0
+        798 MHz   6   133.0     exactly 6*133; the best SCK in the range
+        804 MHz   7   114.9     TRAP: 6 MHz more costs 14% of memory
+
+      Almost all of that table is arithmetic, not experience, and a good
+      divider does not make a frequency reachable. What has actually been
+      run on pico_plus2: 618 stable, 636 unstable, 678 HardFaults. 636
+      failing at only +2.9% says the ceiling is real and close, so treat
+      every row below it as a hypothesis with a known-bad neighbour.
+
+      Requesting 800 yields 798 (VCO 1596, postdiv 2), which is the one
+      frequency in the whole range where SCK lands exactly on the part
+      limit. There is no reason to ask for anything between 799 and 930.
+
+      Above ~620 MHz the QMI min_deselect field (5 bits, 31 cycles) can no
+      longer cover the parts' 50 ns CS-high time, and the programmed
+      deselect shrinks as clk_sys rises: 50.2 ns at 618, 47.0 at 660,
+      38.8 at 798. 618 was the last in-spec point. This is a field-width
+      limit, not a tuning knob.
+
+config CONFIG_CPU_CORE_VOLTAGE_MV
+    int "Core voltage override in mV (0 = pick from the frequency)"
+    default 0
+    depends on CPU_RP2350
+    help
+      Force the POWMAN core regulator to this voltage instead of the value
+      the frequency table in requiredVregCode() would choose. 0 keeps the
+      automatic behaviour.
+
+      Exists so the voltage can be swept without editing Zig, because the
+      automatic value is almost certainly too high. The >560 MHz band sits
+      at 2100 mV, which was established at 618 MHz on the 2026-07-30
+      configuration: 2000 mV failed the dijkstra repro ~4 runs in 5 and
+      2100 mV passed 5 in 5. Much has changed since (PSRAM 133 MHz, the
+      /tmp tmpfs, the pool and logging work), so that floor deserves
+      re-testing -- 2100 mV on a core whose nominal supply is 1100 mV is
+      not somewhere to sit by default.
+
+      The regulator only offers 1800 / 1900 / 2000 / 2100 mV in this
+      region; asking for anything else is a compile error.
+
+      How to test it properly: the failure it guards against is ~80%
+      intermittent, so a single clean boot proves nothing. Use the 76-test
+      reduced repro (the first 75 ir_tests in sorted order followed by
+      mibench_dijkstra.c, ~50 s a run), run each voltage at least 5 times,
+      and compare failure RATES. An early wrong conclusion in this area
+      came from one lucky pass.
 
 config CONFIG_CPU_HAS_FPU
-    bool 
+    bool
 
-config CONFIG_CPU_USE_FPU 
+config CONFIG_CPU_USE_FPU
     bool "Use floating point unit"
-    depends on CONFIG_CPU_HAS_FPU 
+    depends on CONFIG_CPU_HAS_FPU
+
+config CONFIG_CPU_HAS_DCP
+    bool
+    help
+      The CPU has Raspberry Pi's double coprocessor (DCP) on CP4: a set of
+      primitives that a short instruction sequence composes into an IEEE double
+      operation. Selected by the CPU, not by the user.
+
+      Unlike the FPU, the DCP holds state (X, Y and EFD) that the hardware does
+      not stack on exception entry, and a DCP sequence is not atomic. When user
+      code may execute those sequences the context switch has to save and
+      restore that state itself -- see CONFIG_BUILD_USERSPACE_HARDWARE_FP.
 
 
 endmenu

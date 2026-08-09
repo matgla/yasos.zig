@@ -61,6 +61,10 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
             return self.impl.flush();
         }
 
+        pub fn set_baudrate(self: Self, baudrate: u32) void {
+            self.impl.set_baudrate(baudrate);
+        }
+
         pub fn is_readable(self: Self) bool {
             return self.impl.is_readable();
         }
@@ -68,8 +72,38 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
         pub fn bytes_to_read(self: Self) usize {
             return self.impl.bytes_to_read();
         }
+
+        /// Receive-path loss accounting. Backends that do not track it report
+        /// zeros rather than failing to compile, so a diagnostic reader can be
+        /// written once and built for every board.
+        pub fn rx_stats(self: Self) RxStats {
+            if (@hasDecl(UartImplementation, "get_rx_stats")) {
+                return self.impl.get_rx_stats();
+            }
+            return .{};
+        }
     };
 }
+
+/// Where received bytes are lost, counted separately because the fixes differ.
+///
+/// `overruns` is the hardware FIFO overflowing while the receive interrupt was
+/// masked; `dropped` is the software ring above it overflowing because the
+/// reader could not keep up; `fifo_full` is how often the interrupt arrived to
+/// find the FIFO already full, which catches the same lateness without relying
+/// on the overrun flag being where we expect it. `framing_errors` separates a
+/// corrupted line from a merely congested one. The two `max_*_gap_us` values
+/// are how long the interrupt had been away when it happened, which sizes the
+/// critical section responsible.
+pub const RxStats = struct {
+    bytes: u32 = 0,
+    overruns: u32 = 0,
+    dropped: u32 = 0,
+    fifo_full: u32 = 0,
+    framing_errors: u32 = 0,
+    max_overrun_gap_us: u32 = 0,
+    max_late_gap_us: u32 = 0,
+};
 
 pub const WriteError = error{
     WriteFailure,

@@ -33,6 +33,18 @@ const c = @import("libc_imports").c;
 
 const log = std.log.scoped(.@"vfs/driverfs");
 
+fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
+    data.* = std.mem.zeroes(c.struct_stat);
+
+    const normalized_path = if (path.len == 0) "/" else path;
+    const device_hash = std.hash.Wyhash.hash(0, "driverfs") | 1;
+    const inode_hash = std.hash.Wyhash.hash(device_hash, normalized_path) | 1;
+
+    data.st_dev = @truncate(device_hash);
+    data.st_ino = @truncate(inode_hash);
+    data.st_nlink = 1;
+}
+
 const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
     base: kernel.fs.ReadOnlyFile,
@@ -155,6 +167,7 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         _ = follow_links;
+        initialize_stat_identity(data, path);
         var node = try self.get(path);
         defer node.delete();
         data.st_blksize = 512;

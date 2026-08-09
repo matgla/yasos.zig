@@ -15,8 +15,6 @@
 
 const std = @import("std");
 
-const log = std.log.scoped(.@"hal/uart");
-
 pub fn RingBuffer(BufferType: type, BufferSize: usize) type {
     return struct {
         const Self = @This();
@@ -24,24 +22,38 @@ pub fn RingBuffer(BufferType: type, BufferSize: usize) type {
         buffer: [BufferSize]BufferType,
         head: usize,
         tail: usize,
+        dropped: usize,
 
         pub fn init() linksection(".time_critical") Self {
             return Self{
                 .buffer = [_]u8{0} ** BufferSize,
                 .head = 0,
                 .tail = 0,
+                .dropped = 0,
             };
         }
 
+        /// A full buffer drops *data* and counts it, rather than making room by
+        /// discarding the oldest byte. The only caller is the UART RX
+        /// interrupt, where the buffer holds a byte stream: dropping the tail
+        /// costs the bytes that have not been looked at yet, while dropping the
+        /// head corrupts a message the reader is part way through.
+        ///
+        /// It also must not log. push() runs in the RX interrupt, a log write
+        /// goes out over the same UART, and that write drains the RX FIFO
+        /// inline (see Uart.write) -- straight back into push(), which can
+        /// overflow again. Overflow is exactly when that recursion is live, so
+        /// the count is left for a caller outside the interrupt to report.
         pub fn push(self: *Self, data: u8) linksection(".time_critical") void {
             const next_head = (self.head + 1) % BufferSize;
             if (next_head == self.tail) {
-                log.warn("RingBuffer overflow, dropping oldest data", .{});
-                _ = self.pop();
+                self.dropped +%= 1;
+                return;
             }
             self.buffer[self.head] = data;
             self.head = next_head;
         }
+
 
         pub fn pop(self: *Self) linksection(".time_critical") ?BufferType {
             if (self.head == self.tail) {

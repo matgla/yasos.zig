@@ -78,10 +78,24 @@ pub fn ItemTable(comptime ItemType: anytype) type {
         }
 
         pub fn element_by_name(self: *const Self, name: []const u8) ?*const ItemType {
-            if (self.hashtable) |ht| {
-                return ht.lookup(name, self);
+            // The hash table only exists for symbols, and `YaffHashTable.lookup`
+            // is typed against SymbolTable; the comptime guard keeps this from
+            // being analysed at all for a DependencyTable.
+            if (comptime ItemType == Symbol) {
+                if (self.hashtable) |ht| {
+                    // A miss is authoritative, and has to be: resolution asks
+                    // each module in turn whether it owns a name, so *most*
+                    // lookups are expected misses -- an import is by definition
+                    // absent from the importer's own table, and from every
+                    // dependency listed before the one that exports it. Falling
+                    // back to the linear scan on a miss therefore paid the full
+                    // strided walk on the common path and gave back most of
+                    // what the hash table is for. The table covers exactly this
+                    // module's symbols, so "not in the table" means "not in
+                    // this module", which is an answer rather than a failure.
+                    return ht.lookup(name, self);
+                }
             }
-            // Fallback to linear search
             var it = self.root;
             for (0..self.number_of_items) |_| {
                 if (std.mem.eql(u8, it.name(), name)) {

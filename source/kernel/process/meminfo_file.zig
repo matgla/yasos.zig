@@ -21,6 +21,7 @@ const std = @import("std");
 
 const c = @import("libc_imports").c;
 const interface = @import("interface");
+const root = @import("root");
 
 const kernel = @import("../kernel.zig");
 
@@ -31,11 +32,25 @@ const MemoryInfo = struct {
     total: usize,
 };
 
-const BufferSize = 128;
+const BufferSize = 640; // 15 lines of fixed-width fields; bufPrint failure here is silent
 const BufferedFileForMeminfo = kernel.fs.BufferedFile(BufferSize);
 pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct {
     const Self = @This();
     base: BufferedFileForMeminfo,
+
+    fn get_tmp_memory_usage() usize {
+        if (@hasDecl(root, "get_tmp_memory_usage")) {
+            return root.get_tmp_memory_usage();
+        }
+        return 0;
+    }
+
+    fn get_tmp_memory_peak() usize {
+        if (@hasDecl(root, "get_tmp_memory_peak")) {
+            return root.get_tmp_memory_peak();
+        }
+        return 0;
+    }
 
     pub fn create() MemInfoFile {
         var meminfo = MemInfoFile.init(.{
@@ -51,7 +66,11 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
 
     pub fn sync(self: *Self) i32 {
         const memory_used: usize = kernel.memory.heap.malloc.get_usage();
-        const memory_used_slow = kernel.process.process_manager.instance.get_process_memory_pool().get_used_size();
+        const memory_used_slow = if (kernel.process.process_manager.is_initialized())
+            kernel.process.process_manager.instance.get_process_memory_pool().get_used_size()
+        else
+            0;
+        const memory_used_tmp = get_tmp_memory_usage();
         const memory_used_combined = memory_used + memory_used_slow;
         var buffer = &interface.base(self)._buffer;
         var written_length: usize = 0;
@@ -61,7 +80,33 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
         written_length += buf.len;
         buf = std.fmt.bufPrint(buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
         written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "MemTmpUsed:      {s}\n", .{format_size(memory_used_tmp, &sizebuf)}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "MemTmpPeak:      {s}\n", .{format_size(get_tmp_memory_peak(), &sizebuf)}) catch buf;
+        written_length += buf.len;
         buf = std.fmt.bufPrint(buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch buf;
+        written_length += buf.len;
+        const alloc_count = kernel.memory.heap.malloc.get_counter();
+        buf = std.fmt.bufPrint(buffer[written_length..], "AllocCount:      {d: >8}\n", .{alloc_count}) catch buf;
+        written_length += buf.len;
+        const m = kernel.memory.heap.malloc;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B1_4:            {d: >8}\n", .{m.bucket_1_4}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B5:              {d: >8}\n", .{m.bucket_5}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B6:              {d: >8}\n", .{m.bucket_6}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B7:              {d: >8}\n", .{m.bucket_7}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B8:              {d: >8}\n", .{m.bucket_8}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B9_10:           {d: >8}\n", .{m.bucket_9_10}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B11_12:          {d: >8}\n", .{m.bucket_11_12}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B13_16:          {d: >8}\n", .{m.bucket_13_16}) catch buf;
+        written_length += buf.len;
+        buf = std.fmt.bufPrint(buffer[written_length..], "B17p:            {d: >8}\n", .{m.bucket_17_plus}) catch buf;
         written_length += buf.len;
         interface.base(self)._end = written_length;
         return 0;
@@ -101,17 +146,23 @@ test "MemInfoFile.ShouldShowMemInfo" {
     const expected_text =
         \\MemUsed:                0 B
         \\MemKernelUsed:          0 B
+        \\MemTmpUsed:             0 B
+        \\MemTmpPeak:             0 B
         \\MemProcessUsed:         0 B
         \\
     ;
-    try std.testing.expectEqualStrings(expected_text, buffer[0..readed]);
+    // sync() appends AllocCount + allocator-bucket diagnostics after the memory
+    // accounting block; this test validates the accounting, so compare just that
+    // leading block rather than the full (and volatile) bucket dump.
+    try std.testing.expect(readed >= expected_text.len);
+    try std.testing.expectEqualStrings(expected_text, buffer[0..expected_text.len]);
 
     var malloc = kernel.memory.heap.malloc.MallocAllocator(.{}).init();
     defer malloc.deinit();
 
     const a = try malloc.allocator().alloc(u8, 1024 * 1024); // allocate 1 MB
     defer malloc.allocator().free(a);
-    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(512, 123);
+    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(8192, 123); // 8192*256B = 2 MiB (page grain is now 256 B)
 
     _ = sut.interface.sync();
     _ = try sut.interface.seek(0, c.SEEK_SET);
@@ -120,14 +171,17 @@ test "MemInfoFile.ShouldShowMemInfo" {
     const expected_allocated_text =
         \\MemUsed:             3072 KB
         \\MemKernelUsed:       1024 KB
+        \\MemTmpUsed:             0 B
+        \\MemTmpPeak:             0 B
         \\MemProcessUsed:      2048 KB
         \\
     ;
-    try std.testing.expectEqualStrings(expected_allocated_text, buffer[0..readed_after_alloc]);
+    try std.testing.expect(readed_after_alloc >= expected_allocated_text.len);
+    try std.testing.expectEqualStrings(expected_allocated_text, buffer[0..expected_allocated_text.len]);
 
     const b = try malloc.allocator().alloc(u8, 1024 * 1024 * 2048);
     defer malloc.allocator().free(b);
-    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(512, 123);
+    _ = kernel.process.process_manager.instance.get_process_memory_pool().allocate_pages(8192, 123); // 8192*256B = 2 MiB (page grain is now 256 B)
 
     _ = sut.interface.sync();
     _ = try sut.interface.seek(0, c.SEEK_SET);
@@ -136,8 +190,11 @@ test "MemInfoFile.ShouldShowMemInfo" {
     const expected_allocated2_text =
         \\MemUsed:             2053 MB
         \\MemKernelUsed:       2049 MB
+        \\MemTmpUsed:             0 B
+        \\MemTmpPeak:             0 B
         \\MemProcessUsed:      4096 KB
         \\
     ;
-    try std.testing.expectEqualStrings(expected_allocated2_text, buffer[0..readed_after_alloc2]);
+    try std.testing.expect(readed_after_alloc2 >= expected_allocated2_text.len);
+    try std.testing.expectEqualStrings(expected_allocated2_text, buffer[0..expected_allocated2_text.len]);
 }

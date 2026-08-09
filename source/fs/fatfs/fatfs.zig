@@ -24,6 +24,7 @@ const oop = @import("interface");
 const fatfs = @import("zfat");
 const c = @import("libc_imports").c;
 
+const config = @import("config");
 const kernel = @import("kernel");
 const arch = @import("arch");
 
@@ -35,6 +36,18 @@ const FatFsIterator = @import("fatfs_directory.zig").FatFsIterator;
 
 const fatfs_error_to_errno = @import("errno_converter.zig").fatfs_error_to_errno;
 
+fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
+    data.* = std.mem.zeroes(c.struct_stat);
+
+    const normalized_path = if (path.len == 0) "/" else path;
+    const device_hash = std.hash.Wyhash.hash(0, "fatfs") | 1;
+    const inode_hash = std.hash.Wyhash.hash(device_hash, normalized_path) | 1;
+
+    data.st_dev = @truncate(device_hash);
+    data.st_ino = @truncate(inode_hash);
+    data.st_nlink = 1;
+}
+
 var global_fs: fatfs.FileSystem = undefined;
 var workspace_buffer: [4096]u8 = undefined;
 pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
@@ -44,17 +57,22 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     _disk_wrapper: DiskWrapper,
 
     pub fn init(allocator: std.mem.Allocator, device: kernel.fs.IFile) !FatFs {
+        var wrapper = DiskWrapper{ .device = try device.clone() };
+        // Safe to do before the wrapper reaches its final address: it holds the
+        // cache by slice, so moving the struct carries the reference along.
+        wrapper.attach_cache(allocator);
         return FatFs.init(.{
             ._allocator = allocator,
             ._device = try device.clone(),
-            ._disk_wrapper = DiskWrapper{
-                .device = try device.clone(),
-            },
+            ._disk_wrapper = wrapper,
         });
     }
 
     pub fn mount(self: *Self) i32 {
         log.debug("Mounting FAT filesystem", .{});
+        // Whatever the cache still holds describes whichever medium was there
+        // before this mount, which is not something a mount may assume.
+        self._disk_wrapper.invalidate();
         fatfs.disks[0] = &self._disk_wrapper.interface;
         global_fs.mount("0:", true) catch |err| {
             log.err("Failed to mount FAT filesystem: {s}", .{@errorName(err)});
@@ -66,6 +84,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     pub fn delete(self: *Self) void {
         _ = self.umount();
         self._device.interface.delete();
+        self._disk_wrapper.release_cache(self._allocator);
         self._disk_wrapper.device.interface.delete();
     }
 
@@ -80,7 +99,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
-        log.info("Creating file at path: {s}", .{path});
         const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
         var file = try fatfs.File.create(filepath);
@@ -88,7 +106,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) anyerror!void {
-        log.info("Creating directory at path: {s}", .{path});
         const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
         _ = fatfs.mkdir(filepath) catch |err| {
@@ -97,7 +114,6 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        log.info("Removing file or directory at path: {s}", .{path});
         const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
         try fatfs.unlink(filepath);
@@ -112,24 +128,48 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         const filepath = try self._allocator.dupeZ(u8, path);
         defer self._allocator.free(filepath);
 
-        var dir: ?fatfs.Dir = fatfs.Dir.open(filepath) catch blk: {
-            break :blk null;
-        };
+        // Files first, and only once.
+        //
+        // Every FatFs entry point resolves the path by walking the directory,
+        // and that walk is linear in the number of entries: measured at ~10 ms
+        // in a 1685-entry directory against 0.15 ms in a small one. This used
+        // to probe with Dir.open (one walk, which fails for a file) and then
+        // open the file (a second walk), so opening a source in the test
+        // corpus cost ~20 ms -- twice.
+        //
+        // File.open resolves the path once and hands back the handle the node
+        // needs, so the common case is now a single walk. A directory costs
+        // that failed probe plus one stat, which is what it cost before.
+        if (FatFsFile.InstanceType.create_node(self._allocator, filepath)) |node| {
+            return node;
+        } else |_| {}
 
-        if (dir) |*d| {
-            d.close();
+        // Not a file: stat says whether it is a directory or nothing at all.
+        // The check matters -- FatFsDirectory.create tolerates a failed stat
+        // and would happily produce a node for a path that does not exist.
+        const maybe_info: ?fatfs.FileInfo = fatfs.stat(filepath) catch null;
+        if (maybe_info) |info| {
+            if (info.kind != .Directory) {
+                return kernel.errno.ErrnoSet.NoEntry;
+            }
             return try FatFsDirectory.InstanceType.create_node(self._allocator, filepath);
         }
-        return try FatFsFile.InstanceType.create_node(self._allocator, filepath);
+
+        // FatFs cannot stat a volume root ("" or "/"), so confirm that one the
+        // way this function always used to: by opening it as a directory.
+        var dir = fatfs.Dir.open(filepath) catch return kernel.errno.ErrnoSet.NoEntry;
+        dir.close();
+        return try FatFsDirectory.InstanceType.create_node(self._allocator, filepath);
     }
 
     pub fn format(self: *Self) anyerror!void {
-        log.info("Formatting FAT filesystem", .{});
-
         fatfs.disks[0] = &self._disk_wrapper.interface;
         fatfs.mkfs(
             "0:",
-            .{ .filesystem = .fat32, .sector_align = 1, .use_partitions = false },
+            // `any` = best fit for the volume size. FAT32 needs >= 65525
+            // clusters, which a small device (the 1 MB QEMU fatdisk window)
+            // can never reach, so hardcoding it aborted mkfs there.
+            .{ .filesystem = .any, .sector_align = 1, .use_partitions = false },
             &workspace_buffer,
         ) catch |err| {
             log.err("Failed to format FAT filesystem: {s}", .{@errorName(err)});
@@ -141,34 +181,33 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         _ = follow_symlinks;
+        initialize_stat_identity(data, path);
         if (std.mem.eql(u8, path, "/") or path.len == 0) {
-            data.st_blksize = 512;
-            data.st_size = 0;
             data.st_mode = c.S_IFDIR;
-            data.st_nlink = 0; // Number of links,
-            data.st_uid = 0;
-            data.st_gid = 0; // Group ID
-            data.st_dev = 0; // Device ID
-            data.st_ino = 0; // Inode number
-            data.st_rdev = 0; // Device type (for special files)
-            data.st_blocks = 0;
+            data.st_blksize = 512;
             return;
         }
         var path_c = try std.fmt.allocPrintSentinel(self._allocator, "0:/{s} ", .{path}, 0);
         path_c[path_c.len - 1] = 0; // Null-terminate
         defer self._allocator.free(path_c);
         const finfo = fatfs.stat(path_c) catch |err| {
+            // NoFile/NoPath just mean "not on this filesystem" — an expected
+            // negative result the VFS relies on for its symlink/cross-mount
+            // fallback (vfs.stat re-resolves on failure). Logging it at err
+            // level spams every stat that crosses a symlink (e.g. /tmp).
+            switch (err) {
+                error.NoFile, error.NoPath => {
+                    log.debug("stat: path not found: {s}", .{path});
+                },
+                else => {
+                    log.err("Failed to stat path: {s}, error: {s}", .{ path, @errorName(err) });
+                },
+            }
             return fatfs_error_to_errno(err);
         };
         data.st_blksize = 512;
         data.st_size = @intCast(finfo.size);
         data.st_mode = if (finfo.kind == .Directory) c.S_IFDIR else c.S_IFREG;
-        data.st_nlink = 0; // Number of links,
-        data.st_uid = 0;
-        data.st_gid = 0; // Group ID
-        data.st_dev = 0; // Device ID
-        data.st_ino = 0; // Inode number
-        data.st_rdev = 0; // Device type (for special files)
         data.st_blocks = @intCast((finfo.size + 511) / 512);
     }
 
@@ -177,6 +216,27 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         _ = old_path;
         _ = new_path;
         return error.NotSupported;
+    }
+
+    pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        _ = self;
+        _ = target;
+        _ = linkpath;
+        return error.NotSupported; // FAT has no symbolic links
+    }
+
+    pub fn supports_symlinks(self: *const Self) bool {
+        _ = self;
+        // FAT has no such directory entry, so a path under this mount can
+        // never have a link in it and the VFS can skip looking.
+        return false;
+    }
+
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        _ = self;
+        _ = path;
+        _ = buffer;
+        return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
@@ -192,7 +252,66 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     const DiskWrapper = struct {
         const sector_size = 512;
+
+        // Read cache for the FAT metadata.
+        //
+        // FatFs reads file *data* straight into the caller's buffer, in runs of
+        // as many sectors as the read spans. Everything else -- directory
+        // entries, the allocation table -- goes through its single-sector
+        // window, which asks for one sector per call. On an SD card a read is
+        // almost entirely the command sequence around it rather than the 512
+        // bytes: measured on the smoke rig, a sector fetched on its own costs
+        // ~1.6 ms, while a sector inside a multi-block transfer costs ~0.13 ms.
+        //
+        // That gap is what made creating a file cost time proportional to how
+        // many files the directory already held -- FAT walks the directory to
+        // prove the name is new, and the walk paid the per-command price on
+        // every sector it crossed. `open()` in a 600-file directory measured
+        // 108 ms against 22 ms in a 100-file one, which is most of why pushing
+        // the smoke corpus (2000 sources in one directory) crawled.
+        //
+        // So a single-sector read is served out of a line spanning
+        // `line_sectors` consecutive sectors, filled by one multi-block read.
+        // The walks that pay for this are sequential, so a line filled for one
+        // sector serves the rest.
+        const line_sectors: u32 = config.fatfs.cache_line_sectors;
+        const line_count: usize = config.fatfs.cache_lines;
+        const configured = line_sectors > 0 and line_count > 0;
+        const line_bytes: usize = @as(usize, line_sectors) * sector_size;
+
+        /// One cached run. `sectors` is zero when the line holds nothing, and
+        /// short of `line_sectors` only for the line covering the end of the
+        /// disk, which must not be read past.
+        const Line = struct {
+            base: fatfs.LBA = 0,
+            sectors: u32 = 0,
+            used: u32 = 0,
+        };
+
         device: kernel.fs.IFile,
+        /// Held by reference, never inline: the kernel's MSP stack is 16 KB
+        /// (see the linker script) and a `FatFs` is built as a value before it
+        /// reaches the allocator, so an inline buffer of any useful size
+        /// overflows that stack during boot -- which it did, silently, as a
+        /// double fault before the console was up.
+        ///
+        /// Both are empty when the cache is configured away, and also when the
+        /// kernel heap could not spare the room -- 76 KB is all of it. A
+        /// filesystem that reads a little slower is a far better outcome than
+        /// one that refuses to mount.
+        lines: []Line = &.{},
+        cache: []u8 = &.{},
+        /// Counter standing in for time in the LRU choice; nothing here needs a
+        /// real clock, only an order. It is 32 bits and wraps, which keeps this
+        /// struct 4-byte aligned so `@fieldParentPtr` can reach it from the disk
+        /// interface below. A wrap costs one poorly chosen eviction, never a
+        /// wrong answer: a line is matched on the sectors it holds, and this
+        /// only decides which one to give up.
+        clock: u32 = 0,
+        /// Filled on first use. Zero means "not known yet", which is also what
+        /// a device that cannot report its size leaves it as -- lines are then
+        /// never shortened, which is correct for every device that can.
+        sectors_on_disk: fatfs.LBA = 0,
 
         interface: fatfs.Disk = fatfs.Disk{
             .getStatusFn = &getStatus,
@@ -216,26 +335,169 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             return getStatus(&self.interface);
         }
 
-        pub fn read(interface: *fatfs.Disk, buff: [*]u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+        /// Attach a cache, or leave the wrapper reading straight through when
+        /// the configuration asks for none or the heap cannot spare it.
+        pub fn attach_cache(self: *DiskWrapper, allocator: std.mem.Allocator) void {
+            if (!configured) return;
+            const cache = allocator.alloc(u8, line_count * line_bytes) catch {
+                log.warn("no room for the {d} KiB FAT cache; reading through", .{(line_count * line_bytes) / 1024});
+                return;
+            };
+            const lines = allocator.alloc(Line, line_count) catch {
+                allocator.free(cache);
+                return;
+            };
+            @memset(lines, .{});
+            self.cache = cache;
+            self.lines = lines;
+        }
+
+        pub fn release_cache(self: *DiskWrapper, allocator: std.mem.Allocator) void {
+            allocator.free(self.cache);
+            allocator.free(self.lines);
+            self.cache = &.{};
+            self.lines = &.{};
+        }
+
+        fn caching(self: *const DiskWrapper) bool {
+            return self.lines.len != 0;
+        }
+
+        /// Drop everything cached, for when what is on the card stops being
+        /// what we last saw it as: a mount, or a reformat.
+        pub fn invalidate(self: *DiskWrapper) void {
+            for (self.lines) |*line| {
+                line.sectors = 0;
+            }
+            self.sectors_on_disk = 0;
+        }
+
+        fn tick(self: *DiskWrapper) u32 {
+            self.clock +%= 1;
+            return self.clock;
+        }
+
+        fn disk_sectors(self: *DiskWrapper) fatfs.LBA {
+            if (self.sectors_on_disk == 0) {
+                const size = self.device.interface.size();
+                if (size > 0) {
+                    self.sectors_on_disk = @intCast(size >> 9);
+                }
+            }
+            return self.sectors_on_disk;
+        }
+
+        fn line_data(self: *const DiskWrapper, index: usize) []u8 {
+            return self.cache[index * line_bytes .. (index + 1) * line_bytes];
+        }
+
+        /// The device I/O itself, with the seek and the transfer kept together
+        /// under one critical section so nothing can reposition the device
+        /// between them. Everything the cache does around this runs with
+        /// interrupts on.
+        fn read_through(self: *DiskWrapper, into: [*]u8, sector: fatfs.LBA, count: u32) fatfs.Disk.Error!void {
             const state = arch.sync.save_and_disable_interrupts();
             defer arch.sync.restore_interrupts(state);
-            const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             const position = self.device.interface.seek(@as(i64, @intCast(sector)) * sector_size, c.SEEK_SET) catch return error.IoError;
             if (position < 0) return error.IoError;
-            if (self.device.interface.read(buff[0 .. sector_size * count]) != sector_size * count) {
+            const length = sector_size * count;
+            if (self.device.interface.read(into[0..length]) != length) {
                 return error.IoError;
             }
         }
 
-        pub fn write(interface: *fatfs.Disk, buff: [*]const u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+        fn write_through(self: *DiskWrapper, from: [*]const u8, sector: fatfs.LBA, count: u32) fatfs.Disk.Error!void {
             const state = arch.sync.save_and_disable_interrupts();
             defer arch.sync.restore_interrupts(state);
-            const self: *DiskWrapper = @fieldParentPtr("interface", interface);
-            log.debug("Writing to sector {d}, count {d}", .{ sector, count });
             const position = self.device.interface.seek(@as(i64, @intCast(sector)) * sector_size, c.SEEK_SET) catch return error.IoError;
             if (position < 0) return error.IoError;
-            if (self.device.interface.write(buff[0 .. sector_size * count]) != sector_size * count) {
+            const length = sector_size * count;
+            if (self.device.interface.write(from[0..length]) != length) {
                 return error.IoError;
+            }
+        }
+
+        /// Index of the line holding *sector*, filling one if none does.
+        fn line_for(self: *DiskWrapper, sector: fatfs.LBA) fatfs.Disk.Error!usize {
+            // Unreachable through `read`, which serves everything directly when
+            // there is no cache; said here too so a zero line size cannot reach
+            // the modulo below.
+            if (!configured or !self.caching()) return error.IoError;
+            const base = sector - (sector % line_sectors);
+            var victim: usize = 0;
+            for (0..self.lines.len) |index| {
+                const line = self.lines[index];
+                if (line.sectors != 0 and line.base == base and sector - base < line.sectors) {
+                    self.lines[index].used = self.tick();
+                    return index;
+                }
+                if (line.used < self.lines[victim].used) {
+                    victim = index;
+                }
+            }
+
+            var sectors: u32 = line_sectors;
+            const total = self.disk_sectors();
+            if (total != 0 and base + sectors > total) {
+                sectors = @intCast(total - base);
+            }
+            // Marked empty across the read so a failure cannot leave a line
+            // that claims to hold sectors it never received.
+            self.lines[victim].sectors = 0;
+            try self.read_through(self.line_data(victim).ptr, base, sectors);
+            self.lines[victim] = .{ .base = base, .sectors = sectors, .used = self.tick() };
+            return victim;
+        }
+
+        pub fn read(interface: *fatfs.Disk, buff: [*]u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            const self: *DiskWrapper = @fieldParentPtr("interface", interface);
+            // A run this long already amortises the per-command cost the cache
+            // exists to remove, and filling lines for it would evict more than
+            // it saves. File data arrives here.
+            if (!self.caching() or count >= line_sectors) {
+                return self.read_through(buff, sector, @intCast(count));
+            }
+
+            var done: u32 = 0;
+            while (done < count) {
+                const wanted = sector + done;
+                const index = try self.line_for(wanted);
+                const line = self.lines[index];
+                const offset: u32 = @intCast(wanted - line.base);
+                if (offset >= line.sectors) {
+                    // Past the end of the disk; the device is the one entitled
+                    // to say so.
+                    return self.read_through(buff + done * sector_size, wanted, count - done);
+                }
+                const available = @min(count - done, line.sectors - offset);
+                @memcpy(
+                    buff[done * sector_size .. (done + available) * sector_size],
+                    self.line_data(index)[offset * sector_size .. (offset + available) * sector_size],
+                );
+                done += available;
+            }
+        }
+
+        pub fn write(interface: *fatfs.Disk, buff: [*]const u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            const self: *DiskWrapper = @fieldParentPtr("interface", interface);
+            log.debug("Writing to sector {d}, count {d}", .{ sector, count });
+            try self.write_through(buff, sector, @intCast(count));
+            if (!self.caching()) return;
+
+            // Refresh what we hold rather than dropping it. Every file creation
+            // writes a directory entry into the sectors it has just searched,
+            // and invalidating there would make the next creation re-read the
+            // run we still have -- which is exactly the cost being removed.
+            for (0..self.lines.len) |index| {
+                const line = self.lines[index];
+                if (line.sectors == 0) continue;
+                const first = @max(line.base, sector);
+                const last = @min(line.base + line.sectors, sector + count);
+                if (first >= last) continue;
+                const into: usize = @as(usize, @intCast(first - line.base)) * sector_size;
+                const from: usize = @as(usize, @intCast(first - sector)) * sector_size;
+                const length: usize = @as(usize, @intCast(last - first)) * sector_size;
+                @memcpy(self.line_data(index)[into .. into + length], buff[from .. from + length]);
             }
         }
 

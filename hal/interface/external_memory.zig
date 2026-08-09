@@ -44,5 +44,16 @@ pub fn ExternalMemory(comptime ExternalMemoryImpl: anytype) type {
         pub fn perform_post(self: *Self) bool {
             return self.impl.perform_post();
         }
+
+        /// Switch the external memory interface to whatever faster read mode
+        /// the board declares, once the system is up. Separate from `enable`
+        /// because it changes the timing of every instruction fetch, which is
+        /// not something to do underneath a driver that is still bringing its
+        /// hardware up. Boards that declare nothing get a no-op.
+        pub fn enable_fast_reads(self: *Self) void {
+            if (@hasDecl(ExternalMemoryImpl, "enable_fast_reads")) {
+                self.impl.enable_fast_reads();
+            }
+        }
     };
 }

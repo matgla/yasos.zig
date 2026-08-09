@@ -145,6 +145,17 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
         return self.data.capacity;
     }
 
+    pub fn truncate(self: *Self, length: u64) anyerror!void {
+        const len: usize = @intCast(length);
+        if (len > self.data.items.len) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+        self.data.shrinkRetainingCapacity(len);
+        if (self.position > @as(isize, @intCast(len))) {
+            self.position = @intCast(len);
+        }
+    }
+
     pub fn sync(self: *Self) i32 {
         _ = self;
         return 0;

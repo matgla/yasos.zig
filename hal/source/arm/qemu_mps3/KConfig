@@ -1,0 +1,49 @@
+# KConfig
+#
+# Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
+#
+# This program is free software: you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation, either version
+# 3 of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be
+# useful, but WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+# PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General
+# Public License along with this program. If not, see
+# <https://www.gnu.org/licenses/>.
+#
+
+config CPU_QEMU_MPS3
+  bool "qemu_mps3"
+  select CPU_HAS_MPU
+
+if CPU_QEMU_MPS3
+  config CONFIG_CPU
+    def_string "qemu_mps3"
+
+  config CONFIG_CPU_HAS_FPU
+    def_bool y
+
+  config CONFIG_CPU_USE_FPU
+    def_bool y
+
+  # QEMU's Cortex-M33 model advertises single precision only (MVFR0 DP=0) and
+  # has no CP4, so no DCP: doubles stay in the software runtime.
+  config CONFIG_BUILD_USERSPACE_FP_MFPU
+    def_string "fpv5-sp-d16"
+
+  config CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
+    def_bool n
+
+  choice CHOICE_CPU_CORE
+    default CPU_CORE_ARM_CORTEX_M33
+  endchoice
+
+  choice CHOICE_CPU_FAMILY
+    default CPU_FAMILY_ARM
+  endchoice
+endif

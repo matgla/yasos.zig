@@ -52,6 +52,12 @@ pub const mmio = struct {
     }
 };
 
+// Not behind the HAL interface: the XIP cache counters are an RP2350 part
+// feature with no equivalent on the QEMU targets, and the kernel reaches them
+// through a provider hook rather than a call, so there is nothing for a stub
+// on another board to usefully return.
+pub const xip = @import("source/xip.zig");
+
 comptime {
     _ = @import("startup/boot2_rom.zig");
     _ = @import("hal_common");

@@ -29,16 +29,28 @@ pub const LoadedUniqueData = struct {
     address: usize,
     size: usize,
     got: ?[]usize,
+    // Mirrors the real loader's combined data/bss/got backing buffer so kernel
+    // code (save_parent_writable_sections in source/kernel/modules.zig) compiles
+    // against this host-test stub.
+    _underlaying_memory: []u8 = &.{},
 };
+
+var empty_section = [_]u8{};
 
 pub const Module = struct {
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
     xip: bool,
     list_node: std.DoublyLinkedList.Node,
+    child_list_node: std.DoublyLinkedList.Node,
+    children: std.DoublyLinkedList,
     entry: ?SymbolEntry,
     name: ?[]const u8,
     unique_data: ?LoadedUniqueData,
+    // Mirrors the real Module's YAFF stack/heap profile so the exec path in
+    // source/kernel/process_manager.zig compiles against this host-test stub.
+    stack_size: u32 = 0xFFFFFFFF,
+    heap_size: u32 = 0xFFFFFFFF,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -47,15 +59,47 @@ pub const Module = struct {
             .process_allocator = process_allocator,
             .xip = xip,
             .list_node = .{},
+            .child_list_node = .{},
+            .children = .{},
             .entry = null,
             .name = "dummy_module",
             .unique_data = null,
+            .stack_size = 0xFFFFFFFF,
+            .heap_size = 0xFFFFFFFF,
         };
         return module;
     }
 
     pub fn destroy(self: *Module) void {
         self.allocator.destroy(self);
+    }
+
+    // Section accessors mirroring the real Module API so kernel code that
+    // renders /proc/<pid>/maps (source/kernel/modules.zig) compiles against
+    // this host-test stub.
+    pub fn get_text(self: *const Module) []const u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_plt(self: *const Module) []const u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_data(self: *const Module) []u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_bss(self: *const Module) []u8 {
+        _ = self;
+        return empty_section[0..];
+    }
+
+    pub fn get_got(self: *const Module) []const u8 {
+        _ = self;
+        return empty_section[0..];
     }
 
     pub fn find_symbol(self: *Module, name: []const u8) ?SymbolEntry {

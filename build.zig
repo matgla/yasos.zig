@@ -55,6 +55,13 @@ const Config = struct {
     board: []const u8,
     cpu: []const u8,
     cpu_arch: []const u8,
+    /// Optional so a config.json generated before these symbols existed still
+    /// parses; both default to "no DCP state to preserve".
+    cpu_has_dcp: ?bool = null,
+    build_userspace_hardware_fp: ?bool = null,
+    /// Gates the SVC-entry cycle stamp in context_switch.S; kept in step with
+    /// `perf_profile.enabled`, which reads the same Kconfig symbol.
+    instrumentation_perf_profiling: ?bool = null,
 };
 
 fn load_config(b: *std.Build, config_file: []const u8) !Config {
@@ -235,7 +242,11 @@ pub fn build(b: *std.Build) !void {
     kernel_tests.root_module.addImport("hal", hal_for_tests);
     kernel_tests.root_module.addImport("arch", arch_for_tests);
 
-    const oop = b.dependency("modules/oop", .{});
+    // Forward optimize, for the same reason as the MCU dependency in
+    // hal/build.zig: without it this builds Debug inside a release kernel, and
+    // `interface` is the vtable machinery every filesystem, driver and file
+    // object in the tree dispatches through.
+    const oop = b.dependency("modules/oop", .{ .optimize = optimize });
 
     kernel_tests.root_module.addImport("interface", oop.module("interface"));
     fs_tests.root_module.addImport("interface", oop.module("interface"));
@@ -377,7 +388,7 @@ pub fn build(b: *std.Build) !void {
 
             kernel_exec.root_module.addImport("kernel", kernel_module);
             kernel_exec.root_module.addImport("yasld", yasld.module("yasld"));
-            yasld.module("yasld").addIncludePath(b.path("./libs/tinycc"));
+            yasld.module("yasld").addIncludePath(b.path("./libs/tinycc/source/obj"));
             kernel_exec.root_module.addImport("libc_imports", libc_imports_module);
             kernel_exec.root_module.addIncludePath(b.path("."));
             const arch_module = b.addModule("arch", .{
@@ -385,6 +396,7 @@ pub fn build(b: *std.Build) !void {
             });
             arch_module.addIncludePath(b.path("."));
             arch_module.addIncludePath(b.path("libs/libc"));
+            arch_module.addImport("libc_imports", libc_imports_module);
 
             const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
             const board_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("board").?;
@@ -402,10 +414,25 @@ pub fn build(b: *std.Build) !void {
 
                 arch_module.addImport("config", config_module);
                 arch_arm_m.addImport("config", config_module);
+                arch_arm_m.addImport("libc_imports", libc_imports_module);
                 kernel_module.addImport("config", config_module);
                 kernel_module.addImport("yasld", yasld.module("yasld"));
                 kernel_module.addImport("arch", arch_module);
                 arch_arm_m.addImport("hal", hal_module);
+            }
+            // The context switch has to preserve the DCP's X/Y/EFD state when
+            // user code may run DCP sequences -- they are not atomic and the
+            // hardware stacks nothing for CP4. Same condition as
+            // `saves_dcp_state` in source/arch/arm-m/process.zig, which sizes
+            // the matching slot in the software frame.
+            if ((config.cpu_has_dcp orelse false) and (config.build_userspace_hardware_fp orelse false)) {
+                arch_module.addCMacro("YASOS_SAVE_DCP_STATE", "1");
+            }
+            // The syscall profiler needs a cycle stamp from inside the SVC
+            // handler; without it the recorded time would start after the
+            // trampoline and miss the dispatch cost entirely.
+            if (config.instrumentation_perf_profiling orelse false) {
+                arch_module.addCMacro("YASOS_PERF_SYSCALL_STAMP", "1");
             }
             arch_module.addAssemblyFile(b.path(b.fmt("source/arch/{s}/context_switch.S", .{config.cpu_arch})));
             boardDep.artifact("yasos_kernel").root_module.addImport("arch", arch_module);

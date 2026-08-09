@@ -45,23 +45,29 @@ fn configureCmake(b: *std.Build) ![]const u8 {
 
     const cmake_binary_dir = b.pathJoin(&.{ b.cache_root.path.?, "pico_sdk_generated" });
     std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
-    const cmake_binary_dir_absolute = std.fs.cwd().realpathAlloc(b.allocator, cmake_binary_dir) catch |err| {
-        if (err == error.FileNotFound) {
-            const cache_dir_absolute = try std.fs.cwd().realpathAlloc(b.allocator, b.cache_root.path.?);
-            const cache_dir = try std.fs.openDirAbsolute(cache_dir_absolute, .{});
-            _ = try cache_dir.makePath("pico_sdk_generated");
-            std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
 
-            const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
-            std.log.info("{s}", .{configure_project});
+    // Gate on the pioasm binary, not the cache directory: an interrupted build
+    // can leave pico_sdk_generated/ half-populated (e.g. only _deps fetched),
+    // which would otherwise skip the configure + pioasmBuild step and later fail
+    // with FileNotFound when generate_pio invokes the never-produced binary.
+    const pioasm_path = b.pathJoin(&.{ cmake_binary_dir, "pioasm", "pioasm" });
+    std.fs.cwd().access(pioasm_path, .{}) catch |err| {
+        if (err != error.FileNotFound) return err;
 
-            const build_pioasm = b.run(&.{ cmake_exe, "--build", @as([]const u8, cmake_binary_dir), "--target", "pioasmBuild" });
-            std.log.info("{s}", .{build_pioasm});
-            return cmake_binary_dir;
-        }
-        return err;
+        const cache_dir_absolute = try std.fs.cwd().realpathAlloc(b.allocator, b.cache_root.path.?);
+        const cache_dir = try std.fs.openDirAbsolute(cache_dir_absolute, .{});
+        // Reconfiguring a stale/partial cache does not reliably regenerate the
+        // pioasmBuild ExternalProject target, so start from a clean directory.
+        cache_dir.deleteTree("pico_sdk_generated") catch {};
+        _ = try cache_dir.makePath("pico_sdk_generated");
+
+        const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
+        std.log.info("{s}", .{configure_project});
+
+        const build_pioasm = b.run(&.{ cmake_exe, "--build", @as([]const u8, cmake_binary_dir), "--target", "pioasmBuild" });
+        std.log.info("{s}", .{build_pioasm});
+        return cmake_binary_dir;
     };
-    _ = cmake_binary_dir_absolute;
 
     return cmake_binary_dir;
 }
@@ -99,6 +105,12 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = mmc_spi_pio,
     });
     hal.addIncludePath(mmc_spi_pio.dirname());
+
+    const mmc_sdio_pio = try generate_pio(b, "mmc/mmc_sdio.pio", picosdk);
+    hal.addAnonymousImport("mmc_sdio_pio", .{
+        .root_source_file = mmc_sdio_pio,
+    });
+    hal.addIncludePath(mmc_sdio_pio.dirname());
 
     hal.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated" }) });
 
@@ -170,6 +182,7 @@ pub fn build(b: *std.Build) !void {
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_irq/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_gpio/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_pio/include"));
+    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_dma/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_sync/include"));
     hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_vreg/include"));
 
@@ -198,6 +211,16 @@ pub fn build(b: *std.Build) !void {
 
     hal.addCSourceFiles(.{
         .files = &.{
+            // MUST be first: provides interrupt-safe __malloc_lock/__malloc_unlock
+            // ahead of any object that references malloc, so newlib's no-op mlock.o
+            // is never pulled from libc_nano.a (avoids a duplicate-symbol error).
+            "malloc_lock.c",
+            // Second, and for the same class of reason: word-at-a-time
+            // memcpy/memset/memmove that must be seen before anything
+            // references them, or newlib-nano's byte-loop versions get pulled
+            // out of libc_nano.a and collide. Only pays when this HAL is built
+            // optimised -- at -O0 it is slower than the byte loop it replaces.
+            "mem_ops.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_uart/uart.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_clocks/clocks.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_irq/irq.c",
@@ -213,11 +236,20 @@ pub fn build(b: *std.Build) !void {
             "../../../libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_ticks/ticks.c",
             "../../../libs/pico-sdk/src/rp2_common/hardware_pio/pio.c",
+            "../../../libs/pico-sdk/src/rp2_common/hardware_dma/dma.c",
+            "../../../libs/pico-sdk/src/rp2_common/hardware_vreg/vreg.c",
+            "source/mmc/sdio_rp2350.c",
+            "startup/overclock.c",
             // "../../../libs/pico-sdk/src/common/pico_time/time.c",
             // "../../../libs/pico-sdk/src/common/pico_sync/lock_core.c",
         },
-        .flags = &.{"-std=c23"},
+        // -fno-builtin is kept for when mem_ops.c returns: without it the compiler
+        // recognises its copy loops and lowers them back into calls to the very
+        // functions being defined. It is harmless for the rest.
+        .flags = &.{ "-std=c23", "-fno-builtin" },
     });
+    hal.addIncludePath(b.path("source/mmc"));
+    hal.addIncludePath(b.path("startup"));
     hal.addAssemblyFile(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_irq/irq_handler_chain.S"));
     hal.addAssemblyFile(b.path("startup/startup.S"));
     hal.addAssemblyFile(b.path("source/external_memory.S"));

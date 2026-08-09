@@ -159,6 +159,39 @@ pub const MmcStub = struct {
         self.current_speed = speed;
     }
 
+    pub fn send_sdio_command(self: *MmcStub, cmd: u6, arg: u32) hal.mmc.SdioResponse {
+        _ = self;
+        _ = cmd;
+        _ = arg;
+        return .{ .command_index = 0, .card_status = 0, .crc_ok = false };
+    }
+
+    pub fn send_sdio_data_command(self: *MmcStub, cmd: u6, arg: u32) hal.mmc.SdioResponse {
+        return self.send_sdio_command(cmd, arg);
+    }
+
+    pub fn send_sdio_command_long(self: *MmcStub, cmd: u6, arg: u32) hal.mmc.SdioLongResponse {
+        _ = self;
+        _ = cmd;
+        _ = arg;
+        return .{ .data = [_]u8{0} ** 16, .valid = false };
+    }
+
+    pub fn read_sdio_data(self: *MmcStub, buf: []u8) anyerror!void {
+        _ = self;
+        _ = buf;
+    }
+
+    pub fn write_sdio_data(self: *MmcStub, buf: []const u8) anyerror!void {
+        _ = self;
+        _ = buf;
+    }
+
+    pub fn set_wide_bus(self: *MmcStub, wide: bool) void {
+        _ = self;
+        _ = wide;
+    }
+
     // Test helper functions
     pub fn set_busy(self: *MmcStub, busy: bool) void {
         self.busy_state = busy;

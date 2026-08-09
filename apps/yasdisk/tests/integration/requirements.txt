@@ -1,0 +1,8 @@
+# Python dependencies for integration tests
+
+# Core testing framework
+pytest>=7.4.0
+pytest-timeout>=2.2.0
+
+# Terminal interaction
+pexpect>=4.9.0

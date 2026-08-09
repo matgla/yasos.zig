@@ -1,30 +1,161 @@
 name: Yasos Smoke Tests
-on: 
-  push: 
+on:
+  push:
     branches: [main]
   pull_request:
 
 jobs:
-  smoke_tests:
+  # Gate: run the full smoke suite under QEMU in the cloud (no hardware) before
+  # the physical board is touched. Builds the mps2-an505 kernel and runs every
+  # suite at -O0/-O1/-O2 incl. gcc-torture (run_qemu_smoke.sh defaults). A
+  # failure here blocks build_hw + hardware_smoke.
+  qemu_gate:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/matgla/yasos.zig:v0.18
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+      # The -O levels are spelled out here rather than left to the script
+      # default: dropping a level is a coverage cut, and it should be a
+      # reviewable line in the diff, not a default someone changed elsewhere.
+      - name: Run QEMU smoke gate (-O0/-O1/-O2, incl. gcc-torture)
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p tests/smoke/logs
+          ./scripts/run_qemu_smoke.sh --opt-levels '-O0 -O1 -O2'
+      # Guards against silent .text drift: the device tcc grew 2.17 -> 2.42 MiB
+      # over six weeks with nothing noticing. The budget is a literal here on
+      # purpose -- raising it has to show up as a reviewable line in the diff.
+      # Ratchet it down whenever the warning below fires.
+      - name: tcc .text size gate
+        if: always()
+        shell: bash
+        run: |
+          BUDGET=1520000
+          ELF=libs/tinycc/bin/armv8m-tcc.elf
+          # Also covers the known "build_rootfs.sh exits 0 when make failed" trap:
+          # without this, a missing ELF would silently skip the gate.
+          if [ ! -f "$ELF" ]; then
+            echo "::error::$ELF missing - did the rootfs build fail?"
+            exit 1
+          fi
+          TEXT=$(arm-none-eabi-size -A "$ELF" | awk '$1==".text"{print $2}')
+          if [ -z "$TEXT" ]; then
+            echo "::error::could not read .text from $ELF"
+            exit 1
+          fi
+          echo "tcc .text = $TEXT B / budget $BUDGET B (headroom $((BUDGET-TEXT)) B)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$TEXT" -gt "$BUDGET" ]; then
+            echo "::error::tcc .text grew past budget: $TEXT > $BUDGET"
+            exit 1
+          fi
+          if [ "$TEXT" -lt $((BUDGET - 100000)) ]; then
+            echo "::warning::.text is $((BUDGET-TEXT)) B under budget - ratchet BUDGET down in .github/workflows/yasos_smoke.yml"
+          fi
+
+      - name: Collect decode bundle (firmware + rootfs + symbol ELFs)
+        if: failure()
+        shell: bash
+        run: ./scripts/collect_decode_bundle.sh decode_bundle
+      - name: Upload QEMU gate logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu_gate_logs
+          path: |
+            .cache/qemu_smoke_logs/**
+            tests/smoke/logs/**
+            decode_bundle/**
+
+  # Build the hardware image once in the cloud and publish it as an artifact so
+  # the board runner never recompiles. Package = kernel + rootfs.img + flash
+  # cfgs + run_hw_smoke.sh (build_image.sh).
+  build_hw:
+    needs: qemu_gate
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/matgla/yasos.zig:v0.18
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+      - name: Build hardware smoke package (kernel + rootfs + run script)
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./build_image.sh pimoroni_pico_plus2_and_vga_defconfig
+      - name: Upload hardware smoke package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hw_smoke_package
+          path: output/*.tar.gz
+
+  # Flash the prebuilt package onto the real RP2350 and run the on-device suite
+  # at -O0/-O1/-O2 incl. gcc-torture. No host build happens here — the kernel +
+  # rootfs come straight from the build_hw artifact.
+  hardware_smoke:
+    needs: build_hw
     runs-on: [self-hosted, pimoroni_pico_plus2]
     steps:
-      - name: Cleanup workspace 
+      - name: Cleanup workspace
         run: |
-          rm -rf "$GITHUB_WORKSPACE" 
+          rm -rf "$GITHUB_WORKSPACE"
           mkdir -p "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v3
-        with: 
+        with:
           submodules: 'recursive'
-      - name: Run Smoke Tests
+      - name: Download hardware smoke package
+        uses: actions/download-artifact@v4
+        with:
+          name: hw_smoke_package
+          path: artifact
+      - name: Stage prebuilt kernel + rootfs (no rebuild on the board)
         run: |
-          mkdir -p ${{ github.workspace }}/tests/smoke/logs
-          make run_smoke_tests
-      - name: Copy Firmware If Failed
+          pkg=$(find artifact -name '*.tar.gz' | head -n1)
+          if [ -z "$pkg" ]; then echo "no package tarball found in artifact/" >&2; exit 1; fi
+          tar -xzf "$pkg" -C artifact
+          # Exclude the decode_bundle/ copies so we pick the package top-level
+          # kernel + rootfs (the bundle holds symbol ELFs for decoding only).
+          kernel=$(find artifact -name yasos_kernel -not -path '*/decode_bundle/*' | head -n1)
+          rootfs=$(find artifact -name rootfs.img -not -path '*/decode_bundle/*' | head -n1)
+          # yaff_arch_test.py corrupts this executable field by field and checks
+          # the loader refuses it; rootfs/ is gitignored, so the checkout has no
+          # copy and it has to come from the package.
+          donor=$(find artifact -path '*/rootfs/usr/bin/hello' -not -path '*/decode_bundle/*' | head -n1)
+          if [ -z "$kernel" ] || [ -z "$rootfs" ] || [ -z "$donor" ]; then
+            echo "package missing yasos_kernel, rootfs.img or rootfs/usr/bin/hello" >&2; exit 1
+          fi
+          mkdir -p zig-out/bin rootfs/usr/bin
+          cp "$kernel" zig-out/bin/yasos_kernel
+          cp "$rootfs" rootfs.img
+          cp "$donor" rootfs/usr/bin/hello
+      # Same reasoning as the QEMU gate: the levels are explicit. Comma-separated
+      # because make hands the command to run_container.sh, which expands it
+      # unquoted -- a space-separated value would word-split before it reached
+      # run_hw_smoke.sh.
+      - name: Run hardware smoke (-O0/-O1/-O2, incl. gcc-torture, no rebuild)
+        run: make run_smoke_tests_packaged SMOKE_OPT_LEVELS=-O0,-O1,-O2
+      - name: Stage decode bundle if failed (firmware + rootfs + symbol ELFs)
         if: failure()
-        run: | 
-          cp ${{ github.workspace }}/zig-out/bin/yasos_kernel ${{ github.workspace }}/tests/smoke/logs
-      
-      - name: Upload Test Logs  
+        run: |
+          dest="${{ github.workspace }}/tests/smoke/logs/decode_bundle"
+          mkdir -p "$dest/symbols"
+          cp "${{ github.workspace }}/zig-out/bin/yasos_kernel" "$dest/symbols/" || true
+          cp "${{ github.workspace }}/rootfs.img" "$dest/" || true
+          # Symbol ELFs travel in the prebuilt package's decode_bundle/.
+          bundle=$(find artifact -type d -name decode_bundle | head -n1)
+          if [ -n "$bundle" ]; then cp -r "$bundle"/. "$dest/"; fi
+      - name: Upload Test Logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
