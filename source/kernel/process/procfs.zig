@@ -133,7 +133,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
         const resolved_path = try std.fs.path.resolve(self._allocator, &.{path});
         defer self._allocator.free(resolved_path);
-        var it = try std.fs.path.componentIterator(resolved_path);
+        var it = std.fs.path.componentIterator(resolved_path);
         var current_directory = self._root;
         var node_to_remove: ?kernel.fs.Node = null;
         while (it.next()) |component| {
@@ -151,6 +151,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                     if (node_to_remove) |*node| {
                         node.delete();
                     }
+                    node_to_remove = null;
                     return kernel.errno.ErrnoSet.NotADirectory;
                 }
 

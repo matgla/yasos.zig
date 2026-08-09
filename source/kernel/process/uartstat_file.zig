@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const interface = @import("interface");
 
@@ -77,7 +78,7 @@ pub const UartStatFile = interface.DeriveFromBase(UartStatBufferedFile, struct {
     pub fn sync(self: *Self) i32 {
         const stats = if (provider) |source| source() else Stats{};
         const buffer = &interface.base(self)._buffer;
-        const buf = std.fmt.bufPrint(
+        const buf = vfmt.print(
             buffer,
             "rx_bytes {d}\nrx_overruns {d}\nrx_dropped {d}\nrx_fifo_full {d}\n" ++
                 "rx_framing_errors {d}\nmax_overrun_gap_us {d}\nmax_late_gap_us {d}\n",
@@ -87,7 +88,7 @@ pub const UartStatFile = interface.DeriveFromBase(UartStatBufferedFile, struct {
                 stats.framing_errors, stats.max_overrun_gap_us,
                 stats.max_late_gap_us,
             },
-        ) catch buffer;
+        );
         interface.base(self)._end = buf.len;
         return 0;
     }

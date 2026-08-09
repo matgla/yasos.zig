@@ -20,6 +20,14 @@ pub fn build(b: *std.Build) !void {
             });
             yasld.addAssemblyFile(b.path(b.fmt("source/arch/{s}/call.S", .{cpu_arch})));
             yasld.addAssemblyFile(b.path(b.fmt("source/arch/{s}/indirect_call_thunk.S", .{cpu_arch})));
+            const tccyaff_headers = b.addTranslateC(.{
+                .root_source_file = b.path("../libs/tinycc/source/obj/tccyaff.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = false,
+            });
+            tccyaff_headers.addIncludePath(b.path("../libs/tinycc/source/obj"));
+            yasld.addImport("tccyaff_headers", tccyaff_headers.createModule());
         }
     }
 }

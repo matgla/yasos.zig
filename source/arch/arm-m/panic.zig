@@ -54,11 +54,39 @@ pub fn exit_if_emulated(code: u32) void {
     }
 }
 
-pub fn dump_stack_trace(log: anytype, address: usize) void {
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
+pub const StackWalker = struct {
+    fp: usize,
+    skip_until: ?usize,
 
-    while (stack.next()) |return_address| : (index += 1) {
+    pub fn init(first_address: usize) StackWalker {
+        return .{ .fp = @frameAddress(), .skip_until = if (first_address != 0) first_address else null };
+    }
+
+    pub fn next(self: *StackWalker) ?usize {
+        var address = self.step() orelse return null;
+        if (self.skip_until) |target| {
+            while (address != target) address = self.step() orelse return null;
+            self.skip_until = null;
+        }
+        return address;
+    }
+
+    fn step(self: *StackWalker) ?usize {
+        if (!is_valid_stack_ptr(self.fp)) return null;
+        const frame: [*]const usize = @ptrFromInt(self.fp);
+        const caller_fp = frame[0];
+        const return_address = frame[1];
+        if (return_address == 0) return null;
+        if (caller_fp <= self.fp) return null;
+        self.fp = caller_fp;
+        return return_address;
+    }
+};
+
+pub fn dump_stack_trace(log: anytype, address: usize) void {
+    var walker: StackWalker = .init(address);
+    var index: usize = 0;
+    while (walker.next()) |return_address| : (index += 1) {
         log.err("  {d: >3}: 0x{X:0>8}", .{ index, if (return_address > 0) return_address - 1 else return_address });
     }
 }
@@ -72,11 +100,10 @@ pub fn is_valid_stack_ptr(addr: usize) bool {
 }
 
 pub fn get_stack_trace_depth(address: usize) usize {
+    var walker: StackWalker = .init(address);
     var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
     while (index < max_stack_depth) : (index += 1) {
-        if (!is_valid_stack_ptr(stack.fp)) break;
-        if (stack.next() == null) break;
+        if (walker.next() == null) break;
     }
     return index;
 }

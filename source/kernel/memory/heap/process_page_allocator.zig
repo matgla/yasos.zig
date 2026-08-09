@@ -62,7 +62,7 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
 
         _pid: c.pid_t,
         _pool: *MemoryPoolType,
-        _cache: [page_cache_slots]CachedRun = [_]CachedRun{.{}} ** page_cache_slots,
+        _cache: [page_cache_slots]CachedRun = @splat(.{}),
         _cache_bytes: usize = 0,
         // Absolute ceiling on the total pages this process may own across all
         // tiers (image + stack + heap). maxInt = unlimited (the OS-default

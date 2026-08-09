@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from .framework.paths import smoke_log_dir
 from .framework.session import Session
 from .log_artifacts import move_failed_target_logs
 from .log_artifacts import write_failed_pytest_log
@@ -105,6 +106,21 @@ def pytest_collection_modifyitems(config, items):
     _test_progress_current = 0
 
 
+# Under xdist the controller never collects -- the workers do, and only their
+# reports come back -- so the hook above leaves the *controller* total at 0 and
+# the [n/total] suffix vanishes from exactly the runs that need it most (the
+# parallel QEMU gate). Every worker collects the same set, so the first node to
+# report its ids fixes the total; the counter itself is driven by the forwarded
+# reports in pytest_runtest_logreport, which do reach the controller.
+# optionalhook because the hardware venv (tests/smoke/requirements.txt) has no
+# pytest-xdist, and an unknown hook name is a hard PluginValidationError there.
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_node_collection_finished(node, ids):
+    global _test_progress_total
+    if _test_progress_total == 0:
+        _test_progress_total = len(ids)
+
+
 # tryfirst so the counter is incremented before the terminal reporter asks
 # pytest_report_teststatus for the word it prints -- that call happens inside
 # the reporter's own pytest_runtest_logreport, so a later hook would label the
@@ -118,7 +134,7 @@ def pytest_runtest_logreport(report):
         _test_progress_current += 1
         if report.failed:
             nodeid = report.nodeid
-            logs_dir = Path("logs")
+            logs_dir = smoke_log_dir()
             move_failed_target_logs(logs_dir, test_log_paths_by_nodeid.get(nodeid, []))
             write_failed_pytest_log(logs_dir, nodeid, [report])
             _failed_nodeids_handled.add(nodeid)
@@ -279,7 +295,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         failed_reports_by_nodeid.setdefault(nodeid, []).append(report)
 
     if failed_reports_by_nodeid:
-        logs_dir = Path("logs")
+        logs_dir = smoke_log_dir()
         for nodeid, reports in failed_reports_by_nodeid.items():
             if nodeid in _failed_nodeids_handled:
                 continue

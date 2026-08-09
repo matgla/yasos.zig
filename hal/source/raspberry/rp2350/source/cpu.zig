@@ -20,9 +20,7 @@
 
 const std = @import("std");
 
-const clock = @cImport({
-    @cInclude("hardware/clocks.h");
-});
+const clock = @import("clocks_headers");
 
 const ArchRegisters = @import("arch").Registers;
 

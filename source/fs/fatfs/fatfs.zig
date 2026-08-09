@@ -99,14 +99,14 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
-        const filepath = try self._allocator.dupeZ(u8, path);
+        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
         defer self._allocator.free(filepath);
         var file = try fatfs.File.create(filepath);
         file.close();
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) anyerror!void {
-        const filepath = try self._allocator.dupeZ(u8, path);
+        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
         defer self._allocator.free(filepath);
         _ = fatfs.mkdir(filepath) catch |err| {
             return fatfs_error_to_errno(err);
@@ -114,7 +114,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        const filepath = try self._allocator.dupeZ(u8, path);
+        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
         defer self._allocator.free(filepath);
         try fatfs.unlink(filepath);
     }
@@ -125,7 +125,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
-        const filepath = try self._allocator.dupeZ(u8, path);
+        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
         defer self._allocator.free(filepath);
 
         // Files first, and only once.
@@ -253,6 +253,12 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     const DiskWrapper = struct {
         const sector_size = 512;
 
+        /// How much the write-combining buffer below can hold, in sectors.
+        /// Eight covers the contiguous runs a compile emits without tying up
+        /// more than 4 KiB.
+        const combine_sectors: u32 = 8;
+        const combine_bytes: usize = @as(usize, combine_sectors) * sector_size;
+
         // Read cache for the FAT metadata.
         //
         // FatFs reads file *data* straight into the caller's buffer, in runs of
@@ -301,6 +307,30 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         /// one that refuses to mount.
         lines: []Line = &.{},
         cache: []u8 = &.{},
+
+        // ── Write combining ────────────────────────────────────────────────
+        //
+        // FatFs hands the block layer one sector at a time, and on this card a
+        // single-block write costs ~875 us against ~113 us a block inside a
+        // multi-block one. The difference is the card's program cycle, which is
+        // paid per command: the TX PIO program will not report a write until
+        // the card releases DAT0 (`wait_idle` in sdio_rp2350.pio), so a
+        // one-sector write waits out the whole cycle to move 512 bytes.
+        //
+        // A compile's writes are not scattered. Traced, one emits sectors
+        // 1200, 1201, 1202 consecutively, then rewrites 1200, the FAT sector
+        // and the directory sector. Holding one contiguous run and issuing it
+        // as a single multi-block write turns those three commands into one,
+        // and a rewrite of a sector still in the buffer into none.
+        //
+        // This is only safe because FatFs asks: sync_fs() ends in
+        // disk_ioctl(CTRL_SYNC), and it runs from f_close, f_sync, f_unlink,
+        // f_mkdir and f_rename -- every point at which the medium is supposed
+        // to be consistent. `ioctl(.sync)` below is that flush, and was a
+        // no-op before this.
+        combine: []u8 = &.{},
+        combine_base: fatfs.LBA = 0,
+        combine_count: u32 = 0,
         /// Counter standing in for time in the LRU choice; nothing here needs a
         /// real clock, only an order. It is 32 bits and wraps, which keeps this
         /// struct 4-byte aligned so `@fieldParentPtr` can reach it from the disk
@@ -350,13 +380,83 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             @memset(lines, .{});
             self.cache = cache;
             self.lines = lines;
+            // Write combining is independent of the read cache; without the
+            // buffer every write simply goes through as before.
+            self.combine = allocator.alloc(u8, combine_bytes) catch &.{};
         }
 
         pub fn release_cache(self: *DiskWrapper, allocator: std.mem.Allocator) void {
+            // Anything still buffered belongs on the medium before the buffer
+            // holding it goes away.
+            self.flush_combined() catch |err| {
+                log.err("failed to flush combined writes on release: {s}", .{@errorName(err)});
+            };
             allocator.free(self.cache);
             allocator.free(self.lines);
+            allocator.free(self.combine);
             self.cache = &.{};
             self.lines = &.{};
+            self.combine = &.{};
+        }
+
+        /// Issue whatever the combining buffer holds, as one write.
+        fn flush_combined(self: *DiskWrapper) fatfs.Disk.Error!void {
+            if (self.combine_count == 0) return;
+            const count = self.combine_count;
+            const base = self.combine_base;
+            // Cleared first: a failed write must not leave the run queued for
+            // a later flush to retry against a device that already rejected it.
+            self.combine_count = 0;
+            try self.write_through(self.combine.ptr, base, count);
+        }
+
+        /// Take a write into the combining buffer, issuing whatever it has to
+        /// in order to do so.
+        ///
+        /// Four cases, in the order they are worth taking:
+        ///   - the run is already long enough to amortise its own command, so
+        ///     it goes straight out (after flushing, to keep ordering);
+        ///   - it continues the buffered run, and is appended;
+        ///   - it lands inside the buffered run, and overwrites it in place --
+        ///     this is the rewrite of a directory sector that would otherwise
+        ///     cost a second full command;
+        ///   - it goes somewhere else, so the buffer is issued and the new
+        ///     write starts a fresh run.
+        fn write_combined(self: *DiskWrapper, from: [*]const u8, sector: fatfs.LBA, count: u32) fatfs.Disk.Error!void {
+            if (self.combine.len == 0 or count >= combine_sectors) {
+                try self.flush_combined();
+                return self.write_through(from, sector, count);
+            }
+
+            const length = sector_size * count;
+
+            if (self.combine_count != 0) {
+                const base = self.combine_base;
+                const held = self.combine_count;
+                if (sector == base + held and held + count <= combine_sectors) {
+                    @memcpy(self.combine[held * sector_size ..][0..length], from[0..length]);
+                    self.combine_count = held + count;
+                    return;
+                }
+                if (sector >= base and sector + count <= base + held) {
+                    const at: usize = @intCast(sector - base);
+                    @memcpy(self.combine[at * sector_size ..][0..length], from[0..length]);
+                    return;
+                }
+                try self.flush_combined();
+            }
+
+            @memcpy(self.combine[0..length], from[0..length]);
+            self.combine_base = sector;
+            self.combine_count = count;
+        }
+
+        /// True when *sector*..+*count* overlaps what is buffered but not yet
+        /// written, which a read has to resolve before going to the device.
+        fn overlaps_combined(self: *const DiskWrapper, sector: fatfs.LBA, count: u32) bool {
+            if (self.combine_count == 0) return false;
+            return sector < self.combine_base + self.combine_count and
+                self.combine_base < sector + count;
         }
 
         fn caching(self: *const DiskWrapper) bool {
@@ -369,6 +469,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             for (self.lines) |*line| {
                 line.sectors = 0;
             }
+            // Dropped rather than flushed on purpose: this runs at mount and
+            // at reformat, where whatever is buffered describes a volume that
+            // is no longer the one on the card. Writing it out would put one
+            // volume's sectors onto another.
+            self.combine_count = 0;
             self.sectors_on_disk = 0;
         }
 
@@ -451,6 +556,13 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
         pub fn read(interface: *fatfs.Disk, buff: [*]u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
+            // The device does not have the buffered run yet, so a read that
+            // covers any of it has to make it real first. Reads served from
+            // the line cache would be correct either way -- write() refreshes
+            // the lines it touches -- but a miss goes straight to the card.
+            if (self.overlaps_combined(sector, @intCast(count))) {
+                try self.flush_combined();
+            }
             // A run this long already amortises the per-command cost the cache
             // exists to remove, and filling lines for it would evict more than
             // it saves. File data arrives here.
@@ -481,7 +593,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         pub fn write(interface: *fatfs.Disk, buff: [*]const u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             log.debug("Writing to sector {d}, count {d}", .{ sector, count });
-            try self.write_through(buff, sector, @intCast(count));
+            try self.write_combined(buff, sector, @intCast(count));
             if (!self.caching()) return;
 
             // Refresh what we hold rather than dropping it. Every file creation
@@ -506,7 +618,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             defer arch.sync.restore_interrupts(state);
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             switch (cmd) {
-                .sync => {},
+                // Was a no-op, which was correct only while every write went
+                // straight to the card. Writes are now combined, so this is
+                // what makes FatFs's "the volume is consistent" true.
+                .sync => try self.flush_combined(),
                 .get_sector_count => {
                     const size = self.device.interface.size();
                     @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(size >> 9);

@@ -22,6 +22,7 @@ from .timing import (
     elapsed_ms,
     attach_loader_timing,
     attach_compile_profile,
+    attach_kernel_profile,
     begin_case,
     end_case,
     record,
@@ -2220,6 +2221,16 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
                 assert expected_line in actual_line, f"expected '{expected_line}' in '{filtered_lines}'"
         assert actual_exit_code == expected_exit_code, f"expected exit code {expected_exit_code}, got {actual_exit_code}"
     finally:
+        # Before cleanup, so the `rm` below -- which is harness work, and an
+        # expensive syscall on FAT -- is not charged to the test. The kernel
+        # printed a profile line for every process that exited in either window;
+        # this is where they are read back out of the transcript.
+        if timing is not None:
+            attach_kernel_profile(
+                timing,
+                getattr(session, "log_path", ""),
+                {"compile": COMPILE_MARKER_PREFIX, "execute": EXIT_MARKER_PREFIX},
+            )
         # Skip cleanup when the target is being reset (e.g. we aborted early on a
         # runaway program or it crashed): the foreground job is still running, so
         # the rm command would never echo back and the reset wipes /tmp anyway.

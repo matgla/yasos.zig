@@ -25,9 +25,7 @@ const picosdk = @import("../picosdk.zig").picosdk;
 
 const log = std.log.scoped(.@"mmc/sdio");
 
-const sdio = @cImport({
-    @cInclude("sdio_rp2350.h");
-});
+const sdio = @import("mmc_sdio_headers");
 
 pub const MmcSdio = struct {
     const crc_window_us: u64 = 30 * std.time.us_per_s;
@@ -338,7 +336,7 @@ pub const MmcSdio = struct {
 
     pub fn send_sdio_command_long(self: *MmcSdio, cmd: u6, arg: u32) hal.mmc.SdioLongResponse {
         _ = self;
-        var response: [16]u8 = [_]u8{0} ** 16;
+        var response: [16]u8 = @splat(0);
         const flags: u32 = sdio.SDIO_FLAG_NO_CRC | sdio.SDIO_FLAG_NO_CMD_TAG;
         const status = sdio.rp2350_sdio_command(
             @intCast(cmd),
@@ -349,7 +347,7 @@ pub const MmcSdio = struct {
         );
         if (status != sdio.SDIO_OK) {
             log.err("CMD{d} long response failed: {d}", .{ cmd, status });
-            return .{ .data = [_]u8{0} ** 16, .valid = false };
+            return .{ .data = @splat(0), .valid = false };
         }
         return .{
             .data = response,
@@ -570,11 +568,11 @@ pub const MmcSdio = struct {
     pub fn build_command(self: MmcSdio, command: u6, argument: u32) [6]u8 {
         _ = self;
         const argument_value: u32 = std.mem.nativeToBig(u32, argument);
-        var buffer: [6]u8 = [_]u8{0x00} ** 6;
+        var buffer: [6]u8 = @splat(0x00);
         buffer[0] = 0x40 | @as(u8, command);
         const argument_bytes = std.mem.toBytes(argument_value);
         @memcpy(buffer[1..5], argument_bytes[0..4]);
-        buffer[5] = @as(u8, std.hash.crc.Crc7Mmc.hash(buffer[0..5])) << 1 | 1;
+        buffer[5] = @as(u8, std.hash.crc.@"CRC-7/MMC".hash(buffer[0..5])) << 1 | 1;
         return buffer;
     }
 

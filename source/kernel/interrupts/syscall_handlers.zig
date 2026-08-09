@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 const process_manager = @import("../process_manager.zig");
 
 const Semaphore = @import("../semaphore.zig").Semaphore;
@@ -215,7 +216,7 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
             } else {
                 return error.CannotDeterminePathForFd;
             }
-            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, path });
+            const full_path = try vfmt.allocPrint(allocator, "{s}/{s}", .{ prefix, path });
             defer allocator.free(full_path);
             const real = try std.fs.path.resolve(allocator, &.{full_path});
             return real;
@@ -223,7 +224,7 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
             if (path.len > 0) {
                 const current_process = process_manager.instance.get_current_process();
                 const pwd = current_process.get_current_directory();
-                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ pwd, prefix, path });
+                const full_path = try vfmt.allocPrint(allocator, "{s}/{s}/{s}", .{ pwd, prefix, path });
                 defer allocator.free(full_path);
                 const real = try std.fs.path.resolve(allocator, &.{full_path});
                 return real;
@@ -317,6 +318,10 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
         // The window is this image's life (the counters were reset at exec);
         // for tcc it shows only what happened after its own dump reset them.
         const sys = perf.summary();
+        // `cyc=` says whether the *_us figures mean anything: on a target
+        // without a live DWT_CYCCNT (QEMU) they are all 0 while the call and
+        // byte counts are still real.
+        perf.trace("syscyc pid={d} cyc={s}", .{ process.pid, if (perf.has_cycle_counter()) "on" else "off" });
         perf.trace("sysprof pid={d} calls={d} us={d} handler_us={d} load_us={d} read={d}/{d} write={d}/{d} dropped={d} top={d}:{d}/{d},{d}:{d}/{d},{d}:{d}/{d}", .{
             process.pid,        sys.calls,          sys.total_us,
             sys.handler_us,     process._load_us,   sys.read_bytes,
@@ -326,15 +331,35 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
             sys.top[1].us,      sys.top[2].id,      sys.top[2].calls,
             sys.top[2].us,
         });
+        // Where write()/close() time goes: the card, or the filesystem above it.
+        const disk_stats = perf.disk_summary();
+        if (disk_stats.writes != 0 or disk_stats.reads != 0) {
+            perf.trace("diskprof pid={d} writes={d}/{d}blk/{d}us cardwait={d}us reads={d}/{d}blk/{d}us", .{
+                process.pid,
+                disk_stats.writes,     disk_stats.write_blocks, disk_stats.write_us,
+                disk_stats.wait_us,
+                disk_stats.reads,      disk_stats.read_blocks,  disk_stats.read_us,
+            });
+        }
         const open_stats = perf.open_summary();
         if (open_stats.calls != 0) {
-            perf.trace("openprof pid={d} calls={d} misses={d} resolve_us={d} lookup_us={d} attach_us={d}", .{
+            perf.trace("openprof pid={d} calls={d} misses={d} resolve_us={d} lookup_us={d} attach_us={d} rf_hdrs={d} rf_reads={d} rf_allocs={d} rf_hdr_us={d} kheap={d}/{d}us mount_us={d} fsget_us={d} walk_us={d} node_us={d}", .{
                 process.pid,
                 open_stats.calls,
                 open_stats.misses,
                 open_stats.us[@intFromEnum(perf.OpenPhase.resolve)],
                 open_stats.us[@intFromEnum(perf.OpenPhase.lookup)],
                 open_stats.us[@intFromEnum(perf.OpenPhase.attach)],
+                open_stats.headers,
+                open_stats.reads,
+                open_stats.name_allocs,
+                open_stats.header_us,
+                open_stats.heap_calls,
+                open_stats.heap_us,
+                open_stats.mount_us,
+                open_stats.fsget_us,
+                open_stats.walk_us,
+                open_stats.node_us,
             });
         }
         // Where mmap/munmap time actually goes. Printed next to sysprof so the
@@ -647,7 +672,7 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
     var path_slice: []const u8 = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
     if (path_slice[0] != '/') {
         if (process.cwd[process.cwd.len - 1] == '/') {
-            path_slice = try std.fmt.allocPrint(kernel_allocator, "{s}{s}", .{ process.cwd, path_slice });
+            path_slice = try vfmt.allocPrint(kernel_allocator, "{s}{s}", .{ process.cwd, path_slice });
             slice_allocated = true;
         }
     }
@@ -889,7 +914,7 @@ test "DeterminePathForFile.ShouldResolveRelativePathAgainstCurrentWorkingDirecto
     init(std.testing.allocator);
     try process_manager.instance.create_root_process(4096, &test_process_entry, null, "/mnt/bin");
 
-    const path = try std.testing.allocator.dupeZ(u8, "./a.out");
+    const path = try std.testing.allocator.dupeSentinel(u8, "./a.out", 0);
     defer std.testing.allocator.free(path);
 
     const resolved_path = try determine_path_for_file(std.testing.allocator, path.ptr, -1);
@@ -905,7 +930,7 @@ test "DeterminePathForFile.ShouldKeepAbsolutePathUnchanged" {
     init(std.testing.allocator);
     try process_manager.instance.create_root_process(4096, &test_process_entry, null, "/mnt/bin");
 
-    const path = try std.testing.allocator.dupeZ(u8, "/usr/bin/a.out");
+    const path = try std.testing.allocator.dupeSentinel(u8, "/usr/bin/a.out", 0);
     defer std.testing.allocator.free(path);
 
     const resolved_path = try determine_path_for_file(std.testing.allocator, path.ptr, -1);

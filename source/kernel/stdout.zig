@@ -19,6 +19,7 @@
 //
 
 const std = @import("std");
+const vfmt = @import("vfmt.zig");
 
 const board = @import("board");
 
@@ -76,7 +77,13 @@ pub fn get() *std.Io.Writer {
 }
 
 pub fn print(comptime format: []const u8, args: anytype) void {
-    stdout.print(format, args) catch return;
+    const argv = vfmt.erase(args);
+    print_formatted(format, &argv);
+}
+
+noinline fn print_formatted(format: []const u8, argv: []const vfmt.Value) void {
+    var buf: [256]u8 = undefined;
+    _ = stdout.write(vfmt.vprint(&buf, format, argv)) catch return;
 }
 
 pub fn write(comptime data: []const u8) void {

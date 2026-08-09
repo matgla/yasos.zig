@@ -16,7 +16,7 @@ pub fn build_littlefs(b: *std.Build, optimize: std.builtin.OptimizeMode, target:
     });
 
     // Add C source files
-    lib.addCSourceFiles(.{
+    lib.root_module.addCSourceFiles(.{
         .files = &.{
             littlefs_path ++ "lfs.c",
             littlefs_path ++ "lfs_util.c",
@@ -36,7 +36,7 @@ pub fn build_littlefs(b: *std.Build, optimize: std.builtin.OptimizeMode, target:
     lib.root_module.sanitize_c = .trap;
 
     // Add include path
-    lib.addIncludePath(b.path(littlefs_path));
+    lib.root_module.addIncludePath(b.path(littlefs_path));
 
     // Install the library
     b.installArtifact(lib);

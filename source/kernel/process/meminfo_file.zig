@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const c = @import("libc_imports").c;
 const interface = @import("interface");
@@ -74,39 +75,38 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
         const memory_used_combined = memory_used + memory_used_slow;
         var buffer = &interface.base(self)._buffer;
         var written_length: usize = 0;
-        var sizebuf = [_]u8{0} ** 16;
-        var buf = std.fmt.bufPrint(buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)}) catch
-            buffer;
+        var sizebuf: [16]u8 = @splat(0);
+        var buf = vfmt.print(buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "MemKernelUsed:   {s}\n", .{format_size(memory_used, &sizebuf)});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "MemTmpUsed:      {s}\n", .{format_size(memory_used_tmp, &sizebuf)}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "MemTmpUsed:      {s}\n", .{format_size(memory_used_tmp, &sizebuf)});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "MemTmpPeak:      {s}\n", .{format_size(get_tmp_memory_peak(), &sizebuf)}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "MemTmpPeak:      {s}\n", .{format_size(get_tmp_memory_peak(), &sizebuf)});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)});
         written_length += buf.len;
         const alloc_count = kernel.memory.heap.malloc.get_counter();
-        buf = std.fmt.bufPrint(buffer[written_length..], "AllocCount:      {d: >8}\n", .{alloc_count}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "AllocCount:      {d: >8}\n", .{alloc_count});
         written_length += buf.len;
         const m = kernel.memory.heap.malloc;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B1_4:            {d: >8}\n", .{m.bucket_1_4}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B1_4:            {d: >8}\n", .{m.bucket_1_4});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B5:              {d: >8}\n", .{m.bucket_5}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B5:              {d: >8}\n", .{m.bucket_5});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B6:              {d: >8}\n", .{m.bucket_6}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B6:              {d: >8}\n", .{m.bucket_6});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B7:              {d: >8}\n", .{m.bucket_7}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B7:              {d: >8}\n", .{m.bucket_7});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B8:              {d: >8}\n", .{m.bucket_8}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B8:              {d: >8}\n", .{m.bucket_8});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B9_10:           {d: >8}\n", .{m.bucket_9_10}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B9_10:           {d: >8}\n", .{m.bucket_9_10});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B11_12:          {d: >8}\n", .{m.bucket_11_12}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B11_12:          {d: >8}\n", .{m.bucket_11_12});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B13_16:          {d: >8}\n", .{m.bucket_13_16}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B13_16:          {d: >8}\n", .{m.bucket_13_16});
         written_length += buf.len;
-        buf = std.fmt.bufPrint(buffer[written_length..], "B17p:            {d: >8}\n", .{m.bucket_17_plus}) catch buf;
+        buf = vfmt.print(buffer[written_length..], "B17p:            {d: >8}\n", .{m.bucket_17_plus});
         written_length += buf.len;
         interface.base(self)._end = written_length;
         return 0;
@@ -114,13 +114,13 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
 
     fn format_size(memsize: u64, buffer: []u8) []const u8 {
         if (memsize >= 1000000000000) {
-            return std.fmt.bufPrint(buffer, "---", .{}) catch buffer[0..];
+            return vfmt.print(buffer, "---", .{});
         } else if (memsize >= 1024 * 1024 * 1024) {
-            return std.fmt.bufPrint(buffer, "{d: >8} MB", .{memsize / 1024 / 1024}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: >8} MB", .{memsize / 1024 / 1024});
         } else if (memsize >= 1024 * 1024) {
-            return std.fmt.bufPrint(buffer, "{d: >8} KB", .{memsize / 1024}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: >8} KB", .{memsize / 1024});
         } else {
-            return std.fmt.bufPrint(buffer, "{d: >8} B", .{memsize}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: >8} B", .{memsize});
         }
 
         return buffer;

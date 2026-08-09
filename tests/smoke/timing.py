@@ -31,6 +31,8 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .kernel_profile import KernelProfile, parse_windows
+
 
 @dataclass
 class CaseTiming:
@@ -59,11 +61,23 @@ class CaseTiming:
     # Component of `execute_ms`: loading the compiled test binary.
     execute_loader_ms: float = 0.0
 
+    # What the *kernel* says the two windows cost, over every process that
+    # exited inside them -- the compiled binary and the shell included, which
+    # tcc's own dump structurally cannot see. Present on any profiling-build
+    # run; unlike the fields above it does not need tcc's -bench.
+    kernel_compile: KernelProfile = field(default_factory=KernelProfile)
+    kernel_execute: KernelProfile = field(default_factory=KernelProfile)
+
     # Harness: time this process spent driving the device around that work.
     # Accumulated, not assigned — a case may hash several sources.
     hash_ms: float = 0.0
     setup_ms: float = 0.0
     cleanup_ms: float = 0.0
+
+    @property
+    def kernel_os_ms(self):
+        """All kernel-measured syscall time of this case, both windows."""
+        return (self.kernel_compile.us + self.kernel_execute.us) / 1000.0
 
     @property
     def target_total_ms(self):
@@ -108,6 +122,12 @@ PERF_IO_RE = re.compile(
     r" write=(?P<write_bytes>\d+)/(?P<write_us>\d+)"
 )
 PERF_TOP_RE = re.compile(r"# perf: top (?P<entries>.*)")
+
+# No syscall on this device takes a second. Anything that claims to has a
+# wrapped 32-bit cycle counter behind it (DWT_CYCCNT wraps in single-digit
+# seconds), and one such sample is large enough to dominate every real
+# measurement it is summed with.
+IMPLAUSIBLE_CALL_US = 1_000_000
 PERF_TOP_ENTRY_RE = re.compile(r"(?P<name>\w+)=(?P<calls>\d+)/(?P<us>\d+)")
 
 
@@ -193,6 +213,22 @@ def attach_loader_timing(timing: CaseTiming, log_path: str, executable_path: str
         return
 
 
+def attach_kernel_profile(timing: CaseTiming, log_path: str, markers: dict):
+    """Attach the kernel's own view of both windows from the test's transcript.
+
+    Complements `attach_compile_profile`, which only ever sees what tcc reports
+    about itself: this counts every process that exited in each window, so the
+    compiled binary, the shell around it, and the compile's post-dump tail are
+    all in. Called once per case, after the execute window closes and before
+    cleanup, so the `rm` that follows is not charged to the test.
+    """
+    if not log_path:
+        return
+    profiles = parse_windows(log_path, markers)
+    timing.kernel_compile = profiles.get("compile", KernelProfile())
+    timing.kernel_execute = profiles.get("execute", KernelProfile())
+
+
 def attach_compile_profile(timing: CaseTiming, profile_lines: list[str]):
     """Attach the device-side compile breakdown from tcc's ``# perf:`` lines."""
     for line in profile_lines:
@@ -274,6 +310,16 @@ def format_timing_report(terminalreporter):
             bucket["calls"] += data["calls"]
             bucket["ms"] += data["ms"]
 
+    # The kernel's own view: every process that exited inside a window, which
+    # includes the compiled test binaries and the shell, and is therefore the
+    # only measurement of the suite's *whole* OS cost.
+    kernel_compile = KernelProfile()
+    kernel_execute = KernelProfile()
+    for t in timing_results:
+        kernel_compile.add(t.kernel_compile)
+        kernel_execute.add(t.kernel_execute)
+    kernel_total = KernelProfile().add(kernel_compile).add(kernel_execute)
+
     total_hash = sum(t.hash_ms for t in timing_results)
     total_setup = sum(t.setup_ms for t in timing_results)
     total_cleanup = sum(t.cleanup_ms for t in timing_results)
@@ -311,6 +357,11 @@ def format_timing_report(terminalreporter):
                         "total_setup_ms": round(total_setup, 2),
                         "total_cleanup_ms": round(total_cleanup, 2),
                         "total_harness_ms": round(total_harness, 2),
+                        "kernel": {
+                            "compile": kernel_compile.to_dict(),
+                            "execute": kernel_execute.to_dict(),
+                            "total": kernel_total.to_dict(),
+                        },
                     },
                     "tests": [
                         {
@@ -337,6 +388,8 @@ def format_timing_report(terminalreporter):
                             "setup_ms": round(t.setup_ms, 2),
                             "cleanup_ms": round(t.cleanup_ms, 2),
                             "harness_ms": round(t.harness_total_ms, 2),
+                            "kernel_compile": t.kernel_compile.to_dict(),
+                            "kernel_execute": t.kernel_execute.to_dict(),
                         }
                         for t in sorted_results
                     ],
@@ -388,6 +441,18 @@ def format_timing_report(terminalreporter):
         profiled_compiles=profiled_compiles,
         test_count=len(timing_results),
         syscall_totals=syscall_totals,
+    )
+
+    _write_os_cost(
+        terminalreporter,
+        kernel_compile=kernel_compile,
+        kernel_execute=kernel_execute,
+        kernel_total=kernel_total,
+        total_compile=total_compile,
+        total_execute=total_execute,
+        tcc_syscall_ms=total_syscall,
+        tcc_syscall_calls=total_calls,
+        total_loader_ms=total_loader,
     )
 
     terminalreporter.write_line("")
@@ -478,6 +543,158 @@ def format_timing_report(terminalreporter):
         terminalreporter.write_line(
             f"\nFull timing data saved to: {os.path.abspath(report_path)}"
         )
+
+
+def _write_os_cost(
+    terminalreporter,
+    *,
+    kernel_compile,
+    kernel_execute,
+    kernel_total,
+    total_compile,
+    total_execute,
+    tcc_syscall_ms,
+    tcc_syscall_calls,
+    total_loader_ms,
+):
+    """What the OS cost the suite as a whole: syscalls plus image loading.
+
+    Assembled from two measurements that are disjoint by construction, because
+    neither alone is the answer:
+
+    * tcc's own dump covers the compile up to the moment it prints, and *resets*
+      the counters (`perf_dump_print_compact(1)`);
+    * the kernel's per-process line covers what is left -- the rest of tcc's
+      life after that reset, and every other process, the compiled test binaries
+      included, which tcc structurally cannot see.
+
+    Image loading is added rather than folded in: it is charged to whoever ran
+    execve, and a run where the execute window's loading (0.06 s) exceeds its
+    entire syscall time (0.02 s) is the proof that it is not inside it.
+    """
+    have_kernel = kernel_total.processes > 0
+    if not have_kernel and tcc_syscall_ms <= 0:
+        terminalreporter.write_line("")
+        terminalreporter.write_line(
+            "OS cost: n/a — needs a CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING=y "
+            "build (--profile), which prints a per-process profile at every exit"
+        )
+        return
+
+    def pct(part, whole):
+        return (part / whole * 100.0) if whole else 0.0
+
+    total_window = total_compile + total_execute
+    # The kernel's load_us is per process and covers every load in the run, so
+    # it supersedes the loader lines; those remain the fallback for a run whose
+    # transcripts carried no per-process profile.
+    load_ms = (kernel_total.load_us / 1000.0) if have_kernel else total_loader_ms
+    syscall_ms = tcc_syscall_ms + kernel_total.ms
+    os_ms = syscall_ms + load_ms
+
+    terminalreporter.write_line("")
+    terminalreporter.write_line(
+        "OS cost of the whole suite (syscalls + image loading, kernel-measured):"
+    )
+    terminalreporter.write_line(
+        f"  on-target wall            {total_window / 1000:>10.2f}s   "
+        f"{kernel_total.processes} processes profiled"
+    )
+    terminalreporter.write_line(
+        f"  OS total                  {os_ms / 1000:>10.2f}s "
+        f"{pct(os_ms, total_window):>6.1f}%   of on-target time"
+    )
+    if tcc_syscall_ms > 0:
+        terminalreporter.write_line(
+            f"    syscalls, compiling     {tcc_syscall_ms / 1000:>10.2f}s "
+            f"{pct(tcc_syscall_ms, total_compile):>6.1f}%   of the compile window, "
+            f"{tcc_syscall_calls} calls (tcc's own dump)"
+        )
+    if kernel_compile.processes:
+        terminalreporter.write_line(
+            f"    + after tcc's dump      {kernel_compile.ms / 1000:>10.2f}s "
+            f"{pct(kernel_compile.ms, total_compile):>6.1f}%   of the compile window, "
+            f"{kernel_compile.calls} calls — mostly -bench writing its own report "
+            f"to the console, i.e. paid only while profiling"
+        )
+    if kernel_execute.processes:
+        terminalreporter.write_line(
+            f"    syscalls, running       {kernel_execute.ms / 1000:>10.2f}s "
+            f"{pct(kernel_execute.ms, total_execute):>6.1f}%   of the execute window, "
+            f"{kernel_execute.calls} calls over {kernel_execute.processes} binaries"
+        )
+    terminalreporter.write_line(
+        f"    image loading           {load_ms / 1000:>10.2f}s "
+        f"{pct(load_ms, total_window):>6.1f}%   of on-target time (runs in execve, "
+        f"not part of the syscall time above)"
+    )
+    if kernel_total.calls:
+        terminalreporter.write_line(
+            f"    = handler work          {kernel_total.handler_us / 1000000:>10.2f}s "
+            f"{pct(kernel_total.handler_us, kernel_total.us):>6.1f}%   of the kernel-measured "
+            f"half; dispatch is the other "
+            f"{pct(kernel_total.dispatch_us, kernel_total.us):.1f}%"
+        )
+        terminalreporter.write_line(
+            f"      read()                {kernel_total.read_us / 1000000:>10.2f}s   "
+            f"{_format_bytes(kernel_total.read_bytes)} at "
+            f"{_throughput(kernel_total.read_bytes, kernel_total.read_us / 1000.0)}"
+        )
+        terminalreporter.write_line(
+            f"      write()               {kernel_total.write_us / 1000000:>10.2f}s   "
+            f"{_format_bytes(kernel_total.write_bytes)} at "
+            f"{_throughput(kernel_total.write_bytes, kernel_total.write_us / 1000.0)}"
+        )
+    rest = total_window - os_ms
+    terminalreporter.write_line(
+        f"  userspace + serial        {rest / 1000:>10.2f}s "
+        f"{pct(rest, total_window):>6.1f}%   everything the kernel did not do"
+    )
+
+    if kernel_total.open_calls:
+        terminalreporter.write_line(
+            f"  open() path               {kernel_total.open_lookup_us / 1000000:>10.2f}s "
+            f"lookup over {kernel_total.open_calls} opens "
+            f"({kernel_total.open_misses} misses), "
+            f"resolve {kernel_total.open_resolve_us / 1000000:.2f}s, "
+            f"attach {kernel_total.open_attach_us / 1000000:.2f}s"
+        )
+    if kernel_total.disk_writes or kernel_total.disk_reads:
+        terminalreporter.write_line(
+            f"  SD block layer            "
+            f"{kernel_total.disk_write_us / 1000000:>10.2f}s writes "
+            f"({kernel_total.disk_writes} cmds / {kernel_total.disk_write_blocks} blocks, "
+            f"card wait {kernel_total.disk_card_wait_us / 1000000:.2f}s), "
+            f"{kernel_total.disk_read_us / 1000000:.2f}s reads "
+            f"({kernel_total.disk_reads} cmds / {kernel_total.disk_read_blocks} blocks)"
+        )
+    if kernel_total.pool_allocs:
+        terminalreporter.write_line(
+            f"  page pool (mmap)          {kernel_total.pool_clear_us / 1000000:>10.2f}s "
+            f"clearing {_format_bytes(kernel_total.pool_cleared)} over "
+            f"{kernel_total.pool_allocs} allocs / {kernel_total.pool_pages} pages"
+        )
+
+    if kernel_total.syscalls:
+        terminalreporter.write_line("")
+        terminalreporter.write_line(
+            "Syscall time by call (whole suite; each process reports only its own "
+            "top three, so the tail is undercounted):"
+        )
+        terminalreporter.write_line(
+            f"  {'Syscall':<16} {'Calls':>12} {'Total':>12} {'Avg':>10} {'% syscall':>10} {'% on-target':>12}"
+        )
+        terminalreporter.write_line(f"  {'-' * 76}")
+        for name, entry in sorted(
+            kernel_total.syscalls.items(), key=lambda item: item[1]["us"], reverse=True
+        ):
+            avg_us = (entry["us"] / entry["calls"]) if entry["calls"] else 0.0
+            terminalreporter.write_line(
+                f"  {name:<16} {entry['calls']:>12} {entry['us'] / 1000000:>10.2f}s "
+                f"{avg_us:>8.1f}us "
+                f"{pct(entry['us'], kernel_total.us):>9.1f}% "
+                f"{pct(entry['us'] / 1000.0, total_window):>11.1f}%"
+            )
 
 
 def _write_component_breakdown(
@@ -599,8 +816,8 @@ def _write_component_breakdown(
     if profiled_compiles and profiled_compiles < test_count:
         terminalreporter.write_line(
             f"  note: syscall/IO data covers {profiled_compiles} of {test_count} compiles "
-            f"(only compiles that reached tcc's -bench dump report it); the executed "
-            f"binaries report none"
+            f"(only compiles that reached tcc's -bench dump report it); for the "
+            f"executed binaries, and for the suite as a whole, see the OS cost block below"
         )
 
     if syscall_totals:
@@ -614,6 +831,17 @@ def _write_component_breakdown(
             syscall_totals.items(), key=lambda item: item[1]["ms"], reverse=True
         ):
             avg_us = (data["ms"] * 1000 / data["calls"]) if data["calls"] else 0.0
+            if avg_us >= IMPLAUSIBLE_CALL_US:
+                # A 32-bit DWT_CYCCNT that wrapped inside one call: the kernel
+                # drops those it can recognise (`dropped`), but the compact
+                # dump's "other" bucket is a subtraction and inherits any that
+                # slipped through. Printing it as seconds invites reading a
+                # counter artefact as the suite's biggest syscall.
+                terminalreporter.write_line(
+                    f"  {name:<16} {data['calls']:>12} {'implausible':>11} "
+                    f"{'(wrapped cycle counter — sample discarded)':>44}"
+                )
+                continue
             terminalreporter.write_line(
                 f"  {name:<16} {data['calls']:>12} {data['ms'] / 1000:>10.2f}s "
                 f"{avg_us:>8.1f}us "

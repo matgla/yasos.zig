@@ -75,7 +75,7 @@ pub const FatFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         return FatFsDirectory.init(.{
             ._allocator = allocator,
             ._name = dirname,
-            ._path = try allocator.dupeZ(u8, path),
+            ._path = try allocator.dupeSentinel(u8, path, 0),
         });
     }
 

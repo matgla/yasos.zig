@@ -30,6 +30,7 @@ import logging
 
 import serial
 from .detect_serial_port import detect_probe_serial_port
+from .paths import smoke_log_dir
 from . import qemu
 
 current_dir = os.path.dirname(os.path.abspath(__file__)) + "/.."
@@ -126,12 +127,12 @@ class Session:
                 Session.serial = serial.Serial(Session.serial_port, CONSOLE_BAUDRATE, timeout=SERIAL_TIMEOUT)
                 Session.target_needs_reset = True
             self.serial = Session.serial
-        os.makedirs("logs", exist_ok=True)
+        logs_dir = smoke_log_dir()
+        os.makedirs(logs_dir, exist_ok=True)
         log_file = name.split(':')[-1].split(' ')[0]
         log_file = log_file.replace('/', '_').replace('[', '_').replace(']', '_')
         date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        log_file = f"logs/{log_file}_{date}.txt"
-        self.log_path = os.path.abspath(log_file)
+        self.log_path = os.path.abspath(logs_dir / f"{log_file}_{date}.txt")
         self.file = open(self.log_path, 'w')
         # Timed and left on the instance rather than reported from here: this is
         # the per-test prompt resync plus `cd /`, which is harness overhead the
@@ -738,11 +739,12 @@ class Session:
         """
         if cls.serial is None:
             return None
-        os.makedirs("logs", exist_ok=True)
+        logs_dir = smoke_log_dir()
+        os.makedirs(logs_dir, exist_ok=True)
         date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         session = cls.__new__(cls)
         session.serial = cls.serial
-        session.file = open(f"logs/{name}_{date}.txt", 'w')
+        session.file = open(logs_dir / f"{name}_{date}.txt", 'w')
         return session
 
     @classmethod

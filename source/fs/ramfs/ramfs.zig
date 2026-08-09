@@ -280,7 +280,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         const resolved_path = try std.fs.path.resolve(self._allocator, &.{path});
         defer self._allocator.free(resolved_path);
 
-        var it = try std.fs.path.componentIterator(resolved_path);
+        var it = std.fs.path.componentIterator(resolved_path);
         var current_directory: kernel.fs.IDirectory = self._root.as_directory().?;
         while (it.next()) |component| {
             if (it.peekNext() != null) {

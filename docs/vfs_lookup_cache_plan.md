@@ -161,6 +161,16 @@ Measured on a hello-world compile: **12 opens (3 finding nothing) and 4.04 ms
 -> 9 opens (0 finding nothing) and 2.31 ms**. Over the 69-test slice, `open`
 fell to **476 us** average, 1.2% of compile.
 
+## Update (2026-08-10): the romfs side
+
+The rows above are FAT. The romfs side was profiled separately in
+`docs/fs_open_write_profile.md` and had a different problem — not the walk being
+long, but each *entry* of it being expensive: about six reads of the same 32
+bytes plus a heap allocation for a name that existed only to be compared, and a
+~120-byte header struct returned by value per entry stepped over. Fixing both
+took a warm romfs open from ~154 us to ~119 us and a failed romfs lookup from
+~594 us to ~275 us. Nothing there changes the FAT numbers or the plan below.
+
 ## What to do next, in order
 
 **1. Shorten the corpus path.** `/root/ci/sources/v2/gcc_torture/execute/09/x.c`

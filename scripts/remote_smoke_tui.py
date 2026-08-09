@@ -57,6 +57,7 @@ _ROOTFS_SOURCE_DIRS = [
     "apps/zork",
     "apps/rzsz",
     "apps/sha",
+    "apps/syscallbench",
     "apps/toybox_builder",
 ]
 _ROOTFS_SOURCE_FILES = [
@@ -260,6 +261,9 @@ DEFAULT_CONFIG = {
     "pytest_args": "tests/smoke",
     "uhubctl_hub": "",
     "uhubctl_port": "",
+    # Numbered run directories kept on the remote (logs/1, logs/2, ...); 0 keeps
+    # all of them. The local mirror is never pruned.
+    "keep_runs": 20,
 }
 
 
@@ -335,6 +339,10 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
         merged["test_retries"] = int(merged.get("test_retries", 1))
     except (TypeError, ValueError):
         merged["test_retries"] = 1
+    try:
+        merged["keep_runs"] = int(merged.get("keep_runs", DEFAULT_CONFIG["keep_runs"]))
+    except (TypeError, ValueError):
+        merged["keep_runs"] = DEFAULT_CONFIG["keep_runs"]
     # Default on (matches DEFAULT_CONFIG): the GCC torture suite runs unless a
     # config/CLI explicitly disables it.
     merged["with_gcc_torture"] = str(merged.get("with_gcc_torture", True)).strip().lower() in {
@@ -438,6 +446,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise RunnerError("OpenOCD adapter speed must be a positive integer in kHz")
     if validated["test_retries"] < 0:
         raise RunnerError("Test retries must be zero or greater")
+    if validated["keep_runs"] < 0:
+        raise RunnerError("Kept run directories must be zero (keep all) or greater")
 
     identity = str(validated["ssh_identity_file"]).strip()
     if identity:
@@ -555,6 +565,7 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
             ("Optimize", "optimize"),
             ("Smoke TCC opt lvls", "smoke_tcc_opt_level"),
             ("Test retries", "test_retries"),
+            ("Keep remote run dirs", "keep_runs"),
             ("With GCC torture", "with_gcc_torture"),
             ("Pytest args", "pytest_args"),
             ("uhubctl hub (auto)", "uhubctl_hub"),
@@ -658,11 +669,13 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     config[selected_key] = not bool(config[selected_key])
                     continue
                 edited = edit_value(stdscr, label, str(config[selected_key]))
-                if selected_key in ("ssh_port", "openocd_adapter_speed", "test_retries"):
+                if selected_key in ("ssh_port", "openocd_adapter_speed", "test_retries", "keep_runs"):
                     if selected_key == "ssh_port":
                         default_value = "22"
                     elif selected_key == "openocd_adapter_speed":
                         default_value = "20000"
+                    elif selected_key == "keep_runs":
+                        default_value = str(DEFAULT_CONFIG["keep_runs"])
                     else:
                         default_value = "1"
                     config[selected_key] = edited.strip() or default_value
@@ -1013,14 +1026,73 @@ remote_path=$1
     return completed.returncode == 0
 
 
-def fetch_remote_smoke_logs(config: dict[str, Any]) -> Path | None:
+def local_smoke_logs_dir(config: dict[str, Any]) -> Path:
+    """Local mirror of the remote runs root, one directory per ssh target."""
+    return REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
+
+
+def remote_runs_root(config: dict[str, Any]) -> str:
+    """Where the numbered run directories live on the remote host.
+
+    Inside the work dir, because the repo tree above it is rsynced with
+    --delete: a runs root under $remote_repo would be deleted at the start of
+    every run, and the run before it would silently hand its number back.
+    """
     remote_repo = str(config["remote_repo_path"]).rstrip("/")
-    remote_logs_dir = f"{remote_repo}/logs"
-    local_logs_dir = REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
+    return f"{remote_work_dir_of(remote_repo)}/logs"
 
-    if local_logs_dir.exists():
-        shutil.rmtree(local_logs_dir)
 
+def allocate_remote_run_id(config: dict[str, Any]) -> int:
+    """Reserve the next run number under the remote ``logs/``.
+
+    Allocated here rather than remotely so the local side knows the directory
+    before the run starts: the log mirror and the tailer are scoped to it, which
+    is what lets a run be followed live without confusing it with the previous
+    run's transcripts.
+    """
+    remote_script = """set -euo pipefail
+runs_root=$1
+
+mkdir -p "$runs_root"
+max=0
+for entry in "$runs_root"/*; do
+    name=${entry##*/}
+    [[ -d "$entry" && ! -L "$entry" ]] || continue
+    [[ "$name" =~ ^[0-9]+$ ]] || continue
+    if (( 10#$name > max )); then
+        max=$(( 10#$name ))
+    fi
+done
+echo $(( max + 1 ))
+"""
+    completed = subprocess.run(
+        ssh_base(config) + ["bash", "-s", "--", remote_runs_root(config)],
+        input=remote_script,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RunnerError(
+            f"Could not allocate a remote run id: {completed.stderr.strip()}"
+        )
+    try:
+        return int(completed.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise RunnerError(
+            f"Unexpected remote run id: {completed.stdout.strip()!r}"
+        ) from None
+
+
+def fetch_remote_smoke_logs(config: dict[str, Any], run_id: int | None = None) -> Path | None:
+    remote_logs_dir = remote_runs_root(config)
+    local_logs_dir = local_smoke_logs_dir(config)
+
+    # Not wiped, and synced without --delete: the mirror holds one directory per
+    # run, and keeping the earlier ones is the reason they are numbered. It
+    # therefore outlives the remote's own retention (keep_runs), which is what
+    # makes a baseline safe to compare against weeks later.
     if not remote_directory_exists(config, remote_logs_dir):
         return None
 
@@ -1038,6 +1110,8 @@ def fetch_remote_smoke_logs(config: dict[str, Any]) -> Path | None:
         str(local_logs_dir) + "/",
     ]
     run_command(rsync_cmd, cwd=REPO_ROOT)
+    if run_id is not None and (local_logs_dir / str(run_id)).is_dir():
+        return local_logs_dir / str(run_id)
     return local_logs_dir
 
 
@@ -1047,20 +1121,19 @@ def _quiet_log_sync(config: dict[str, Any]) -> bool:
     The remote ``Session`` flushes its log file after every write, so a test
     that is still running (or wedged) already has its output on disk remotely --
     this pulls that partial file down so it can be tailed live.
+
+    No --delete: the run being followed lives in its own numbered directory, so
+    a previous run's transcripts can no longer be mistaken for this one's (which
+    is what --delete used to prevent), and mirroring the remote's pruning would
+    throw away local history for nothing.
     """
-    remote_repo = str(config["remote_repo_path"]).rstrip("/")
-    remote_logs_dir = f"{remote_repo}/logs"
-    local_logs_dir = REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
+    remote_logs_dir = remote_runs_root(config)
+    local_logs_dir = local_smoke_logs_dir(config)
     local_logs_dir.mkdir(parents=True, exist_ok=True)
 
     rsync_cmd = [
         "rsync",
         "-az",
-        # The remote wipes logs/ *after* flashing, so the first syncs of a run
-        # pull the previous run's logs. Mirroring deletions is what makes those
-        # disappear again -- otherwise a stale log outlives the wipe locally and
-        # can still be the newest file, i.e. the one that gets streamed.
-        "--delete",
         "-e",
         command_string(ssh_transport_base(config)),
         f"{config['ssh_target']}:{remote_logs_dir.rstrip('/')}/",
@@ -1116,12 +1189,13 @@ class _LogTailer:
     arrives.  That is the whole point: the serial transcript of a stuck test is
     visible *while* it is stuck, instead of only after it times out.
 
-    Streaming stays off until the remote pytest phase is known to have started,
-    because the remote clears ``logs/`` only after flashing -- until then the
-    fetched logs belong to the *previous* run and streaming one of them would be
-    pure misdirection.  Two independent signals turn it on, whichever lands
-    first: pytest's own session banner in the runner's output, and the fetched
-    logs disappearing (the remote wipe, mirrored by ``rsync --delete``).
+    ``logs_dir`` is *this run's* numbered directory in the local mirror, so
+    everything in it belongs to the run being followed and no previous run's
+    transcript can be mistaken for the in-flight one.  Streaming still stays off
+    until the remote pytest phase is known to have started; two independent
+    signals turn it on, whichever lands first: pytest's own session banner in
+    the runner's output, and the first log file appearing in the run directory
+    (the remote creates it after flashing, immediately before pytest).
     """
 
     def __init__(
@@ -1144,6 +1218,15 @@ class _LogTailer:
         self._last_output_at = 0.0
         self._enabled = False
         self._enabled_at = 0.0
+        # A file already in the run directory cannot belong to this run -- the
+        # remote creates that directory after flashing, and its number was
+        # allocated as one past the highest existing one. It can only be a
+        # leftover in the local mirror from a remote whose logs/ was wiped by
+        # hand and started numbering again, so it is excluded outright rather
+        # than announced, streamed, or taken as the signal that pytest started.
+        self._stale: set[Path] = set()
+        if self._logs_dir.exists():
+            self._stale = set(self._logs_dir.glob("*.txt"))
 
     @property
     def streaming(self) -> bool:
@@ -1162,6 +1245,10 @@ class _LogTailer:
         # Called from the reader thread as well as the sync thread; both only
         # ever set the flag, and the timestamp makes the in-flight test's
         # threshold count from here rather than from a pre-pytest observation.
+        # Idempotent: whichever signal lands first fixes the timestamp, and a
+        # later one must not push it forward and delay streaming.
+        if self._enabled:
+            return
         self._enabled_at = self._clock()
         self._enabled = True
 
@@ -1172,6 +1259,8 @@ class _LogTailer:
         candidates: list[tuple[float, Path, int]] = []
         new_files = 0
         for path in sorted(self._logs_dir.glob("*.txt")):
+            if path in self._stale:
+                continue
             try:
                 stat = path.stat()
             except OSError:
@@ -1181,13 +1270,14 @@ class _LogTailer:
                 new_files += 1
             candidates.append((stat.st_mtime, path, stat.st_size))
 
-        # The sync mirrors deletions, so drop bookkeeping for files that are
-        # gone; a later file reusing the name starts from a clean offset.
-        present = {path for _, path, _ in candidates}
-        if self._seen - present:
-            # Logs vanished: the remote cleared logs/, which it does right
-            # before starting pytest.
+        # A file in the run directory can only have come from this run, so its
+        # arrival means the remote is past flashing and into pytest.
+        if new_files:
             self._enable()
+
+        # Drop bookkeeping for files that are gone (a rerun that recreates the
+        # run directory); a later file reusing the name starts from offset 0.
+        present = {path for _, path, _ in candidates}
         self._seen &= present
         for path in [p for p in self._sizes if p not in present]:
             del self._sizes[path]
@@ -1466,6 +1556,10 @@ def run_remote_smoke(
     adapter_speed = str(config["openocd_adapter_speed"])
     test_retries = int(config.get("test_retries", 0))
     pytest_args = shlex.split(str(config["pytest_args"]).strip() or "tests/smoke")
+    keep_runs = int(config.get("keep_runs", DEFAULT_CONFIG["keep_runs"]))
+    # A flash-only run never reaches the pytest phase, so it neither needs nor
+    # should consume a run number.
+    run_id = 0 if flash_only else allocate_remote_run_id(config)
     remote_script = """set -euo pipefail
 remote_repo=$1
 remote_work_dir=$2
@@ -1492,7 +1586,9 @@ smoke_tcc_opt_level=${22}
 extra_tcc_cflags=${23}
 seed_source_manifest=${24}
 tcc_env_prefix=${25}
-shift 25
+run_id=${26}
+keep_runs=${27}
+shift 27
 
 detect_uhubctl_device() {
     # Find a USB device by vendor ID in sysfs and return its hub location
@@ -1892,9 +1988,58 @@ if [[ "$flash_only" == "1" ]]; then
 fi
 
 cd "$remote_repo"
-rm -rf "$remote_repo/logs"
-mkdir -p "$remote_repo/logs"
-export YASOS_TIMING_REPORT_DIR="$remote_repo/logs"
+
+# One numbered directory per run (logs/1, logs/2, ...), instead of a single
+# logs/ wiped at the start of every run. Comparing two runs -- the whole point
+# of --profile -- needs both of them to still exist, and the timing/profile
+# report is written into this directory too, so an A/B is just two numbers.
+# The id comes from the caller so the local side knows which directory to
+# mirror and tail without having to guess.
+#
+# Under the work dir, NOT under the repo: sync_remote_repo_sources() rsyncs the
+# repo with --delete and excludes only /workdir/, so anything the repo tree does
+# not have locally -- a runs root at $remote_repo/logs included -- is deleted at
+# the start of every run. That is also why the old layout could get away with
+# wiping logs/ itself: it was ephemeral either way.
+runs_root="$remote_work_dir/logs"
+run_dir="$runs_root/$run_id"
+mkdir -p "$runs_root"
+rm -rf "$run_dir"
+mkdir -p "$run_dir"
+ln -sfn "$run_id" "$runs_root/latest"
+export YASOS_TIMING_REPORT_DIR="$run_dir"
+export YASOS_SMOKE_LOG_DIR="$run_dir"
+
+# What this run *was*, so a directory found later is self-describing: the two
+# arms of an A/B differ by exactly one of these lines.
+{
+    printf 'run_id=%s\n' "$run_id"
+    printf 'started=%s\n' "$(date -Iseconds)"
+    printf 'kernel_sha=%s\n' "$kernel_sha"
+    printf 'rootfs_sha=%s\n' "$rootfs_sha"
+    printf 'profile=%s\n' "$profile"
+    printf 'opt_levels=%s\n' "$smoke_tcc_opt_level"
+    printf 'gcc_torture=%s\n' "$with_gcc_torture"
+    printf 'extra_tcc_cflags=%s\n' "$extra_tcc_cflags"
+    printf 'tcc_env_prefix=%s\n' "$tcc_env_prefix"
+    printf 'git_rev=%s\n' "$(git -C "$remote_repo" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    printf 'pytest_args=%s\n' "${*@Q}"
+} > "$run_dir/run_info.txt"
+
+# Keep the last $keep_runs runs; 0 keeps everything. Full-suite runs leave tens
+# of MiB of transcripts behind, and this is a Pi.
+if (( keep_runs > 0 )); then
+    mapfile -t run_dirs < <(find "$runs_root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+        | grep -E '^[0-9]+$' | sort -n)
+    prune_count=$(( ${#run_dirs[@]} - keep_runs ))
+    for (( i = 0; i < prune_count; i++ )); do
+        rm -rf "${runs_root:?}/${run_dirs[$i]}"
+    done
+    if (( prune_count > 0 )); then
+        echo "Pruned $prune_count old run dir(s) from $runs_root, keeping the last $keep_runs"
+    fi
+fi
+echo "Run $run_id logging to $run_dir"
 
 if [[ ! -x "$remote_work_dir/venv/bin/python3" ]]; then
     python3 -m venv "$remote_work_dir/venv"
@@ -1974,7 +2119,15 @@ if (( test_retries > 0 )); then
     pytest_cmd+=(--reruns "$test_retries" --reruns-delay 1)
 fi
 
+# The exit status is recorded next to the logs and then re-raised, so a run
+# directory says on its own whether it is a complete result or the wreckage of
+# an aborted run -- which matters when it is one arm of an A/B read back later.
+set +e
 "${pytest_cmd[@]}" "$@"
+pytest_status=$?
+set -e
+printf 'finished=%s\nstatus=%s\n' "$(date -Iseconds)" "$pytest_status" >> "$run_dir/run_info.txt"
+exit "$pytest_status"
 """
     # SSH concatenates remote command args with spaces before sending to the
     # remote shell.  Empty strings and values with special characters would be
@@ -2005,6 +2158,8 @@ fi
         str(config.get("extra_tcc_cflags", "")),
         str(config.get("seed_source_manifest", "")),
         str(config.get("tcc_env_prefix", "")),
+        str(run_id),
+        str(keep_runs),
         *pytest_args,
     ]
     cmd = ssh_base(config) + [
@@ -2016,11 +2171,16 @@ fi
     sync_thread: threading.Thread | None = None
     tailer: _LogTailer | None = None
     if not flash_only:
-        local_logs_dir = REMOTE_SMOKE_LOGS_DIR / safe_path_component(str(config["ssh_target"]))
-        if local_logs_dir.exists():
-            shutil.rmtree(local_logs_dir)
+        # Scoped to this run's directory: it does not exist yet (the remote
+        # creates it after flashing), which the tailer treats as "nothing to
+        # follow yet" rather than as an error.
+        local_run_dir = local_smoke_logs_dir(config) / str(run_id)
+        print(
+            f"Run {run_id}: remote {remote_runs_root(config)}/{run_id}"
+            f" -> local {local_run_dir}"
+        )
         tailer = _LogTailer(
-            local_logs_dir,
+            local_run_dir,
             stream_after=float(config.get("log_stream_after", LOG_STREAM_AFTER_SECONDS)),
         )
         sync_thread = threading.Thread(
@@ -2060,7 +2220,7 @@ fi
             sync_thread.join(timeout=5)
         if not flash_only:
             try:
-                fetched_logs_dir = fetch_remote_smoke_logs(config)
+                fetched_logs_dir = fetch_remote_smoke_logs(config, run_id)
             except RunnerError as fetch_error:
                 if run_error is None:
                     raise
@@ -2972,6 +3132,9 @@ def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namesp
     if getattr(args, "log_stream_after", None) is not None:
         runtime_config["log_stream_after"] = max(float(args.log_stream_after), 0.0)
 
+    if getattr(args, "keep_runs", None) is not None:
+        runtime_config["keep_runs"] = max(int(args.keep_runs), 0)
+
     if args.with_gcc_torture is not None:
         runtime_config["with_gcc_torture"] = args.with_gcc_torture
 
@@ -3098,6 +3261,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--power-reset-port", default=None, metavar="PORTS", help="Override which hub port(s) the power-cycle reset switches, as a uhubctl spec (e.g. '1,2' for the debug probe on port 1 plus the target board on port 2, or '1-2'). Defaults to the configured uhubctl port(s); empty means auto-detect the probe's port.")
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
     parser.add_argument("--log-stream-after", type=float, default=None, metavar="SECONDS", help=f"Start streaming the in-flight test's target log once it has been running this long (default {LOG_STREAM_AFTER_SECONDS:g}s). The log is rsynced from the remote host while the test runs, so a stuck test's serial transcript is visible before it times out. 0 disables streaming and only reports newly fetched log files.")
+    parser.add_argument("--keep-runs", type=int, default=None, metavar="N", help=f"How many numbered run directories to keep on the remote host (default {DEFAULT_CONFIG['keep_runs']}; 0 keeps all). Every run writes its logs and its timing/profile report to logs/<N>/, so two runs can be compared afterwards; the local mirror under .cache/remote_smoke_logs is never pruned.")
     parser.add_argument("--rerun-failed", action="store_true", help="Run only tests that failed in the previous remote pytest run by passing --lf to pytest. If no last-failed cache exists on the remote host, runs no tests instead of the full suite.")
     parser.add_argument("--with-gcc-torture", dest="with_gcc_torture", action="store_true", default=None, help="Enable GCC torture smoke tests for this run. Also syncs libs/tinycc/tests/gcctestsuite and exports YASOS_SMOKE_ENABLE_GCC_TORTURE=1 remotely.")
     parser.add_argument("--smoke-tcc-opt-levels", "--smoke-tcc-opt-level", dest="smoke_tcc_opt_level", type=smoke_tcc_opt_levels_argument, metavar="LEVELS", help=f"tcc -O levels the smoke suites run at (default '{SMOKE_TCC_ALL_OPT_LEVELS}', i.e. every suite -- tests2, ir_tests and gcc-torture -- runs once per level). Pass one level for a focused, roughly 3x shorter run, or any subset: --smoke-tcc-opt-levels -O1, --smoke-tcc-opt-levels '-O0 -O2', --smoke-tcc-opt-levels all.")

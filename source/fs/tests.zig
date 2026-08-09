@@ -27,5 +27,18 @@ comptime {
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    refAllDeclsRecursive(@This());
+}
+
+fn refAllDeclsRecursive(comptime T: type) void {
+    if (!@import("builtin").is_test) return;
+    inline for (comptime std.meta.declarations(T)) |decl_name| {
+        if (@TypeOf(@field(T, decl_name)) == type) {
+            switch (@typeInfo(@field(T, decl_name))) {
+                .@"struct", .@"enum", .@"union", .@"opaque" => refAllDeclsRecursive(@field(T, decl_name)),
+                else => {},
+            }
+        }
+        _ = &@field(T, decl_name);
+    }
 }

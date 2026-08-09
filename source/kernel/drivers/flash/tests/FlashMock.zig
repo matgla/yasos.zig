@@ -22,7 +22,7 @@ pub const FlashMock = struct {
     pub fn create(id: u32) FlashMock {
         return .{
             .id = id,
-            .memory = [_]u8{0} ** 4096,
+            .memory = @splat(0),
         };
     }
 

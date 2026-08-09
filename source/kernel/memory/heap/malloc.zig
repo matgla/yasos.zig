@@ -28,6 +28,8 @@ const log = std.log.scoped(.malloc);
 const heapprof_log = std.log.scoped(.heapprof);
 
 const arch = @import("arch");
+// Allocation cost attribution; compiles out unless profiling is enabled.
+const perf = @import("../../interrupts/perf_profile.zig");
 const config = @import("config");
 
 pub const KernelAllocatorType = MallocAllocator(.{
@@ -315,7 +317,7 @@ const Tracker = extern struct {
         heapprof_log.err("begin total={d} live={d}", .{ total, live });
         node = self.next;
         while (node) |n| {
-            var bt: [6]usize = [_]usize{0} ** 6;
+            var bt: [6]usize = @splat(0);
             var i: usize = 0;
             // data[0] is the allocation pointer; data[1..data_len] are the
             // caller-first return addresses captured at alloc time.
@@ -398,7 +400,9 @@ pub fn MallocAllocator(comptime options: anytype) type {
         ) ?[*]u8 {
             _ = log2_align;
             std.debug.assert(len > 0);
+            const t_alloc = if (perf.enabled) perf.read_cycles() else 0;
             const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
+            if (perf.enabled) perf.kernel_heap_op(perf.read_cycles() -% t_alloc);
             memory_in_use += @as(isize, @intCast(len));
             if (memory_in_use > peak_memory_in_use) {
                 peak_memory_in_use = memory_in_use;
@@ -419,11 +423,10 @@ pub fn MallocAllocator(comptime options: anytype) type {
                 tracker_object.allocated_length = len;
                 tracker_object.owner_pid = current_pid();
                 var index: usize = 2;
-                var stack = std.debug.StackIterator.init(return_address, @frameAddress());
-                _ = stack.next(); // skip first (already stored as data[1])
+                var walker: arch.panic.StackWalker = .init(return_address);
+                _ = walker.next(); // skip first (already stored as data[1])
                 while (index <= max_trace + 1) {
-                    if (!arch.panic.is_valid_stack_ptr(stack.fp)) break;
-                    const ret = stack.next() orelse break;
+                    const ret = walker.next() orelse break;
                     if (@hasField(@TypeOf(options), "verbose") and options.verbose) {
                         log.debug("{d}: 0x{x}", .{ index - 1, ret });
                     }

@@ -19,6 +19,7 @@
 //
 
 const std = @import("std");
+const vfmt = @import("vfmt.zig");
 
 const cpu = @import("hal").cpu;
 const memory = @import("hal").memory;
@@ -71,15 +72,15 @@ pub const DumpHardware = struct {
 
     fn format_size(size: u64, buffer: []u8) []const u8 {
         if (size >= 1000000000000) {
-            return std.fmt.bufPrint(buffer, "TB", .{}) catch buffer[0..];
+            return vfmt.print(buffer, "TB", .{});
         } else if (size >= 1024 * 1024 * 1024) {
-            return std.fmt.bufPrint(buffer, "{d: <4} GB", .{size / 1024 / 1024 / 1024}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} GB", .{size / 1024 / 1024 / 1024});
         } else if (size >= 1024 * 1024) {
-            return std.fmt.bufPrint(buffer, "{d: <4} MB", .{size / 1024 / 1024}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} MB", .{size / 1024 / 1024});
         } else if (size >= 1024) {
-            return std.fmt.bufPrint(buffer, "{d: <4} KB", .{size / 1024}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} KB", .{size / 1024});
         } else {
-            return std.fmt.bufPrint(buffer, "{d: <4} B", .{size}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} B", .{size});
         }
 
         return buffer;
@@ -87,15 +88,15 @@ pub const DumpHardware = struct {
 
     fn format_frequency(freq: u64, buffer: []u8) []const u8 {
         if (freq >= 1000000000000) {
-            return std.fmt.bufPrint(buffer, "{d: <4} ---", .{freq / 1000000000000}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} ---", .{freq / 1000000000000});
         } else if (freq >= 1000000000) {
-            return std.fmt.bufPrint(buffer, "{d: <4} GHz", .{freq / 1000000000}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} GHz", .{freq / 1000000000});
         } else if (freq >= 1000000) {
-            return std.fmt.bufPrint(buffer, "{d: <4} MHz", .{freq / 1000000}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} MHz", .{freq / 1000000});
         } else if (freq >= 1000) {
-            return std.fmt.bufPrint(buffer, "{d: <4} KHz", .{freq / 1000}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} KHz", .{freq / 1000});
         } else {
-            return std.fmt.bufPrint(buffer, "{d: <4} Hz", .{freq}) catch buffer[0..];
+            return vfmt.print(buffer, "{d: <4} Hz", .{freq});
         }
 
         return buffer;

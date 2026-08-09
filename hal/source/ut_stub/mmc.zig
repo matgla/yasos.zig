@@ -91,7 +91,7 @@ pub const MmcStub = struct {
     }
 
     pub fn build_command(self: *MmcStub, command: u6, argument: u32) [6]u8 {
-        var buf: [6]u8 = [_]u8{0x00} ** 6;
+        var buf: [6]u8 = @splat(0x00);
         buf[0] = 0x40;
         buf[0] |= command; // Standard MMC command format
         buf[1] = @intCast((argument >> 24) & 0xFF);
@@ -174,7 +174,7 @@ pub const MmcStub = struct {
         _ = self;
         _ = cmd;
         _ = arg;
-        return .{ .data = [_]u8{0} ** 16, .valid = false };
+        return .{ .data = @splat(0), .valid = false };
     }
 
     pub fn read_sdio_data(self: *MmcStub, buf: []u8) anyerror!void {

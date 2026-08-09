@@ -1,4 +1,4 @@
-CONTAINER_VERSION ?= v0.18
+CONTAINER_VERSION ?= v0.19
 RUN_CONTAINER ?= ./scripts/run_container.sh -v ${CONTAINER_VERSION}
 
 # tcc -O levels the smoke suites run at. Every suite (tests2, ir_tests,

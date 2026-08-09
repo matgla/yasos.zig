@@ -20,9 +20,6 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("source/sys/include/syscall.h");
-});
 
 const ContextSwitchHandler = *const fn (lr: usize) usize;
 const SystemCallHandler = *const fn (number: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void;

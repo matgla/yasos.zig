@@ -180,7 +180,6 @@ pub const Mmc = union(enum) {
 //         fn encode_command(cmd: u32, arg: u32) EncodedCommand {
 //             var buffer: [2]u32 = undefined;
 //             buffer[0] = ((0x40 | (cmd & 0x3f)) << 24) | ((arg >> 8) & 0xffffff);
-//             var calc = std.hash.crc.Crc7Mmc.init();
 //             buffer[1] = ((arg & 0xff) << 8) << 16;
 //             calc.update(std.mem.sliceAsBytes(buffer[0..1])[0..6]);
 //             const crc = calc.final();

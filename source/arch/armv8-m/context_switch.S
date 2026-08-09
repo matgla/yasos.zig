@@ -22,6 +22,23 @@
 .cpu cortex-m33
 .thumb
 
+// Run this file out of RAM rather than XIP flash.
+//
+// Every syscall and every context switch enters through here, and on the
+// RP2350 the core runs at 532 MHz against QSPI flash: an instruction fetch
+// that misses the XIP cache is worth tens of core cycles. The Zig half of the
+// path already had this treatment -- _irq_svcall and syscall_fast_table carry
+// linksection(".time_critical") and link at 0x2000xxxx -- but this file
+// declared no section, so it landed in .text at 0x1000xxxx and the path
+// crossed flash -> RAM -> flash on the way in and back out again on the way
+// out, with the SVCall vector itself pointing into flash.
+//
+// Every board's linker script already collects .time_critical into the RAM
+// region it copies at boot (hal/source/*/linker_script.ld), so this is a
+// placement change only. "ax" because the section holds code; the region is
+// executable already, which is what lets the Zig side run there today.
+.section .time_critical, "ax", %progbits
+
 #include "libs/libc/sys/syscall_ids.h"
 
 // ─── DCP (RP2350 double coprocessor, CP4) context ───────────────────────────
@@ -244,21 +261,31 @@ process_syscall_return_without_fpu:
 // CONTROL.nPRIV is left untouched, so the thread resumes at its prior privilege.
 // r0 = syscall number, r1 = arg pointer, r2 = out pointer, lr = EXC_RETURN.
 process_syscall_fast_check:
-  push {r0-r3, lr}
 #if YASOS_PERF_SYSCALL_STAMP
   // Stamp DWT_CYCCNT for the syscall profiler before anything else runs. This
   // is the only point that sees the cost of exception entry and of the
   // trampoline the slow path is about to build; _irq_svcall can only time
-  // itself. r1/r2 are restored by the pop below, so nothing user-visible is
-  // clobbered. Compiled in only with CONFIG_INSTRUMENTATION_PERF_PROFILING.
-  ldr r1, =0xE0001004     // DWT_CYCCNT
-  ldr r1, [r1]
-  ldr r2, =perf_svc_entry_cycles
-  str r1, [r2]
+  // itself. Compiled in only with CONFIG_INSTRUMENTATION_PERF_PROFILING.
+  push {r0, r3}
+  ldr r3, =0xE0001004     // DWT_CYCCNT
+  ldr r3, [r3]
+  ldr r0, =perf_svc_entry_cycles
+  str r3, [r0]
+  pop {r0, r3}
 #endif
-  bl syscall_is_fast      // r0(number) -> r0 (1 fast, 0 otherwise)
-  cmp r0, #0
-  pop {r0-r3, lr}         // ldmia preserves the condition flags
+  // Fast-path decision, inlined: an out-of-range number falls through to the
+  // trampoline, where _irq_svcall reports NotImplemented.
+  //
+  // r3 is the scratch register throughout. It is free to clobber on both
+  // exits: the fast path exception-returns through the user's own stacked
+  // frame, and the trampoline's simulated frame carries r3 only as far as
+  // dispatch_syscall, which does not read it -- the user's r3 is restored at
+  // the end from the original frame, which is untouched here.
+  cmp r0, #YASOS_SYSCALL_COUNT
+  bcs process_syscall_entry
+  ldr r3, =syscall_fast_table
+  ldrb r3, [r3, r0]
+  cmp r3, #0
   beq process_syscall_entry
   // fast: dispatch in handler mode, args (r0-r2) already in place
   push {r0, lr}           // r0 for 8-byte alignment; lr = EXC_RETURN

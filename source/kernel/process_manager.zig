@@ -145,7 +145,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 .allocator = allocator,
                 ._scheduler = SchedulerType.init(),
                 ._process_memory_pool = processes_memory_pool,
-                ._pid_map = std.StaticBitSet(config.process.max_pid_value).initFull(),
+                ._pid_map = std.StaticBitSet(config.process.max_pid_value).full,
                 .core = undefined,
                 .mutex = .{},
                 .terminate_list = .{},
@@ -1018,7 +1018,7 @@ test "ProcessManager.ShouldForkProcess" {
     defer kernel.dynamic_loader.deinit();
 
     const IoctlCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
             const cmd = args[0];
             try std.testing.expectEqual(cmd, @as(i32, @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
 

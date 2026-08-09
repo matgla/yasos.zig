@@ -23,12 +23,7 @@ const hal = @import("hal_interface");
 
 const log = std.log.scoped(.@"mmc/spi");
 
-const mmc_spi = @cImport({
-    @cInclude("mmc_spi.pio.h");
-    @cInclude("hardware/clocks.h");
-    @cInclude("hardware/pio.h");
-    @cInclude("hardware/gpio.h");
-});
+const mmc_spi = @import("mmc_spi_headers");
 
 pub const MmcSpi = struct {
     _config: hal.mmc.MmcConfig,
@@ -54,11 +49,11 @@ pub const MmcSpi = struct {
     pub fn build_command(self: MmcSpi, command: u6, argument: u32) [6]u8 {
         _ = self;
         const argument_value: u32 = std.mem.nativeToBig(u32, argument);
-        var buffer: [6]u8 = [_]u8{0x00} ** 6;
+        var buffer: [6]u8 = @splat(0x00);
         buffer[0] = 0x40 | @as(u8, command);
         const argument_bytes = std.mem.toBytes(argument_value);
         @memcpy(buffer[1..5], argument_bytes[0..4]);
-        buffer[5] = @as(u8, std.hash.crc.Crc7Mmc.hash(buffer[0..5])) << 1 | 1;
+        buffer[5] = @as(u8, std.hash.crc.@"CRC-7/MMC".hash(buffer[0..5])) << 1 | 1;
         return buffer;
     }
 
@@ -76,7 +71,7 @@ pub const MmcSpi = struct {
     }
 
     fn enter_native_mode(self: *MmcSpi) void {
-        const init_cmd: [10]u8 = [_]u8{0xff} ** 10;
+        const init_cmd: [10]u8 = @splat(0xff);
 
         self.transmit_blocking(init_cmd[0..], null);
     }

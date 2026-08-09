@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import sys
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_PATH = REPO_ROOT / "scripts" / "remote_smoke_tui.py"
@@ -189,39 +191,40 @@ def test_log_tailer_streaming_can_be_disabled(tmp_path, monkeypatch):
     assert tailer.streaming is False
 
 
-def test_log_tailer_ignores_logs_fetched_before_pytest_starts(tmp_path, monkeypatch):
-    """The remote clears logs/ only after flashing, so early polls fetch the
-    previous run's logs; streaming one of them would show an unrelated test."""
+def test_log_tailer_ignores_logs_already_in_the_run_directory(tmp_path, monkeypatch):
+    """The run directory is created remotely after flashing and its number is one
+    past the highest existing run, so anything already in the local mirror under
+    that number predates this run (a remote whose logs/ was wiped by hand and
+    renumbered) and must not be mistaken for the in-flight test."""
+    _write_log(tmp_path, "previous_run.txt", "old transcript\n", mtime=10.0)
+
     emitted = []
     monkeypatch.setattr(remote_smoke_tui, "_emit", emitted.append)
     clock = _FakeClock()
     tailer = remote_smoke_tui._LogTailer(tmp_path, stream_after=30.0, clock=clock)
 
-    _write_log(tmp_path, "previous_run.txt", "old transcript\n", mtime=10.0)
     tailer.poll()
-    emitted.clear()
     clock.advance(600.0)
     tailer.poll()
 
     assert emitted == []
     assert tailer.streaming is False
+    assert tailer.enabled is False
 
 
-def test_log_tailer_starts_streaming_after_the_remote_clears_the_logs(tmp_path, monkeypatch):
+def test_log_tailer_starts_streaming_when_the_run_directory_fills(tmp_path, monkeypatch):
+    """A file appearing in this run's directory is itself the signal that the
+    remote is past flashing and into pytest -- no session banner needed."""
     emitted = []
     monkeypatch.setattr(remote_smoke_tui, "_emit", emitted.append)
     clock = _FakeClock()
     tailer = remote_smoke_tui._LogTailer(tmp_path, stream_after=30.0, clock=clock)
 
-    stale = _write_log(tmp_path, "previous_run.txt", "old transcript\n", mtime=10.0)
     tailer.poll()
     clock.advance(600.0)
-
-    # rsync --delete mirrors the remote wipe; pytest starts right after it.
-    stale.unlink()
-    tailer.poll()
     _write_log(tmp_path, "current.txt", "tcc 31_args.c\n", mtime=700.0)
     tailer.poll()
+    assert tailer.enabled is True
     emitted.clear()
 
     clock.advance(30.0)
@@ -239,6 +242,51 @@ def test_apply_runtime_pytest_overrides_keeps_log_stream_after_out_of_the_cache(
 
     assert config["log_stream_after"] == 5.0
     assert "log_stream_after" not in remote_smoke_tui.DEFAULT_CONFIG
+
+
+def test_apply_runtime_pytest_overrides_sets_keep_runs():
+    config = remote_smoke_tui.apply_runtime_pytest_overrides(
+        dict(remote_smoke_tui.DEFAULT_CONFIG),
+        _default_args(keep_runs=3),
+    )
+
+    assert config["keep_runs"] == 3
+
+
+def test_run_directories_live_outside_the_rsynced_repo_tree():
+    """The repo is rsynced with --delete and excludes only the work dir, so a
+    runs root under $remote_repo is wiped at the start of every run -- which
+    silently hands the previous run's number back and overwrites it. Measured:
+    run 2 allocated id 1 again and destroyed run 1."""
+    runs_root = remote_smoke_tui.remote_runs_root(
+        {"remote_repo_path": "~/yasos-remote-smoke"}
+    )
+
+    assert runs_root == f"~/yasos-remote-smoke/{remote_smoke_tui.REMOTE_WORK_DIR_NAME}/logs"
+    # The exclude that keeps it alive, asserted from the same constant the
+    # rsync builds its argument from.
+    assert remote_smoke_tui.REMOTE_WORK_DIR_NAME in runs_root
+
+
+def test_allocate_remote_run_id_takes_the_next_number(monkeypatch):
+    """The remote prints one number; anything else is a broken run directory and
+    must not silently become run 0, which would overwrite an existing run."""
+    class _Completed:
+        returncode = 0
+        stdout = "7\n"
+        stderr = ""
+
+    monkeypatch.setattr(remote_smoke_tui.subprocess, "run", lambda *a, **k: _Completed())
+    config = dict(remote_smoke_tui.DEFAULT_CONFIG, ssh_target="pi@rig")
+
+    assert remote_smoke_tui.allocate_remote_run_id(config) == 7
+
+    class _Garbage(_Completed):
+        stdout = "mkdir: permission denied\n"
+
+    monkeypatch.setattr(remote_smoke_tui.subprocess, "run", lambda *a, **k: _Garbage())
+    with pytest.raises(remote_smoke_tui.RunnerError):
+        remote_smoke_tui.allocate_remote_run_id(config)
 
 
 def test_apply_runtime_pytest_overrides_sets_smoke_tcc_opt_level():

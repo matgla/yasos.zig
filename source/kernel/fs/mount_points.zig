@@ -143,7 +143,7 @@ pub const MountPoints = struct {
 
             if (bestchild) |child| {
                 parent = mountpoint;
-                left = std.mem.trimLeft(u8, left[child.path.len..], "/");
+                left = std.mem.trimStart(u8, left[child.path.len..], "/");
                 last_matched_point = child;
             }
             maybe_node = bestchild;
@@ -259,7 +259,7 @@ test "MountPoints.RejectTooLongPath" {
     const fs = filesystem_mock.get_interface();
 
     try sut.mount_filesystem("/", fs);
-    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem("/" ** (config.fs.max_mount_point_size + 1), fs));
+    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem(&@as([config.fs.max_mount_point_size + 1]u8, @splat('/')), fs));
 }
 
 test "MountPoints.RejectRootIfAlreadyMounted" {
@@ -280,7 +280,7 @@ fn create_filesystem_mock(context: anytype) !kernel.fs.IFileSystem {
     const fs2 = fs2_mock.get_interface();
 
     const ReturnSharedMock = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{[]const u8})) anyerror!anyerror!kernel.fs.Node {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{[]const u8})) anyerror!anyerror!kernel.fs.Node {
             _ = args;
             const c: @TypeOf(context) = @ptrCast(@alignCast(ctx.?));
             return c.file.share();

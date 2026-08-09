@@ -15,6 +15,8 @@
 
 const std = @import("std");
 
+var io_backend: std.Io.Threaded = .init_single_threaded;
+
 pub const Flash = struct {
     pub const BlockSize = 1;
     id: u32,
@@ -32,10 +34,12 @@ pub const Flash = struct {
     pub fn init(self: *Flash) !void {
         std.debug.print("Initializing flash with ID: {d}\n", .{self.id});
         const filename = try self.get_filename_mapping();
-        const file = try std.fs.cwd().openFile(filename, .{});
-        defer file.close();
-        const file_size = try file.getEndPos();
-        self.memory = try file.readToEndAlloc(std.heap.page_allocator, file_size);
+        self.memory = try std.Io.Dir.cwd().readFileAlloc(
+            io_backend.io(),
+            filename,
+            std.heap.page_allocator,
+            .unlimited,
+        );
         std.debug.print("Flash initialized\n", .{});
     }
 

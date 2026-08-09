@@ -380,7 +380,7 @@ fn mount_fatdisk(allocator: std.mem.Allocator) !void {
 }
 
 fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) !void {
-    var buffer: [1024]u8 = [_]u8{0x00} ** 1024;
+    var buffer: [1024]u8 = @splat(0x00);
     _ = mmcfile.interface.read(buffer[0..]);
     const mbr = kernel.fs.MBR.create(buffer[0..]);
     if (mbr.is_valid()) {
@@ -443,13 +443,13 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     var maybe_mmcnode: ?kernel.fs.Node = null;
     var maybe_mmcdriver: ?kernel.driver.IDriver = null;
     if (@hasDecl(board, "mmc")) {
-        inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
+        inline for (@typeInfo(board.mmc).@"struct".decl_names) |m| {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
 
             maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, &@field(board.mmc, name), name)).interface.new(allocator);
             driverfs.data().append(maybe_mmcdriver.?, name) catch {};
-            kernel.log.info("adding mmc driver: {s}", .{m.name});
+            kernel.log.info("adding mmc driver: {s}", .{m});
             i = i + 1;
             maybe_mmcnode = try maybe_mmcdriver.?.interface.node();
         }

@@ -20,6 +20,7 @@
 
 .{
     .name = .mcu_rp2040,
+    .fingerprint = 0xcfd2069934d19e3e,
     .version = "0.0.0",
     .dependencies = .{
         .toolchains = .{

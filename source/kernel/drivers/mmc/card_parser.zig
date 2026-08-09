@@ -150,7 +150,7 @@ pub const CardParser = struct {
 
     pub fn parse_csdv2(buffer: []const u8) anyerror!CSDv2 {
         std.debug.assert(buffer.len == 16);
-        if (std.hash.crc.Crc7Mmc.hash(buffer[0..15]) != @as(u7, @intCast(buffer[15] >> 1))) {
+        if (std.hash.crc.@"CRC-7/MMC".hash(buffer[0..15]) != @as(u7, @intCast(buffer[15] >> 1))) {
             return error.InvalidCrc;
         }
 

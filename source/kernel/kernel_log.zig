@@ -23,6 +23,7 @@ const std = @import("std");
 const board = @import("board");
 const stdout = @import("stdout.zig");
 const file_log = @import("file_log.zig");
+const vfmt = @import("vfmt.zig");
 
 fn log_level_as_text(comptime level: std.log.Level) []const u8 {
     switch (level) {
@@ -36,7 +37,7 @@ fn log_level_as_text(comptime level: std.log.Level) []const u8 {
 
 pub fn kernel_stdout_log(
     comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -57,17 +58,19 @@ pub fn kernel_stdout_log(
     // it before paying the formatting cost.
     if (!to_serial and !to_file) return;
 
-    var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, line_format, args) catch {
-        // Oversized line: record a truncated marker rather than dropping it.
-        const trunc = std.fmt.bufPrint(&buf, "{s}<truncated>\n", .{prefix}) catch return;
-        if (to_file) file_log.append(trunc);
-        if (to_serial) stdout.write_bytes(trunc);
-        return;
-    };
+    const argv = vfmt.erase(args);
+    log_line(line_format, &argv, to_serial, to_file);
+}
 
+noinline fn emit(line: []const u8, to_serial: bool, to_file: bool) void {
     if (to_file) file_log.append(line);
     if (to_serial) stdout.write_bytes(line);
 }
+
+noinline fn log_line(fmt: []const u8, argv: []const vfmt.Value, to_serial: bool, to_file: bool) void {
+    var buf: [512]u8 = undefined;
+    emit(vfmt.vprint(&buf, fmt, argv), to_serial, to_file);
+}
+
 
 pub const log = std.log.scoped(.kernel);

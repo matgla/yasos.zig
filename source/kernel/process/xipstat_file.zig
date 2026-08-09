@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const interface = @import("interface");
 
@@ -148,11 +149,11 @@ pub const XipStatFile = interface.DeriveFromBase(XipStatBufferedFile, struct {
     pub fn sync(self: *Self) i32 {
         const stats = read_stats();
         const buffer = &interface.base(self)._buffer;
-        const buf = std.fmt.bufPrint(
+        const buf = vfmt.print(
             buffer,
             "xip_hit {d}\nxip_acc {d}\nxip_saturated {d}\n",
             .{ stats.hit, stats.acc, stats.saturated },
-        ) catch buffer;
+        );
         interface.base(self)._end = buf.len;
         return 0;
     }

@@ -21,8 +21,8 @@ pub const IrqStub = struct {
     pub const Action = *const fn (id: u32, arg: *const volatile anyopaque, result: *volatile anyopaque) callconv(.c) void;
     pub const IrqAction = *const fn () void;
 
-    pub var calls: [c.SYSCALL_COUNT]u32 = .{0} ** c.SYSCALL_COUNT;
-    pub var actions: [c.SYSCALL_COUNT]?Action = .{null} ** c.SYSCALL_COUNT;
+    pub var calls: [c.SYSCALL_COUNT]u32 = @splat(0);
+    pub var actions: [c.SYSCALL_COUNT]?Action = @splat(null);
 
     pub const Type = enum(u4) {
         systick,
@@ -30,9 +30,9 @@ pub const IrqStub = struct {
         supervisor_call,
     };
 
-    const IrqLen = @typeInfo(Type).@"enum".fields.len;
-    pub var irq_actions: [IrqLen]?IrqAction = .{null} ** IrqLen;
-    pub var irq_disable_mask: std.StaticBitSet(IrqLen) = std.StaticBitSet(IrqLen).initEmpty();
+    const IrqLen = @typeInfo(Type).@"enum".field_names.len;
+    pub var irq_actions: [IrqLen]?IrqAction = @splat(null);
+    pub var irq_disable_mask: std.StaticBitSet(IrqLen) = std.StaticBitSet(IrqLen).empty;
 
     pub fn set_action(id: u32, action: Action) void {
         actions[id] = action;
@@ -52,7 +52,7 @@ pub const IrqStub = struct {
             irq_actions[idx] = null;
         }
 
-        irq_disable_mask = std.StaticBitSet(IrqLen).initEmpty();
+        irq_disable_mask = std.StaticBitSet(IrqLen).empty;
     }
 
     pub fn disable(t: Type) void {

@@ -18,8 +18,11 @@ const std = @import("std");
 const fatfs = @import("zfat");
 const kernel = @import("kernel");
 
-pub fn fatfs_error_to_errno(err: fatfs.GlobalError) kernel.errno.ErrnoSet {
+pub const FatfsError = fatfs.GlobalError || error{Overflow};
+
+pub fn fatfs_error_to_errno(err: FatfsError) kernel.errno.ErrnoSet {
     switch (err) {
+        error.Overflow => return kernel.errno.ErrnoSet.InvalidArgument,
         fatfs.GlobalError.DiskErr => return kernel.errno.ErrnoSet.InputOutputError,
         fatfs.GlobalError.IntErr => return kernel.errno.ErrnoSet.InputOutputError,
         fatfs.GlobalError.NotReady => return kernel.errno.ErrnoSet.InputOutputError,

@@ -26,7 +26,7 @@ pub fn RingBuffer(BufferType: type, BufferSize: usize) type {
 
         pub fn init() linksection(".time_critical") Self {
             return Self{
-                .buffer = [_]u8{0} ** BufferSize,
+                .buffer = @splat(0),
                 .head = 0,
                 .tail = 0,
                 .dropped = 0,

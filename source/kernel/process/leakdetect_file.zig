@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const interface = @import("interface");
 
@@ -49,7 +50,7 @@ pub const LeakStartFile = interface.DeriveFromBase(BufferedFile, struct {
         TheKernelAllocator.start_leaks_detection();
         const buffer = &interface.base(self)._buffer;
         var written_length: usize = 0;
-        const buf = std.fmt.bufPrint(buffer, "leak detection started\n", .{}) catch buffer;
+        const buf = vfmt.print(buffer, "leak detection started\n", .{});
         written_length += buf.len;
         interface.base(self)._end = written_length;
         return 0;
@@ -88,7 +89,7 @@ pub const LeakDumpFile = interface.DeriveFromBase(BufferedFile, struct {
         const leaked = TheKernelAllocator.detect_leaks_filter(&is_pid_alive);
         const buffer = &interface.base(self)._buffer;
         var written_length: usize = 0;
-        const buf = std.fmt.bufPrint(buffer, "leaked: {d} bytes\n", .{leaked}) catch buffer;
+        const buf = vfmt.print(buffer, "leaked: {d} bytes\n", .{leaked});
         written_length += buf.len;
         interface.base(self)._end = written_length;
         return 0;

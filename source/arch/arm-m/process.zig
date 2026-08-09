@@ -390,7 +390,7 @@ fn test_entry() void {}
 fn test_exit_handler() void {}
 
 test "prepare process initial stack" {
-    var stack align(8) = [_]u8{0} ** 1024;
+    var stack: [1024]u8 align(8) = @splat(0);
     const offset = prepare_process_stack(&stack, &test_exit_handler, &test_entry);
     _ = try std.testing.expect(offset % 8 == 0);
     if (config.cpu.has_fpu and config.cpu.use_fpu) {} else {

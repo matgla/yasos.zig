@@ -49,6 +49,11 @@ pub const dynamic_loader = @import("modules.zig");
 
 pub const irq = @import("interrupts/interrupts.zig");
 
+/// Syscall/IO profiling counters. Exposed here so filesystem code, which lives
+/// outside the kernel directory, can attribute its own work; every entry point
+/// compiles to nothing unless CONFIG_INSTRUMENTATION_PERF_PROFILING is on.
+pub const perf = @import("interrupts/perf_profile.zig");
+
 pub const driver = @import("drivers/drivers.zig");
 pub const benchmark = @import("benchmark.zig");
 

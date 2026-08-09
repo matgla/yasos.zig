@@ -18,20 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const c = @cImport({
-    @cInclude("hardware/regs/resets.h");
-    @cInclude("hardware/resets.h");
-    @cInclude("pico/runtime_init.h");
-    @cInclude("pico/time.h");
-    @cInclude("hardware/vreg.h");
-    @cInclude("hardware/clocks.h");
-    @cInclude("hardware/pll.h");
-    @cInclude("hardware/xosc.h");
-    @cInclude("hardware/ticks.h");
-    @cInclude("hardware/structs/qmi.h");
-    @cInclude("hardware/regs/clocks.h");
-    @cInclude("overclock.h");
-});
+const c = @import("crt_headers");
 
 const config = @import("config").cpu;
 const flash_config = @import("config").flash;
@@ -204,7 +191,7 @@ fn initialize_libc_constructors() void {
 export fn _init() void {}
 
 const ram_vector_table_size: usize = c.VTABLE_FIRST_IRQ + c.PICO_NUM_VTABLE_IRQS;
-var ram_vector_table: [ram_vector_table_size]usize linksection(".ram_vector_table") = [_]usize{0} ** ram_vector_table_size;
+var ram_vector_table: [ram_vector_table_size]usize linksection(".ram_vector_table") = @splat(0);
 
 extern var __vectors_start: usize;
 extern var __vectors_end: usize;
@@ -212,7 +199,10 @@ extern var __vectors_end: usize;
 fn initialize_ram_vector_table() void {
     const vectors_start: *usize = @ptrCast(&__vectors_start);
     const vectors_end: *usize = @ptrCast(&__vectors_end);
-    _ = c.__builtin_memcpy(@ptrCast(&ram_vector_table), vectors_start, @intFromPtr(vectors_end) - @intFromPtr(vectors_start));
+    const bytes = @intFromPtr(vectors_end) - @intFromPtr(vectors_start);
+    const src: [*]const u8 = @ptrCast(vectors_start);
+    const dst: [*]u8 = @ptrCast(&ram_vector_table);
+    @memcpy(dst[0..bytes], src[0..bytes]);
     cpu.scb.vtor.write(@intFromPtr(&ram_vector_table));
 }
 

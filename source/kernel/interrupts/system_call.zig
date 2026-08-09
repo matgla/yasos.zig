@@ -223,13 +223,44 @@ fn create_fast_syscall_table(comptime count: usize) [count]bool {
 
 const fast_syscall_table = create_fast_syscall_table(c.SYSCALL_COUNT);
 
-// Called from the SVCall handler (context_switch.S) to decide whether the
-// incoming syscall can take the handler-mode fast path. Returns 1 for fast, 0
-// otherwise (including out-of-range numbers, which fall through to the trampoline
-// where _irq_svcall reports NotImplemented).
-pub export fn syscall_is_fast(number: u32) linksection(".time_critical") callconv(.c) usize {
-    if (number >= c.SYSCALL_COUNT) return 0;
-    return if (fast_syscall_table[number]) 1 else 0;
+/// The same predicate as a plain byte array, indexed by syscall number and read
+/// directly by the SVCall stub (`process_syscall_fast_check` in
+/// context_switch.S).
+///
+/// The stub used to reach this decision through an exported Zig function, and
+/// that call was a real one -- push/pop of a frame pointer and link register
+/// around three instructions of table lookup -- which *both* paths paid, the
+/// trampoline included, before it had even been decided that they were slow.
+/// Read inline at the call site it is a bounds check and one `ldrb`.
+///
+/// `u8` rather than `bool` because the assembler indexes it with `ldrb`: Zig
+/// guarantees `bool` a size of one byte but not which bit patterns it uses, and
+/// the stub tests the whole byte.
+pub export const syscall_fast_table: [c.SYSCALL_COUNT]u8 linksection(".time_critical") = blk: {
+    var table: [c.SYSCALL_COUNT]u8 = undefined;
+    for (&table, 0..) |*f, index| {
+        f.* = if (is_fast_syscall(index)) 1 else 0;
+    }
+    break :blk table;
+};
+
+test "SystemCall.FastTableMatchesPredicate" {
+    // The stub indexes `syscall_fast_table` with no way to check it against the
+    // predicate it is generated from, and a table that silently disagreed would
+    // either strand a fast syscall on the trampoline or -- far worse -- run a
+    // blocking one in handler mode, where it deadlocks at SVCall priority.
+    for (0..c.SYSCALL_COUNT) |index| {
+        try std.testing.expectEqual(fast_syscall_table[index], syscall_fast_table[index] != 0);
+    }
+}
+
+test "SystemCall.FastTableCoversEverySyscall" {
+    // The stub bounds-checks against YASOS_SYSCALL_COUNT from sys/syscall_ids.h,
+    // which the assembler can read and the enum is not. sys/syscall.h fails to
+    // compile if the two drift; this covers the Zig side of the same contract,
+    // since the table it indexes is sized from the enum.
+    try std.testing.expectEqual(@as(usize, c.SYSCALL_COUNT), syscall_fast_table.len);
+    try std.testing.expectEqual(@as(usize, c.YASOS_SYSCALL_COUNT), syscall_fast_table.len);
 }
 
 fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") isize {

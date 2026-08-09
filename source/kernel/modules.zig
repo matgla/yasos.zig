@@ -17,6 +17,7 @@
 // It keeps track of loaded modules and their addresses, for further deallocation when died.
 
 const std = @import("std");
+const vfmt = @import("vfmt.zig");
 const hal = @import("hal");
 const config = @import("config");
 
@@ -399,7 +400,7 @@ pub fn release_executable(pid: c.pid_t) void {
 }
 
 fn append_section(buffer: []u8, name: []const u8, section: []const u8, address: usize, size: usize) usize {
-    const written = std.fmt.bufPrint(buffer, "{s} {s} 0x{x} 0x{x}\n", .{ name, section, address, size }) catch return 0;
+    const written = vfmt.print(buffer, "{s} {s} 0x{x} 0x{x}\n", .{ name, section, address, size });
     return written.len;
 }
 
@@ -632,7 +633,7 @@ const test_mapped_address: usize = 0x1000;
 fn create_filemock(allocator: std.mem.Allocator) !*FileMock {
     var file_mock = try FileMock.create(allocator);
     const IoctlCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
             const cmd = args[0];
             try std.testing.expectEqual(cmd, @as(i32, @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
 
@@ -963,7 +964,7 @@ test "Modules.ResolverShouldReturnAddressIfFileFoundInDirectory" {
         .willReturn("libtest.so");
 
     const GetCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
             const node_name = args[0];
             const node = args[1];
             node.* = @as(*const kernel.fs.Node, @ptrCast(@alignCast(ctx))).*;
@@ -1022,7 +1023,7 @@ test "Modules.ResolverShouldReturnNullIfFileIsNotMemoryMapped" {
         .willReturn("libtest.so");
 
     const GetCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
             const node_name = args[0];
             const node = args[1];
             node.* = @as(*const kernel.fs.Node, @ptrCast(@alignCast(ctx))).*;

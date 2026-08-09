@@ -191,6 +191,7 @@ if $CLEAR; then
   rm -rf apps/mkfs/build
   rm -rf apps/longjump_tester/build
   rm -rf apps/sdbench/build
+  rm -rf apps/syscallbench/build
 
   rm -rf libs/tinycc/bin
   rm -rf libs/tinycc/.yasos-build
@@ -681,6 +682,7 @@ build_zork_makefile zork
 build_makefile rzsz
 build_makefile sha
 build_makefile sdbench
+build_makefile syscallbench
 # build_gnumake make
 
 TOYBOX_EXTRA_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX

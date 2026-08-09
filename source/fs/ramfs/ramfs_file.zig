@@ -248,7 +248,7 @@ test "RamFsFile.ShouldSeekFile" {
 
     try std.testing.expectEqual(0, try file.interface.seek(-32, c.SEEK_CUR));
     try std.testing.expectEqual(16, file.interface.read(&buf));
-    try std.testing.expectEqualStrings(" " ** 10 ++ "Some d", &buf);
+    try std.testing.expectEqualStrings(@as([10]u8, @splat(' ')) ++ "Some d", &buf);
 
     try std.testing.expectEqual(32, try file.interface.seek(0, c.SEEK_END));
     try std.testing.expectEqual(32, file.interface.tell());

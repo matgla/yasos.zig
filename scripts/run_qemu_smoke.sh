@@ -13,8 +13,6 @@
 # Options:
 #   --no-build         Skip configure/build; use the existing kernel ELF.
 #   --rebuild-rootfs   Regenerate rootfs.img (needed when userspace changed).
-#   --fast             Build the kernel -Doptimize=ReleaseFast instead of the
-#                      default ReleaseSafe (which keeps safety checks on).
 #   --an505            Use the older MPS2-AN505 board (implies --no-map-corpus;
 #                      its 1 MB fatdisk cannot hold the corpus).
 #   --no-map-corpus    Push the sources over ZMODEM instead of mapping them into
@@ -45,6 +43,9 @@
 # Disable parallelism with -n 0 or YASOS_SMOKE_XDIST=0.
 # Note: the per-test timing/profiling summaries are skipped under -n (they
 # aggregate in-process), and pytest's -s output interleaves across workers.
+# Output is one line per test (pytest -v, added unless you pass your own -q/-v),
+# each carrying a [n/total] counter and the test's wall time, so a long run
+# streams progress instead of sitting on a single unterminated progress line.
 #
 # Logs: each run's per-test session logs, logs/failed/, and the qemu process
 # logs are collected into .cache/qemu_smoke_logs/ (analogous to the remote
@@ -57,8 +58,6 @@
 # Environment overrides (consumed by tests/smoke/framework/qemu.py):
 #   YASOS_QEMU_BIN, YASOS_QEMU_MACHINE, YASOS_QEMU_CPU,
 #   YASOS_QEMU_EXTRA_ARGS, YASOS_QEMU_BOOT_TIMEOUT
-#   YASOS_QEMU_OPTIMIZE   zig optimize mode for the build (default ReleaseSafe;
-#                         --fast selects ReleaseFast)
 #   YASOS_SMOKE_ENABLE_GCC_TORTURE   default 1 here; set 0 to skip GCC torture
 #   YASOS_SMOKE_XDIST     pytest-xdist worker count (default auto = all CPUs);
 #                         set 0 to run serially
@@ -89,10 +88,7 @@ QEMU_MACHINE="mps3-an524"
 QEMU_EXTRA="-global sse-200.CPU0_FPU=on"
 MAP_CORPUS=1
 PRESERVE_STATE=0
-# Default to ReleaseSafe so safety checks (overflow, bounds, etc.) stay on while
-# running the suite; --fast switches to ReleaseFast. An explicit
-# YASOS_QEMU_OPTIMIZE wins as the default but is still overridden by --fast.
-OPTIMIZE="${YASOS_QEMU_OPTIMIZE:-ReleaseSafe}"
+OPTIMIZE="${YASOS_QEMU_OPTIMIZE:-ReleaseFast}"
 KERNEL="$REPO_ROOT/zig-out/bin/yasos_kernel"
 VENV="$REPO_ROOT/.qemu_smoke_venv"
 SMOKE_DIR="$REPO_ROOT/tests/smoke"
@@ -110,6 +106,7 @@ while [ "$#" -gt 0 ]; do
         --no-build) DO_BUILD=0; shift ;;
         --rebuild-rootfs) REBUILD_ROOTFS=1; shift ;;
         --fast) OPTIMIZE="ReleaseFast"; shift ;;
+        --safe) OPTIMIZE="ReleaseSafe"; shift ;;
         --opt-levels)
             [ "$#" -ge 2 ] || { echo "error: --opt-levels needs a value" >&2; exit 2; }
             OPT_LEVELS="$2"; shift 2
@@ -126,7 +123,7 @@ while [ "$#" -gt 0 ]; do
             shift ;;
         --no-map-corpus) MAP_CORPUS=0; shift ;;
         --preserve-state) PRESERVE_STATE=1; shift ;;
-        -h|--help) sed -n '2,73p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,76p' "$0"; exit 0 ;;
         --) shift; while [ "$#" -gt 0 ]; do PYTEST_ARGS+=("$1"); shift; done ;;
         *) PYTEST_ARGS+=("$1"); shift ;;
     esac
@@ -219,6 +216,30 @@ done
 if [ "$have_n" -eq 0 ] && [ "$XDIST_DEFAULT" != "0" ]; then
     PYTEST_ARGS+=(-n "$XDIST_DEFAULT")
 fi
+
+# -v rather than the default dot progress, same as tests/smoke/run_tests.sh does
+# for the hardware runner: without it pytest (and xdist) keeps a single progress
+# line open for minutes at a time, so every line-oriented reader -- the CI log
+# viewer, `tee`, a pager -- shows nothing while the suite grinds through a
+# module, and a run that is actually alive looks hung. -v gives one line per
+# test, carrying the [n/total] counter and wall time conftest.py appends in
+# pytest_report_teststatus; serially it also lets progress.py's RUNNING
+# announcer close the pending line while a slow test is still in flight.
+# Skipped if the caller already chose a verbosity (-q, -vv, ...).
+have_verbosity=0
+for arg in "${PYTEST_ARGS[@]}"; do
+    case "$arg" in
+        -v*|-q*|--verbose*|--quiet*|--verbosity*) have_verbosity=1; break ;;
+    esac
+done
+if [ "$have_verbosity" -eq 0 ]; then
+    PYTEST_ARGS+=(-v)
+fi
+
+# stdout here is a pipe, not a tty (podman without -t, then the CI runner), so
+# python would block-buffer anything pytest does not explicitly flush -- which
+# defeats the per-test lines above.
+export PYTHONUNBUFFERED=1
 
 export YASOS_QEMU_KERNEL="$KERNEL"
 export YASOS_QEMU_MACHINE="$QEMU_MACHINE"
