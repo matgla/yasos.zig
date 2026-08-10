@@ -160,13 +160,32 @@ export var hardfault_callee: [8]usize = undefined;
 // faulting context's true values.
 export fn irq_hard_fault() callconv(.naked) void {
     asm volatile (
+    // EXC_RETURN and the faulting frame pointer are captured *here*, in the
+    // naked stub, and handed to `hard_fault_main` as arguments.
+    //
+    // They used to be read from inside the Zig body with `mov rN, lr` and
+    // `tst lr, #4`. By then `lr` is no longer EXC_RETURN: `hard_fault_main`
+    // calls `file_log_disable()` and `klog_force_enable()` first, and any `bl`
+    // clobbers it. The asm declared no inputs, so nothing stopped the compiler
+    // scheduling those reads after the calls either.
+    //
+    // The result was a frame pointer chosen from a clobbered `lr`, so the dump
+    // printed sixteen bytes of whatever memory that happened to name -- which
+    // is how a fault-from-handler-mode came out as `r0 == r12`, `r1 == r3` and
+    // a nonsense PSR. Every handler-mode postmortem was unreadable, which cost
+    // two wrong diagnoses of the shutdown fault before anyone looked here.
         \\ ldr r0, =hardfault_callee
         \\ stmia r0, {r4-r11}
+        \\ mov r0, lr
+        \\ tst lr, #4
+        \\ ite eq
+        \\ mrseq r1, msp
+        \\ mrsne r1, psp
         \\ b hard_fault_main
     );
 }
 
-export fn hard_fault_main() void {
+export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callconv(.c) void {
     const callee = hardfault_callee;
     // SDIO depends on lower-priority interrupts that are masked inside the
     // fault handler, so a blocking SD write here would hang. Route the
@@ -179,8 +198,6 @@ export fn hard_fault_main() void {
     // swallowed and the crash looks like the device going mute mid-transfer.
     klog_force_enable();
 
-    const exc_return = read_exception_return();
-    const active_stack_address = read_fault_stack_pointer();
     const frame_ptr: *volatile FaultFrame = @ptrFromInt(active_stack_address);
     const frame = frame_ptr.*;
 
@@ -340,22 +357,7 @@ const FaultFrame = struct {
     }
 };
 
-inline fn read_fault_stack_pointer() usize {
-    return asm volatile (
-        \\ tst lr, #4
-        \\ ite eq
-        \\ mrseq %[sp], msp
-        \\ mrsne %[sp], psp
-        : [sp] "=r" (-> usize),
-    );
-}
 
-inline fn read_exception_return() usize {
-    return asm volatile (
-        \\ mov %[lr_out], lr
-        : [lr_out] "=r" (-> usize),
-    );
-}
 
 inline fn read_psp() usize {
     return asm volatile (

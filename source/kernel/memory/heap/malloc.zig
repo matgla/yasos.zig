@@ -31,6 +31,7 @@ const arch = @import("arch");
 // Allocation cost attribution; compiles out unless profiling is enabled.
 const perf = @import("../../interrupts/perf_profile.zig");
 const config = @import("config");
+const kheap_lock = @import("kheap_lock.zig");
 
 pub const KernelAllocatorType = MallocAllocator(.{
     .leak_detection = config.instrumentation.enable_memory_leak_detection,
@@ -400,6 +401,26 @@ pub fn MallocAllocator(comptime options: anytype) type {
         ) ?[*]u8 {
             _ = log2_align;
             std.debug.assert(len > 0);
+            // The accounting and the leak tracker below are *not* covered by
+            // `__malloc_lock`, which guards only newlib's own free list. They
+            // are this wrapper's own shared state: `memory_in_use`, `counter`,
+            // nine size buckets, and an intrusive tracker list that `push`
+            // walks to its tail before splicing.
+            //
+            // That walk-then-splice is a long window, and until syscalls became
+            // preemptible nothing could land inside it. `sys_open` allocates
+            // (path resolution) and no longer refuses preemption, so two
+            // contexts can now interleave here and lose a node or build a cycle
+            // -- which does not fault at the time. It faults at shutdown, when
+            // `detect_leaks` walks the list end to end and follows the wild
+            // pointer, with the exception frame long gone.
+            //
+            // Taking the heap lock over the whole body -- the `c.malloc` call
+            // included -- makes the allocation and its bookkeeping one
+            // operation. It nests into `__malloc_lock`, which is why that lock
+            // is recursive.
+            kheap_lock.yasos_kheap_lock();
+            defer kheap_lock.yasos_kheap_unlock();
             const t_alloc = if (perf.enabled) perf.read_cycles() else 0;
             const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
             if (perf.enabled) perf.kernel_heap_op(perf.read_cycles() -% t_alloc);
@@ -483,6 +504,10 @@ pub fn MallocAllocator(comptime options: anytype) type {
         ) void {
             _ = log2_buf_align;
             _ = return_address;
+            // Same reasoning as `alloc`: the free and its bookkeeping have to be
+            // one operation, or `tracker.remove` races the splice in `push`.
+            kheap_lock.yasos_kheap_lock();
+            defer kheap_lock.yasos_kheap_unlock();
             c.free(buf.ptr);
             memory_in_use -= @as(isize, @intCast(buf.len));
             counter -= 1;

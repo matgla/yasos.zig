@@ -73,13 +73,26 @@ config CONFIG_PROCESS_MAX_STACK_SIZE
     Hard stack size limit for processes. Soft stack limits may be raised up to
     this value.
 
-config CONFIG_PROCESS_HW_SPINLOCK_NUMBER
-  int "HW spinlock number for process synchronization"
-  default 5
+config CONFIG_PROCESS_SMP
+  bool "Run the scheduler on more than one core"
+  default n
+  help
+    Whether a second core is actually brought up and scheduled on.
 
-config CONFIG_PROCESS_CONTEXT_SWITCH_HW_SPINLOCK_NUMBER
-  int "HW spinlock number for context switch"
-  default 6
+    This is NOT "does the chip have two cores" -- the RP2350 does, and reports
+    it through hal.cpu.number_of_cores(), while YasOS still parks core 1. It is
+    "is more than one core running kernel code", which is what decides whether
+    cross-core synchronization has anything to do.
+
+    With this off, the kernel keeps every atomic and every interrupt mask it has
+    -- the scheduler is preemptive, so a read-modify-write shared between thread
+    and handler context still races on a single core -- but drops the parts that
+    only mean something between cores: the spinlock's wait/wake back-off, and
+    the per-CPU arrays collapse to one slot with a compile-time-zero index.
+
+    Turn it on with core 1 bring-up (phase 6 of docs/smp_plan.md), and on the
+    host unit-test target, where the primitives are exercised under genuine
+    std.Thread contention.
 
 choice CONFIG_PROCESS_SCHEDULER
   prompt "Process Scheduler"

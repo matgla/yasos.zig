@@ -16,6 +16,7 @@
 const std = @import("std");
 
 const kernel = @import("kernel");
+const dev_lock = kernel.driver.dev_lock;
 const IFile = kernel.fs.IFile;
 
 const c = @import("libc_imports").c;
@@ -40,6 +41,8 @@ pub const FileReader = struct {
     }
 
     pub fn init(device_file: IFile, offset: u64) !FileReader {
+        dev_lock.acquire();
+        defer dev_lock.release();
         var data_offset_value: u64 = 32;
         var buffer: [16]u8 = undefined;
         var df = device_file;
@@ -68,6 +71,8 @@ pub const FileReader = struct {
     }
 
     pub fn read(self: *FileReader, comptime T: type, offset: u64) !T {
+        dev_lock.acquire();
+        defer dev_lock.release();
         var buffer: [@sizeOf(T)]u8 = undefined;
         kernel.perf.romfs_read();
         _ = try self._device_file.interface.seek(@intCast(self._offset + offset), c.SEEK_SET);
@@ -76,6 +81,12 @@ pub const FileReader = struct {
     }
 
     pub fn read_string(self: *FileReader, allocator: std.mem.Allocator, offset: c.off_t) ![]u8 {
+        // The whole loop, not just the first read: it keeps reading forward
+        // from one seek until it finds the terminator, so a device
+        // repositioned partway through returns the tail of somebody else's
+        // file as the rest of this name.
+        dev_lock.acquire();
+        defer dev_lock.release();
         _ = try self._device_file.interface.seek(@as(i64, @intCast(self._offset)) + @as(i64, @intCast(offset)), c.SEEK_SET);
         var name_buffer: [16]u8 = undefined;
         var output_buffer: []u8 = &.{};
@@ -99,6 +110,8 @@ pub const FileReader = struct {
     }
 
     pub fn read_bytes(self: *FileReader, buffer: []u8, offset: c.off_t) !void {
+        dev_lock.acquire();
+        defer dev_lock.release();
         _ = try self._device_file.interface.seek(@as(i64, @intCast(self._offset)) + @as(i64, @intCast(offset)), c.SEEK_SET);
         _ = self._device_file.interface.read(buffer[0..]);
     }

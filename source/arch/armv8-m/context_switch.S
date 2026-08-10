@@ -162,6 +162,14 @@ load_no_fpu:
 .thumb_func
 arch_store_registers_on_stack:
   push {lr}
+  // Drop any exclusive reservation the outgoing task left live.
+  //
+  // A thread preempted between its LDREX and its STREX must not be able to
+  // resume and complete that STREX against a monitor state that belongs to
+  // whatever ran in between. Exception entry is widely believed to clear the
+  // local monitor, but this is one cycle and the failure mode if the belief is
+  // wrong is a spinlock that hands the same lock to two owners.
+  clrex
   mov r2, r1
   mrs r1, psp
   isb
@@ -221,8 +229,24 @@ dispatch_syscall:
 .thumb_func
 irq_svcall:
   // this is processed in irq
+  // r0 in 0..4 is the kernel's own SVC protocol, which is why the SystemCall
+  // enum in sys/syscall.h starts at 5 rather than 0. Two numbers are live:
+  //
+  //   r0 == 0  return from the syscall trampoline (issued by dispatch_syscall);
+  //   r0 == 1  no-op, issued by userspace `vfork` on its way out
+  //            (libs/libc/arm/vfork.S, after _vfork_process returns in the
+  //            parent). It once branched to a stub that released the preempt
+  //            window; it must not any more, because the window vfork opens is
+  //            already closed by process_vfork_child /
+  //            process_get_back_to_parent_vfork, and a third release underflows
+  //            the counter -- a panic now that preempt_enable is strict.
+  //
+  // The r0 == 1 case still has to be caught *here*: r1 and r2 are dead
+  // registers at that call site, not the arg/out pointers the dispatch path
+  // assumes, so letting it fall through to the trampoline hands _irq_svcall a
+  // garbage `out` to write its 8-byte result through.
   cmp r0, #1
-  beq process_syscall_unblock_context_switch
+  beq process_syscall_internal_noop
   cmp r0, #0
   bne process_syscall_fast_check
   mrs r2, psp
@@ -329,10 +353,11 @@ process_syscall_entry:
   pop {r4, r5, r6, r7}
   // process stack is modified, but not yet ready to be switched, block context switch till prepared
   bx r3 // we are taking back context from 134
-process_syscall_unblock_context_switch:
-  push {r0, lr}
-  bl process_unblock_context_switch
-  pop {r0, pc}
+process_syscall_internal_noop:
+  // lr is still the EXC_RETURN this handler was entered with, and nothing here
+  // has touched CONTROL, so the thread resumes at its own privilege level with
+  // its own registers -- which is the whole of what this svc is for.
+  bx lr
 .thumb_func
 return_from_syscall:
   pop {r1, pc}
@@ -344,8 +369,28 @@ arch_get_stack_pointer:
   bx lr
 
 
+// Resume `sys_start_root_process` on the frame `switch_to_the_first_task` left
+// on MSP, restoring the callee-saved registers it parked there.
+//
+// Reached two ways, both of which must find MSP exactly where the push left it:
+// from `sys_stop_root_process` in thread mode (the CONTROL write below moves it
+// off PSP first), and from `pendsv_exit` in handler mode (where the SPSEL write
+// is ignored and MSP is already current).
+//
+// The register list must stay identical to the one in
+// `switch_to_the_first_task`; see the comment there for why it is not just
+// {r0, lr}.
+//
+// `.thumb_func`, not `.thumb_func:` -- the stray colon made this a label
+// definition rather than the directive, so the symbol was emitted NOTYPE with
+// bit 0 clear. `pendsv_exit` reaches here with a local `b` and did not care,
+// but the `bl` from `sys_stop_root_process` crosses from flash into
+// .time_critical in RAM and goes through a linker-built long thunk, which ends
+// in `bx ip` -- a branch to an even address, i.e. to ARM state, on a core that
+// has none. That is an INVSTATE UsageFault escalating to HardFault, on the
+// shutdown path only, and only via the one of the two routes that is thunked.
 .global switch_to_main_task
-.thumb_func:
+.thumb_func
 switch_to_main_task:
   mrs r0, control
   isb
@@ -353,7 +398,7 @@ switch_to_main_task:
   msr control, r0
   isb
   dsb
-  pop {r0, pc}
+  pop {r0, r4-r11, pc}
 
 // caller saved registers are already saved by exception entry
 .global irq_pendsv
@@ -430,7 +475,28 @@ apply_privilege_tail:
 .global switch_to_the_first_task
 .thumb_func
 switch_to_the_first_task:
-  push {r0, lr} // this will be taken by return to user mode
+  // Build the frame `switch_to_main_task` resumes on at shutdown.
+  //
+  // This is a call that returns from somewhere else, an entire system lifetime
+  // later: the `bx r0` below enters the first task and never comes back, and
+  // `switch_to_main_task` re-enters the caller by popping this frame. So the
+  // frame has to carry everything the AAPCS promises a call preserves, not just
+  // pc.
+  //
+  // It used to push only {r0, lr}, which restored pc and sp and left r4-r11
+  // holding whatever the *shutdown* context had in them. The caller does not
+  // survive that: `spawn.root_process` materialises its `!void` success value
+  // into r4 before this call and returns it with `mov r0, r4` immediately
+  // after, so it resumed returning a foreign word as an error -- "Cannot start
+  // root process" on a clean `exit`, with `@errorName` indexing past its table
+  // and handing the logger a wild slice to memcpy from. The out-of-line
+  // `sys_start_root_process` is worse: it keeps its sret pointer in r4, so the
+  // resume stored 8 bytes through a stale address.
+  //
+  // r0 is in the list for the 8-byte stack alignment AAPCS requires (nine
+  // registers would not do), and restoring it costs nothing: it is the
+  // `with_fpu` argument, dead by then in both callers.
+  push {r0, r4-r11, lr} // this will be taken by return to user mode
   mov r1, lr
   bl switch_to_next_task
   // Switch to PSP (SPSEL=1) and set nPRIV for the first task from its privilege

@@ -46,7 +46,7 @@ test "Mutex.ShouldLock" {
     const ActionCall = struct {
         pub fn acquire(id: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void {
             const event: *const volatile syscall_handlers.SemaphoreEvent = @ptrCast(@alignCast(arg));
-            event.object.counter.value -= 1;
+            event.object.counter -= 1;
             hal.irq.impl().calls[id] += 1;
             const result: *volatile bool = @ptrCast(@alignCast(out));
             result.* = true;
@@ -54,7 +54,7 @@ test "Mutex.ShouldLock" {
 
         pub fn release(id: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void {
             const event: *const volatile syscall_handlers.SemaphoreEvent = @ptrCast(@alignCast(arg));
-            event.object.counter.value += 1;
+            event.object.counter += 1;
             hal.irq.impl().calls[id] += 1;
             const result: *volatile bool = @ptrCast(@alignCast(out));
             result.* = true;
@@ -68,9 +68,9 @@ test "Mutex.ShouldLock" {
     mutex.lock();
     mutex.lock();
     try std.testing.expectEqual(1, hal.irq.impl().calls[c.sys_semaphore_acquire]);
-    try std.testing.expectEqual(0, mutex.semaphore.counter.value);
+    try std.testing.expectEqual(0, mutex.semaphore.counter);
     try std.testing.expectEqual(0, hal.irq.impl().calls[c.sys_semaphore_release]);
     mutex.unlock();
     try std.testing.expectEqual(1, hal.irq.impl().calls[c.sys_semaphore_release]);
-    try std.testing.expectEqual(1, mutex.semaphore.counter.value);
+    try std.testing.expectEqual(1, mutex.semaphore.counter);
 }

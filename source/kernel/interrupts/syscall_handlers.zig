@@ -43,19 +43,136 @@ const arch = @import("arch");
 
 var kernel_allocator: std.mem.Allocator = undefined;
 
+const uaccess = kernel.uaccess;
+const ErrnoSet = kernel.errno.ErrnoSet;
+
+/// Landing size for a path copied out of user memory.
+///
+/// Twice the system PATH_MAX (main.zig: 128), matching the symlink working
+/// buffer in fs/vfs.zig. This bound only decides when a caller gets
+/// ENAMETOOLONG; the safety property comes from `strncpy_from_user`, which
+/// additionally clamps its scan to the end of the memory region the pointer
+/// lands in, so it cannot walk out of the caller's own memory.
+const max_user_path = 256;
+
 pub fn init(allocator: std.mem.Allocator) void {
     kernel_allocator = allocator;
 }
 
+/// True when the pointers in the current syscall came from an untrusted caller.
+///
+/// Mirrors `system_call.caller_is_untrusted`: the root/init process runs
+/// privileged and can already reach any address directly, and the kernel issues
+/// syscalls of its own during boot with arguments on the MSP stack.
+fn untrusted_caller() bool {
+    if (comptime !uaccess.enabled) return false;
+    if (!process_manager.is_initialized()) return false;
+    return !process_manager.instance.get_current_process().is_privileged();
+}
+
+/// Validate a user buffer the kernel is about to write into.
+fn user_out_slice(ptr: ?*anyopaque, len: usize) ![]u8 {
+    const p = ptr orelse return ErrnoSet.InvalidArgument;
+    if (untrusted_caller()) try uaccess.check(@intFromPtr(p), len, .write);
+    return @as([*]u8, @ptrCast(p))[0..len];
+}
+
+/// Validate a user buffer the kernel is about to read from.
+fn user_in_slice(ptr: ?*const anyopaque, len: usize) ![]const u8 {
+    const p = ptr orelse return ErrnoSet.InvalidArgument;
+    if (untrusted_caller()) try uaccess.check(@intFromPtr(p), len, .read);
+    return @as([*]const u8, @ptrCast(p))[0..len];
+}
+
+/// Validate a user pointer the kernel is about to write a `T` through.
+fn user_out(comptime T: type, ptr: ?*T) !*T {
+    const p = ptr orelse return ErrnoSet.InvalidArgument;
+    if (untrusted_caller()) try uaccess.check(@intFromPtr(p), @sizeOf(T), .write);
+    return p;
+}
+
+/// Validate a user pointer the kernel is about to read a `T` from.
+fn user_in(comptime T: type, ptr: ?*const T) !*const T {
+    const p = ptr orelse return ErrnoSet.InvalidArgument;
+    if (untrusted_caller()) try uaccess.check(@intFromPtr(p), @sizeOf(T), .read);
+    return p;
+}
+
+/// Copy a NUL-terminated user string into `dst`, bounded.
+fn user_string(dst: []u8, ptr: [*c]const u8) ![]u8 {
+    if (ptr == null) return ErrnoSet.InvalidArgument;
+    if (comptime !uaccess.enabled) {
+        const span = std.mem.span(@as([*:0]const u8, @ptrCast(ptr)));
+        if (span.len >= dst.len) return ErrnoSet.NameTooLong;
+        @memcpy(dst[0..span.len], span);
+        return dst[0..span.len];
+    }
+    if (!untrusted_caller()) {
+        const span = std.mem.span(@as([*:0]const u8, @ptrCast(ptr)));
+        if (span.len >= dst.len) return ErrnoSet.NameTooLong;
+        @memcpy(dst[0..span.len], span);
+        return dst[0..span.len];
+    }
+    return uaccess.strncpy_from_user(dst, ptr, dst.len);
+}
+
+/// Syscalls that hand the kernel a raw kernel-object pointer or a function
+/// pointer to call, and therefore cannot be made safe by validating a range.
+///
+/// `sys_create_process` takes a `CreateProcessCall` carrying an `entry` function
+/// pointer *and* a Zig `Allocator` (an interface with a vtable pointer); the
+/// handler calls both. `sys_semaphore_acquire`/`_release` take a raw
+/// `*Semaphore` and increment through it. From an unprivileged process each is a
+/// direct privileged-arbitrary-code / arbitrary-write primitive.
+///
+/// None of the three has a caller outside the kernel's own dead
+/// `mutex.zig`/`semaphore.zig` (both unused; see docs/smp_plan.md), so refusing
+/// them for unprivileged callers costs nothing and removes the surface.
+fn reject_if_unprivileged() !void {
+    if (untrusted_caller()) return ErrnoSet.NotPermitted;
+}
+
+/// Caps on what execve will accept, so a malformed vector cannot be walked
+/// forever. Both are far above anything real: the longest command line in the
+/// tree is a tcc invocation of a couple of dozen arguments.
+const max_argv_entries = 256;
+const max_arg_length = 4096;
+
+/// Validate a NULL-terminated array of C strings handed in by userspace.
+///
+/// `ProcessManager.clone_exec_args` counts these arrays with
+/// `while (argv[argc] != null)` and then `std.mem.span`s every entry. Given an
+/// array that is not NULL-terminated inside memory the caller owns -- or one
+/// whose entries are not -- that walk runs off the end while privileged. This
+/// proves, before the walk starts, that the terminator and every string are
+/// present and readable.
+fn check_user_string_vector(vector: [*c][*c]u8) !void {
+    if (!untrusted_caller()) return;
+    if (vector == null) return;
+    var i: usize = 0;
+    while (i < max_argv_entries) : (i += 1) {
+        try uaccess.check(@intFromPtr(vector + i), @sizeOf([*c]u8), .read);
+        const entry = vector[i];
+        if (entry == null) return;
+        _ = try uaccess.strnlen_user(entry, max_arg_length);
+    }
+    return ErrnoSet.ArgumentListTooLong;
+}
+
 // most stupid way to keep track of the last file
-fn fill_dirent(entry: kernel.fs.DirectoryEntry, dirent_address: *anyopaque) isize {
+/// Write one directory entry into the caller's buffer, capped at `capacity`.
+///
+/// The record is variable-length (the name is inline), so without the cap a
+/// long enough name runs off the end of a buffer the caller sized itself.
+fn fill_dirent(entry: kernel.fs.DirectoryEntry, dirent_address: *anyopaque, capacity: usize) isize {
     const required_space = std.mem.alignForward(usize, @sizeOf(c.dirent) - 1 + entry.name.len, @alignOf(c.dirent));
+    if (required_space > capacity) return -1;
     // skip files that were already traversed
     const dirp: *c.dirent = @as(*c.dirent, @ptrCast(@alignCast(dirent_address)));
     dirp.d_ino = 0xdead;
     dirp.d_off = 0xbeef;
     dirp.d_reclen = @intCast(required_space);
-    std.mem.copyForwards(u8, dirp.d_name[0..], entry.name);
+    std.mem.copyForwards(u8, dirp.d_name[0..entry.name.len], entry.name);
     dirp.d_name[entry.name.len] = 0;
     return @intCast(required_space);
 }
@@ -102,7 +219,7 @@ extern fn push_return_address() void;
 extern fn switch_to_main_task(lr: usize, with_fpu: bool) void;
 var main_process_stack_pointer_before_scheduler_started: usize = 0;
 
-pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
+pub fn sys_start_root_process(arg: *const anyopaque) !i32 {
     // Apply the (signed, usually negative) register-frame offset to the stack
     // pointer in unsigned/wrapping space. Casting the pointer through `isize`
     // first overflows on targets whose stacks live at/above 0x80000000 (e.g.
@@ -115,7 +232,7 @@ pub fn sys_start_root_process(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_stop_root_process(arg: *const volatile anyopaque) !i32 {
+pub fn sys_stop_root_process(arg: *const anyopaque) !i32 {
     _ = arg;
     hal.time.systick.disable();
     std.log.info("Stopping root process with stack pointer: {x}", .{main_process_stack_pointer_before_scheduler_started});
@@ -123,28 +240,37 @@ pub fn sys_stop_root_process(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_create_process(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile CreateProcessCall = @ptrCast(@alignCast(arg));
+pub fn sys_create_process(arg: *const anyopaque) !i32 {
+    // `entry` is called and `allocator` is an interface with a vtable pointer:
+    // both are taken from the caller verbatim, so this is arbitrary privileged
+    // code execution if an unprivileged process is allowed in.
+    try reject_if_unprivileged();
+    const context: *const CreateProcessCall = @ptrCast(@alignCast(arg));
     process_manager.instance.create_process(context.stack_size, context.entry, context.arg, "/") catch |err| {
         return err;
     };
     return 0;
 }
 
-pub fn sys_semaphore_acquire(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
+pub fn sys_semaphore_acquire(arg: *const anyopaque) !i32 {
+    // `object` is a raw pointer to a kernel Semaphore, incremented through and
+    // used to walk the process list. An arbitrary-write primitive if unprivileged
+    // callers are allowed in.
+    try reject_if_unprivileged();
+    const context: *const SemaphoreEvent = @ptrCast(@alignCast(arg));
     return KernelSemaphore.acquire(context.object);
 }
 
-pub fn sys_semaphore_release(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile SemaphoreEvent = @ptrCast(@alignCast(arg));
+pub fn sys_semaphore_release(arg: *const anyopaque) !i32 {
+    try reject_if_unprivileged();
+    const context: *const SemaphoreEvent = @ptrCast(@alignCast(arg));
     return KernelSemaphore.release(context.object);
 }
 
-pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const check_parent: *const volatile u8 = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open`. Everything the window covered is under a
+    // named lock now, or needs none.
+pub fn sys_getpid(arg: *const anyopaque) !i32 {
+    const check_parent: *const u8 = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     if (check_parent.* != 0) {
         const maybe_parent = process.get_parent();
@@ -156,21 +282,21 @@ pub fn sys_getpid(arg: *const volatile anyopaque) !i32 {
     return @intCast(process.pid);
 }
 
-pub fn sys_mkdir(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.mkdir_context = @ptrCast(@alignCast(arg));
+pub fn sys_mkdir(arg: *const anyopaque) !i32 {
+    const context: *const c.mkdir_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.mkdir(path, @intCast(context.mode));
     return 0;
 }
 
-pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.fstat_context = @ptrCast(@alignCast(arg));
-    if (context.buf == null) {
-        return kernel.errno.ErrnoSet.InvalidArgument;
-    }
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_fstat(arg: *const anyopaque) !i32 {
+    const context: *const c.fstat_context = @ptrCast(@alignCast(arg));
+    _ = try user_out(c.struct_stat, context.buf);
     const path = try determine_path_for_file(kernel_allocator, null, context.fd);
     defer kernel_allocator.free(path);
     fs.get_ivfs().interface.stat(path, context.buf, true) catch |err| {
@@ -179,10 +305,12 @@ pub fn sys_fstat(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_isatty(arg: *const anyopaque) !i32 {
+    const fd: *const c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const maybe_handle = process.get_file_handle(@intCast(fd.*));
     if (maybe_handle) |handle| {
@@ -201,7 +329,12 @@ pub fn sys_isatty(arg: *const volatile anyopaque) !i32 {
 fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u8, fd: i32) ![]const u8 {
     var prefix: []const u8 = "";
     if (maybe_path) |cpath| {
-        const path = std.mem.span(@as([*:0]const u8, @ptrCast(cpath)));
+        // Every path-taking syscall funnels through here, so this is the one
+        // place the unbounded `std.mem.span` on a user pointer had to go: it
+        // scanned for a NUL with no limit and no notion of whether it was still
+        // inside memory the caller owns.
+        var path_storage: [max_user_path]u8 = undefined;
+        const path = try user_string(&path_storage, cpath);
         if (path.len > 0 and path[0] == '/') {
             return try allocator.dupe(u8, path);
         }
@@ -242,10 +375,29 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
     return error.CannotDeterminePath;
 }
 
-pub fn sys_open(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.open_context = @ptrCast(@alignCast(arg));
+// Deliberately preemptible -- the first of the phase 3(B) conversions, and the
+// pattern for the rest.
+//
+// The `block_context_switch()` window this had was doing three jobs, and every
+// one of them now has a named lock underneath it:
+//
+//   * the kernel-heap allocations in `determine_path_for_file` -> `kheap`;
+//   * the VFS walk and the filesystem work -> `mount`, `fs`, `dev`;
+//   * `get_current_process()` -> per-CPU, and the caller *is* the current
+//     process, so it cannot change under its own syscall.
+//
+// The fourth candidate, the fd table, needs no lock yet: `_fds` is per-process
+// and there is one thread per process, so two cores means two separate tables.
+// It becomes shared the moment phase 9 adds threads, and that is where its lock
+// belongs.
+//
+// Removing the window is not merely tidying. Holding it across filesystem I/O
+// is what made `fs_lock` deadlockable on a single core: `sys_read` releases its
+// window *before* touching the file, so it can park holding `fs_lock` while
+// preemptible, and a `sys_open` contending for the same lock with preemption
+// disabled could never be rescheduled to get it. See `RankedMutex.lock`.
+pub fn sys_open(arg: *const anyopaque) !i32 {
+    const context: *const c.open_context = @ptrCast(@alignCast(arg));
     const t_resolve = if (perf.enabled) perf.read_cycles() else 0;
     const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
     defer kernel_allocator.free(path);
@@ -295,16 +447,22 @@ fn close_fd(fd: i32) i32 {
     return 0;
 }
 
-pub fn sys_close(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const fd: *const volatile c_int = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_close(arg: *const anyopaque) !i32 {
+    const fd: *const c_int = @ptrCast(@alignCast(arg));
     return close_fd(fd.*);
 }
 
-pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    const context: *const volatile c_int = @ptrCast(@alignCast(arg));
+pub fn sys_exit(arg: *const anyopaque) !i32 {
+    // Category (C): this window is not protecting data, it is holding PendSV
+    // off until `delete_process` has moved this process off the run queue and
+    // handed the core away. It is closed there, or by the assembly on the vfork
+    // path -- which is why it is a bare disable with no `defer`.
+    preempt.preempt_disable();
+    const context: *const c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process.append_tty_newline_on_exit();
     // Report real execution time (load/relocate boundary → exit), separate from
@@ -413,19 +571,29 @@ pub fn sys_exit(arg: *const volatile anyopaque) !i32 {
     return context.*;
 }
 
-pub fn sys_read(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    const context: *const volatile c.read_context = @ptrCast(@alignCast(arg));
+// Preemptible throughout, and this one is worth a note beyond "see sys_open".
+//
+// The window used to cover the validation and the fd lookup and then be
+// released explicitly *before* the read, which left the transfer preemptible
+// while everything else in the file path held its window across the I/O. That
+// asymmetry is what made `fs_lock` deadlockable on a single core: this syscall
+// could park holding it while preemptible, and a `sys_open` contending for it
+// with preemption disabled could never be rescheduled to get it (see
+// `RankedMutex.lock`). With both sides preemptible the asymmetry is gone, and
+// the three hand-written `unblock` calls on the error paths go with it.
+pub fn sys_read(arg: *const anyopaque) !i32 {
+    const context: *const c.read_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    if (context.buf == null) {
-        return kernel.errno.ErrnoSet.InvalidArgument;
-    }
+    // The kernel is about to write `count` bytes of file data through `buf`
+    // while running privileged. Unchecked, read(fd, &kernel_ram, n) overwrites
+    // the kernel with attacker-chosen file contents.
+    const destination = try user_out_slice(context.buf, context.count);
+    const result_out = try user_out(isize, context.result);
     const maybe_handle = process.get_file_handle(@intCast(context.fd));
-    kernel.process.unblock_context_switch();
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
-            context.result.* = file.interface.read(@as([*]u8, @ptrCast(context.buf.?))[0..context.count]);
+            result_out.* = file.interface.read(destination);
             // Safe, serialized point to flush the buffered kernel log to SD
             // (no-op unless CONFIG_INSTRUMENTATION_LOG_TO_SD and data pending).
             kernel.file_log.drain();
@@ -434,33 +602,33 @@ pub fn sys_read(arg: *const volatile anyopaque) !i32 {
     }
     return 0;
 }
-pub fn sys_kill(arg: *const volatile anyopaque) !i32 {
+pub fn sys_kill(arg: *const anyopaque) !i32 {
     _ = arg;
-    kernel.process.block_context_switch();
+    // Same hand-off as `sys_exit`; closed by `delete_process`.
+    preempt.preempt_disable();
     const process = process_manager.instance.get_current_process();
     process_manager.instance.delete_process(process.pid, -1);
     return 0;
 }
 
-pub fn sys_write(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    const context: *const volatile c.write_context = @ptrCast(@alignCast(arg));
+// Preemptible throughout; see `sys_read` for why the old release-before-the-I/O
+// shape was actively harmful rather than merely inconsistent.
+pub fn sys_write(arg: *const anyopaque) !i32 {
+    const context: *const c.write_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
 
-    if (context.buf == null) {
-        return kernel.errno.ErrnoSet.InvalidArgument;
-    }
+    // Unchecked, write(fd, &kernel_ram, n) copies kernel memory out to a file.
+    const data = try user_in_slice(context.buf, context.count);
+    const result_out = try user_out(isize, context.result);
 
     const maybe_handle = process.get_file_handle(@intCast(context.fd));
-    kernel.process.unblock_context_switch();
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
-            const data = @as([*]const u8, @ptrCast(context.buf.?))[0..context.count];
             const is_tty = file.interface.filetype() == FileType.CharDevice;
-            context.result.* = file.interface.write(data);
-            if (is_tty and context.result.* > 0) {
-                process.record_tty_output(context.fd, data[0..@intCast(context.result.*)]);
+            result_out.* = file.interface.write(data);
+            if (is_tty and result_out.* > 0) {
+                process.record_tty_output(context.fd, data[0..@intCast(result_out.*)]);
             }
         }
         // Safe, serialized point to flush the buffered kernel log to SD.
@@ -470,22 +638,26 @@ pub fn sys_write(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_vfork(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.vfork_context = @ptrCast(@alignCast(arg));
+pub fn sys_vfork(arg: *const anyopaque) !i32 {
+    const context: *const c.vfork_context = @ptrCast(@alignCast(arg));
+    // The child's pid is written back through this pointer from inside vfork.
+    _ = try user_out(c.pid_t, context.pid);
     return try process_manager.instance.vfork(context);
 }
 
-pub fn sys_unlink(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.unlink_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_unlink(arg: *const anyopaque) !i32 {
+    const context: *const c.unlink_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.unlink(path);
     return 0;
 }
-pub fn sys_link(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.link_context = @ptrCast(@alignCast(arg));
+pub fn sys_link(arg: *const anyopaque) !i32 {
+    const context: *const c.link_context = @ptrCast(@alignCast(arg));
     const old_path = try determine_path_for_file(kernel_allocator, context.oldpath, context.olddirfd);
     defer kernel_allocator.free(old_path);
     const new_path = try determine_path_for_file(kernel_allocator, context.newpath, context.newdirfd);
@@ -494,13 +666,13 @@ pub fn sys_link(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.stat_context = @ptrCast(@alignCast(arg));
-    if (context.statbuf == null) {
-        return kernel.errno.ErrnoSet.InvalidArgument;
-    }
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_stat(arg: *const anyopaque) !i32 {
+    const context: *const c.stat_context = @ptrCast(@alignCast(arg));
+    _ = try user_out(c.struct_stat, context.statbuf);
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
     defer kernel_allocator.free(path);
     fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0) catch |err| {
@@ -509,59 +681,93 @@ pub fn sys_stat(arg: *const volatile anyopaque) !i32 {
     return 0;
 }
 
-pub fn sys_getentropy(arg: *const volatile anyopaque) !i32 {
+pub fn sys_getentropy(arg: *const anyopaque) !i32 {
     _ = arg;
     return -1;
 }
 
-pub fn sys_lseek(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.lseek_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_lseek(arg: *const anyopaque) !i32 {
+    const context: *const c.lseek_context = @ptrCast(@alignCast(arg));
+    const result_out = try user_out(c.off_t, context.result);
     var file = try get_file_from_process(@intCast(context.fd));
-    context.result.* = @intCast(try file.interface.seek(@intCast(context.offset), context.whence));
+    result_out.* = @intCast(try file.interface.seek(@intCast(context.offset), context.whence));
     return 0;
 }
 
-pub fn sys_wait(arg: *const volatile anyopaque) !i32 {
+pub fn sys_wait(arg: *const anyopaque) !i32 {
     _ = arg;
     return -1;
 }
-pub fn sys_times(arg: *const volatile anyopaque) !i32 {
+pub fn sys_times(arg: *const anyopaque) !i32 {
     _ = arg;
     return -1;
 }
 
-pub fn sys_getdents(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.getdents_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_getdents(arg: *const anyopaque) !i32 {
+    const context: *const c.getdents_context = @ptrCast(@alignCast(arg));
 
-    context.result.* = -1;
-    if (context.dirp == null) {} else {
-        const process = process_manager.instance.get_current_process();
-        const maybe_handle = process.get_file_handle(@intCast(context.fd));
-        if (maybe_handle) |handle| {
-            // if iterator not exists create one
-            const diriter: ?*kernel.fs.IDirectoryIterator = handle.get_iterator() catch null;
-            // still can be null if path not exists or is not a directory
-            if (diriter) |it| {
-                const maybe_entry = it.interface.next();
-                if (maybe_entry) |entry| {
-                    context.result.* = fill_dirent(entry, context.dirp);
-                } else {
-                    handle.remove_iterator();
-                }
+    const result_out = try user_out(isize, context.result);
+    result_out.* = -1;
+    if (context.dirp == null) return -1;
+    // `fill_dirent` writes a variable-length record whose size depends on the
+    // entry name, so the caller's buffer has to be good for all `count` bytes
+    // and the write has to be capped to them.
+    _ = try user_out_slice(@ptrCast(context.dirp), context.count);
+
+    const process = process_manager.instance.get_current_process();
+    const maybe_handle = process.get_file_handle(@intCast(context.fd));
+    if (maybe_handle) |handle| {
+        // if iterator not exists create one
+        const diriter: ?*kernel.fs.IDirectoryIterator = handle.get_iterator() catch null;
+        // still can be null if path not exists or is not a directory
+        if (diriter) |it| {
+            const maybe_entry = it.interface.next();
+            if (maybe_entry) |entry| {
+                result_out.* = fill_dirent(entry, context.dirp, context.count);
+            } else {
+                handle.remove_iterator();
             }
-            return 0;
         }
-        return -1;
+        return 0;
     }
     return -1;
 }
 
-pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.ioctl_context = @ptrCast(@alignCast(arg));
+/// Validate the pointer an ioctl op carries in its integer-or-pointer `arg`.
+///
+/// The set of ops whose `arg` is a pointer is small and closed (this is not a
+/// general driver ioctl interface), so it can be enumerated. Anything not listed
+/// takes an integer and has no pointer to check. Adding a pointer-taking op
+/// without adding it here leaves that op unvalidated -- which is why the list
+/// sits next to the dispatch rather than in a driver.
+fn check_ioctl_arg(op: i32, raw: isize) !void {
+    if (!untrusted_caller()) return;
+    const ptr: usize = @bitCast(raw);
+    const access: uaccess.Access, const size: usize = switch (op) {
+        c.TCGETS => .{ .write, @sizeOf(c.termios) },
+        c.TCSETS, c.TCSETSW, c.TCSETSF => .{ .read, @sizeOf(c.termios) },
+        c.TIOCGWINSZ => .{ .write, @sizeOf(c.struct_winsize) },
+        c.FIONREAD => .{ .write, @sizeOf(c_int) },
+        @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => .{ .write, @sizeOf(kernel.fs.FileMemoryMapAttributes) },
+        else => return,
+    };
+    switch (access) {
+        .read => try uaccess.check(ptr, size, .read),
+        .write => try uaccess.check(ptr, size, .write),
+    }
+}
+
+pub fn sys_ioctl(arg: *const anyopaque) !i32 {
+    const context: *const c.ioctl_context = @ptrCast(@alignCast(arg));
+    try check_ioctl_arg(context.op, context.arg);
     var file = try get_file_from_process(@intCast(context.fd));
     // arg is a signed ssize_t carrying "int or void*"; a user pointer at/above
     // 0x80000000 is negative as ssize_t, so reinterpret the bits (@bitCast)
@@ -569,41 +775,50 @@ pub fn sys_ioctl(arg: *const volatile anyopaque) !i32 {
     return file.interface.ioctl(context.op, @ptrFromInt(@as(usize, @bitCast(context.arg))));
 }
 
-pub fn sys_gettimeofday(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.gettimeofday_context = @ptrCast(@alignCast(arg));
+pub fn sys_gettimeofday(arg: *const anyopaque) !i32 {
+    const context: *const c.gettimeofday_context = @ptrCast(@alignCast(arg));
     const now_us = hal.time.get_time_us();
 
     if (context.tv) |tv| {
-        tv.*.tv_sec = @intCast(@divTrunc(now_us, 1_000_000));
-        tv.*.tv_usec = @intCast(@mod(now_us, 1_000_000));
+        const out = try user_out(c.struct_timeval, tv);
+        out.tv_sec = @intCast(@divTrunc(now_us, 1_000_000));
+        out.tv_usec = @intCast(@mod(now_us, 1_000_000));
     }
 
     if (context.tz) |tz| {
-        tz.*.tz_minuteswest = 0;
-        tz.*.tz_dsttime = 0;
+        const out = try user_out(c.struct_timezone, tz);
+        out.tz_minuteswest = 0;
+        out.tz_dsttime = 0;
     }
 
     return 0;
 }
 
-pub fn sys_waitpid(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.waitpid_context = @ptrCast(@alignCast(arg));
+pub fn sys_waitpid(arg: *const anyopaque) !i32 {
+    const context: *const c.waitpid_context = @ptrCast(@alignCast(arg));
+    if (context.status) |status| _ = try user_out(c_int, status);
     return process_manager.instance.waitpid(context.pid, context.status);
 }
 
-pub fn sys_execve(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.execve_context = @ptrCast(@alignCast(arg));
+pub fn sys_execve(arg: *const anyopaque) !i32 {
+    const context: *const c.execve_context = @ptrCast(@alignCast(arg));
+    if (context.argv == null) return ErrnoSet.InvalidArgument;
+    // prepare_exec -> clone_exec_args walks both vectors and spans every entry,
+    // so they have to be proven well-formed before it starts.
+    try check_user_string_vector(context.argv);
+    try check_user_string_vector(context.envp);
     const path = try determine_path_for_file(kernel_allocator, context.filename, -1);
     // Path is freed inside prepare_exec after load_executable, because
     // prepare_exec may not return normally (vfork context switch bypasses defers).
     return process_manager.instance.prepare_exec(path, context.argv.?, context.envp.?, kernel_allocator);
 }
 
-pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.nanosleep_context = @ptrCast(@alignCast(arg));
+pub fn sys_nanosleep(arg: *const anyopaque) !i32 {
+    const context: *const c.nanosleep_context = @ptrCast(@alignCast(arg));
     if (context.req) |req| {
-        const seconds = req.*.tv_sec;
-        const nanoseconds = req.*.tv_nsec;
+        const in = try user_in(c.struct_timespec, req);
+        const seconds = in.tv_sec;
+        const nanoseconds = in.tv_nsec;
         if (seconds != 0) {
             time.sleep_ms(@intCast(seconds * 1000));
         }
@@ -613,60 +828,72 @@ pub fn sys_nanosleep(arg: *const volatile anyopaque) !i32 {
     }
     return 0;
 }
-pub fn sys_mmap(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.mmap_context = @ptrCast(@alignCast(arg));
+    // Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
+    // accounting tag that used to require serialisation is an argument now
+    // rather than a one-shot flag on the pool (`allocate_pages_from`).
+pub fn sys_mmap(arg: *const anyopaque) !i32 {
+    const context: *const c.mmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    context.result.* = process.mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset) catch {
-        context.result.* = c.MAP_FAILED;
+    const result_out = try user_out(?*anyopaque, context.result);
+    result_out.* = process.mmap(context.addr, context.length, context.prot, context.flags, context.fd, context.offset) catch {
+        result_out.* = c.MAP_FAILED;
         return -1;
     };
     return 0;
 }
 
-pub fn sys_munmap(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.munmap_context = @ptrCast(@alignCast(arg));
+    // Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
+    // accounting tag that used to require serialisation is an argument now
+    // rather than a one-shot flag on the pool (`allocate_pages_from`).
+pub fn sys_munmap(arg: *const anyopaque) !i32 {
+    const context: *const c.munmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     process.munmap(context.addr, context.length);
     return 0;
 }
 
-pub fn sys_mremap(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.mremap_context = @ptrCast(@alignCast(arg));
+    // Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
+    // accounting tag that used to require serialisation is an argument now
+    // rather than a one-shot flag on the pool (`allocate_pages_from`).
+pub fn sys_mremap(arg: *const anyopaque) !i32 {
+    const context: *const c.mremap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    context.result.* = process.mremap(context.addr.?, context.old_length, context.new_length, context.flags) catch {
-        context.result.* = c.MAP_FAILED;
+    const result_out = try user_out(?*anyopaque, context.result);
+    result_out.* = process.mremap(context.addr.?, context.old_length, context.new_length, context.flags) catch {
+        result_out.* = c.MAP_FAILED;
         return -1;
     };
     return 0;
 }
 
-pub fn sys_getcwd(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.getcwd_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_getcwd(arg: *const anyopaque) !i32 {
+    const context: *const c.getcwd_context = @ptrCast(@alignCast(arg));
+    if (context.size == 0) return ErrnoSet.InvalidArgument;
+    const buffer = try user_out_slice(@ptrCast(context.buf), context.size);
+    const result_out = try user_out([*c]u8, context.result);
+
     const current_process = process_manager.instance.get_current_process();
     const cwd = current_process.get_current_directory();
-    const cwd_len = @min(cwd.len, context.size);
-    std.mem.copyForwards(u8, context.buf[0..cwd_len], cwd[0..cwd_len]);
-    var last_index = cwd_len;
-    if (last_index > context.size) {
-        last_index = context.size - 1;
-    }
-    context.buf[last_index] = 0;
-    context.result.* = context.buf;
+    // Leave room for the terminator: `cwd_len` was previously allowed to reach
+    // `size`, and the NUL then went to buf[size] -- one past the end of the
+    // caller's buffer.
+    const cwd_len = @min(cwd.len, context.size - 1);
+    std.mem.copyForwards(u8, buffer[0..cwd_len], cwd[0..cwd_len]);
+    buffer[cwd_len] = 0;
+    result_out.* = context.buf;
     return 0;
 }
 
-pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.chdir_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_chdir(arg: *const anyopaque) !i32 {
+    const context: *const c.chdir_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     var slice_allocated = false;
     var path_slice: []const u8 = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
@@ -694,85 +921,102 @@ pub fn sys_chdir(arg: *const volatile anyopaque) !i32 {
     return kernel.errno.ErrnoSet.NotADirectory;
 }
 
-pub fn sys_time(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.time_context = @ptrCast(@alignCast(arg));
+pub fn sys_time(arg: *const anyopaque) !i32 {
+    const context: *const c.time_context = @ptrCast(@alignCast(arg));
     const now_seconds: c.time_t = @intCast(hal.time.get_time());
     if (context.timep) |timep| {
-        timep.* = now_seconds;
+        (try user_out(c.time_t, timep)).* = now_seconds;
     }
-    context.result.* = now_seconds;
+    (try user_out(c.time_t, context.result)).* = now_seconds;
     return 0;
 }
-pub fn sys_fcntl(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.fcntl_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_fcntl(arg: *const anyopaque) !i32 {
+    const context: *const c.fcntl_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     // See sys_ioctl: arg is a signed ssize_t that may hold a high user pointer.
     return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @bitCast(context.arg))));
 }
-pub fn sys_remove(arg: *const volatile anyopaque) !i32 {
+pub fn sys_remove(arg: *const anyopaque) !i32 {
     _ = arg;
     return -1;
 }
-pub fn sys_realpath(arg: *const volatile anyopaque) !i32 {
+pub fn sys_realpath(arg: *const anyopaque) !i32 {
     _ = arg;
     return -1;
 }
-pub fn sys_mprotect(arg: *const volatile anyopaque) !i32 {
+pub fn sys_mprotect(arg: *const anyopaque) !i32 {
     _ = arg;
     return -1;
 }
 
-pub fn sys_dlopen(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.dlopen_context = @ptrCast(@alignCast(arg));
+pub fn sys_dlopen(arg: *const anyopaque) !i32 {
+    const context: *const c.dlopen_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    const library = dynamic_loader.load_shared_library(std.mem.span(@as([*:0]const u8, @ptrCast(context.path))), process.get_process_memory_allocator(), process.pid) catch {
+    var path_storage: [max_user_path]u8 = undefined;
+    const path = try user_string(&path_storage, context.path);
+    const result_out = try user_out(?*anyopaque, context.result);
+    const library = dynamic_loader.load_shared_library(path, process.get_process_memory_allocator(), process.pid) catch {
         // log.print("dlopen: failed to load library: {s}\n", .{@errorName(err)});
         return -1;
     };
-    context.*.result.* = library;
+    result_out.* = library;
     return 0;
 }
 
-pub fn sys_dlclose(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.dlclose_context = @ptrCast(@alignCast(arg));
+pub fn sys_dlclose(arg: *const anyopaque) !i32 {
+    const context: *const c.dlclose_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
+    const library: *yasld.Module = @ptrCast(@alignCast(context.handle orelse return ErrnoSet.InvalidArgument));
+    // The handle comes straight from userspace; releasing an unowned one
+    // unlinks a list node at an attacker-chosen address.
+    if (untrusted_caller() and !dynamic_loader.owns_shared_library(process.pid, library)) {
+        return ErrnoSet.InvalidArgument;
+    }
     dynamic_loader.release_shared_library(process.pid, library);
     return 0;
 }
 
-pub fn sys_dlsym(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.dlsym_context = @ptrCast(@alignCast(arg));
-    const library: *yasld.Module = @ptrCast(@alignCast(context.handle));
-    const maybe_symbol = library.find_symbol(std.mem.span(@as([*:0]const u8, @ptrCast(context.symbol))));
+pub fn sys_dlsym(arg: *const anyopaque) !i32 {
+    const context: *const c.dlsym_context = @ptrCast(@alignCast(arg));
+    const process = process_manager.instance.get_current_process();
+    const library: *yasld.Module = @ptrCast(@alignCast(context.handle orelse return ErrnoSet.InvalidArgument));
+    if (untrusted_caller() and !dynamic_loader.owns_shared_library(process.pid, library)) {
+        return ErrnoSet.InvalidArgument;
+    }
+    var symbol_storage: [max_user_path]u8 = undefined;
+    const symbol_name = try user_string(&symbol_storage, context.symbol);
+    const result_out = try user_out(?*anyopaque, context.result);
+    const maybe_symbol = library.find_symbol(symbol_name);
     if (maybe_symbol) |symbol| {
-        context.result.* = @ptrFromInt(symbol.address);
+        result_out.* = @ptrFromInt(symbol.address);
         return 0;
     }
     return -1;
 }
 
-pub fn sys_getuid(arg: *const volatile anyopaque) !i32 {
+pub fn sys_getuid(arg: *const anyopaque) !i32 {
     _ = arg;
     // we are always root until we implement user management
     return 0;
 }
 
-pub fn sys_geteuid(arg: *const volatile anyopaque) !i32 {
+pub fn sys_geteuid(arg: *const anyopaque) !i32 {
     _ = arg;
     // we are always root until we implement user management
     return 0;
 }
 
-pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
-    // Frees (close_fd -> release_file -> FileHandle.close) and allocates
-    // (attach_file_with_fd) on the kernel heap, which newlib's allocator does
-    // not guard — the same contract sys_open and sys_close already follow.
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.dup_context = @ptrCast(@alignCast(arg));
+// Preemptible. The window here was justified by the kernel heap being
+// unguarded -- "frees ... and allocates ... on the kernel heap, which newlib's
+// allocator does not guard". That premise no longer holds: `__malloc_lock` is a
+// ranked recursive spinlock and the allocator wrapper's own accounting is under
+// it too, so the heap guards itself. The fd table this walks is per-process.
+pub fn sys_dup(arg: *const anyopaque) !i32 {
+    const context: *const c.dup_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
     const maybe_handle = process.get_file_handle(@intCast(context.fd));
     if (maybe_handle) |handle| {
@@ -805,24 +1049,21 @@ pub fn sys_dup(arg: *const volatile anyopaque) !i32 {
     return -1;
 }
 
-pub fn sys_sysinfo(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.sysinfo_context = @ptrCast(@alignCast(arg));
-    if (context.info == null) {
-        return kernel.errno.ErrnoSet.InvalidArgument;
-    }
-    const info = context.info.?;
-    info.*.uptime = @intCast(systick.get_system_ticks().*);
-    info.*.totalram = 1;
-    info.*.freeram = 0;
-    info.*.procs = @intCast(process_manager.instance.processes.len());
+pub fn sys_sysinfo(arg: *const anyopaque) !i32 {
+    const context: *const c.sysinfo_context = @ptrCast(@alignCast(arg));
+    const info = try user_out(c.struct_sysinfo, context.info);
+    info.uptime = @intCast(systick.get_system_ticks());
+    info.totalram = 1;
+    info.freeram = 0;
+    info.procs = @intCast(process_manager.instance.processes.len());
     return 0;
 }
 
-pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.sysconf_context = @ptrCast(@alignCast(arg));
+pub fn sys_sysconf(arg: *const anyopaque) !i32 {
+    const context: *const c.sysconf_context = @ptrCast(@alignCast(arg));
     switch (context.name) {
         c._SC_CLK_TCK => {
-            context.result.* = 1000;
+            (try user_out(c_long, context.result)).* = 1000;
             return 0;
         },
         else => {
@@ -831,11 +1072,11 @@ pub fn sys_sysconf(arg: *const volatile anyopaque) !i32 {
     }
 }
 
-pub fn sys_prlimit(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    // Preemptible: see `sys_open`. Everything the window covered is under a
+    // named lock now, or needs none.
+pub fn sys_prlimit(arg: *const anyopaque) !i32 {
 
-    const context: *const volatile c.prlimit_context = @ptrCast(@alignCast(arg));
+    const context: *const c.prlimit_context = @ptrCast(@alignCast(arg));
     if (context.pid < 0) {
         return kernel.errno.ErrnoSet.InvalidArgument;
     }
@@ -846,49 +1087,65 @@ pub fn sys_prlimit(arg: *const volatile anyopaque) !i32 {
         process_manager.instance.get_process_for_pid(context.pid) orelse return kernel.errno.ErrnoSet.NoSuchProcess;
 
     if (context.old_limit) |old_limit| {
-        old_limit.* = try process.get_resource_limit(context.resource);
+        (try user_out(c.struct_rlimit, old_limit)).* = try process.get_resource_limit(context.resource);
     }
 
     if (context.new_limit) |new_limit| {
-        try process.set_resource_limit(context.resource, new_limit.*);
+        const limit = try user_in(c.struct_rlimit, new_limit);
+        try process.set_resource_limit(context.resource, limit.*);
     }
 
     return 0;
 }
 
-pub fn sys_access(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.access_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open` for the reasoning. Everything this window
+    // used to protect -- the kernel-heap allocations, the VFS walk and the
+    // filesystem work, `get_current_process()`, and the per-process fd table --
+    // is either under a named lock now or needs none.
+pub fn sys_access(arg: *const anyopaque) !i32 {
+    const context: *const c.access_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);
     try fs.get_ivfs().interface.access(path, context.mode, context.flags);
     return 0;
 }
 
-pub fn sys_klog_ctl(arg: *const volatile anyopaque) !i32 {
-    const context: *const volatile c.klog_ctl_context = @ptrCast(@alignCast(arg));
+pub fn sys_klog_ctl(arg: *const anyopaque) !i32 {
+    const context: *const c.klog_ctl_context = @ptrCast(@alignCast(arg));
     kernel.stdout.suppress(context.enable == 0);
     return 0;
 }
 
-pub fn sys_ftruncate(arg: *const volatile anyopaque) !i32 {
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
-    const context: *const volatile c.ftruncate_context = @ptrCast(@alignCast(arg));
+    // Preemptible: see `sys_open`. Everything the window covered is under a
+    // named lock now, or needs none.
+pub fn sys_ftruncate(arg: *const anyopaque) !i32 {
+    const context: *const c.ftruncate_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(@intCast(context.fd));
     try file.interface.truncate(@intCast(context.length));
     return 0;
 }
 
 const perf = @import("perf_profile.zig");
+const preempt = @import("../sync/preempt.zig");
 const system_stubs = @import("system_stubs.zig");
 
-pub fn sys_perf_dump(arg: *const volatile anyopaque) !i32 {
+pub fn sys_perf_dump(arg: *const anyopaque) !i32 {
     // The caller owns the struct and expects the summary fields written back
     // into it, so the const on `arg` (shared by every syscall handler) is not
     // the contract here.
     const context: *volatile c.perf_dump_context = @ptrCast(@alignCast(@constCast(arg)));
+    // Deliberately excluded from the copy-in table in system_call.zig (the
+    // caller expects the summary fields written back into its own struct), so
+    // this handler is the one that has to validate its own arguments.
+    if (untrusted_caller()) {
+        try uaccess.check(@intFromPtr(context), @sizeOf(c.perf_dump_context), .write);
+        if (context.max_entries < 0) return ErrnoSet.InvalidArgument;
+        _ = try user_out(c_int, context.num_entries);
+        _ = try user_out_slice(
+            @ptrCast(context.entries),
+            @as(usize, @intCast(context.max_entries)) * @sizeOf(c.perf_syscall_entry),
+        );
+    }
     if (!perf.enabled) {
         context.num_entries.* = 0;
         return 0;

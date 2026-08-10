@@ -26,6 +26,14 @@ export fn arch_get_stack_pointer() *usize {
 }
 pub const panic = @import("panic.zig");
 pub const irq_handlers = @import("irq_handlers.zig");
+comptime {
+    // Force the stub exports (`switch_to_the_first_task`, the fault handlers)
+    // to be emitted. Zig only analyses a decl that is referenced, so which of
+    // them exist used to depend on what each test binary happened to touch --
+    // fs_tests started failing to link the moment the FatFs lock pulled the
+    // process manager in. Same pattern as `source/arch/arm-m/arch.zig`.
+    _ = @import("irq_handlers.zig");
+}
 pub const exc_return = struct {
     pub const return_to_handler_msp: u32 = 0xfffffff1;
     pub const return_to_thread_msp: u32 = 0xfffffff9;
@@ -45,12 +53,48 @@ pub const mpu = struct {
     pub fn enable_kernel_protection() void {}
 };
 
+/// See `source/arch/arm-m/atomic.zig`. The host build deliberately reports the
+/// *device's* limit rather than its own: the point of the unit-test target is to
+/// stand in for the M33, and a `u64` atomic that compiles here and turns into a
+/// non-lock-free libcall there is exactly the failure the limit exists to
+/// prevent. Zig's atomic builtins are genuinely atomic on the host, so
+/// everything built on them is exercised under real `std.Thread` contention.
+pub const atomic = struct {
+    pub const lock_free_bits: u16 = 32;
+
+    pub inline fn clear_exclusive() void {}
+};
+
 pub const sync = struct {
+    /// There are no interrupts to mask on the host, so this is a no-op -- but
+    /// the *lock* half of `lock_irqsave` is not, and that is what the host race
+    /// tests exercise.
     pub inline fn save_and_disable_interrupts() usize {
         return 0;
     }
 
     pub inline fn restore_interrupts(primask: usize) void {
         _ = primask;
+    }
+
+    pub inline fn cpu_relax() void {
+        std.atomic.spinLoopHint();
+    }
+
+    /// No parked waiters to wake: `cpu_relax()` busy-spins here.
+    pub inline fn signal_event() void {}
+
+    /// The host analogue of "which core am I".
+    ///
+    /// It must be the *thread*, not `hal.cpu.coreid()` -- the ut stub hands
+    /// every thread the same core id, which would make each of two genuinely
+    /// racing test threads look like a recursive acquisition by the other.
+    /// The host has no exception handlers, so nothing can be in one.
+    pub inline fn in_handler_mode() bool {
+        return false;
+    }
+
+    pub inline fn owner_id() u32 {
+        return @truncate(std.Thread.getCurrentId());
     }
 };

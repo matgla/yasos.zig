@@ -42,9 +42,6 @@ switch_to_next_task:
   ldmia r0!, {r4-r7}
   msr psp, r0
   @ cpsie i
-  push {r0, r1}
-  bl unlock_pendsv_spinlock
-  pop {r0, r1}
   bx r1
 
 .global push_return_address

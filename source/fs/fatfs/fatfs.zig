@@ -26,6 +26,8 @@ const c = @import("libc_imports").c;
 
 const config = @import("config");
 const kernel = @import("kernel");
+const fs_lock = @import("fs_lock.zig");
+const dev_lock = kernel.driver.dev_lock;
 const arch = @import("arch");
 
 const log = std.log.scoped(.@"fs/fatfs");
@@ -48,15 +50,45 @@ fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
     data.st_nlink = 1;
 }
 
-var global_fs: fatfs.FileSystem = undefined;
+/// How many FAT volumes may be mounted at once. Must match `fat_volume_count`
+/// in build.zig, which is what FatFs itself is configured with.
+pub const max_volumes: u8 = 4;
+
+/// Which volume numbers are taken. A `FatFs` claims one at `init` and releases
+/// it at `delete`.
+var volume_in_use: [max_volumes]bool = @splat(false);
+
+/// mkfs scratch. Shared, and safe to share because `fs_lock` serialises every
+/// FatFs entry point -- unlike the volume state above, only one format can be
+/// running at a time.
 var workspace_buffer: [4096]u8 = undefined;
+
+fn claim_volume() ?u8 {
+    for (&volume_in_use, 0..) |*taken, index| {
+        if (!taken.*) {
+            taken.* = true;
+            return @intCast(index);
+        }
+    }
+    return null;
+}
+
 pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     const Self = @This();
     _allocator: std.mem.Allocator,
     _device: kernel.fs.IFile,
     _disk_wrapper: DiskWrapper,
+    /// This instance's FatFs volume number, and its own `FATFS`.
+    ///
+    /// Both used to be process-wide: one `global_fs` and `disks[0]`. A second
+    /// instance then mounted *over* the first rather than beside it, and every
+    /// path it was given resolved against the other one's device.
+    _volume: u8,
+    _fs: fatfs.FileSystem,
 
     pub fn init(allocator: std.mem.Allocator, device: kernel.fs.IFile) !FatFs {
+        const volume = claim_volume() orelse return error.OutOfMemory;
+        errdefer volume_in_use[volume] = false;
         var wrapper = DiskWrapper{ .device = try device.clone() };
         // Safe to do before the wrapper reaches its final address: it holds the
         // cache by slice, so moving the struct carries the reference along.
@@ -65,16 +97,52 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             ._allocator = allocator,
             ._device = try device.clone(),
             ._disk_wrapper = wrapper,
+            ._volume = volume,
+            ._fs = undefined,
         });
     }
 
+    /// `"N:"` for this instance, as FatFs wants it.
+    ///
+    /// Returned by value into a caller-provided buffer so it needs no
+    /// allocation and no lifetime: it is used to build a path and then thrown
+    /// away.
+    fn volume_prefix(self: *const Self, buffer: *[3:0]u8) [:0]const u8 {
+        buffer[0] = '0' + self._volume;
+        buffer[1] = ':';
+        buffer[2] = 0;
+        return buffer[0..2 :0];
+    }
+
+    /// `path` addressed to this instance's volume.
+    ///
+    /// Every path-based FatFs call has to go through here. FatFs resolves an
+    /// unprefixed path against its *current* drive, so without this a second
+    /// volume's lookups would land on whichever one was mounted last -- the
+    /// silent aliasing this whole change exists to remove.
+    fn volume_path(self: *const Self, path: []const u8) ![:0]u8 {
+        const trimmed = if (path.len > 0 and path[0] == '/') path[1..] else path;
+        return std.fmt.allocPrintSentinel(self._allocator, "{c}:/{s}", .{ '0' + self._volume, trimmed }, 0);
+    }
+
     pub fn mount(self: *Self) i32 {
+        fs_lock.acquire();
+        defer fs_lock.release();
+        return self.mount_locked();
+    }
+
+    /// `mount` with the FatFs lock already held. Split out because `format`
+    /// remounts at the end and the lock is deliberately not recursive -- a
+    /// second acquire from the owner would block on itself forever.
+    fn mount_locked(self: *Self) i32 {
+        fs_lock.lock.assert_held();
         log.debug("Mounting FAT filesystem", .{});
         // Whatever the cache still holds describes whichever medium was there
         // before this mount, which is not something a mount may assume.
         self._disk_wrapper.invalidate();
-        fatfs.disks[0] = &self._disk_wrapper.interface;
-        global_fs.mount("0:", true) catch |err| {
+        var prefix: [3:0]u8 = undefined;
+        fatfs.disks[self._volume] = &self._disk_wrapper.interface;
+        self._fs.mount(self.volume_prefix(&prefix), true) catch |err| {
             log.err("Failed to mount FAT filesystem: {s}", .{@errorName(err)});
             return -1;
         };
@@ -83,15 +151,26 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn delete(self: *Self) void {
         _ = self.umount();
+        // Hand the volume back, or a system that mounts and unmounts a few
+        // filesystems runs out of drive numbers with none of them in use.
+        volume_in_use[self._volume] = false;
         self._device.interface.delete();
         self._disk_wrapper.release_cache(self._allocator);
         self._disk_wrapper.device.interface.delete();
     }
 
     pub fn umount(self: *Self) i32 {
+        fs_lock.acquire();
+        defer fs_lock.release();
+        return self.umount_locked();
+    }
+
+    /// `umount` with the FatFs lock already held. See `mount_locked`.
+    fn umount_locked(self: *Self) i32 {
+        fs_lock.lock.assert_held();
         log.debug("Unmounting FAT filesystem", .{});
-        _ = self;
-        fatfs.FileSystem.unmount("0:") catch |err| {
+        var prefix: [3:0]u8 = undefined;
+        fatfs.FileSystem.unmount(self.volume_prefix(&prefix)) catch |err| {
             log.err("Failed to unmount FAT filesystem: {s}", .{@errorName(err)});
             return -1;
         };
@@ -99,14 +178,18 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
-        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
+        fs_lock.acquire();
+        defer fs_lock.release();
+        const filepath = try self.volume_path(path);
         defer self._allocator.free(filepath);
         var file = try fatfs.File.create(filepath);
         file.close();
     }
 
     pub fn mkdir(self: *Self, path: []const u8, _: i32) anyerror!void {
-        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
+        fs_lock.acquire();
+        defer fs_lock.release();
+        const filepath = try self.volume_path(path);
         defer self._allocator.free(filepath);
         _ = fatfs.mkdir(filepath) catch |err| {
             return fatfs_error_to_errno(err);
@@ -114,7 +197,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
+        fs_lock.acquire();
+        defer fs_lock.release();
+        const filepath = try self.volume_path(path);
         defer self._allocator.free(filepath);
         try fatfs.unlink(filepath);
     }
@@ -125,7 +210,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
-        const filepath = try self._allocator.dupeSentinel(u8, path, 0);
+        fs_lock.acquire();
+        defer fs_lock.release();
+        const filepath = try self.volume_path(path);
         defer self._allocator.free(filepath);
 
         // Files first, and only once.
@@ -163,9 +250,12 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn format(self: *Self) anyerror!void {
-        fatfs.disks[0] = &self._disk_wrapper.interface;
+        fs_lock.acquire();
+        defer fs_lock.release();
+        fatfs.disks[self._volume] = &self._disk_wrapper.interface;
+        var prefix: [3:0]u8 = undefined;
         fatfs.mkfs(
-            "0:",
+            self.volume_prefix(&prefix),
             // `any` = best fit for the volume size. FAT32 needs >= 65525
             // clusters, which a small device (the 1 MB QEMU fatdisk window)
             // can never reach, so hardcoding it aborted mkfs there.
@@ -175,11 +265,13 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             log.err("Failed to format FAT filesystem: {s}", .{@errorName(err)});
             return err;
         };
-        _ = self.umount();
-        _ = self.mount();
+        _ = self.umount_locked();
+        _ = self.mount_locked();
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
+        fs_lock.acquire();
+        defer fs_lock.release();
         _ = follow_symlinks;
         initialize_stat_identity(data, path);
         if (std.mem.eql(u8, path, "/") or path.len == 0) {
@@ -187,7 +279,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             data.st_blksize = 512;
             return;
         }
-        var path_c = try std.fmt.allocPrintSentinel(self._allocator, "0:/{s} ", .{path}, 0);
+        var path_c = try std.fmt.allocPrintSentinel(self._allocator, "{c}:/{s} ", .{ '0' + self._volume, path }, 0);
         path_c[path_c.len - 1] = 0; // Null-terminate
         defer self._allocator.free(path_c);
         const finfo = fatfs.stat(path_c) catch |err| {
@@ -212,6 +304,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        fs_lock.acquire();
+        defer fs_lock.release();
         _ = self;
         _ = old_path;
         _ = new_path;
@@ -219,6 +313,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
+        fs_lock.acquire();
+        defer fs_lock.release();
         _ = self;
         _ = target;
         _ = linkpath;
@@ -233,12 +329,19 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        fs_lock.acquire();
+        defer fs_lock.release();
         _ = self;
         _ = path;
         _ = buffer;
         return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
     }
 
+    /// Deliberately unlocked: it is a pure composition of `get`, `filetype` and
+    /// `delete`, each of which takes the lock itself. Taking it here as well
+    /// would be a second acquire by the owner, which the non-recursive mutex
+    /// refuses. The whole sequence is therefore not atomic -- exactly as it was
+    /// before -- and each FatFs call inside it is.
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
         var node = try self.get(path);
@@ -496,13 +599,15 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             return self.cache[index * line_bytes .. (index + 1) * line_bytes];
         }
 
-        /// The device I/O itself, with the seek and the transfer kept together
-        /// under one critical section so nothing can reposition the device
-        /// between them. Everything the cache does around this runs with
-        /// interrupts on.
+        /// The device I/O itself. The seek and the transfer have to stay
+        /// together so nothing can reposition the device between them; that is
+        /// `dev_lock`, taken by the outer `read`/`write`/`ioctl` entry points.
+        ///
+        /// It used to be a PRIMASK section here instead, which held interrupts
+        /// off for the whole multi-sector SD command -- correct exclusion, but
+        /// milliseconds inside a budget that is ~93 us (uart_driver.zig:51-59).
         fn read_through(self: *DiskWrapper, into: [*]u8, sector: fatfs.LBA, count: u32) fatfs.Disk.Error!void {
-            const state = arch.sync.save_and_disable_interrupts();
-            defer arch.sync.restore_interrupts(state);
+            dev_lock.lock.assert_held();
             const position = self.device.interface.seek(@as(i64, @intCast(sector)) * sector_size, c.SEEK_SET) catch return error.IoError;
             if (position < 0) return error.IoError;
             const length = sector_size * count;
@@ -512,8 +617,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         fn write_through(self: *DiskWrapper, from: [*]const u8, sector: fatfs.LBA, count: u32) fatfs.Disk.Error!void {
-            const state = arch.sync.save_and_disable_interrupts();
-            defer arch.sync.restore_interrupts(state);
+            dev_lock.lock.assert_held();
             const position = self.device.interface.seek(@as(i64, @intCast(sector)) * sector_size, c.SEEK_SET) catch return error.IoError;
             if (position < 0) return error.IoError;
             const length = sector_size * count;
@@ -555,6 +659,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn read(interface: *fatfs.Disk, buff: [*]u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            dev_lock.acquire();
+            defer dev_lock.release();
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             // The device does not have the buffered run yet, so a read that
             // covers any of it has to make it real first. Reads served from
@@ -591,6 +697,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn write(interface: *fatfs.Disk, buff: [*]const u8, sector: fatfs.LBA, count: c_uint) fatfs.Disk.Error!void {
+            dev_lock.acquire();
+            defer dev_lock.release();
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             log.debug("Writing to sector {d}, count {d}", .{ sector, count });
             try self.write_combined(buff, sector, @intCast(count));
@@ -614,8 +722,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         pub fn ioctl(interface: *fatfs.Disk, cmd: fatfs.IoCtl, buff: [*]u8) fatfs.Disk.Error!void {
-            const state = arch.sync.save_and_disable_interrupts();
-            defer arch.sync.restore_interrupts(state);
+            dev_lock.acquire();
+            defer dev_lock.release();
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
             switch (cmd) {
                 // Was a no-op, which was correct only while every write went
@@ -640,6 +748,32 @@ pub fn create_fs_for_test() !kernel.fs.IFileSystem {
     var device_file = try (try FatFsDeviceFileStub.InstanceType.create(std.testing.allocator, null)).interface.new(std.testing.allocator);
     defer device_file.interface.delete();
     return try (try FatFs.InstanceType.init(std.testing.allocator, device_file)).interface.new(std.testing.allocator);
+}
+
+test "FatFs.TwoVolumesCoexistWithoutAliasingEachOther" {
+    // The bug this replaces was silent, which is what made it dangerous: FatFs
+    // was built `FF_VOLUMES=1` with one `global_fs` and one `disks[]` slot, so
+    // mounting a second filesystem did not fail -- it repointed the first at
+    // the second's device. A read from /mnt returned the SD card's bytes.
+    var first = try create_fs_for_test();
+    defer first.interface.delete();
+    try first.interface.format();
+    try std.testing.expectEqual(0, first.interface.mount());
+
+    var second = try create_fs_for_test();
+    defer second.interface.delete();
+    try second.interface.format();
+    try std.testing.expectEqual(0, second.interface.mount());
+
+    // The proof that matters: a file written through one is not visible
+    // through the other. Under the old aliasing both lookups hit one device.
+    try first.interface.create("/only_on_first", 0);
+    var found = try first.interface.get("/only_on_first");
+    found.delete();
+    try std.testing.expectError(
+        kernel.errno.ErrnoSet.NoEntry,
+        second.interface.get("/only_on_first"),
+    );
 }
 
 test "FatFs.ShouldMountAfterFormat" {

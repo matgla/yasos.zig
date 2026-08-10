@@ -20,26 +20,26 @@
 // the lock and then calls the (also-locking) _malloc_r / _free_r.
 #include <stdint.h>
 
-static volatile uint32_t ml_depth = 0;
-static volatile uint32_t ml_primask = 0;
+// The lock itself lives in Zig (source/kernel/memory/heap/kheap_lock.zig) so
+// there is one implementation rather than two that have to be kept in step.
+// This file exists only to satisfy the link order described above: it must
+// *define* __malloc_lock, but it need not implement it.
+//
+// What changed: this used to be a PRIMASK nesting counter, which excludes this
+// core's own interrupt handlers and provides nothing at all against a second
+// core. It is now a ranked recursive spinlock underneath the same nesting
+// counter, so it does both.
+void yasos_kheap_lock(void);
+void yasos_kheap_unlock(void);
 
 void __malloc_lock(void *reent)
 {
     (void)reent;
-    uint32_t primask;
-    __asm volatile("mrs %0, primask" : "=r"(primask));
-    __asm volatile("cpsid i" ::: "memory");
-    if (ml_depth == 0) {
-        ml_primask = primask;
-    }
-    ml_depth++;
+    yasos_kheap_lock();
 }
 
 void __malloc_unlock(void *reent)
 {
     (void)reent;
-    ml_depth--;
-    if (ml_depth == 0 && (ml_primask & 1u) == 0u) {
-        __asm volatile("cpsie i" ::: "memory");
-    }
+    yasos_kheap_unlock();
 }

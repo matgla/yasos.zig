@@ -34,6 +34,33 @@ const system_call = @import("interrupts/system_call.zig");
 const c = @import("libc_imports").c;
 const handlers = @import("interrupts/syscall_handlers.zig");
 const perf = @import("interrupts/perf_profile.zig");
+const preempt = @import("sync/preempt.zig");
+
+/// Rank 70, a leaf, and `spin_irq` rather than a sleeping mutex on purpose:
+/// `release_pid` is called from `schedule_next`, which runs in PendSV, where
+/// blocking is not allowed. The critical sections are a bitset scan and a bit
+/// flip -- microseconds -- so masking interrupts across them costs nothing
+/// against the ~93 us console budget.
+///
+/// This replaced a `block_context_switch` window, which is not a lock: it stops
+/// *this* core rescheduling and does nothing at all about a second one.
+var pidmap_lock: kernel.sync.Ranked(.pidmap) = .{};
+
+/// Rank 50: the process table itself -- `processes`, `terminate_list`, and the
+/// scheduler's cursor into them.
+///
+/// The inventory calls this "the entire process world, read unlocked from
+/// PendSV, HardFault, SVC and thread mode", and that is the reason it is
+/// `spin_irq`: PendSV walks the list on every context switch, so a lock that can
+/// block is not available here.
+///
+/// It is taken *outside* `pidmap` (70), `pagepool` (80) and `kheap` (90), which
+/// is what lets `schedule_next` reap a process -- releasing its pid, its pages
+/// and its kernel allocations -- with the table held. It is taken *inside*
+/// `fs` (20) and `dev` (30), which is the rule that keeps filesystem work off
+/// this path: `clear_fds` had to move to `delete_process` before that could be
+/// true.
+var proctable_lock: kernel.sync.Ranked(.proctable) = .{};
 
 const arch = @import("arch");
 
@@ -129,7 +156,6 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         _process_memory_pool: kernel.memory.heap.ProcessMemoryPool,
         _pid_map: std.StaticBitSet(config.process.max_pid_value),
         core: [hal.cpu.number_of_cores()]*ProcessType,
-        mutex: kernel.sync.Mutex,
         terminate_list: std.DoublyLinkedList,
         runtime_configuration: RuntimeConfiguration,
 
@@ -147,7 +173,6 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 ._process_memory_pool = processes_memory_pool,
                 ._pid_map = std.StaticBitSet(config.process.max_pid_value).full,
                 .core = undefined,
-                .mutex = .{},
                 .terminate_list = .{},
                 .runtime_configuration = RuntimeConfiguration.init(),
             };
@@ -165,7 +190,22 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return &self.runtime_configuration;
         }
 
+        /// Reap the terminate list and pick the next process.
+        ///
+        /// `assert_held` at the head of the functions this reaches is what
+        /// catches the bug review cannot: one correct only because *some*
+        /// caller was believed to hold the table, and one caller does not.
         pub fn schedule_next(self: *Self) kernel.scheduler.Action {
+            // Held across the reap *and* the pick: they are one decision about
+            // the table, and a second core allowed between them could schedule
+            // a process this one is in the middle of freeing.
+            //
+            // The masked window is a list walk in the common case. It is longer
+            // when there is something to reap -- bitmap and heap frees, tens of
+            // microseconds -- but that happens once per process death, not per
+            // switch.
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
             var next = self.terminate_list.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -204,14 +244,17 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn get_pidmap(self: *const Self) std.StaticBitSet(config.process.max_pid_value) {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            const flags = pidmap_lock.lock_irqsave();
+            defer pidmap_lock.unlock_irqrestore(flags);
             return self._pid_map;
         }
 
         fn get_next_pid(self: *Self) ?c.pid_t {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            const flags = pidmap_lock.lock_irqsave();
+            defer pidmap_lock.unlock_irqrestore(flags);
+            // find-then-clear is a read-modify-write across two operations: two
+            // contexts can both see the same first free bit and both take it,
+            // handing one pid to two processes.
             const maybe_index = self._pid_map.findFirstSet();
             if (maybe_index) |index| {
                 self._pid_map.unset(index);
@@ -222,8 +265,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         fn release_pid(self: *Self, pid: c.pid_t) void {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            const flags = pidmap_lock.lock_irqsave();
+            defer pidmap_lock.unlock_irqrestore(flags);
             if (pid > 0 and pid < config.process.max_pid_value) {
                 self._pid_map.set(@intCast(pid - 1));
             }
@@ -236,9 +279,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
                 new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
 
-                kernel.process.block_context_switch();
-                defer kernel.process.unblock_context_switch();
-                self.processes.append(&new_process.node);
+                {
+                    const flags = proctable_lock.lock_irqsave();
+                    defer proctable_lock.unlock_irqrestore(flags);
+                    self.processes.append(&new_process.node);
+                }
                 return;
             }
             return kernel.errno.ErrnoSet.TryAgain;
@@ -250,7 +295,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
                 var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
                 new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
-                self.processes.append(&new_process.node);
+                {
+                    const flags = proctable_lock.lock_irqsave();
+                    defer proctable_lock.unlock_irqrestore(flags);
+                    self.processes.append(&new_process.node);
+                }
                 self.core[hal.cpu.coreid()] = new_process;
                 return;
             }
@@ -276,13 +325,23 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     // fix me
                     const ctx = p._vfork_context;
 
+                    // Close this process's files here, in its own thread
+                    // context, rather than leaving them to `deinit` -- which the
+                    // reaper calls from PendSV, where taking the filesystem's
+                    // sleeping mutex is not allowed. See Process.clear_fds.
+                    p.clear_fds();
+
                     // i can't remove myself on my on stack
                     dynamic_loader.release_executable(pid);
                     p.unblock_parent();
                     p.schedule_removal();
                     p.unblock_all(return_code);
-                    self.processes.remove(&p.node);
-                    self.terminate_list.append(&p.node);
+                    {
+                        const flags = proctable_lock.lock_irqsave();
+                        defer proctable_lock.unlock_irqrestore(flags);
+                        self.processes.remove(&p.node);
+                        self.terminate_list.append(&p.node);
+                    }
 
                     if (ctx != null) {
                         const parent = p._parent.?;
@@ -296,22 +355,26 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     break;
                 }
             }
+            // Closes the window `sys_exit` / `sys_kill` opened. Released once
+            // and then spun on: the release used to sit *inside* the loop, so
+            // every iteration after the first was an unmatched release that the
+            // old clamp absorbed. This process is never scheduled again, so the
+            // loop is only here to keep re-pending the switch that takes us off
+            // this stack for good.
+            preempt.preempt_enable();
+            arch.memory_barrier_release();
             if (!std.mem.eql(u8, "host", config.cpu.arch)) {
                 while (true) {
-                    kernel.process.unblock_context_switch();
-                    arch.memory_barrier_release();
                     hal.irq.trigger(.pendsv);
                 }
             } else {
-                kernel.process.unblock_context_switch();
-                arch.memory_barrier_release();
                 hal.irq.trigger(.pendsv);
             }
         }
 
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
-            kernel.process.block_context_switch();
-            errdefer kernel.process.unblock_context_switch();
+            preempt.preempt_disable();
+            errdefer preempt.preempt_enable();
 
             const current_process = self.get_current_process();
             const maybe_pid = self.get_next_pid();
@@ -351,8 +414,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // Save parent's writable sections before child runs on shared memory
             dynamic_loader.save_parent_writable_sections(current_process.pid, new_process.pid);
 
-            self.processes.append(&new_process.node);
-            self._scheduler.set_next(&new_process.node);
+            {
+                const flags = proctable_lock.lock_irqsave();
+                defer proctable_lock.unlock_irqrestore(flags);
+                self.processes.append(&new_process.node);
+                self._scheduler.set_next(&new_process.node);
+            }
             self.core[hal.cpu.coreid()] = new_process;
             // child is now running without context switch, but uses parent stack until exec
             // switch without context switch, just to represent correct state
@@ -454,7 +521,6 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 
         // TODO: exec on currently running process is not supported yet
         pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator) !i32 {
-            kernel.process.block_context_switch();
             const current_process = self.get_current_process();
 
             // Restore parent's writable sections that may have been corrupted
@@ -518,7 +584,6 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             } else if (executable.module.find_symbol("_start")) |entry| {
                 symbol = entry;
             } else {
-                kernel.process.unblock_context_switch();
                 return -1;
             }
 
@@ -546,6 +611,28 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             }
 
+            // The window starts *here*, not at the top of the function.
+            //
+            // What follows rewrites this process's own stack and then hands the
+            // core to its parent -- category (C): PendSV must not fire inside
+            // it. Everything above is the image load, which is long (milliseconds
+            // of card I/O), allocates, and reads the filesystem, and which
+            // refusing to be preempted across bought nothing once the loader
+            // tables, the process table and the heap each got a lock of their
+            // own. Holding it up there also made a *sleeping* `loader_lock`
+            // impossible: blocking with preemption disabled is a hang, so
+            // `RankedMutex` refuses it.
+            //
+            // A plain `defer` would be wrong, and a plain manual release was
+            // what the old code did and got wrong the other way: the vfork tail
+            // hands off through `process_get_back_to_parent_vfork`, which never
+            // returns, so a `defer` there would never run -- while every `try`
+            // and the ordinary `return 0` leaked the window outright. The flag
+            // covers both.
+            preempt.preempt_disable();
+            var preempt_held = true;
+            defer if (preempt_held) preempt.preempt_enable();
+
             try current_process.reallocate_stack();
 
             // Apply the per-image heap profile now that the image + stack are
@@ -562,13 +649,20 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 current_process._vfork_context = null;
                 current_process.unblock_parent();
                 arch.disable_interrupts();
-                kernel.process.unblock_context_switch();
+                // `process_get_back_to_parent_vfork` issues the matching
+                // release itself (`bl process_unblock_context_switch` in
+                // context_switch.S) once it is on the parent's stack, which is
+                // also how `delete_process`'s hand-off works. Releasing here as
+                // well made this the one caller that released twice.
+                preempt_held = false;
                 return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
             }
             return 0;
         }
 
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
             var next = self.processes.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -581,15 +675,31 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn waitpid(self: *Self, pid: i32, status: *i32) !i32 {
-            kernel.process.block_context_switch();
             const current_process = self.get_current_process();
-            const maybe_process = self.get_process_for_pid(pid);
-            if (maybe_process) |p| {
-                if (p.state == Process.State.Terminated) {
+
+            // Registration runs with preemption refused; the wait itself must
+            // not, and the two used to be tangled. The old shape blocked once
+            // and released inside the wait loop, so it leaked the block
+            // entirely when the pid was unknown or the child had already
+            // finished registering -- and released one time per loop iteration
+            // when it did wait. The leak left preemption refused for the rest
+            // of the process's life, which the clamp in the old
+            // `unblock_context_switch` then papered over.
+            {
+                preempt.preempt_disable();
+                defer preempt.preempt_enable();
+
+                const maybe_process = self.get_process_for_pid(pid);
+                if (maybe_process == null) {
                     status.* = current_process.child_exit_code;
-                    kernel.process.unblock_context_switch();
                     return pid;
                 }
+                const p = maybe_process.?;
+                if (p.state == Process.State.Terminated) {
+                    status.* = current_process.child_exit_code;
+                    return pid;
+                }
+
                 const Action = struct {
                     pub fn on_process_finished(context: ?*anyopaque, rc: i32) void {
                         const s: *i32 = @ptrCast(@alignCast(context));
@@ -597,26 +707,33 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     }
                 };
                 current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
-                    kernel.process.unblock_context_switch();
                     return -1;
                 };
-
-                while (current_process.state == Process.State.Blocked) {
-                    kernel.process.unblock_context_switch();
-                    hal.irq.trigger(.pendsv);
-                    current_process.reevaluate_state();
-                }
             }
+
+            // Preemption is enabled here, which is the point: yielding is the
+            // only way the child ever runs.
+            while (current_process.state == Process.State.Blocked) {
+                hal.irq.trigger(.pendsv);
+                current_process.reevaluate_state();
+            }
+
             status.* = current_process.child_exit_code;
             return pid;
         }
 
-        // Synchronization
-        // core access - secure, different memory regions
-        // interrupts - disabled during access
+        /// The process running on this core.
+        ///
+        /// No window: `core[]` is per-CPU (one slot per core, written only by
+        /// its own core's context switch) and a pointer-sized aligned load
+        /// cannot tear. The old `block_context_switch()` pair here was two
+        /// PRIMASK round-trips on one of the most-called functions in the
+        /// kernel, protecting a single load.
+        ///
+        /// The value is stable for the caller that matters: a syscall handler
+        /// asking who it is *is* the current process, and if a switch happens
+        /// it is not running to observe the change.
         pub fn get_current_process(self: *const Self) *Process {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
             return self.core[hal.cpu.coreid()];
         }
 
@@ -626,9 +743,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             process.initialize_context_switching();
         }
 
-        // Synchronization
-        // this must be synchronized across interrupts and cores
         pub fn is_empty(self: *Self) bool {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
             return self.processes.first == null;
         }
     };
@@ -776,13 +893,16 @@ export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
 }
 
 export fn arch_store_vfork_back_point(back_point: usize, stack_pointer: usize) void {
-    kernel.process.block_context_switch();
+    preempt.preempt_disable();
     instance.set_vfork_back_point(back_point, stack_pointer);
-    kernel.process.unblock_context_switch();
+    preempt.preempt_enable();
 }
 
+/// Called from `context_switch.S` to close a window opened in `vfork` or
+/// `prepare_exec`, both of which hand off through assembly that never returns
+/// normally and so cannot use `defer`.
 export fn process_unblock_context_switch() void {
-    kernel.process.unblock_context_switch();
+    preempt.preempt_enable();
 }
 
 const StubScheduler = @import("scheduler/stub.zig").StubScheduler;
@@ -930,6 +1050,11 @@ test "ProcessManager.ShouldScheduleProcesses" {
     _ = process_set_next_task();
     try std.testing.expectEqual(2, sut.get_current_process().pid);
 
+    // `delete_process` closes a preemption window it does not open -- `sys_exit`
+    // and `sys_kill` are its only real callers and both open one. Calling it
+    // bare would release a window nobody took, which is now a panic rather than
+    // a silently clamped counter.
+    preempt.preempt_disable();
     sut.delete_process(2, 0);
 
     for (1..4) |i| {

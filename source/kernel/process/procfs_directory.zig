@@ -23,6 +23,7 @@ const ProcFsIterator = @import("procfs_iterator.zig").ProcFsIterator;
 const PidDirectory = @import("pid_directory.zig").PidDirectory;
 
 const log = std.log.scoped(.@"vfs/procfs/directory");
+const refcount = kernel.sync.refcount;
 
 const ProcFsDirectoryData = struct {
     const Self = @This();
@@ -31,13 +32,12 @@ const ProcFsDirectoryData = struct {
     _refcounter: i16,
 
     pub fn share(self: *Self) *Self {
-        self._refcounter += 1;
+        refcount.acquire(&self._refcounter);
         return self;
     }
 
     pub fn delete(self: *Self, allocator: std.mem.Allocator) void {
-        self._refcounter -= 1;
-        if (self._refcounter == 0) {
+        if (refcount.release(&self._refcounter)) {
             for (self._nodes.items) |*node| {
                 node.delete();
             }

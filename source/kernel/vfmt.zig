@@ -126,6 +126,31 @@ fn parseSpec(text: []const u8) Spec {
     return spec;
 }
 
+/// Whether a `[]const u8` looks like something that can actually be read.
+///
+/// Deliberately crude, and deliberately not a memory-map lookup: this runs from
+/// the fault handler, where the memory map may itself be what is broken, and
+/// from before the board is fully up. It only has to catch the shapes a dangling
+/// or uninitialised slice actually takes -- an all-ones or null pointer, an
+/// address in the unmapped high region, or a length no log line could have.
+fn readable_string(s: []const u8) bool {
+    if (s.len == 0) return true;
+    const address = @intFromPtr(s.ptr);
+    if (address == 0) return false;
+    // Nothing readable lives at or above 0xF0000000 on a 32-bit target: that
+    // window is the PPB and the EXC_RETURN encodings, not memory. Gated on the
+    // pointer width because the unit tests run on a 64-bit host, where ordinary
+    // heap and stack addresses sit far above that line -- an ungated check
+    // rejected every legitimate string there.
+    if (comptime @bitSizeOf(usize) == 32) {
+        if (address >= 0xF000_0000) return false;
+    }
+    // A log line is bounded by the 512-byte buffer in kernel_log; anything
+    // claiming more than that is a corrupted length, not a message.
+    if (s.len > 4096) return false;
+    return true;
+}
+
 const Out = struct {
     buf: []u8,
     len: usize = 0,
@@ -205,7 +230,21 @@ fn emitValue(out: *Out, v: Value, spec: Spec) void {
                 else => out.padded(renderInt(&scratch, magnitude, negative, 10, digits_lower), spec),
             }
         },
-        .string => |s| out.padded(s, spec),
+        // A `{s}` whose slice is dangling must not take the kernel down.
+        //
+        // The logger is the instrument used to diagnose faults, so a fault
+        // *inside* it costs far more than the bad line it was asked to print:
+        // the HardFault handler formats its own postmortem, re-enters this
+        // path, and dies a second time -- which is why several shutdown
+        // crashes arrived as three truncated lines and an exception frame that
+        // had already been overwritten.
+        //
+        // Printing the offending pointer and length instead turns a dead board
+        // into a log line naming exactly which message held the stale slice.
+        .string => |s| if (readable_string(s))
+            out.padded(s, spec)
+        else
+            out.bytes("<bad str>"),
         .bytes => |b| {
             if (spec.verb == 's') return out.padded(b, spec);
             const upper = spec.verb == 'X';

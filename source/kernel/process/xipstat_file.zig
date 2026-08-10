@@ -23,6 +23,7 @@ const vfmt = @import("../vfmt.zig");
 const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
+const kernel_sync = @import("../sync/sync.zig");
 
 /// One read of a machine's XIP cache counters, covering the window since the
 /// previous read. `hit` counts accesses served from cached data, `acc` counts
@@ -58,7 +59,15 @@ var saturated_samples: u32 = 0;
 /// in thread mode can tell it caught the tick mid-update. Without it, reading a
 /// 64-bit total on a 32-bit core can splice the low word of one value onto the
 /// high word of another.
-var sequence: u32 = 0;
+///
+/// Atomic with `seq_cst` ordering rather than the plain `+%=` on a `volatile`
+/// this used to be. `volatile` stops the *compiler* reordering the accesses and
+/// says nothing to a second core; the sequence is the whole protocol, so it is
+/// the one field that must carry real ordering. See `sync/seqlock.zig`, which
+/// this predates -- the totals are three fields read together, which `Seq64`
+/// does not model, so the protocol stays hand-rolled here and only its ordering
+/// is fixed.
+var sequence: kernel_sync.Atomic(u32) = .init(0);
 
 /// Eight is far past what could ever be needed: losing a race costs one retry
 /// of a read that takes well under a microsecond, against a sampler that runs
@@ -83,22 +92,21 @@ pub fn accumulate() void {
     const read = sampler orelse return;
     const sample = read();
 
-    const seq: *volatile u32 = &sequence;
     const hit: *volatile u64 = &total_hit;
     const acc: *volatile u64 = &total_acc;
     const saturated: *volatile u32 = &saturated_samples;
 
-    seq.* +%= 1;
+    const start = sequence.load(.monotonic);
+    sequence.store(start +% 1, .seq_cst);
     hit.* +%= sample.hit;
     acc.* +%= sample.acc;
     if (sample.saturated) {
         saturated.* +%= 1;
     }
-    seq.* +%= 1;
+    sequence.store(start +% 2, .seq_cst);
 }
 
 pub fn read_stats() Stats {
-    const seq: *const volatile u32 = &sequence;
     const hit: *const volatile u64 = &total_hit;
     const acc: *const volatile u64 = &total_acc;
     const saturated: *const volatile u32 = &saturated_samples;
@@ -106,10 +114,10 @@ pub fn read_stats() Stats {
     var stats = Stats{};
     var attempt: u8 = 0;
     while (attempt < max_read_attempts) : (attempt += 1) {
-        const before = seq.*;
+        const before = sequence.load(.seq_cst);
         if (before & 1 != 0) continue;
         stats = .{ .hit = hit.*, .acc = acc.*, .saturated = saturated.* };
-        if (seq.* == before) break;
+        if (sequence.load(.seq_cst) == before) break;
     }
     // Falling out of the loop hands back the last attempt rather than zeros:
     // a total that may be spliced is still recognisably a total, while zeros
@@ -121,7 +129,7 @@ pub fn reset() void {
     total_hit = 0;
     total_acc = 0;
     saturated_samples = 0;
-    sequence = 0;
+    sequence.store(0, .seq_cst);
 }
 
 // Two 20-digit totals and one 10-digit count with their labels come to 83

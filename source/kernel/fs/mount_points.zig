@@ -26,6 +26,32 @@ const IDirectoryIterator = kernel.fs.IDirectoryIterator;
 const IFile = kernel.fs.IFile;
 
 const config = @import("config");
+
+/// Guards the shape of the mount tree.
+///
+/// The hazard the inventory names: `find_longest_matching_point` walks the tree
+/// on the hottest kernel path -- every `open`, `stat`, `unlink` goes through it
+/// -- while `umount` calls `deinit` on nodes underneath it. There is no refcount
+/// and no generation counter, so a walk in progress can follow a pointer into a
+/// node that has just been freed.
+///
+/// Rank `mount` (10), the outermost lock in the hierarchy, and a *sleeping*
+/// mutex rather than the spin rwlock the plan's table sketches. It has to be:
+/// rank 10 is acquired before `fs` (20), which is itself a sleeping mutex, and
+/// "never take a sleeping mutex while holding a spinlock" would make a spin
+/// rwlock here illegal the moment it were held across a filesystem call.
+///
+/// ## What this does not yet fix
+///
+/// It makes the *walk* safe against a concurrent mount or umount. It does not
+/// make the *result* safe: the VFS calls into `node.point.filesystem` after the
+/// lookup returns and the lock is dropped, so a umount landing in that gap can
+/// still free the mount point out from under an in-flight operation. Closing
+/// that needs a reference on the returned point, which is the next step -- and
+/// holding this lock across the filesystem call instead is not an option,
+/// because RamFs's tier spills back through `kernel.fs.get_ivfs()` and would
+/// re-enter it.
+pub var mount_lock: kernel.sync.RankedMutex(.mount) = .{};
 const interface = @import("interface");
 
 const log = std.log.scoped(.@"kernel/fs/mount_points");
@@ -104,11 +130,28 @@ pub const MountPoints = struct {
         }
     }
 
-    pub fn find_longest_matching_point(self: anytype, T: type, path: []const u8) ?struct {
-        left: []const u8,
-        point: T,
-        parent: ?T,
-    } {
+    /// Named rather than anonymous so the locked and unlocked halves below
+    /// share one return type; two `?struct { ... }` literals are two distinct
+    /// types even when spelled identically.
+    pub fn Match(comptime T: type) type {
+        return struct {
+            left: []const u8,
+            point: T,
+            parent: ?T,
+        };
+    }
+
+    pub fn find_longest_matching_point(self: anytype, T: type, path: []const u8) ?Match(T) {
+        mount_lock.lock();
+        defer mount_lock.unlock();
+        return find_locked(self, T, path);
+    }
+
+    /// The walk itself, with `mount_lock` already held. Split out because the
+    /// mutators below look points up before changing them, and the lock is
+    /// deliberately not recursive.
+    pub fn find_locked(self: anytype, T: type, path: []const u8) ?Match(T) {
+        mount_lock.assert_held();
         if (self.root == null) {
             return null;
         }
@@ -171,6 +214,8 @@ pub const MountPoints = struct {
     }
 
     pub fn mount_filesystem(self: *MountPoints, path: []const u8, filesystem: IFileSystem) !void {
+        mount_lock.lock();
+        defer mount_lock.unlock();
         if (path.len + 1 > config.fs.max_mount_point_size) {
             return error.PathTooLong;
         }
@@ -184,7 +229,7 @@ pub const MountPoints = struct {
             return MountPointError.MountPointNotAbsolutePath;
         }
 
-        const maybe_longest_matching_point = self.find_longest_matching_point(*MountPoint, path);
+        const maybe_longest_matching_point = find_locked(self, *MountPoint, path);
         if (maybe_longest_matching_point == null) {
             return MountPointError.RootNotMounted;
         }
@@ -205,7 +250,9 @@ pub const MountPoints = struct {
     }
 
     pub fn umount(self: *MountPoints, path: []const u8) !void {
-        const maybe_longest_matching_point = self.find_longest_matching_point(*MountPoint, path);
+        mount_lock.lock();
+        defer mount_lock.unlock();
+        const maybe_longest_matching_point = find_locked(self, *MountPoint, path);
         if (maybe_longest_matching_point == null) {
             return MountPointError.NotMounted;
         }

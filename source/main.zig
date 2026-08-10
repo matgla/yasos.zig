@@ -355,8 +355,15 @@ fn mount_fatdisk(allocator: std.mem.Allocator) !void {
     defer fnode.delete();
     var maybe_file = fnode.as_file();
     if (maybe_file) |*file| {
+        // `as_file()` hands back a borrowed copy of the node's interface — same
+        // refcount, no acquire — and `FatFs.init` deep-clones it into references
+        // of its own. Releasing this copy here as well as through
+        // `fnode.delete()` is a double release of the node's single reference:
+        // the first drops it to zero and frees the counter, the second
+        // decrements freed memory, which by then is a newlib free-list `next`
+        // pointer. That is the boot-time heap corruption that made ReleaseSafe
+        // hand out overlapping allocations later on.
         var fatdisk = try allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*));
-        file.interface.delete();
         // The window only holds a FAT image when the host pre-loaded one into
         // the RAM backing file (memory-backend-file launch, see
         // scripts/qemu_fatdisk_run.py). A plain `-kernel` launch
@@ -478,8 +485,10 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         if (maybe_mmcpart0) |*mmcnode| {
             var maybe_file = mmcnode.as_file();
             if (maybe_file) |*file| {
+                // Same borrowed-copy rule as mount_fatdisk: `mmcnode.delete()`
+                // below owns the single reference, so releasing it here too
+                // would decrement a freed refcount.
                 const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*)) catch null;
-                file.interface.delete();
                 if (maybe_rootfs) |rootfs| {
                     if (mount_filesystem(rootfs, "/root")) |_| {
                         root_mounted = true;
@@ -600,6 +609,10 @@ pub export fn main() void {
     {
         const allocator = kernel_allocator.allocator();
         initialize_board();
+        // After the board, because the PSRAM window's size is only known once
+        // external memory has been probed, and that is what the placement
+        // assertion checks against.
+        kernel.sync.init();
         splashscreen();
 
         // Lock the kernel heap and stack away from unprivileged user processes.
@@ -631,6 +644,22 @@ pub export fn main() void {
         hal.external_memory.enable_fast_reads();
 
         // we need to get real return address to get back from user mode successfully
+        //
+        // This call returns twice over: once if creating or scheduling the root
+        // process actually fails, and once at shutdown, when
+        // `switch_to_main_task` pops the frame `switch_to_the_first_task` left
+        // on MSP a whole system lifetime earlier and resumes this call's callee
+        // mid-function.
+        //
+        // The second return used to arrive with foreign callee-saved registers,
+        // because that hand-off saved only `{r0, lr}` -- and the compiler parks
+        // `root_process`'s success value in r4 across the call (`mov r0, r4`
+        // right at the resume point). So a clean `exit` reported a random word
+        // as an error here, `@errorName` indexed past its table, and the logger
+        // HardFaulted memcpy'ing the wild slice it got back. The frame now
+        // carries r4-r11, so the value landing in `err` is a real error again
+        // and is worth naming. See `switch_to_the_first_task` in
+        // source/arch/armv8-m/context_switch.S.
         @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, kernel.process.process_manager.instance.get_default_stack_size() }) catch |err| {
             kernel.log.err("Cannot start root process: {s}", .{@errorName(err)});
         };

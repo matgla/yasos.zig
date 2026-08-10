@@ -22,6 +22,7 @@ const RamFsDirectoryIterator = @import("ramfs_directory_iterator.zig").RamFsDire
 const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 
 const log = std.log.scoped(.ramfsdirectory);
+const refcount = kernel.sync.refcount;
 
 pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
@@ -33,7 +34,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     pub fn create(allocator: std.mem.Allocator, nodename: []const u8) !RamFsDirectory {
         const list = try allocator.create(std.DoublyLinkedList);
         const refcounter = try allocator.create(i16);
-        refcounter.* = 1;
+        refcount.init(refcounter);
         list.* = std.DoublyLinkedList{};
         return RamFsDirectory.init(.{
             ._allocator = allocator,
@@ -45,7 +46,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        self._refcounter.* += 1;
+        refcount.acquire(self._refcounter);
     }
 
     pub fn create_node(allocator: std.mem.Allocator, nodename: []const u8) anyerror!kernel.fs.Node {
@@ -107,8 +108,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     }
 
     pub fn delete(self: *Self) void {
-        self._refcounter.* -= 1;
-        if (self._refcounter.* == 0) {
+        if (refcount.release(self._refcounter)) {
             var next = self._root.pop();
             while (next) |child| {
                 const file_node: *RamFsNode = @fieldParentPtr("list_node", child);

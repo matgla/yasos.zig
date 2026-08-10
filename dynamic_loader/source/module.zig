@@ -30,6 +30,7 @@ const profile = @import("load_profile.zig");
 const get_loader = @import("loader.zig").get_loader;
 
 const log = std.log.scoped(.@"yasld/module");
+const refcount = @import("refcount.zig");
 
 pub const GotEntry = extern struct {
     symbol_offset: usize,
@@ -66,8 +67,7 @@ pub const ThunkHolderData = struct {
     }
 
     pub fn delete(self: *ThunkHolderData, allocator: std.mem.Allocator) void {
-        self.refcount -= 1;
-        if (self.refcount == 0) {
+        if (refcount.release(&self.refcount)) {
             const hdr = @sizeOf(ThunkHolderData);
             const base: [*]u8 = @ptrCast(self);
             allocator.free(base[0 .. hdr + self.data.len]);

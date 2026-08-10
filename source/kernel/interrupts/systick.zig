@@ -25,9 +25,34 @@ const arch = @import("arch");
 
 const process_manager = @import("../process_manager.zig");
 const xip_stats = @import("../process/xipstat_file.zig");
+const kernel_sync = @import("../sync/sync.zig");
 
-var tick_counter: u64 = 0;
-var last_time: u64 = 0;
+/// Milliseconds since boot.
+///
+/// Two things make this awkward on a second core, and they pull in opposite
+/// directions:
+///
+///   * **SysTick is per-core hardware** (it lives in the SCS), so core 1 gets
+///     its own interrupt. A shared counter incremented by both would run at
+///     twice wall-clock speed -- and unlike most per-CPU state, a *clock* must
+///     not be summed across cores either.
+///   * It is 64 bits on a machine with no `LDREXD`, and it is read concurrently
+///     by `sleep_for_us` and `sysinfo`. A plain two-halves read can catch the
+///     increment mid-carry and land four billion ticks in the future.
+///
+/// So: exactly one core advances it (`timekeeper_core`), which removes the
+/// double count and leaves a single writer; and it is published through a
+/// seqlock, which removes the torn read. Readers never hold the tick up.
+var ticks: kernel_sync.Seq64 = .init(0);
+
+/// The core that owns wall-clock time. Every other core's SysTick still fires
+/// and still drives *its own* preemption, but does not touch the clock.
+const timekeeper_core: usize = 0;
+
+/// Tick at which this core last forced a reschedule. Per-CPU: each core
+/// preempts on its own schedule, and a shared value would let one core's
+/// timeslice reset the other's.
+var last_preempt: kernel_sync.PerCpu(u64) = .init(0);
 
 pub export fn irq_systick() void {
     const state = arch.sync.save_and_disable_interrupts();
@@ -39,23 +64,40 @@ pub export fn irq_systick() void {
     // check on machines that publish no sampler.
     xip_stats.accumulate();
 
-    const tick_counter_ptr: *volatile u64 = &tick_counter;
-    tick_counter_ptr.* += 1;
-    if (tick_counter_ptr.* - last_time >= 100) { //config.process.context_switch_period) {
+    // Only the timekeeper advances the clock. The read-modify-write is safe
+    // without a lock precisely because of that: one writer, and it is this
+    // handler, which cannot preempt itself.
+    const now = blk: {
+        if (kernel_sync.percpu.current_core() == timekeeper_core) {
+            const next = ticks.load() +% 1;
+            ticks.store(next);
+            break :blk next;
+        }
+        break :blk ticks.load();
+    };
+
+    // Preemption is per-core: every core forces its own reschedule on its own
+    // timeslice, whether or not it owns the clock.
+    const last = last_preempt.current();
+    if (now -% last.* >= 100) { //config.process.context_switch_period) {
         hal.irq.trigger(.pendsv);
-        last_time = tick_counter_ptr.*;
+        last.* = now;
     }
 }
 
-pub fn get_system_ticks() *const volatile u64 {
-    const ptr: *const volatile u64 = &tick_counter;
-    return ptr;
+/// Milliseconds since boot.
+///
+/// Returns a value, not a pointer. It used to hand out a `*const volatile u64`
+/// that callers dereferenced at their leisure, which is exactly the read the
+/// seqlock exists to prevent -- there is no way to retry a raw dereference.
+pub fn get_system_ticks() u64 {
+    return ticks.load();
 }
 
 // Test helpers for resetting state
 fn reset_systick_state() void {
-    tick_counter = 0;
-    last_time = 0;
+    ticks = .init(0);
+    last_preempt.current().* = 0;
 }
 
 // test "Systick.GetSystemTicks.ShouldReturnInitialZero" {

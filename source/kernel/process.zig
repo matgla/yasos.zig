@@ -24,6 +24,7 @@ const c = @import("libc_imports").c;
 
 const config = @import("config");
 const kernel = @import("kernel.zig");
+const preempt = @import("sync/preempt.zig");
 
 const log = std.log.scoped(.@"kernel/process");
 
@@ -165,8 +166,18 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         // by update_stack_pointer() on every context store; read by the PendSV
         // resume path via process_resume_is_privileged().
         resume_privileged: bool,
-        waiting_for: ?*const Semaphore = null,
+        /// What this process is blocked on, or null when it is not.
+        ///
+        /// An opaque token rather than `?*const Semaphore`: the identity of the
+        /// blocker is all `reevaluate_state` and the wake-up scan ever need, and
+        /// widening it is what lets the kernel's sleeping mutex reuse the
+        /// machinery the semaphore already proved rather than growing a second,
+        /// parallel one that `reevaluate_state` would also have to know about.
+        waiting_for: ?*const anyopaque = null,
         _fds: std.AutoHashMap(u16, FileHandle),
+        /// See `clear_fds`: it runs at exit *and* from `deinit`, and must not
+        /// tear the map down twice.
+        _fds_cleared: bool = false,
         cwd: []u8,
         node: std.DoublyLinkedList.Node,
         _process_memory_allocator: ProcessMemoryAllocator,
@@ -238,7 +249,25 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return process;
         }
 
+        /// Close every open file descriptor.
+        ///
+        /// **Thread context only, and idempotent.** Closing a descriptor is
+        /// filesystem I/O -- a FatFs handle goes through `FatFsFile.delete` and
+        /// takes `fs_lock`, a *sleeping* mutex -- so this must never run from an
+        /// exception handler. It used to be called from `deinit`, which the
+        /// terminate-list reaper calls from PendSV: fine while nothing locked,
+        /// but a latent panic the moment `fs_lock` existed, because a reap
+        /// landing while another process was mid-FatFs-operation would find the
+        /// lock contended and have nowhere to block.
+        ///
+        /// It is now called from `delete_process`, in the exiting process's own
+        /// thread context, which is where closing a process's files belonged
+        /// anyway. Idempotent because `deinit` still calls it for the paths that
+        /// destroy a process without going through `delete_process` (a failed
+        /// spawn), and `_fds.deinit()` twice is a double free.
         pub fn clear_fds(self: *Self) void {
+            if (self._fds_cleared) return;
+            self._fds_cleared = true;
             var it = self._fds.iterator();
             while (it.next()) |*n| {
                 n.value_ptr.close();
@@ -397,8 +426,37 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn block_semaphore(self: *Self, semaphore: *const Semaphore) void {
-            self.waiting_for = semaphore;
+            self.block_on(semaphore);
+        }
+
+        /// Mark this process blocked on an arbitrary blocker.
+        ///
+        /// The caller must hold whatever guards the blocker, so that an unlock
+        /// racing with this cannot decide there is nobody to wake between the
+        /// decision to block and the state actually changing.
+        pub fn block_on(self: *Self, blocker: *const anyopaque) void {
+            self.waiting_for = blocker;
             self.reevaluate_state();
+        }
+
+        /// Whether this process is blocked on `blocker`.
+        pub fn is_blocked_on(self: Self, blocker: *const anyopaque) bool {
+            if (self.waiting_for) |current| return current == blocker;
+            return false;
+        }
+
+        /// Release this process from `blocker`, if that is what it is waiting on.
+        ///
+        /// Named `wake_from` rather than `unblock_from` because that name is
+        /// already taken by the *process*-blocking half below (`_blocked_by`),
+        /// which is a different relationship: this one clears `waiting_for`.
+        pub fn wake_from(self: *Self, blocker: *const anyopaque) void {
+            if (self.waiting_for) |current| {
+                if (current == blocker) {
+                    self.waiting_for = null;
+                    self.reevaluate_state();
+                }
+            }
         }
 
         pub fn blocks_process(self: *Self, blocked_process: *Self, action: UnblockAction, context: ?*anyopaque) !void {
@@ -414,8 +472,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn wait_for_process(self: *Self, process: *Self, action: UnblockAction, context: ?*anyopaque) !void {
             // this process will be unblocked until other processes are finished
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            //
+            // Preemption is refused rather than a lock taken, because the two
+            // wait lists spliced here (`_blocked_by` on this process, `_blocks`
+            // on the other) are reached from `delete_process` and the semaphore
+            // wake-up scan, both of which run under `proctable_lock`. Taking it
+            // here as well would be a same-rank nesting; the lists move to that
+            // lock together with the rest of the process relationships.
+            preempt.preempt_disable();
+            defer preempt.preempt_enable();
             const blocked_data = try self._kernel_allocator.create(BlockedByProcess);
             try process.blocks_process(self, action, context);
             blocked_data.* = .{
@@ -443,19 +508,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn is_blocked_by(self: Self, semaphore: *const Semaphore) bool {
-            if (self.waiting_for) |blocker| {
-                return blocker == semaphore;
-            }
-            return false;
+            return self.is_blocked_on(semaphore);
         }
 
         pub fn unblock_semaphore(self: *Self, semaphore: *const Semaphore) void {
-            if (self.waiting_for) |blocker| {
-                if (blocker == semaphore) {
-                    self.waiting_for = null;
-                    self.reevaluate_state();
-                }
-            }
+            self.wake_from(semaphore);
         }
 
         pub fn unblock_parent(self: *Self) void {
@@ -505,8 +562,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, _: i32, _: i32, _: i32) !*anyopaque {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            // Preemptible; see the syscall wrappers. The pool guards itself.
             if (addr == null) {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
@@ -528,8 +584,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            // Preemptible; see the syscall wrappers. The pool guards itself.
             if (maybe_address) |addr| {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
@@ -542,8 +597,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// Try to extend an existing mmap allocation in-place.
         /// Returns the same address on success (with extended size), or error.
         pub fn mremap(self: *Self, addr: *anyopaque, old_length: i32, new_length: i32, flags: i32) !*anyopaque {
-            kernel.process.block_context_switch();
-            defer kernel.process.unblock_context_switch();
+            // Preemptible; see the syscall wrappers. The pool guards itself.
             _ = flags;
             var old_pages = @divTrunc(old_length, ProcessMemoryPoolType.page_size);
             if (@rem(old_length, ProcessMemoryPoolType.page_size) != 0) {
@@ -613,13 +667,13 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn sleep_for_us(self: *Self, us: u64) void {
-            const start = systick.get_system_ticks().*;
+            const start = systick.get_system_ticks();
             var elapsed: u64 = 0;
             const ptr: *volatile u64 = &elapsed;
             while (ptr.* < us / 1000) {
                 // context switch, we are waiting for condition
                 hal.irq.trigger(.pendsv);
-                ptr.* = systick.get_system_ticks().* - start;
+                ptr.* = systick.get_system_ticks() - start;
             }
             _ = self;
         }
@@ -732,7 +786,6 @@ const ProcessMemoryPoolForTests = struct {
     release_address: ?*anyopaque = null,
     release_pages: i32 = 0,
     release_pid: c.pid_t = 0,
-    tag_next_heap: bool = false,
 
     pub fn release_pages_for(self: *Self, pid: c.pid_t) void {
         _ = self;
@@ -748,6 +801,13 @@ const ProcessMemoryPoolForTests = struct {
     pub fn get_used_size(self: *const Self) usize {
         _ = self;
         return 0;
+    }
+
+    /// Mirrors the real pool's signature; the test stub does not care which
+    /// accounting bucket a run belongs to.
+    pub fn allocate_pages_from(self: *Self, number_of_pages: i32, pid: c.pid_t, source: anytype) ?[]u8 {
+        _ = source;
+        return self.allocate_pages(number_of_pages, pid);
     }
 
     pub fn allocate_pages(self: *Self, number_of_pages: i32, pid: c.pid_t) ?[]u8 {

@@ -19,6 +19,8 @@ comptime {
     _ = @import("drivers/tests.zig");
     _ = @import("fs/tests.zig");
     _ = @import("scheduler/tests.zig");
+    _ = @import("sync/sync.zig");
+    _ = @import("memory/heap/kheap_lock.zig");
 
     _ = @import("benchmark.zig");
     _ = @import("mutex.zig");
@@ -26,6 +28,7 @@ comptime {
     _ = @import("process_manager.zig");
     _ = @import("memory/tests.zig");
     _ = @import("errno.zig");
+    _ = @import("uaccess.zig");
     _ = @import("spawn.zig");
     _ = @import("semaphore.zig");
     _ = @import("dump_hardware.zig");

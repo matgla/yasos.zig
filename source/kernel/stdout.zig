@@ -22,6 +22,8 @@ const std = @import("std");
 const vfmt = @import("vfmt.zig");
 
 const board = @import("board");
+const arch = @import("arch");
+const kernel_sync = @import("sync/sync.zig");
 
 var stdout: std.Io.Writer = undefined;
 var write_callback: ?WriteCallback = null;
@@ -35,6 +37,37 @@ var secondary_callback: ?WriteCallback = null;
 var secondary_context: ?*const anyopaque = null;
 
 pub const WriteCallback = *const fn (self: *const anyopaque, data: []const u8) anyerror!usize;
+
+/// Rank 95, the innermost leaf, and held **without** masking interrupts.
+///
+/// That is the unusual part and it is deliberate. The console is a blocking
+/// per-byte UART: a hundred-byte line at 460800 baud is over two milliseconds,
+/// and masking interrupts for it would blow the ~93 us RX-FIFO budget this very
+/// device is trying to meet -- the lock would create the problem it exists
+/// beside. So it excludes the *other core*, not this core's handlers.
+///
+/// Same-core interrupt context therefore does not block on it; it takes the
+/// lock if free and writes anyway if not, which is exactly today's behaviour
+/// (interleaved bytes) rather than a regression. That is also what the plan
+/// asks for on the panic path: a garbled panic beats a hung panic.
+///
+/// A thread can never *find* it held by a handler on one core -- handlers run
+/// to completion -- so the blocking path here cannot deadlock, and being the
+/// innermost rank it cannot invert against anything either.
+var console_lock: kernel_sync.Ranked(.console) = .{};
+
+/// Take the console if we are allowed to wait for it.
+///
+/// Returns whether it was acquired; a false means "write anyway, ungoverned".
+fn console_acquire() bool {
+    if (arch.sync.in_handler_mode()) return console_lock.try_lock_no_irq();
+    console_lock.lock_no_irq();
+    return true;
+}
+
+fn console_release(held: bool) void {
+    if (held) console_lock.unlock_no_irq();
+}
 
 fn drain_sink(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
     _ = splat;
@@ -83,15 +116,22 @@ pub fn print(comptime format: []const u8, args: anytype) void {
 
 noinline fn print_formatted(format: []const u8, argv: []const vfmt.Value) void {
     var buf: [256]u8 = undefined;
-    _ = stdout.write(vfmt.vprint(&buf, format, argv)) catch return;
+    const line = vfmt.vprint(&buf, format, argv);
+    const held = console_acquire();
+    defer console_release(held);
+    _ = stdout.write(line) catch return;
 }
 
 pub fn write(comptime data: []const u8) void {
+    const held = console_acquire();
+    defer console_release(held);
     _ = stdout.write(data) catch return;
 }
 
 // Like `write` but for runtime byte slices (e.g. a pre-formatted log line).
 pub fn write_bytes(data: []const u8) void {
+    const held = console_acquire();
+    defer console_release(held);
     _ = stdout.write(data) catch return;
 }
 

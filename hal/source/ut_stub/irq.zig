@@ -32,6 +32,10 @@ pub const IrqStub = struct {
 
     const IrqLen = @typeInfo(Type).@"enum".field_names.len;
     pub var irq_actions: [IrqLen]?IrqAction = @splat(null);
+    /// How many times each interrupt has been pended. `irq_actions` only tells a
+    /// test what ran; this tells it what was *requested*, which is what code
+    /// deferring a PendSV has to be checked against.
+    pub var irq_calls: [IrqLen]u32 = @splat(0);
     pub var irq_disable_mask: std.StaticBitSet(IrqLen) = std.StaticBitSet(IrqLen).empty;
 
     pub fn set_action(id: u32, action: Action) void {
@@ -50,6 +54,7 @@ pub const IrqStub = struct {
 
         for (0..IrqLen) |idx| {
             irq_actions[idx] = null;
+            irq_calls[idx] = 0;
         }
 
         irq_disable_mask = std.StaticBitSet(IrqLen).empty;
@@ -71,6 +76,7 @@ pub const IrqStub = struct {
     }
 
     pub fn trigger(t: Type) void {
+        irq_calls[@intFromEnum(t)] += 1;
         if (irq_actions[@intFromEnum(t)]) |action| {
             if (irq_disable_mask.isSet(@intFromEnum(t))) {
                 return;
@@ -80,8 +86,4 @@ pub const IrqStub = struct {
             irq_disable_mask.unset(@intFromEnum(t));
         }
     }
-
-    pub fn enter_critical_section() void {}
-
-    pub fn leave_critical_section() void {}
 };

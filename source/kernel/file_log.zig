@@ -172,10 +172,14 @@ pub fn drain() void {
     if (!enabled or draining or count == 0) return;
     draining = true;
     defer draining = false;
-    // Block context switches so no process FS op can interleave with ours
-    // (FatFs is not reentrant); IRQs stay enabled for the SDIO driver.
-    kernel.process.block_context_switch();
-    defer kernel.process.unblock_context_switch();
+    // No context-switch window. This used to block them "so no process FS op
+    // can interleave with ours (FatFs is not reentrant)" -- which is now
+    // `fs_lock`'s job, taken by the FatFs calls below and held across the SD
+    // write. Refusing to be preempted for the duration of a card write was a
+    // very expensive way to get exclusion, and it excluded nothing on a second
+    // core.
+    //
+    // `draining` above still guards re-entry from *this* context.
 
     if (!opened) {
         open_files();

@@ -18,7 +18,9 @@ if [ $? -ne 0 ]; then
     echo "Failed to configure project. Please check configuration output."
     exit 1
 fi
-zig build -Doptimize=ReleaseFast
+# ReleaseSafe to match the CI legs (build_image.sh and run_qemu_smoke.sh); a
+# board flashed from here should be the same kernel CI gates on.
+zig build -Doptimize="${YASOS_KERNEL_OPTIMIZE:-ReleaseSafe}"
 if [ $? -ne 0 ]; then
     echo "Failed to build project. Please check build output."
     exit 1

@@ -27,6 +27,7 @@ const fatfs = @import("zfat");
 const c = @import("libc_imports").c;
 
 const kernel = @import("kernel");
+const fs_lock = @import("fs_lock.zig");
 
 const fatfs_error_to_errno = @import("errno_converter.zig").fatfs_error_to_errno;
 
@@ -63,6 +64,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
+        fs_lock.acquire();
+        defer fs_lock.release();
         if (self._file) |*file| {
             const s = file.read(buffer) catch return -1;
             return @as(isize, @intCast(s));
@@ -71,6 +74,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn write(self: *Self, data: []const u8) isize {
+        fs_lock.acquire();
+        defer fs_lock.release();
         if (self._file) |*file| {
             const s = file.write(data) catch return -1;
             return @as(isize, @intCast(s));
@@ -80,6 +85,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
+        fs_lock.acquire();
+        defer fs_lock.release();
         var new_position: i64 = 0;
         if (self._file) |*file| {
             const file_size: i64 = @intCast(file.size());
@@ -106,6 +113,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn sync(self: *Self) i32 {
+        fs_lock.acquire();
+        defer fs_lock.release();
         if (self._file) |*file| {
             file.sync() catch return -1;
         }
@@ -113,6 +122,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn tell(self: *Self) i64 {
+        fs_lock.acquire();
+        defer fs_lock.release();
         if (self._file) |*file| {
             return @intCast(file.tell());
         }
@@ -124,6 +135,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
+        fs_lock.acquire();
+        defer fs_lock.release();
         _ = self;
         switch (cmd) {
             @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => {
@@ -150,6 +163,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn delete(self: *Self) void {
+        fs_lock.acquire();
+        defer fs_lock.release();
         if (!self._is_open) {
             return;
         }
@@ -162,6 +177,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn size(self: *const Self) u64 {
+        fs_lock.acquire();
+        defer fs_lock.release();
         if (self._file) |*file| {
             return @as(u64, @intCast(file.size()));
         }
@@ -169,6 +186,8 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn truncate(self: *Self, length: u64) anyerror!void {
+        fs_lock.acquire();
+        defer fs_lock.release();
         if (self._file) |*file| {
             file.seekTo(@intCast(length)) catch |err| return fatfs_error_to_errno(err);
             file.truncate() catch |err| return fatfs_error_to_errno(err);

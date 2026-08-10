@@ -29,6 +29,7 @@ const hal = @import("hal");
 const log = std.log.scoped(.@"mmc/driver");
 
 const card_parser = @import("card_parser.zig");
+const refcount = kernel.sync.refcount;
 
 const CardType = enum(u2) {
     MMCv3,
@@ -69,14 +70,18 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
     _initialized: bool,
     _node: kernel.fs.Node,
     _refcounter: *i16,
+    /// Container-level: shared by every `MmcDriver` instance in the system, so
+    /// unlike `_refcounter` it is not per-object and never was. Plain `+= 1` on
+    /// a global reached from driver create/clone/delete is the same lost-update
+    /// race as the per-object counter, one scope wider.
     var global_refcount: i16 = 0;
 
     pub fn create(allocator: std.mem.Allocator, mmc: *hal.mmc.Mmc, driver_name: []const u8) !MmcDriver {
         const mmcio = try allocator.create(MmcIo);
         mmcio.* = MmcIo.create(mmc);
         const refcounter = try allocator.create(i16);
-        refcounter.* = 1;
-        global_refcount += 1;
+        refcount.init(refcounter);
+        refcount.acquire(&global_refcount);
         return MmcDriver.init(.{
             ._allocator = allocator,
             ._mmcio = mmcio,
@@ -91,8 +96,8 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        global_refcount += 1;
-        self._refcounter.* += 1;
+        refcount.acquire(&global_refcount);
+        refcount.acquire(self._refcounter);
     }
 
     pub fn node(self: *Self) anyerror!kernel.fs.Node {
@@ -110,16 +115,14 @@ pub const MmcDriver = interface.DeriveFromBase(IDriver, struct {
 
     pub fn delete(self: *Self) void {
         // this cannot be removed before all copies are gone
-        self._refcounter.* -= 1;
-        if (self._refcounter.* > 0) {
+        if (!refcount.release(self._refcounter)) {
             return;
         }
 
         self._allocator.destroy(self._mmcio);
         self._allocator.destroy(self._refcounter);
         self._node.delete();
-        global_refcount -= 1;
-        if (global_refcount == 0) {
+        if (refcount.release(&global_refcount)) {
             // self._mmcio.deinit();
         }
     }

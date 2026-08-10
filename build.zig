@@ -82,6 +82,13 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
     return parsed.value;
 }
 
+/// How many FAT volumes may be mounted at once.
+///
+/// Must match `source/fs/fatfs/fatfs.zig`'s `max_volumes`. One is what FatFs
+/// defaults to, and it made a second `FatFs` instance silently repoint the
+/// first at its own device rather than fail.
+const fat_volume_count: u5 = 4;
+
 pub fn build(b: *std.Build) !void {
     const test_filters = b.option([]const []const u8, "test-filter", "comma separated list of test name filters") orelse &[0][]const u8{};
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
@@ -182,6 +189,10 @@ pub fn build(b: *std.Build) !void {
     });
 
     kernel_tests.root_module.addImport("yasld", yasld_stub);
+    // fs_tests needs it too now: the FatFs lock is a *sleeping* mutex, so it
+    // reaches the process manager to block and wake a caller, and that pulls in
+    // the syscall handlers behind it. The cost of a lock that can yield.
+    kernel_module_for_tests.addImport("yasld", yasld_stub);
 
     const c_for_tests = b.addModule("c_for_tests", .{
         .root_source_file = b.path("source/cimports.zig"),
@@ -245,6 +256,11 @@ pub fn build(b: *std.Build) !void {
     // them fs_tests fails with "no module named 'config' available".
     kernel_module_for_tests.addImport("config", test_config_module);
     kernel_module_for_tests.addImport("hal", hal_for_tests);
+    // fs_tests reaches `kernel.sync` (ramfs refcounts), and the sync primitives
+    // ask the arch layer how wide a lock-free atomic is and how to mask
+    // interrupts. Zig only analyses an import when something references it, so
+    // this was previously satisfied by nothing in fs_tests touching that path.
+    kernel_module_for_tests.addImport("arch", arch_for_tests);
 
     // Forward optimize, for the same reason as the MCU dependency in
     // hal/build.zig: without it this builds Debug inside a release kernel, and
@@ -294,6 +310,10 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .mkfs = true,
         .relative_path_api = .enabled_with_getcwd,
+        // More than one FAT volume. Costs a pointer per slot in FatFs's
+        // `FatFs[]` and in zfat's `disks[]`; buys an SD rootfs and a flash
+        // /mnt on the same board, which a single volume made impossible.
+        .@"volume-count" = @as(u5, fat_volume_count),
     });
     const zfat_host_module = zfat_host.module("zfat");
 
@@ -509,6 +529,7 @@ pub fn build(b: *std.Build) !void {
                 .@"static-rtc" = date[0..],
                 .mkfs = true,
                 .relative_path_api = .enabled_with_getcwd,
+                .@"volume-count" = @as(u5, fat_volume_count),
             });
             _ = try zfat.builder.addUserInputOption("no-libc", "true");
             const zfat_module = zfat.module("zfat");

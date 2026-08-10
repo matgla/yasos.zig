@@ -29,6 +29,7 @@ const FloatAbi = header_module.FloatAbi;
 const Fpu = header_module.Fpu;
 const print_header = header_module.print_header;
 const Module = @import("module.zig").Module;
+const refcount = @import("refcount.zig");
 const Parser = @import("parser.zig").Parser;
 const Type = @import("header.zig").Type;
 const Section = @import("section.zig").Section;
@@ -134,7 +135,7 @@ pub const Loader = struct {
         var maybe_existing_module = self.modules_list.getPtr(module_name);
         if (maybe_existing_module) |*loaded| {
             log.debug("Module is already loaded, propagating .text for: {s}", .{parser.name});
-            loaded.*.users += 1;
+            refcount.acquire(&loaded.*.users);
             return loaded.*.shared_data;
         }
         log.debug("module doesn't exists, creating one for: {s}", .{parser.name});
@@ -169,8 +170,12 @@ pub const Loader = struct {
             log.debug("Unloading module: {s}", .{name});
             const maybe_shared_data = self.modules_list.getPtr(name);
             if (maybe_shared_data) |*shared_data| {
-                shared_data.*.users -= 1;
-                if (shared_data.*.users == 0) {
+                // Fused with the decrement. Separate, two unloads racing on the
+                // last two users both see zero and both destroy. Note this is
+                // still not sufficient on its own -- a concurrent
+                // `get_shared_data` can resurrect the pointer between this
+                // decision and the `remove` below; that needs `loader_lock`.
+                if (refcount.release(&shared_data.*.users)) {
                     log.debug("Removing shared data for: {s}", .{name});
                     shared_data.*.shared_data.destroy();
                     _ = self.modules_list.remove(name);

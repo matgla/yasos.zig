@@ -25,6 +25,7 @@ const hal = @import("hal");
 const kernel = @import("../../kernel.zig");
 
 const log = std.log.scoped(.@"mmc/driver");
+const refcount = kernel.sync.refcount;
 
 pub const MmcPartitionDriver = interface.DeriveFromBase(IDriver, struct {
     const Self = @This();
@@ -37,7 +38,7 @@ pub const MmcPartitionDriver = interface.DeriveFromBase(IDriver, struct {
 
     pub fn create(allocator: std.mem.Allocator, dev: kernel.fs.IFile, driver_name: []const u8, start_lba: u32, size_in_sectors: u32) !MmcPartitionDriver {
         const refcounter = try allocator.create(i16);
-        refcounter.* = 1;
+        refcount.init(refcounter);
         return MmcPartitionDriver.init(.{
             ._allocator = allocator,
             ._name = driver_name,
@@ -50,12 +51,11 @@ pub const MmcPartitionDriver = interface.DeriveFromBase(IDriver, struct {
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        self._refcounter.* += 1;
+        refcount.acquire(self._refcounter);
     }
 
     pub fn delete(self: *Self) void {
-        self._refcounter.* -= 1;
-        if (self._refcounter.* > 0) {
+        if (!refcount.release(self._refcounter)) {
             return;
         }
         self._node.delete();

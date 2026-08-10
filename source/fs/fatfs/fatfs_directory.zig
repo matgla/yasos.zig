@@ -19,6 +19,7 @@ const interface = @import("interface");
 const fatfs = @import("zfat");
 
 const kernel = @import("kernel");
+const fs_lock = @import("fs_lock.zig");
 
 pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, struct {
     const Self = @This();
@@ -35,6 +36,8 @@ pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator,
     }
 
     pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
+        fs_lock.acquire();
+        defer fs_lock.release();
         const maybe_entry = self._dir.next() catch return null;
         if (maybe_entry) |entry| {
             if (self._name) |old_name| {
@@ -92,6 +95,8 @@ pub const FatFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     }
 
     pub fn iterator(self: *const Self) anyerror!kernel.fs.IDirectoryIterator {
+        fs_lock.acquire();
+        defer fs_lock.release();
         var dir = try fatfs.Dir.open(self._path);
         return FatFsIterator.InstanceType.create(dir, self._allocator).interface.new(self._allocator) catch {
             dir.close();

@@ -40,6 +40,23 @@ var kernel_allocator: std.mem.Allocator = undefined;
 // load time (~1-1.7 ms per imported lib, vs ~0.1 ms relocating its GOT).
 var resolver_cache: std.StringHashMap(*const anyopaque) = undefined;
 
+/// Serialises the dynamic loader: rank 8, a sleeping mutex, held across a whole
+/// load rather than just the tables.
+///
+/// Holding it only around the table operations would not fix the bug that
+/// matters. `Loader.get_shared_data` is check-then-act across a hash-map lookup
+/// and an insert: two contexts can both miss, both create the image, and one
+/// `put` overwrites the other -- leaking an image and leaving a `users` count
+/// that never reaches zero. Closing that needs the lock held across
+/// miss -> create -> insert, and the create *is* the load.
+///
+/// It sleeps rather than spins because a load is milliseconds of card I/O, and
+/// it sits outside `mount`/`fs`/`dev` because it reads the executable through
+/// the VFS. `prepare_exec` had to stop holding a preempt window across the load
+/// before this was possible at all -- blocking with preemption disabled is a
+/// hang, and `RankedMutex` refuses it.
+pub var loader_lock: kernel.sync.RankedMutex(.loader) = .{};
+
 const ModuleContext = struct {
     name: []const u8,
     address: ?*const anyopaque,
@@ -267,6 +284,8 @@ pub fn deinit() void {
 }
 
 pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Executable {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     log.debug("load_executable: pid={d} path={s}", .{ pid, path });
     // Start the clock at the path lookup, not at the relocation. For an image
     // the filesystem cannot memory-map (anything outside the XIP romfs -- /tmp,
@@ -307,7 +326,7 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
             };
             last_executable_load_us = hal.time.get_time_us() - load_start_us;
             log_loader_timing("executable", path, pid, load_start_us);
-            release_executable(pid);
+            release_executable_locked(pid);
             entry.executable = executable;
             modules_list.put(pid, entry) catch |err| return err;
             const exec_ptr: *yasld.Executable = &modules_list.getPtr(pid).?.executable.?;
@@ -321,6 +340,8 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
 }
 
 pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Module {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     // Same window as load_executable: from the lookup, not from the relocation.
     const load_start_us = hal.time.get_time_us();
     var node = try fs.get_ivfs().interface.get(path);
@@ -366,6 +387,18 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
 }
 
 pub fn release_executable(pid: c.pid_t) void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    release_executable_locked(pid);
+}
+
+/// `release_executable` with `loader_lock` already held.
+///
+/// Split out because `load_executable` drops the previous image before
+/// installing the new one, and the lock is deliberately not recursive -- the
+/// nesting was caught the moment lockdep saw it.
+fn release_executable_locked(pid: c.pid_t) void {
+    loader_lock.assert_held();
     // Kernel-heap accounting around the release: a climbing kernel_used or
     // alloc_count across the (no-reboot) suite is the signature of the leak that
     // ends in tcc "memory full" on a tiny input. It used to print at info, which
@@ -467,7 +500,28 @@ pub fn format_maps(pid: c.pid_t, buffer: []u8) usize {
     return written;
 }
 
+/// Is `library` a handle this process actually holds?
+///
+/// dlclose/dlsym receive the handle straight from userspace. Without this,
+/// `release_shared_library` would call `list.remove(&library.list_node)` on an
+/// attacker-chosen address -- an unlink of `node.prev`/`node.next` and so an
+/// arbitrary write -- and `dlsym` would parse arbitrary memory as a Module.
+///
+/// The per-process library list is a handful of entries, so a linear scan is
+/// cheaper than any bookkeeping that would replace it.
+pub fn owns_shared_library(pid: c.pid_t, library: *const yasld.Module) bool {
+    const list = libraries_list.getPtr(pid) orelse return false;
+    var maybe_node = list.first;
+    while (maybe_node) |node| : (maybe_node = node.next) {
+        const module: *yasld.Module = @alignCast(@fieldParentPtr("list_node", node));
+        if (module == library) return true;
+    }
+    return false;
+}
+
 pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     const maybe_list = libraries_list.getPtr(pid);
     if (maybe_list) |list| {
         list.remove(&library.list_node);

@@ -803,7 +803,7 @@ if $BUILD_IMAGE && $REBUILD_KERNEL; then
   elif ! command -v zig >/dev/null 2>&1; then
     echo "Kernel: zig not found in PATH; skipping kernel rebuild."
   else
-    KERNEL_OPTIMIZE="${YASOS_KERNEL_OPTIMIZE:-${YASOS_QEMU_OPTIMIZE:-ReleaseFast}}"
+    KERNEL_OPTIMIZE="${YASOS_KERNEL_OPTIMIZE:-${YASOS_QEMU_OPTIMIZE:-ReleaseSafe}}"
     echo "Kernel: re-embedding $IMG_BASE and rebuilding (-Doptimize=$KERNEL_OPTIMIZE)..."
     if ! ( cd "$SCRIPT_DIR" && zig build -Doptimize="$KERNEL_OPTIMIZE" ); then
       echo "ERROR: kernel rebuild failed."

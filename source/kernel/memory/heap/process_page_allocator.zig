@@ -196,11 +196,12 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
                 self.cache_flush();
                 if (self.would_exceed_limit(number_of_pages)) return null;
             }
-            // Tag this as user heap (malloc/mmap) so the profiler can separate
-            // it from loader-managed image/stack/thunk allocations.
-            self._pool.tag_next_heap = true;
+            // Tagged as user heap (malloc/mmap) so the profiler can separate it
+            // from loader-managed image/stack/thunk allocations. Passed as an
+            // argument rather than stashed on the pool first -- see
+            // `allocate_pages_from`.
             perf.pool_cache_miss();
-            return self._pool.allocate_pages(number_of_pages, self._pid);
+            return self._pool.allocate_pages_from(number_of_pages, self._pid, .heap);
         }
 
         pub fn release_pages(self: *Self, address: *anyopaque, number_of_pages: i32) void {
