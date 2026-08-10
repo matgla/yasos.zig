@@ -137,7 +137,7 @@ Note the exact idiom: `ldaexb`/`strexb`, i.e. **load-acquire**-exclusive, plus a
 explicit acquire fence. Armv8-M Mainline has the acquire/release exclusive forms;
 use them rather than bare `ldrex`/`strex` + `dmb`.
 
-### 2. `ACTLR.EXTEXCLALL`, and PSRAM is outside the global monitor
+### 2. `ACTLR.EXTEXCLALL` is already on — and core 1 forgetting it fails silently
 
 `hal/libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/sync_spin_lock.c:24-42`:
 
@@ -147,20 +147,47 @@ use them rather than bare `ldrex`/`strex` + `dmb`.
 > single-core exclusives in external PSRAM (not covered by the global monitor on
 > RP2350)** you must clear this and add your own Shareable regions.
 
-Two consequences, both load-bearing:
+**This is already running on core 0 today, by accident of the build.** That
+function is registered via `PICO_RUNTIME_INIT_FUNC_PER_CORE`, which expands to a
+`.preinit_array` entry; the rp2350 linker script `KEEP`s `.preinit_array`
+(`hal/source/raspberry/rp2350/linker_script.ld:80-83`) and `crt_init()` calls
+`__libc_init_array()` (`startup/crt.zig:186`), which runs it. Confirmed in the
+shipped binary:
 
-**(a) `ACTLR.EXTEXCLALL` must be set on each core during bring-up.** It is a
-per-core register. The alternative — marking regions Shareable in the MPU — runs
-straight into `source/arch/armv8-m/mpu.zig:53`, which hardcodes the opposite:
-
-```zig
-// SH[4:3] = 0b00 non-shareable (single core, no caches modelled).
+```
+$ nm zig-out/bin/yasos_kernel | grep -i extexcl
+10039860 T __pre_init_spinlock_set_extexclall
+100029f9 t spinlock_set_extexclall
 ```
 
-Setting `EXTEXCLALL` is the cheaper path and avoids reworking MPU region
-encoding. Either way that comment stops being true and the file needs revisiting.
+So cross-core exclusives will work on core 0 without touching `mpu.zig` at all.
 
-**(b) No lock or atomic may live in PSRAM.** This is an invariant, not a caveat:
+**`ACTLR` is a per-core register in the PPB, and core 1 must set it in its own
+bring-up path.** If it does not, every kernel spinlock silently degrades to a
+local-monitor lock providing zero exclusion — no fault, no log line, presenting
+as random memory corruption rather than as a lock bug. This is the single
+easiest way to lose weeks on this project.
+
+**Mitigation, and it is cheap:** after setting `ACTLR` in `crt_init_core1`, run a
+short two-core LDREX/STREX mutual-exclusion self-test *before* starting the
+scheduler. `ACTLR` is also not modelled in
+`hal/source/common/arch/arm/armv8-m/registers.zig` and must be added.
+
+**The MPU angle is moot on the SMP target today.** `mpu.zig:53` hardcodes
+`SH[4:3] = 0b00` (Non-shareable), which is safe *only because* `EXTEXCLALL`
+overrides shareability for exclusives — but note that
+`CONFIG_PROCESS_USE_MPU_KERNEL_PROTECTION` is set **only in the two QEMU
+defconfigs**, not in `pimoroni_pico_plus2_and_vga_defconfig` or
+`mspc_defconfig`. `enable_kernel_protection()` does not execute on the RP2350 at
+all right now. Still: correct the comment to record the `EXTEXCLALL` dependency,
+because if anyone ever clears it (e.g. to allow exclusives in PSRAM), every
+region carrying a lock word must become `SH = 0b11`.
+
+One real latent bug there regardless: **`next_region` (`mpu.zig:70`) is a module
+global and the MPU is per-core** — core 1's programming pass would continue from
+core 0's index and program regions 5..9 on a part with 8. Make it a local.
+
+**No lock or atomic may live in PSRAM.** This is an invariant, not a caveat:
 
 - The **kernel heap is safe** — it is in `kernel_ram`, internal SRAM
   (`hal/source/raspberry/rp2350/linker_script.ld:153-160`).
@@ -182,20 +209,62 @@ This bites in two specific places:
 Phase 0 must ship an assertion or allocator split that makes "this lock is in
 SRAM" checkable rather than assumed.
 
-### 3. The IPI should be a doorbell, not the FIFO
+### 3. Erratum RP2350-E2 is not what our code says it is — and it couples two decisions
 
-The RP2350 adds **doorbells** specifically for cross-core interrupts —
-`SIO_IRQ_BELL = 26`
-(`hal/libs/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/intctrl.h:42`),
-rung with `sio_hw->doorbell_out_set`
-(`hal/libs/pico-sdk/src/rp2_common/pico_multicore/include/pico/multicore.h:344-360`;
-the SDK notes doorbells "are not available on RP2040"). The inter-core FIFO
-should be left alone — pico-sdk's core-1 launch handshake uses it.
+`hal/source/raspberry/rp2350/source/atomic.zig:26-29` describes E2 as a set of
+broken spinlocks needing a remap table. That is wrong.
+`hal/libs/pico-sdk/src/rp2_common/hardware_sync/include/hardware/sync.h:41-42`:
 
-**`hal/source/raspberry/rp2350/source/sio.zig` declares `cpuid`, `fifo_st/wr/rd`,
-`spinlock_st` and `spinlocks[32]` but no doorbell registers.** They must be
-added, and `hal.irq.Type` must grow beyond `{systick, pendsv, supervisor_call}`
-to carry an IPI.
+> RP2350 Warning. Due to erratum RP2350-E2, **writes to new SIO registers above
+> an offset of +0x180 alias the spinlocks, causing spurious lock releases.** This
+> SDK by default uses atomic memory accesses to implement the
+> `hardware_sync_spin_lock` API, as a workaround on RP2350 A2.
+
+The registers at ≥ `+0x180` are **exactly the doorbells** (`DOORBELL_OUT_SET`
+`0x180` … `DOORBELL_IN_CLR` `0x18c`, per
+`hal/libs/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs/sio.h:1936,1984`).
+
+So the erratum reads: **using doorbells corrupts the SIO hardware spinlocks.**
+That couples two decisions that look independent — you cannot keep
+`hal/interface/atomic.zig` *and* use doorbells as the IPI. Since the SIO spinlock
+backend is being deleted anyway (it releases locks it never acquired), this is
+consistent, but it must be recorded so nobody reintroduces one half of it.
+
+Note also that `bugfree_spinlocks = {5,6,7,10,11,18..31}` in `atomic.zig` is not
+derived from E2 at all — it is near enough the complement of pico-sdk's
+*reserved* IDs (`hardware/sync/spin_lock.h:22-76`: IRQ=9, TIMER=10,
+HARDWARE_CLAIM=11, RAND=12, ATOMIC=13, OS1/OS2=14/15). The comment and the list
+are both hazards; delete the backend.
+
+Nothing else depends on SIO spinlocks: the pico-sdk C that *is* compiled already
+resolves `spin_lock_blocking` to the **software** LDAEXB/STREXB variant, because
+`PICO_USE_SW_SPIN_LOCKS` defaults to 1 on RP2350. `nm` confirms `_sw_spin_locks`
+sits in kernel `.bss`. The only two consumers are `atomic.zig` and the boot
+force-release loop at `crt.zig:250-253`; both go away.
+
+### 4. The IPI should be a doorbell; `NVIC_STIR` cannot work
+
+The RP2350 adds **doorbells** for cross-core interrupts — `SIO_IRQ_BELL = 26`
+(`.../regs/intctrl.h:42`), rung with `sio_hw->doorbell_out_set`
+(`pico_multicore/include/pico/multicore.h:344-360`; doorbells "are not available
+on RP2040"). Level-held, idempotent, no queue, no data — exactly IPI semantics,
+8 bits available. The receiver acknowledges via `DOORBELL_IN_CLR` (W1C).
+
+The inter-core **FIFO** should be left for the core-1 launch handshake, and is
+the fallback if the doorbell erratum turns out to be blocking on the rig's
+stepping.
+
+**`NVIC_STIR` is not an option**: the NVIC is a per-PE block, so STIR pends an
+interrupt on the *writing* core only. Useful as a self-directed soft IRQ, useless
+as an IPI. Say so in the header so nobody re-derives it.
+
+**`hal/source/raspberry/rp2350/source/sio.zig` has no doorbell registers** and
+must gain them — but **audit the whole struct first**: its GPIO fields from
+`+0x14` follow **RP2040** ordering (`gpio_out_set` at `+0x14`), whereas RP2350 has
+`GPIO_HI_OUT` at `+0x14` and `GPIO_OUT_SET` at `+0x18` (`regs/sio.h:113,133,188`).
+Latent today because only `cpuid` and `spinlocks` are read, but not something to
+build doorbell offsets on top of. `hal.irq.Type` must also grow beyond
+`{systick, pendsv, supervisor_call}` to carry an IPI.
 
 ---
 
@@ -223,9 +292,37 @@ Ship:
   PRIMASK helper to build on.
 - Barriers: state where `dmb` / `dsb` / `isb` are actually required, rather than
   the current scatter of `memory_barrier_release()`/`_acquire()` that are both
-  plain `dmb`.
+  plain `dmb` (and a `data_synchronization_barrier` that emits a redundant
+  `dsb; dmb`). Express acquire/release on a *single* location as `ldaex`/`stl`
+  orderings, not as a separate `dmb`. There are no data caches for SRAM on
+  RP2350 and the XIP cache is shared between cores, so **no cache maintenance is
+  ever required**.
 - Single-core implementations with the same API so the host and unit-test targets
-  keep building: `source/arch/host/`, `source/arch/ut/`, qemu mps2/mps3.
+  keep building: `source/arch/host/`, `source/arch/ut/`, qemu mps2/mps3. Note
+  qemu mps2/mps3 are armv8-m — give them the *identical* exclusives path, just
+  uncontended, so CI runs the same code as hardware. Make the **host** backend
+  genuinely concurrent (`std.atomic`), because that is what makes the host race
+  tests in [Testing](#testing) possible; `source/arch/ut/arch.zig` should point
+  at it rather than at today's no-op stubs.
+
+Three correctness traps that belong in the primitive itself:
+
+- **Ban 64-bit atomics at comptime.** Cortex-M33 has no `LDREXD`, so a 64-bit
+  `@atomicRmw` lowers to an `__atomic_*` libcall that is **not lock-free** —
+  silently. Several counters in scope are `u64` (`tick_counter`, most of
+  `perf_profile`); they must become per-CPU, not atomic. Add a CI gate that
+  disassembles the armv8-m kernel and asserts `ldrex`/`strex` are present and
+  **no `__atomic_*`/`__sync_*` libcall is linked**.
+- **Pad and align every lock word to 32 bytes.** The global monitor's exclusive
+  reservation granule is implementation-defined; if two lock words share a
+  granule, core A's `strex` on lock X clears core B's reservation on lock Y.
+  That presents as an unbounded-retry throughput cliff, not a hang — very hard to
+  diagnose. *Verify the actual granule in the RP2350 datasheet.*
+- **Add `clrex` to the context-switch store path** (`context_switch.S`). A thread
+  preempted between its `ldrex` and `strex` must not resume with a live
+  reservation. The architecture may already clear it on exception entry —
+  *verify against the Armv8-M ARM* — but `clrex` is one cycle; do it
+  unconditionally rather than rely on a guarantee nobody has checked.
 
 Also in phase 0, because they block everything after it:
 
@@ -251,14 +348,46 @@ the SRAM-placement audit from hardware fact 2(b).
 
 ### Phase 3 — Split `block_context_switch`
 
-The crux. It currently conflates two different things, and every one of the 37
-acquire sites has to be classified as one or the other:
+The crux. It currently conflates **three** different meanings, and every acquire
+site has to be classified as one of them:
 
-- a per-CPU **`preempt_disable()`** — "don't switch away from me", or
-- an **explicit data lock** — "nobody else may touch this structure".
+- **(A) "do not preempt me"** — protecting a *per-core* invariant. → per-CPU
+  `preempt_disable()`.
+- **(B) "nobody else may touch this shared structure"** — process table, pid map,
+  page pool, loader tables, VFS. → a named data lock. This is the majority, and
+  the only one of the three that is a lock at all.
+- **(C) "PendSV must not fire in this instruction window"** — the assembly sites
+  where an exception frame is being hand-built on a stack. → `preempt_disable()`
+  plus a `need_resched` flag so the dropped PendSV is re-delivered.
 
-Do it incrementally, not as a flag-day. Two sites are already broken and should
-be fixed while passing through:
+**Do the mechanical rename first, as its own merge**, with
+`block_context_switch` kept as a deprecated alias so nothing breaks. In that step
+`do_context_switch` changes from *silently return 3* to *set `need_resched` and
+return 3*, and `preempt_enable()` re-triggers PendSV on the way out.
+
+**That fixes a live single-core bug for free:** today a SysTick landing inside a
+block window is simply **lost**, so the process gets a free extra timeslice — a
+fairness and latency defect that has nothing to do with SMP.
+
+Also fix `system_call.zig:78-82` in that step. `unblock_context_switch`
+currently clamps a negative counter back to zero and re-enables; that is not a
+safety net, it is a bug concealer that has been silently absorbing every
+unbalanced pair in the tree. Make it a debug panic — it will immediately surface
+the two known-broken sites below, and possibly others.
+
+Verification has to live in the code, not a review spreadsheet — three layers:
+
+1. **No site keeps calling a generic "block".** When the last one is converted,
+   delete the alias and let the compiler find stragglers; then add a CI grep
+   guard so `block_context_switch` cannot come back.
+2. **`assert_locked(&locks.X)`** at the head of every function that mutates a
+   guarded structure (`allocate_pages`, `get_next_pid`,
+   `find_longest_matching_point`, `get_shared_data`, …). This catches sites you
+   *believed* a caller covered and it did not. Debug builds only.
+3. **Lockdep** (phase 4), which turns the hierarchy from documentation into a
+   runtime invariant. Run the whole smoke suite in that build.
+
+Two sites are already broken and should be fixed while passing through:
 
 - `waitpid` (`process_manager.zig:583-612`) blocks at `:584` and **never unblocks
   on the success path** (`:610-611`).
@@ -267,11 +396,54 @@ be fixed while passing through:
 
 ### Phase 4 — Lock hierarchy + BKL
 
-A named, strictly ordered set of locks with the acquisition order written down,
-which are IRQ-safe, which are leaves, and the deadlock argument given that
-PendSV, SysTick and SVC handlers all take some of them. Add lock-order assertions
-under a debug flag. Introduce a big kernel lock as the initial coarse cover so
-phase 7 has something correct to stand on.
+Acquire in **increasing rank**, release in reverse, enforced at runtime by a
+lockdep-style per-CPU `held_lock_ranks` bitmask that panics on a violation.
+
+| rank | name | kind | IRQ-safe | leaf | guards |
+|---:|---|---|:-:|:-:|---|
+| 5 | `bkl` | recursive spin | yes | no | *transitional only*, deleted in phase 8 |
+| 10 | `mount_lock` | rwlock (spin) | no | no | the `MountPoints` tree |
+| 20 | `fs_lock[fs]` | sleeping mutex | no | no | per-filesystem; FatFs, littlefs, romfs, ramfs, procfs, driverfs |
+| 30 | `dev_lock[dev]` | sleeping mutex | no | yes | device seek/DMA state, `g_sdio`, `aligned_buf`, the FatFs line cache |
+| 40 | `loader_lock` | spin_irq | yes | no | `modules.zig` + `loader.zig` tables |
+| 50 | `proctable_lock` | spin_irq | yes | no | process table, parent/child, wait lists, `Semaphore.counter` |
+| 55 | `p->fd_lock` | spin_irq | yes | yes | per-process `_fds` |
+| 60 | `rq_lock[cpu]` | spin_irq | yes | no | per-core runqueue, `Thread.state` transitions |
+| 70 | `pidmap_lock` | spin_irq | yes | yes | `_pid_map` |
+| 80 | `pagepool_lock` | spin_irq | yes | yes | `ProcessMemoryPool` |
+| 90 | `kheap_lock` | spin_irq | yes | yes | newlib free list + `malloc.zig` accounting + `_sbrk` |
+| 95 | `console_lock` | spin_irq | yes | yes | `stdout.zig`, UART TX, `file_log` ring |
+
+**The counter-intuitive part is that sleeping mutexes are *outer* and spinlocks
+are *inner*.** That encodes the rule that matters most:
+
+> **Never take a sleeping mutex while holding any spinlock.**
+
+Because ranks run mutexes-before-spinlocks, lockdep enforces it for free. The
+consequence is that **no filesystem or device I/O may ever be initiated from
+handler context**. Two sites violate this today and are prerequisites:
+
+- `process_manager.zig:180-184` — the terminate-list reaper runs *in PendSV* and
+  frees to the kernel heap. Move it to a `kreaper` thread woken via `try_wake`.
+- `source/kernel/file_log.zig` — its drain phase must be thread-context only.
+
+`console_lock` being the innermost leaf is what lets you log from inside
+`kheap_lock` or `rq_lock`. Panic and HardFault paths use `try_lock` and print
+regardless — a garbled panic beats a hung panic. Correspondingly the allocator
+must never log at a rank ≥ its own; `malloc.zig` does today, so audit it.
+
+Cross-core migration needs two `rq_lock`s: use a `double_rq_lock(a, b)` that
+always takes the lower `coreid` first, and special-case it in lockdep as the one
+permitted same-rank acquisition.
+
+**Then add the BKL, and do not skip it.** One recursive spinlock at every kernel
+entry (SVC both paths, PendSV, SysTick, device IRQs). With it in place, core 1
+can be launched in phase 6 and *the entire existing smoke suite runs on two
+cores* while FatFs, SDIO, the loader and the mount tree remain trivially safe.
+Then peel one subsystem out from under it per PR in phase 8. Converting every
+subsystem *and* bringing up core 1 in one merge is how this project fails. Type
+it `RecursiveSpinLock` so it stays greppable and deletable — it is the only
+recursive lock in the system.
 
 ### Phase 5 — Non-reentrant libraries
 
@@ -345,6 +517,7 @@ per-process · **LIB** library configuration change
 |---|---|---|
 | `system_call.zig:49,50` `context_switch_enabled`, `counter` | per-core mask used as a lock at 37 sites | PC + SL |
 | `system_call.zig:59` `scheduler_running` | first-switch ordering flag | PC |
+| `system_call.zig:321` dispatch, `:266-277` `write_result` | **dereferences user pointers directly, no copy-in/copy-out.** Another thread of the same process can mutate the arg struct after validation — a TOCTOU. This is a security issue *today*, and becomes exploitable the moment threads exist | RF (copy args to kernel stack, copy results back) |
 | `process_manager.zig:638` `instance` | the entire process world; read unlocked from PendSV, HardFault, SVC and thread mode | SL |
 | `process_manager.zig:126` `processes` | intrusive `DoublyLinkedList` run queue, O(n) walk | SL (runqueue) |
 | `round_robin.zig:32-33` `current`/`next` | single-valued; hands the same node to both cores | PC + AT |
