@@ -91,7 +91,7 @@ jobs:
   build_hw:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.18
+      image: ghcr.io/matgla/yasos.zig:v0.19
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

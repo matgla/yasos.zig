@@ -682,6 +682,16 @@ in phase 3 and the most likely source of phase-7 bugs.
 
 ## Not in scope
 
+- **Don't skip the BKL milestone.** It is the single decision that makes this
+  tractable.
+- **Don't attempt RCU.** At two cores it does not pay for its quiescent-state
+  machinery; a rwlock plus a generation counter on the mount tree is sufficient
+  and far easier to get right.
+- **Don't make FatFs concurrent.** Serialize it behind one mutex, permanently.
+- **Don't use 64-bit atomics** (no `LDREXD` on M33 → a non-lock-free libcall).
+- **Don't run the dynamic loader concurrently** in v1 — `loader_lock`, and pin
+  `execve` to core 0.
+- **Don't put the console behind a sleeping mutex** — panic must be able to print.
 - **RISC-V / Hazard3.** No first-party code exists; the only RISC-V artifacts are
   unbuilt vendored pico-sdk files.
 - **RP2040 / armv6-m.** No exclusives, and no defconfig builds it. The dangling
