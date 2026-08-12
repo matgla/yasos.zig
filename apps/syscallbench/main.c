@@ -1,37 +1,25 @@
 /*
  * syscallbench — what a system call costs the caller, end to end.
  *
- * The kernel's own profiler (CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING)
- * times from the SVC entry stamp to the end of the handler. That is the right
- * window for asking which *handler* is slow, and the wrong one for asking what
- * the syscall *path* costs: it deliberately excludes the return trampoline back
- * to user mode, and on this kernel a non-fast syscall returns through a second
- * SVC with a second exception entry and return. Measuring from user code is the
- * only way to see the whole round trip, so that is what this does.
+ * The kernel's own profiler times from the SVC entry stamp to the end of the
+ * handler, which excludes the return trampoline -- and on this kernel a non-fast
+ * syscall returns through a second SVC with its own exception entry and return.
+ * Measuring from user code is the only way to see the whole round trip.
  *
- * The arms are chosen so the interesting numbers come out as differences
- * between them rather than as absolutes, which cancels the loop, the libc
- * wrapper and the timer:
+ * The arms are chosen so the interesting numbers are differences between them,
+ * which cancels the loop, the libc wrapper and the timer:
  *
- *   getpid     a "fast" syscall — dispatched in handler mode, one exception
- *              entry and one exception return (see is_fast_syscall in
- *              source/kernel/interrupts/system_call.zig).
- *   close(-1)  a trampoline syscall whose handler returns immediately on the
- *              negative fd. Same handler-side work as getpid, so
+ *   getpid     a "fast" syscall — one exception entry and one return.
+ *   close(-1)  a trampoline syscall whose handler returns immediately, so
  *              close(-1) - getpid isolates the trampoline itself.
- *   lseek      a trampoline syscall with a real handler body, for scale: it is
- *              second only to read in a tcc compile.
+ *   lseek      a trampoline syscall with a real handler body, for scale.
  *
  * Each arm is also run with the FPU live. The kernel disables lazy FP stacking
- * (disable_lazy_fp_stacking in source/arch/arm-m/process.zig) because the
- * trampoline breaks the EXC_RETURN.FType pairing lazy stacking relies on, so
- * every exception entry taken from FP context eagerly stacks s0-s15 + FPSCR.
- * The _fp arms minus their non-FP counterparts price that decision, and because
- * the fast path takes half as many exception transitions as the trampoline, the
- * two tell you the per-transition cost separately from how many there are.
+ * (disable_lazy_fp_stacking in source/arch/arm-m/process.zig), so every
+ * exception entry from FP context eagerly stacks s0-s15 + FPSCR; the _fp arms
+ * minus their counterparts price that.
  *
- * Output is one space-separated key=value line per arm, matching sdbench, so it
- * parses without a second tool.
+ * Output is one space-separated key=value line per arm, matching sdbench.
  *
  * Copyright (C) 2026 Mateusz Stadnik <matgla@live.com>
  *
@@ -70,16 +58,13 @@
  * the one that changes when the path changes. */
 #define TRIALS 7
 
-/* SINGLE precision on purpose. The FPU here is fpv5-sp-d16 / rp2350, which has
- * no double-precision unit: a `double` expression compiles to DCP coprocessor
- * or softfloat calls, which never set CONTROL.FPCA and so never cause an FP
- * exception frame. A first version of this benchmark used `double` and duly
- * reported an FP stacking tax of -13 ns, i.e. it measured nothing at all.
- * `float` keeps the work in s0-s15, which is the state whose stacking is being
- * priced.
+/* Single precision on purpose: the FPU is fpv5-sp-d16, so a `double` expression
+ * compiles to DCP or softfloat calls that never set CONTROL.FPCA and so never
+ * cause an FP exception frame -- it would measure nothing. `float` keeps the
+ * work in s0-s15, the state whose stacking is being priced.
  *
  * Volatile so the compiler can neither hoist the FP work out of the loop nor
- * fold it away: FPCA is only set if the FP instructions really execute. */
+ * fold it away: FPCA is only set if the instructions really execute. */
 static volatile float fp_state = 1.0f;
 static volatile int sink;
 
@@ -181,14 +166,11 @@ int main(int argc, char **argv) {
   printf("arm=getpid_fp ns=%lu net_ns=%ld path=fast fpu=live\n", getpid_fp_ns, getpid_fp_net);
   printf("arm=close_bad_fp ns=%lu net_ns=%ld path=trampoline fpu=live\n", close_fp_ns, close_fp_net);
 
-  /* The three numbers this program exists to produce.
-   *   trampoline_ns  what the second exception round trip costs, over and above
-   *                  a fast-path call doing the same handler work.
+  /* trampoline_ns  the second exception round trip, over a fast-path call.
    *   fp_tax_fast    eager FP stacking across one entry + one return.
-   *   fp_tax_slow    the same across the trampoline's two of each; expected to
-   *                  be roughly twice fp_tax_fast, and a check on both.
-   *   handler_ns     what lseek's handler body costs on top of the same path
-   *                  close(-1) takes, i.e. the part no dispatch change helps. */
+   *   fp_tax_slow    the same across the trampoline's two of each, so roughly
+   *                  twice fp_tax_fast -- a check on both.
+   *   handler_ns     lseek's handler body on top of close(-1)'s path. */
   printf("derived: trampoline_ns=%ld fp_tax_fast_ns=%ld fp_tax_slow_ns=%ld handler_lseek_ns=%ld\n",
          difference(close_net < 0 ? 0 : (unsigned long)close_net,
                     getpid_net < 0 ? 0 : (unsigned long)getpid_net),

@@ -33,8 +33,18 @@ extern fn arch_get_stack_pointer() *usize;
 pub fn root_process(entry: anytype, stack_size: u32) !void {
     try process_manager.instance.create_root_process(stack_size, entry, null, "/");
 
+    // After the root, so the root keeps pid 1. Before the first switch, because
+    // a secondary core may be waiting on `smp.scheduler_ready` and enters
+    // through its idle process the moment that flag is set.
+    try process_manager.instance.create_idle_processes();
+
     if (process_manager.instance.schedule_next() != .NoAction) {
         process_manager.instance.initialize_context_switching();
+        // Release any secondary core waiting in `kernel_secondary_core_entry`:
+        // the process manager, the process table and its idle process all exist
+        // now. Before this core's first switch, which does not return until
+        // shutdown.
+        kernel.smp.mark_scheduler_ready();
         hal.time.systick.enable();
         // hal.irq.trigger_supervisor_call(c.sys_start_root_process, arch_get_stack_pointer(), &out);
         _ = try syscall_handlers.sys_start_root_process(arch_get_stack_pointer());

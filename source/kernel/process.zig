@@ -33,12 +33,17 @@ const arch_process = @import("arch").process;
 const Semaphore = @import("semaphore.zig").Semaphore;
 const IDirectoryIterator = @import("fs/idirectory.zig").IDirectoryIterator;
 const system_call = @import("interrupts/system_call.zig");
-const systick = @import("interrupts/systick.zig");
 const arch = @import("arch");
 
 const hal = @import("hal");
 
 const default_nofile_limit: c.rlim_t = 256;
+
+/// One system tick, in microseconds: SysTick is programmed at
+/// `hal.cpu.frequency() / 1000` on every core (`source/arch/arm-m/process.zig`).
+/// It is the finest deadline a yield can serve, so `sleep_for_us` spins the
+/// remainder out rather than yielding it away.
+const tick_us: u64 = 1000;
 
 pub fn create_default_resource_limits(stack_size: u32) [c.RLIM_NLIMITS]c.rlimit {
     const max_stack_size = @max(stack_size, config.process.max_stack_size);
@@ -146,6 +151,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             node: std.DoublyLinkedList.Node,
         };
 
+        /// A child that has exited and is waiting to be collected by `waitpid`.
+        /// One slot per child rather than a single code, so concurrent exits do
+        /// not overwrite each other -- which is the point of `waitpid(-1)`.
+        pub const ExitedChild = struct {
+            pid: c.pid_t,
+            status: i32,
+            node: std.DoublyLinkedList.Node = .{},
+        };
+
         state: State,
         priority: u8,
         impl: ImplType,
@@ -166,13 +180,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         // by update_stack_pointer() on every context store; read by the PendSV
         // resume path via process_resume_is_privileged().
         resume_privileged: bool,
-        /// What this process is blocked on, or null when it is not.
-        ///
-        /// An opaque token rather than `?*const Semaphore`: the identity of the
-        /// blocker is all `reevaluate_state` and the wake-up scan ever need, and
-        /// widening it is what lets the kernel's sleeping mutex reuse the
-        /// machinery the semaphore already proved rather than growing a second,
-        /// parallel one that `reevaluate_state` would also have to know about.
+        /// What this process is blocked on, or null when it is not. An opaque
+        /// token rather than `?*const Semaphore`, so the sleeping mutex can
+        /// reuse the same machinery; its identity is all the wake-up scan needs.
         waiting_for: ?*const anyopaque = null,
         _fds: std.AutoHashMap(u16, FileHandle),
         /// See `clear_fds`: it runs at exit *and* from `deinit`, and must not
@@ -185,9 +195,37 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _child: ?*Self = null,
         _blocked_by: std.DoublyLinkedList,
         _blocks: std.DoublyLinkedList,
+        /// Children of this process that have exited and not yet been collected.
+        /// Also the token this process blocks on in `waitpid(-1)`, which is what
+        /// makes "wake me when *any* child finishes" expressible at all: the
+        /// per-child wait list can only name one child up front.
+        _exited_children: std.DoublyLinkedList = .{},
         _stack_shared_with_parent: bool,
         _vfork_context: ?VForkContext = null,
+        /// The slice of this process's stack a vfork child is running over.
+        ///
+        /// A vfork child continues from the parent's `vfork()` call site, the
+        /// only stack pointer the caller's frame offsets are valid against, so
+        /// everything below it is the child's to reuse -- and is also where the
+        /// parent's suspended kernel frames live. Those bytes are copied out
+        /// when the child starts and put back when it execs or exits.
+        ///
+        /// Kept on the parent and reused across vforks: a process parked in
+        /// vfork cannot reach `vfork()` again until its child is gone.
+        _vfork_stack: ?[]u8 = null,
+        /// Address the saved bytes came from, and how many are live (0 = none).
+        _vfork_stack_base: usize = 0,
+        _vfork_stack_len: usize = 0,
+        /// The parent's stack pointer at its `vfork()` call site: the exclusive
+        /// upper bound of the region above.
+        _vfork_stack_top: usize = 0,
         _initialized: bool = false,
+        /// Sleeping-mutex ranks this process holds, parked here while it is not
+        /// running. lockdep's held-set is per-core, which is right for the
+        /// `spin_irq` locks but wrong for a `RankedMutex`, whose holder can
+        /// block and resume on the other core. Saved and restored by
+        /// `RoundRobin.update_current`; see `sync/locks.zig:migrating_ranks`.
+        _held_lock_ranks: u16 = 0,
         _start_time: u64,
         // Wall-clock (us) captured right after this process's exec'd image is
         // loaded and relocated. Used to separate dynamic-load time from real
@@ -249,22 +287,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return process;
         }
 
-        /// Close every open file descriptor.
-        ///
-        /// **Thread context only, and idempotent.** Closing a descriptor is
-        /// filesystem I/O -- a FatFs handle goes through `FatFsFile.delete` and
-        /// takes `fs_lock`, a *sleeping* mutex -- so this must never run from an
-        /// exception handler. It used to be called from `deinit`, which the
-        /// terminate-list reaper calls from PendSV: fine while nothing locked,
-        /// but a latent panic the moment `fs_lock` existed, because a reap
-        /// landing while another process was mid-FatFs-operation would find the
-        /// lock contended and have nowhere to block.
-        ///
-        /// It is now called from `delete_process`, in the exiting process's own
-        /// thread context, which is where closing a process's files belonged
-        /// anyway. Idempotent because `deinit` still calls it for the paths that
-        /// destroy a process without going through `delete_process` (a failed
-        /// spawn), and `_fds.deinit()` twice is a double free.
+        /// Close every open file descriptor. Thread context only: closing a
+        /// descriptor is filesystem I/O and takes the sleeping `fs_lock`, so it
+        /// cannot run from an exception handler. Called from `delete_process`,
+        /// and idempotent because `deinit` still calls it for the paths that
+        /// destroy a process without going through it (a failed spawn).
         pub fn clear_fds(self: *Self) void {
             if (self._fds_cleared) return;
             self._fds_cleared = true;
@@ -303,6 +330,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             log.info("deinit pid={d}: after impl.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             self.clear_fds();
             log.info("deinit pid={d}: after clear_fds kernel_used={d} process_pages={d} alloc_count={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
+            if (self._vfork_stack) |buffer| {
+                self._kernel_allocator.free(buffer);
+                self._vfork_stack = null;
+            }
+            self.drop_exited_children();
             self._kernel_allocator.free(self.cwd);
             self._process_memory_allocator.deinit();
             log.info("deinit pid={d}: after proc_mem.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
@@ -382,6 +414,61 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return self._stack_shared_with_parent;
         }
 
+        /// Make room to save the stack a vfork child is about to run over.
+        /// Called before the child exists, so a heap that cannot spare the
+        /// buffer fails `vfork()` rather than the hand-off. `top` is the
+        /// parent's stack pointer at its call site; `capacity` must reach down
+        /// to where the child is released, deeper than this caller's frame.
+        pub fn reserve_vfork_stack(self: *Self, top: usize, capacity: usize) !void {
+            self._vfork_stack_top = top;
+            self._vfork_stack_len = 0;
+            if (self._vfork_stack) |buffer| {
+                if (buffer.len >= capacity) return;
+                self._kernel_allocator.free(buffer);
+                self._vfork_stack = null;
+            }
+            self._vfork_stack = try self._kernel_allocator.alloc(u8, capacity);
+        }
+
+        /// Copy [`low`, call site) out of the stack. Returns false when there is
+        /// nowhere to put it, which means the child must NOT be given its
+        /// caller's stack pointer.
+        ///
+        /// Must run with the stack pointer at or below `low`, or it would copy
+        /// its own frame over the parent's.
+        pub fn save_vfork_stack(self: *Self, low: usize) bool {
+            const buffer = self._vfork_stack orelse return false;
+            if (low >= self._vfork_stack_top) return false;
+            const length = self._vfork_stack_top - low;
+            if (length > buffer.len) return false;
+            const source: [*]const u8 = @ptrFromInt(low);
+            @memcpy(buffer[0..length], source[0..length]);
+            self._vfork_stack_base = low;
+            self._vfork_stack_len = length;
+            return true;
+        }
+
+        /// The stack pointer this process had at its `vfork()` call site, while
+        /// the frames below it are saved and can be scribbled on. Null once they
+        /// are not -- with no backup, those frames are the parent's only copy.
+        pub fn vfork_stack_ceiling(self: *const Self) ?usize {
+            if (self._vfork_stack_len == 0) return null;
+            return self._vfork_stack_top;
+        }
+
+        /// Put the saved bytes back, so the parent can resume on them. Must run
+        /// with the stack pointer below `_vfork_stack_base`, which
+        /// `process_get_back_to_parent_vfork` guarantees by switching to the
+        /// parent's resume position first.
+        pub fn restore_vfork_stack(self: *Self) void {
+            const buffer = self._vfork_stack orelse return;
+            const length = self._vfork_stack_len;
+            if (length == 0) return;
+            self._vfork_stack_len = 0;
+            const destination: [*]u8 = @ptrFromInt(self._vfork_stack_base);
+            @memcpy(destination[0..length], buffer[0..length]);
+        }
+
         pub fn release_parent_after_getting_freedom(self: *Self) *std.DoublyLinkedList.Node {
             self.unblock_parent();
             if (self._parent) |p| {
@@ -429,11 +516,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.block_on(semaphore);
         }
 
-        /// Mark this process blocked on an arbitrary blocker.
-        ///
-        /// The caller must hold whatever guards the blocker, so that an unlock
-        /// racing with this cannot decide there is nobody to wake between the
-        /// decision to block and the state actually changing.
+        /// Mark this process blocked on an arbitrary blocker. The caller must
+        /// hold whatever guards the blocker, or a racing unlock can decide there
+        /// is nobody to wake between the decision to block and the state change.
         pub fn block_on(self: *Self, blocker: *const anyopaque) void {
             self.waiting_for = blocker;
             self.reevaluate_state();
@@ -446,10 +531,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         /// Release this process from `blocker`, if that is what it is waiting on.
-        ///
-        /// Named `wake_from` rather than `unblock_from` because that name is
-        /// already taken by the *process*-blocking half below (`_blocked_by`),
-        /// which is a different relationship: this one clears `waiting_for`.
+        /// Clears `waiting_for`; `unblock_from` below is the different
+        /// relationship on `_blocked_by`.
         pub fn wake_from(self: *Self, blocker: *const anyopaque) void {
             if (self.waiting_for) |current| {
                 if (current == blocker) {
@@ -473,12 +556,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn wait_for_process(self: *Self, process: *Self, action: UnblockAction, context: ?*anyopaque) !void {
             // this process will be unblocked until other processes are finished
             //
-            // Preemption is refused rather than a lock taken, because the two
-            // wait lists spliced here (`_blocked_by` on this process, `_blocks`
-            // on the other) are reached from `delete_process` and the semaphore
-            // wake-up scan, both of which run under `proctable_lock`. Taking it
-            // here as well would be a same-rank nesting; the lists move to that
-            // lock together with the rest of the process relationships.
+            // Preemption is refused rather than a lock taken: the two wait lists
+            // spliced here are also reached from `delete_process` and the
+            // semaphore wake-up scan, both already under `proctable_lock`, so
+            // taking it here would be a same-rank nesting.
             preempt.preempt_disable();
             defer preempt.preempt_enable();
             const blocked_data = try self._kernel_allocator.create(BlockedByProcess);
@@ -491,6 +572,16 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.reevaluate_state();
         }
 
+        /// Recompute this process's state from what it is waiting on.
+        ///
+        /// `Running` is sticky, and that is a correctness rule: every waker in
+        /// the tree calls this on *other* processes, and publishing a process
+        /// the other core is running as `Ready` would let this core claim it and
+        /// have both resume the same context off the same stack pointer. The
+        /// only `Running -> Ready` transition is `release_from_core`, on the
+        /// core that owns the claim and after the context has been stored.
+        /// `Running -> Blocked` stays allowed -- it is always a process blocking
+        /// itself.
         pub fn reevaluate_state(self: *Self) void {
             if (self.state == State.Terminated) {
                 return;
@@ -504,7 +595,24 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 self.state = Process.State.Blocked;
                 return;
             }
+            if (self.state == State.Running) {
+                return;
+            }
             self.state = Process.State.Ready;
+        }
+
+        /// Give up the claim a core holds on this process -- the counterpart to
+        /// `RoundRobin.try_claim`, and the only place a `Running` process
+        /// becomes schedulable again. Called with `proctable_lock` held and
+        /// after the outgoing context has been written to its stack; any earlier
+        /// and the other core could resume it from a stale stack pointer.
+        pub fn release_from_core(self: *Self) void {
+            if (self.state == State.Running) {
+                self.state = State.Ready;
+            }
+            // It may have blocked itself while it was running, so the wait lists
+            // still get the final word.
+            self.reevaluate_state();
         }
 
         pub fn is_blocked_by(self: Self, semaphore: *const Semaphore) bool {
@@ -544,6 +652,48 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 }
             }
             self.reevaluate_state();
+        }
+
+        /// Note that a child has exited, for a later `waitpid` to collect. Best
+        /// effort: if the record cannot be allocated the exit is still reported
+        /// through `child_exit_code`.
+        pub fn record_child_exit(self: *Self, child_pid: c.pid_t, status: i32) void {
+            const entry = self._kernel_allocator.create(ExitedChild) catch {
+                log.err("no room to record the exit of pid={d}", .{child_pid});
+                return;
+            };
+            entry.* = .{ .pid = child_pid, .status = status };
+            self._exited_children.append(&entry.node);
+            // Anything parked in waitpid(-1) is waiting on exactly this list.
+            self.wake_from(&self._exited_children);
+        }
+
+        /// Collect an exited child: `pid` of -1 takes the oldest, any other
+        /// value takes that child only. Null when there is nothing to collect.
+        pub fn take_exited_child(self: *Self, pid: c.pid_t) ?ExitedChild {
+            var it = self._exited_children.first;
+            while (it) |node| {
+                const entry: *ExitedChild = @fieldParentPtr("node", node);
+                it = node.next;
+                if (pid != -1 and entry.pid != pid) continue;
+                const collected = entry.*;
+                self._exited_children.remove(node);
+                self._kernel_allocator.destroy(entry);
+                return collected;
+            }
+            return null;
+        }
+
+        /// The token `waitpid(-1)` blocks on; see `_exited_children`.
+        pub fn any_child_blocker(self: *Self) *const anyopaque {
+            return &self._exited_children;
+        }
+
+        fn drop_exited_children(self: *Self) void {
+            while (self._exited_children.pop()) |node| {
+                const entry: *ExitedChild = @fieldParentPtr("node", node);
+                self._kernel_allocator.destroy(entry);
+            }
         }
 
         pub fn unblock_all(self: *Self, result: i32) void {
@@ -666,16 +816,32 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return self._parent;
         }
 
+        /// Sleep for at least `us` microseconds: a yield-spin against the
+        /// microsecond wall clock, not the millisecond tick, so a sub-tick
+        /// request is not truncated to a no-op.
+        ///
+        /// The last tick is spun through rather than yielded away, because a
+        /// yield cannot resolve a sub-tick deadline -- whoever runs next holds
+        /// the CPU for its own 100-tick quantum.
+        ///
+        /// Not a real sleep: the process stays `Ready` and burns quanta until
+        /// the deadline passes. Blocking would need a `wake_at` in the
+        /// scheduler.
         pub fn sleep_for_us(self: *Self, us: u64) void {
-            const start = systick.get_system_ticks();
-            var elapsed: u64 = 0;
-            const ptr: *volatile u64 = &elapsed;
-            while (ptr.* < us / 1000) {
-                // context switch, we are waiting for condition
-                hal.irq.trigger(.pendsv);
-                ptr.* = systick.get_system_ticks() - start;
-            }
             _ = self;
+            // Saturating, so an absurd request cannot overflow the deadline into
+            // the past. Plain comparisons below: the qemu boards' `get_time_us`
+            // accumulates its 32-bit timer non-atomically, so it can step
+            // backwards, which wrapping arithmetic would read as "long passed".
+            const deadline = hal.time.get_time_us() +| us;
+            while (true) {
+                const now = hal.time.get_time_us();
+                if (now >= deadline) return;
+                if (deadline - now >= tick_us) {
+                    // Context switch, we are waiting for the deadline.
+                    hal.irq.trigger(.pendsv);
+                }
+            }
         }
 
         pub fn sleep_for_ms(self: *Self, ms: u32) void {
@@ -950,6 +1116,10 @@ test "Process.ShouldSleepForMilliseconds" {
 
     const PendSvAction = struct {
         pub fn call() void {
+            // One second per switch, on both clocks. The wall clock is the one
+            // `sleep_for_us` waits on now, and the stub only moves when
+            // something moves it -- without this line the sleep never ends.
+            hal.time.impl.set_time(hal.time.get_time_us() + 1000 * 1000);
             hal.time.systick.set_ticks(hal.time.systick.get_system_tick() + 1000);
             for (0..1000) |_| irq_systick();
         }
@@ -957,6 +1127,25 @@ test "Process.ShouldSleepForMilliseconds" {
 
     hal.irq.impl().set_irq_action(.pendsv, &PendSvAction.call);
     sut.sleep_for_ms(10);
+}
+
+test "Process.ShouldSleepForSubMillisecondDelay" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+    var sut = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 71, false);
+    defer sut.deinit();
+
+    // A sub-tick sleep deliberately does not yield, so there is no PendSV
+    // action to advance the stub clock from: let it run on its own instead.
+    hal.time.impl.set_auto_advance_us(10);
+    defer hal.time.impl.set_auto_advance_us(0);
+
+    const start = hal.time.get_time_us();
+    sut.sleep_for_us(500);
+    // The whole point: `us / 1000` used to truncate to zero ticks here and
+    // return with the clock untouched.
+    try std.testing.expect(hal.time.get_time_us() - start >= 500);
 }
 
 test "Process.ShouldForkProcess" {
@@ -1118,6 +1307,83 @@ test "Process.ShouldRestoreParentStack" {
 
     // try std.testing.expect(parent.stack_pointer() != parent_stack_before);
     try std.testing.expectEqual(new_child_sp, child.stack_pointer());
+}
+
+test "Process.ShouldCollectEachExitedChildOnce" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 130, false);
+    defer parent.deinit();
+
+    // Two children exiting before either is waited for: the single
+    // `child_exit_code` slot this replaced would report the second one twice.
+    parent.record_child_exit(131, 0x100);
+    parent.record_child_exit(132, 0x200);
+
+    // -1 takes them oldest first, and each entry only once.
+    const first = parent.take_exited_child(-1).?;
+    try std.testing.expectEqual(@as(c.pid_t, 131), first.pid);
+    try std.testing.expectEqual(@as(i32, 0x100), first.status);
+
+    const second = parent.take_exited_child(-1).?;
+    try std.testing.expectEqual(@as(c.pid_t, 132), second.pid);
+    try std.testing.expectEqual(@as(i32, 0x200), second.status);
+
+    try std.testing.expect(parent.take_exited_child(-1) == null);
+}
+
+test "Process.ShouldCollectAnExitedChildByPid" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 140, false);
+    defer parent.deinit();
+
+    parent.record_child_exit(141, 0x100);
+    parent.record_child_exit(142, 0x200);
+
+    try std.testing.expect(parent.take_exited_child(143) == null);
+
+    const picked = parent.take_exited_child(142).?;
+    try std.testing.expectEqual(@as(c.pid_t, 142), picked.pid);
+    try std.testing.expectEqual(@as(i32, 0x200), picked.status);
+
+    // The one that was skipped is still there, and nothing else is.
+    try std.testing.expectEqual(@as(c.pid_t, 141), parent.take_exited_child(-1).?.pid);
+    try std.testing.expect(parent.take_exited_child(-1) == null);
+}
+
+test "Process.ShouldWakeAWaitForAnyChildWhenOneExits" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 150, false);
+    defer parent.deinit();
+
+    // What waitpid(-1) does: park on the collection list rather than on a
+    // named child, because which child finishes first is not known yet.
+    parent.block_on(parent.any_child_blocker());
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, parent.state);
+
+    parent.record_child_exit(151, 0x300);
+    try std.testing.expectEqual(ProcessUnderTest.State.Ready, parent.state);
+}
+
+test "Process.ShouldFreeUncollectedChildrenOnExit" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    // A parent that exits without waiting still has to hand the records back;
+    // the testing allocator fails this test if `deinit` leaks them.
+    var parent = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 160, false);
+    parent.record_child_exit(161, 0x100);
+    parent.record_child_exit(162, 0x200);
+    parent.deinit();
 }
 
 test "Process.ShouldMmapMemory" {

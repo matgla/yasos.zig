@@ -13,49 +13,21 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! One lock for all of FatFs, permanently.
-//!
-//! FatFs is built `FF_FS_REENTRANT 0`, `FF_FS_LOCK 0`, `FF_USE_LFN 1` -- a
-//! combination ffconf itself documents as "Always NOT thread-safe". `LfnBuf` is
-//! a single 256-entry scratch buffer written by every name comparison in every
-//! directory walk, and `FatFs[]`, `Fsid` and `CurrVol` are all file-scope state
-//! in `ff.c`. Making it concurrent is not a goal and never will be; serialising
-//! it is.
-//!
-//! ## This closes a hole that is open today, on one core
-//!
-//! It would be easy to assume the existing `block_context_switch` windows
-//! already cover this. They do not. `sys_read` and `sys_write` deliberately
-//! release the window *before* touching the file:
-//!
-//! ```zig
-//! const maybe_handle = process.get_file_handle(...);
-//! kernel.process.unblock_context_switch();
-//! if (maybe_handle) |handle| { result_out.* = file.interface.read(destination); }
-//! ```
-//!
-//! so every FatFs read and write already runs preemptible. Two processes doing
-//! file I/O can already interleave inside `ff.c` and scribble over each other's
-//! `LfnBuf`. That it has not obviously broken is a property of the workload --
-//! the shell spends almost all of its time blocked in `waitpid` while one child
-//! runs -- not of the code.
-//!
-//! ## Why a sleeping mutex and not a spinlock
-//!
-//! Because it is held across SD card I/O. A spinlock here would sit in `cpsid i`
-//! for milliseconds, and `hal/.../uart_driver.zig:51-59` documents a ~93 µs
-//! RX-FIFO overrun window that every masked section has to fit inside. It is
-//! rank `fs` (20), outside every spinlock in the hierarchy, which is what
-//! `sync/locks.zig` encodes with "never take a sleeping mutex while holding a
-//! spinlock".
-//!
-//! ## Where it is taken
-//!
-//! At the outermost FatFs boundary only -- the `IFileSystem`, `IFile` and
-//! `IDirectory` methods -- and never on the internal constructors
-//! (`FatFsFile.create_node`, `FatFsDirectory.create_node`), which are reached
-//! only from `FatFs.get` with the lock already held. The mutex is deliberately
-//! **not** recursive, so getting that wrong panics by name instead of hanging.
+// One lock for all of FatFs, permanently. It is built `FF_FS_REENTRANT 0`,
+// `FF_FS_LOCK 0`, `FF_USE_LFN 1`, which ffconf documents as "Always NOT
+// thread-safe": `LfnBuf` is one 256-entry scratch buffer written by every name
+// comparison in every directory walk, and `FatFs[]`, `Fsid` and `CurrVol` are
+// file-scope state in `ff.c`. Making it concurrent is not a goal; serialising it
+// is.
+//
+// A sleeping mutex, not a spinlock, because it is held across SD card I/O -- a
+// spinlock would sit in `cpsid i` for milliseconds against a ~93 us RX-FIFO
+// overrun window. Rank `fs` (20), outside every spinlock in the hierarchy.
+//
+// Taken at the outermost FatFs boundary only -- the `IFileSystem`, `IFile` and
+// `IDirectory` methods -- never on the internal constructors, which are reached
+// from `FatFs.get` with the lock already held. Not recursive, so getting that
+// wrong panics by name instead of hanging.
 
 const kernel = @import("kernel");
 

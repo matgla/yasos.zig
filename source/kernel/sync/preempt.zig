@@ -13,33 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! "Do not preempt me" -- a per-core preemption barrier.
-//!
-//! This is one of the three meanings `block_context_switch()` currently
-//! conflates, and the only one that is genuinely about *this core's* execution
-//! rather than about shared data. Sites that protect a per-core invariant
-//! (nothing another core could touch) want this; sites that protect a shared
-//! structure want a named lock; sites that must keep PendSV out of a specific
-//! instruction window want this **plus** the deferred re-trigger below.
-//!
-//! ## Deferring, not dropping
-//!
-//! The behaviour that separates this from what it replaces: when the scheduler
-//! is asked to run while preemption is disabled, it records `need_resched` and
-//! returns instead of silently doing nothing. `preempt_enable()` sees the flag
-//! on the way out and re-triggers PendSV.
-//!
-//! That fixes a live single-core defect, independent of SMP. Today a SysTick
-//! landing inside a block window is simply lost: the process that happened to be
-//! running gets a free extra timeslice, and nothing accounts for it. Under load
-//! -- a `tcc` compile inside a syscall-heavy shell -- that is a fairness and
-//! latency bug in a scheduler that is supposed to be round-robin.
-//!
-//! ## What it is not
-//!
-//! It is not mutual exclusion. On a second core it provides exactly zero, which
-//! is precisely why the 37 sites that use `block_context_switch()` as a lock
-//! have to be classified rather than mechanically renamed onto this.
+// A per-core preemption barrier. Not mutual exclusion -- it provides nothing at
+// all against a second core; sites protecting shared structures want a named
+// lock instead. A reschedule refused while preemption is disabled is recorded
+// in `need_resched` and re-pended by `preempt_enable`, rather than lost.
 
 const std = @import("std");
 
@@ -59,10 +36,8 @@ const State = struct {
 
 var state: percpu.PerCpu(State) = .init(.{});
 
-/// Refuse preemption on this core until the matching `preempt_enable()`.
-///
-/// Nests. The counter update runs with interrupts masked because the interrupt
-/// handlers on this core touch the same slot.
+/// Refuse preemption on this core until the matching `preempt_enable()`. Nests.
+/// Masks interrupts because this core's handlers touch the same slot.
 pub fn preempt_disable() void {
     const flags = arch.sync.save_and_disable_interrupts();
     defer arch.sync.restore_interrupts(flags);
@@ -70,19 +45,11 @@ pub fn preempt_disable() void {
     self.count += 1;
 }
 
-/// Whether an unbalanced release is a panic or a clamp.
-///
-/// A panic is what this deserves: the clamp is why every unbalanced pair in the
-/// tree has stayed invisible. It is off in ReleaseFast so a mis-analysed path
-/// cannot turn a latent accounting bug into a boot-time panic on a shipped
-/// image, and on in Debug/ReleaseSafe -- which is what `zig build test` and
-/// `run_qemu_smoke.sh --safe` build, so the suites do surface them.
+/// Whether an unbalanced release is a panic or a clamp. Off in ReleaseFast so a
+/// latent accounting bug cannot turn into a boot-time panic on a shipped image.
 const panic_on_unbalanced_release = std.debug.runtime_safety;
 
 /// Releases that had no matching `preempt_disable`, per core.
-///
-/// Exposed rather than merely clamped, so "we know some sites are unbalanced"
-/// is a number someone can watch go to zero instead of a comment.
 var unbalanced_releases: percpu.PerCpu(u32) = .init(0);
 
 pub fn unbalanced_release_count() u32 {
@@ -91,23 +58,15 @@ pub fn unbalanced_release_count() u32 {
     return unbalanced_releases.current().*;
 }
 
-/// Allow preemption again, and deliver any reschedule that was refused in the
-/// meantime.
-///
-/// The re-trigger happens *after* the count reaches zero and after interrupts
-/// are restored, so the PendSV it pends can actually be taken.
+/// Allow preemption again, and deliver any reschedule refused in the meantime.
+/// The re-trigger happens after the count reaches zero and interrupts are
+/// restored, so the PendSV it pends can actually be taken.
 pub fn preempt_enable() void {
     release(true);
 }
 
-/// `preempt_enable()` for the sites that are knowingly unbalanced.
-///
-/// Only the deprecated `unblock_context_switch` alias calls this. It exists so
-/// the strict version can be strict: several release sites in the tree today
-/// have no matching acquire on the same path -- the tail of `delete_process`
-/// releases in a loop, and three releases are issued from assembly to close
-/// windows opened in Zig by functions that never return normally. Those are
-/// phase 3 work; until then they must not take the kernel down.
+/// `preempt_enable()` for the sites that are knowingly unbalanced -- only the
+/// deprecated `unblock_context_switch` alias, so the strict version can panic.
 pub fn preempt_enable_unbalanced() void {
     release(false);
 }
@@ -122,9 +81,8 @@ fn release(comptime strict: bool) void {
             if (strict and panic_on_unbalanced_release) {
                 @panic("preempt_enable without a matching preempt_disable");
             }
-            // Clamp, as `unblock_context_switch` always has: leaving preemption
-            // refused because the accounting went negative would hang the
-            // system outright.
+            // Clamp: leaving preemption refused because the accounting went
+            // negative would hang the system outright.
             self.pending = false;
             break :blk false;
         }
@@ -151,10 +109,8 @@ pub fn preempt_count() u32 {
     return state.current().count;
 }
 
-/// Record that this core owes a reschedule.
-///
-/// Called from the scheduler entry point when it declines to switch. Safe from
-/// handler context: it only touches this core's slot.
+/// Record that this core owes a reschedule. Called from the scheduler entry
+/// point when it declines to switch; safe from handler context.
 pub fn set_need_resched() void {
     const flags = arch.sync.save_and_disable_interrupts();
     defer arch.sync.restore_interrupts(flags);
@@ -168,10 +124,8 @@ pub fn need_resched() bool {
     return state.current().pending;
 }
 
-/// Drop any recorded reschedule for this core without delivering it.
-///
-/// For the paths that are about to switch anyway, so the flag does not survive
-/// into the next window and pend a redundant PendSV.
+/// Drop any recorded reschedule without delivering it, for paths that are about
+/// to switch anyway.
 pub fn clear_need_resched() void {
     const flags = arch.sync.save_and_disable_interrupts();
     defer arch.sync.restore_interrupts(flags);
@@ -188,8 +142,7 @@ pub fn reset() void {
 
 const testing = std.testing;
 
-/// `hal.irq` is an instance, so the enum is reached through its type. Works
-/// against every hal backend, unlike naming the stub directly.
+/// `hal.irq` is an instance, so the enum is reached through its type.
 const IrqType = @TypeOf(hal.irq).IrqType;
 
 fn pendsv_count() u32 {
@@ -208,9 +161,7 @@ test "Sync.Preempt.NestsAndOnlyReleasesAtZero" {
     try testing.expect(preempt_disabled());
 
     preempt_enable();
-    // Still disabled: the outer window has not closed yet. Releasing at the
-    // inner `enable` is the classic nesting bug and the reason the counter
-    // exists at all.
+    // Still disabled: the outer window has not closed yet.
     try testing.expect(preempt_disabled());
     preempt_enable();
     try testing.expect(!preempt_disabled());
@@ -229,8 +180,7 @@ test "Sync.Preempt.DeferredRescheduleIsDeliveredNotDropped" {
     try testing.expectEqual(0, pendsv_count());
 
     preempt_enable();
-    // The whole point: the switch that was refused is re-pended rather than
-    // lost, so the running process does not get a free extra timeslice.
+    // The refused switch is re-pended, not lost.
     try testing.expect(!need_resched());
     try testing.expectEqual(1, pendsv_count());
 }
@@ -273,9 +223,6 @@ test "Sync.Preempt.UnbalancedReleaseIsCountedAndClamped" {
     try testing.expectEqual(@as(u32, 0), unbalanced_release_count());
 
     // The tolerant path the deprecated `unblock_context_switch` alias uses.
-    // Clamping matters: going negative and staying "disabled" would hang the
-    // system, which is why the original clamped -- the defect was doing it
-    // silently.
     preempt_enable_unbalanced();
     try testing.expectEqual(@as(u32, 1), unbalanced_release_count());
     try testing.expect(!preempt_disabled());
@@ -302,9 +249,7 @@ test "Sync.Preempt.StateIsPerCoreNotGlobal" {
     preempt_disable();
     set_need_resched();
 
-    // Core 1 is unaffected -- this is the property that makes the counter safe
-    // without a lock. A shared counter would have core 1 refusing to schedule
-    // because core 0 is in a critical section it has nothing to do with.
+    // Core 1 is unaffected, which is what makes the counter safe without a lock.
     Cpu.set_coreid(1);
     try testing.expect(!preempt_disabled());
     try testing.expect(!need_resched());

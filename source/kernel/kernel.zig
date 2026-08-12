@@ -62,6 +62,16 @@ pub const sync = struct {
 };
 
 pub const spawn = @import("spawn.zig");
+
+/// Secondary-core bring-up. Forced into the build rather than merely exposed:
+/// `kernel_secondary_core_entry` is reached only from the board's core-N reset
+/// assembly, so nothing in Zig references it and it would otherwise not be
+/// emitted -- the same reason `source/arch/*/arch.zig` force their irq_handlers.
+pub const smp = @import("smp.zig");
+comptime {
+    _ = @import("smp.zig");
+}
+
 pub const uaccess = @import("uaccess.zig");
 pub const fs = @import("fs/fs.zig");
 pub const dynamic_loader = @import("modules.zig");

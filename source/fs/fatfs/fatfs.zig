@@ -78,11 +78,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     _allocator: std.mem.Allocator,
     _device: kernel.fs.IFile,
     _disk_wrapper: DiskWrapper,
-    /// This instance's FatFs volume number, and its own `FATFS`.
-    ///
-    /// Both used to be process-wide: one `global_fs` and `disks[0]`. A second
-    /// instance then mounted *over* the first rather than beside it, and every
-    /// path it was given resolved against the other one's device.
+    /// This instance's FatFs volume number, and its own `FATFS`. Per-instance:
+    /// with a single process-wide pair, a second mount lands over the first
+    /// rather than beside it and every path resolves against the wrong device.
     _volume: u8,
     _fs: fatfs.FileSystem,
 
@@ -102,11 +100,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         });
     }
 
-    /// `"N:"` for this instance, as FatFs wants it.
-    ///
-    /// Returned by value into a caller-provided buffer so it needs no
-    /// allocation and no lifetime: it is used to build a path and then thrown
-    /// away.
+    /// `"N:"` for this instance, as FatFs wants it. Written into a
+    /// caller-provided buffer, so it needs no allocation and no lifetime.
     fn volume_prefix(self: *const Self, buffer: *[3:0]u8) [:0]const u8 {
         buffer[0] = '0' + self._volume;
         buffer[1] = ':';
@@ -114,12 +109,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return buffer[0..2 :0];
     }
 
-    /// `path` addressed to this instance's volume.
-    ///
-    /// Every path-based FatFs call has to go through here. FatFs resolves an
-    /// unprefixed path against its *current* drive, so without this a second
-    /// volume's lookups would land on whichever one was mounted last -- the
-    /// silent aliasing this whole change exists to remove.
+    /// `path` addressed to this instance's volume. Every path-based FatFs call
+    /// has to go through here: FatFs resolves an unprefixed path against its
+    /// current drive, so a second volume's lookups would otherwise land on
+    /// whichever was mounted last.
     fn volume_path(self: *const Self, path: []const u8) ![:0]u8 {
         const trimmed = if (path.len > 0 and path[0] == '/') path[1..] else path;
         return std.fmt.allocPrintSentinel(self._allocator, "{c}:/{s}", .{ '0' + self._volume, trimmed }, 0);
@@ -337,11 +330,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
     }
 
-    /// Deliberately unlocked: it is a pure composition of `get`, `filetype` and
-    /// `delete`, each of which takes the lock itself. Taking it here as well
-    /// would be a second acquire by the owner, which the non-recursive mutex
-    /// refuses. The whole sequence is therefore not atomic -- exactly as it was
-    /// before -- and each FatFs call inside it is.
+    /// Deliberately unlocked: a pure composition of `get`, `filetype` and
+    /// `delete`, each of which takes the lock itself, and the non-recursive
+    /// mutex refuses a second acquire. The sequence is not atomic; each FatFs
+    /// call inside it is.
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
         var node = try self.get(path);
@@ -413,24 +405,15 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
         // ── Write combining ────────────────────────────────────────────────
         //
-        // FatFs hands the block layer one sector at a time, and on this card a
-        // single-block write costs ~875 us against ~113 us a block inside a
-        // multi-block one. The difference is the card's program cycle, which is
-        // paid per command: the TX PIO program will not report a write until
-        // the card releases DAT0 (`wait_idle` in sdio_rp2350.pio), so a
-        // one-sector write waits out the whole cycle to move 512 bytes.
+        // FatFs hands the block layer one sector at a time, and a single-block
+        // write costs ~875 us against ~113 us a block inside a multi-block one:
+        // the card's program cycle is paid per command. A compile's writes are
+        // contiguous runs with rewrites of the same sector, so buffering one run
+        // turns three commands into one and a rewrite into none.
         //
-        // A compile's writes are not scattered. Traced, one emits sectors
-        // 1200, 1201, 1202 consecutively, then rewrites 1200, the FAT sector
-        // and the directory sector. Holding one contiguous run and issuing it
-        // as a single multi-block write turns those three commands into one,
-        // and a rewrite of a sector still in the buffer into none.
-        //
-        // This is only safe because FatFs asks: sync_fs() ends in
-        // disk_ioctl(CTRL_SYNC), and it runs from f_close, f_sync, f_unlink,
-        // f_mkdir and f_rename -- every point at which the medium is supposed
-        // to be consistent. `ioctl(.sync)` below is that flush, and was a
-        // no-op before this.
+        // Safe only because FatFs asks: sync_fs() ends in disk_ioctl(CTRL_SYNC)
+        // and runs from f_close, f_sync, f_unlink, f_mkdir and f_rename --
+        // every point at which the medium is supposed to be consistent.
         combine: []u8 = &.{},
         combine_base: fatfs.LBA = 0,
         combine_count: u32 = 0,
@@ -572,10 +555,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             for (self.lines) |*line| {
                 line.sectors = 0;
             }
-            // Dropped rather than flushed on purpose: this runs at mount and
-            // at reformat, where whatever is buffered describes a volume that
-            // is no longer the one on the card. Writing it out would put one
-            // volume's sectors onto another.
+            // Dropped rather than flushed: this runs at mount and reformat,
+            // where whatever is buffered describes a volume that is no longer
+            // the one on the card.
             self.combine_count = 0;
             self.sectors_on_disk = 0;
         }
@@ -601,11 +583,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
         /// The device I/O itself. The seek and the transfer have to stay
         /// together so nothing can reposition the device between them; that is
-        /// `dev_lock`, taken by the outer `read`/`write`/`ioctl` entry points.
-        ///
-        /// It used to be a PRIMASK section here instead, which held interrupts
-        /// off for the whole multi-sector SD command -- correct exclusion, but
-        /// milliseconds inside a budget that is ~93 us (uart_driver.zig:51-59).
+        /// `dev_lock`, taken by the outer `read`/`write`/`ioctl` entry points
+        /// rather than a PRIMASK section, which would mask for the whole
+        /// multi-sector SD command against a ~93 us console budget.
         fn read_through(self: *DiskWrapper, into: [*]u8, sector: fatfs.LBA, count: u32) fatfs.Disk.Error!void {
             dev_lock.lock.assert_held();
             const position = self.device.interface.seek(@as(i64, @intCast(sector)) * sector_size, c.SEEK_SET) catch return error.IoError;
@@ -662,10 +642,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             dev_lock.acquire();
             defer dev_lock.release();
             const self: *DiskWrapper = @fieldParentPtr("interface", interface);
-            // The device does not have the buffered run yet, so a read that
-            // covers any of it has to make it real first. Reads served from
-            // the line cache would be correct either way -- write() refreshes
-            // the lines it touches -- but a miss goes straight to the card.
+            // The device does not have the buffered run yet, so a read covering
+            // any of it has to make it real first: a line-cache miss goes
+            // straight to the card.
             if (self.overlaps_combined(sector, @intCast(count))) {
                 try self.flush_combined();
             }
@@ -751,10 +730,9 @@ pub fn create_fs_for_test() !kernel.fs.IFileSystem {
 }
 
 test "FatFs.TwoVolumesCoexistWithoutAliasingEachOther" {
-    // The bug this replaces was silent, which is what made it dangerous: FatFs
-    // was built `FF_VOLUMES=1` with one `global_fs` and one `disks[]` slot, so
-    // mounting a second filesystem did not fail -- it repointed the first at
-    // the second's device. A read from /mnt returned the SD card's bytes.
+    // With `FF_VOLUMES=1` and one shared `disks[]` slot, mounting a second
+    // filesystem does not fail -- it repoints the first at the second's device,
+    // so a read from /mnt returns the SD card's bytes.
     var first = try create_fs_for_test();
     defer first.interface.delete();
     try first.interface.format();

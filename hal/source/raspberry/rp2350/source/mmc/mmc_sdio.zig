@@ -293,10 +293,20 @@ pub const MmcSdio = struct {
         };
     }
 
+    /// The command phase needs the same masking the data phase has:
+    /// `rp2350_sdio_command*` drives DMA channel B and `g_sdio.card_response`,
+    /// the state `rp2350_sdio_dma_irq()` mutates. The mask belongs here, bounded
+    /// to one command/response, rather than around a whole transfer, which would
+    /// starve the UART.
+    ///
+    /// Restored before any logging: a console write is milliseconds of blocking
+    /// UART, and emitting it masked is what the 93 us RX-FIFO budget forbids.
     pub fn send_sdio_command(self: *MmcSdio, cmd: u6, arg: u32) hal.mmc.SdioResponse {
         // CMD0, CMD4, CMD15 have no response
         if (cmd == 0 or cmd == 4 or cmd == 15) {
+            const primask = save_and_disable_irq();
             const status = sdio.rp2350_sdio_command(@intCast(cmd), arg, null, 0, 0);
+            restore_irq(primask);
             if (status != sdio.SDIO_OK) {
                 log.err("CMD{d} no-resp failed: {d}", .{ cmd, status });
             }
@@ -305,7 +315,9 @@ pub const MmcSdio = struct {
 
         var response: u32 = 0;
         const flags = sdio_flags_for_cmd(cmd);
+        const primask = save_and_disable_irq();
         const status = sdio.rp2350_sdio_command_u32(@intCast(cmd), arg, &response, flags);
+        restore_irq(primask);
         if (status != sdio.SDIO_OK) {
             self.report_command_failure(cmd, status, false);
             return .{ .command_index = 0, .card_status = 0, .crc_ok = false };
@@ -321,7 +333,9 @@ pub const MmcSdio = struct {
     pub fn send_sdio_data_command(self: *MmcSdio, cmd: u6, arg: u32) hal.mmc.SdioResponse {
         var response: u32 = 0;
         const flags = sdio_flags_for_data_cmd(cmd);
+        const primask = save_and_disable_irq();
         const status = sdio.rp2350_sdio_command_u32(@intCast(cmd), arg, &response, flags);
+        restore_irq(primask);
         if (status != sdio.SDIO_OK) {
             self.report_command_failure(cmd, status, true);
             return .{ .command_index = 0, .card_status = 0, .crc_ok = false };
@@ -338,6 +352,7 @@ pub const MmcSdio = struct {
         _ = self;
         var response: [16]u8 = @splat(0);
         const flags: u32 = sdio.SDIO_FLAG_NO_CRC | sdio.SDIO_FLAG_NO_CMD_TAG;
+        const primask = save_and_disable_irq();
         const status = sdio.rp2350_sdio_command(
             @intCast(cmd),
             arg,
@@ -345,6 +360,7 @@ pub const MmcSdio = struct {
             16,
             flags,
         );
+        restore_irq(primask);
         if (status != sdio.SDIO_OK) {
             log.err("CMD{d} long response failed: {d}", .{ cmd, status });
             return .{ .data = @splat(0), .valid = false };
@@ -409,12 +425,27 @@ pub const MmcSdio = struct {
     //    checksum was already cleared to 0xDEADBEEF → false CRC error.
     // DMA transfers continue autonomously via hardware control-block chaining;
     // no IRQ is needed for the transfer to proceed.
-    inline fn disable_irq() void {
-        asm volatile ("cpsid i" ::: .{ .memory = true });
+    //
+    // Save and restore PRIMASK rather than `cpsid i` / `cpsie i`: these sections
+    // can nest inside a caller that has masked already, and a bare `cpsie i` on
+    // the way out ends the caller's section rather than this one. The error
+    // paths below are where it bites -- each would log preemptible and leave the
+    // rest of the transfer running with the sdio lock held and interrupts on.
+    inline fn save_and_disable_irq() usize {
+        return asm volatile (
+            \\ mrs %[ret], PRIMASK
+            \\ cpsid i
+            : [ret] "=r" (-> usize),
+            :
+            : .{ .memory = true });
     }
 
-    inline fn enable_irq() void {
-        asm volatile ("cpsie i" ::: .{ .memory = true });
+    inline fn restore_irq(primask: usize) void {
+        asm volatile (
+            \\ msr PRIMASK, %[mask]
+            :
+            : [mask] "r" (primask),
+            : .{ .memory = true });
     }
 
     /// Sink for the C driver's SDIO_ERRMSG. Everything sdio_rp2350.c reports --
@@ -452,7 +483,7 @@ pub const MmcSdio = struct {
         // a full reinit on the next rx_start which disrupts the card's
         // continuous data stream.  Instead let rx_poll set SDIO_RX_DONE so
         // the next rx_start can continue seamlessly.
-        disable_irq();
+        const primask = save_and_disable_irq();
         var i: u32 = 0;
         while (i < num_blocks) {
             const chunk: u32 = @min(num_blocks - i, chunk_limit);
@@ -461,7 +492,7 @@ pub const MmcSdio = struct {
 
             const status = sdio.rp2350_sdio_rx_start(target, chunk, @intCast(block_size));
             if (status != sdio.SDIO_OK) {
-                enable_irq();
+                restore_irq(primask);
                 try check_status(status);
             }
             var blocks_complete: u32 = 0;
@@ -473,7 +504,7 @@ pub const MmcSdio = struct {
                     break;
                 }
                 if (poll_status != sdio.SDIO_BUSY) {
-                    enable_irq();
+                    restore_irq(primask);
                     self.report_rx_poll_failure(poll_status, blocks_complete, chunk, !direct);
                     try check_status(poll_status);
                 }
@@ -485,7 +516,7 @@ pub const MmcSdio = struct {
             i += chunk;
         }
         _ = sdio.rp2350_sdio_stop();
-        enable_irq();
+        restore_irq(primask);
     }
 
     pub fn write_sdio_data(self: *MmcSdio, buf: []const u8) anyerror!void {
@@ -509,14 +540,16 @@ pub const MmcSdio = struct {
             @intCast(@min(@as(usize, tx_blocks_per_section), aligned_buf.len / tx_block_size));
 
         // A chunk per critical section rather than one around the whole
-        // transfer. The stream survives the gap: between chunks the driver
-        // parks in SDIO_TX_DONE, from which the next tx_start continues without
-        // reinitializing the PIO, and the card sits waiting for the next start
-        // token, so neither an interrupt nor a context switch in the gap can
-        // disturb it. The gap is where everything a masked window starves gets
-        // to run -- a whole multi-block write under one cpsid is milliseconds,
-        // far longer than the 32-byte UART FIFO can cover, which is why the
-        // chunk is bounded rather than simply set to the request length.
+        // transfer. The stream survives the gap: the driver parks in
+        // SDIO_TX_DONE, from which the next tx_start continues without
+        // reinitializing the PIO, and the card waits for the next start token.
+        // The gap is where everything a masked window starves gets to run.
+        //
+        // It only opens if the caller has not masked already, since the section
+        // restores PRIMASK rather than clearing it -- which is why `MmcIo`'s
+        // sdio lock has to be a sleeping mutex. As a `lock_irqsave` spinlock it
+        // masked for the whole transfer regardless of this chunking, so the gap
+        // restored to masked and the UART RX FIFO starved anyway.
         var i: u32 = 0;
         while (i < num_blocks) {
             const chunk: u32 = @min(num_blocks - i, chunk_limit);
@@ -528,11 +561,11 @@ pub const MmcSdio = struct {
                 src = &aligned_buf;
             }
 
-            disable_irq();
+            const primask = save_and_disable_irq();
             const status = sdio.rp2350_sdio_tx_start(src, chunk, @intCast(tx_block_size));
             if (status != sdio.SDIO_OK) {
                 _ = sdio.rp2350_sdio_stop();
-                enable_irq();
+                restore_irq(primask);
                 try check_status(status);
                 return error.Unknown; // not reached: status was not SDIO_OK
             }
@@ -544,23 +577,23 @@ pub const MmcSdio = struct {
                     break;
                 }
                 if (poll_status != sdio.SDIO_BUSY) {
-                    enable_irq();
+                    restore_irq(primask);
                     log.err("tx_poll failed: {d} (block {d}/{d})", .{ poll_status, i, num_blocks });
                     _ = sdio.rp2350_sdio_stop();
                     try check_status(poll_status);
                     return error.Unknown; // not reached: status was not SDIO_OK
                 }
             }
-            enable_irq();
+            restore_irq(primask);
             i += chunk;
         }
 
         // Back to the command state machine, which also restarts the
         // continuous clock the card needs in order to signal busy while it
         // programs what it buffered.
-        disable_irq();
+        const primask = save_and_disable_irq();
         _ = sdio.rp2350_sdio_stop();
-        enable_irq();
+        restore_irq(primask);
     }
 
     // -- SPI-compatible interface methods (for mmc.zig union compatibility) --

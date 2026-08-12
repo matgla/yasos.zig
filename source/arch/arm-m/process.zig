@@ -246,6 +246,37 @@ pub fn init() void {
     hal.time.systick.disable();
 }
 
+/// Per-core timer setup for a secondary core, run by that core itself. SysTick
+/// lives in the System Control Space, which is per-core hardware, so this is the
+/// same registers on different silicon rather than a repeat of `init()`.
+///
+/// It does not call `initialize_context_switching`, which installs the
+/// scheduler's hand-off; until this core takes its first switch the tick drives
+/// nothing but its liveness counter. Unlike `init()` the timer is left enabled,
+/// because the caller is already parked in its idle loop.
+///
+/// It does call `disable_lazy_fp_stacking`: FPCCR is banked per core too, so
+/// core 1 comes up with LSPEN at its reset value whatever core 0 did.
+pub fn init_secondary() void {
+    disable_lazy_fp_stacking();
+    // Exception priorities live in the SCB's SHPR registers, which are banked
+    // per core, so core 0 setting them does nothing for core 1. The ordering
+    // argument below -- PendSV strictly lowest, so it can never preempt SysTick
+    // or SVCall and strand their ACTIVE bits -- is a property of these
+    // registers, and equal priorities happen not to preempt, so leaving them at
+    // reset reads as working right up until something moves.
+    set_exception_priorities();
+    hal.time.systick.init(@intCast(hal.cpu.frequency() / 1000)) catch @panic("Unable to initialize systick on a secondary core");
+}
+
+/// The priority ordering the context switch depends on. See
+/// `initialize_context_switching` for why PendSV must be last.
+fn set_exception_priorities() void {
+    hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
+    hal.irq.set_priority(.systick, 0xfe);
+    hal.irq.set_priority(.pendsv, 0xff);
+}
+
 // FPCCR.LSPEN (bit 30), the FPU's lazy state-preservation enable. Reset value
 // is 1.
 const fpccr: *volatile u32 = @ptrFromInt(0xE000EF34);
@@ -287,7 +318,7 @@ fn disable_lazy_fp_stacking() void {
 pub fn initialize_context_switching() void {
     std.log.err("Initializing ARM Cortex-M context switching...", .{});
     disable_lazy_fp_stacking();
-    hal.irq.set_priority(.supervisor_call, 0xf0); // system calls are not interuptible
+    set_exception_priorities();
     // PendSV MUST be the lowest-priority exception. The context switch performed
     // inside the PendSV handler exits via an exception-return into the switched-to
     // task instead of returning to whatever it interrupted. If PendSV could
@@ -297,8 +328,6 @@ pub fn initialize_context_switching() void {
     // again -> all further context switches stall. Keeping PendSV strictly below
     // SysTick makes SysTick return first (clearing SYSTICKACT) and PendSV
     // tail-chain afterwards.
-    hal.irq.set_priority(.systick, 0xfe);
-    hal.irq.set_priority(.pendsv, 0xff);
 }
 
 pub const ArmProcess = struct {

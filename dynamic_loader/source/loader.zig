@@ -741,6 +741,23 @@ pub const Loader = struct {
             if ((from_section == .Code or from_section == .Init) and (address_from & 1) == 0) {
                 address_from += 1;
             }
+
+            // If this same function is also reachable through the GOT, that GOT
+            // entry was given a thunk by process_local_relocations. Writing the
+            // raw address here would make the two pointers to one function
+            // compare unequal, which C forbids (gcc-torture 930608-1). Reuse the
+            // thunk that already exists; do not mint a new one, since only GOT
+            // and imported-pointer relocations are counted into the thunk pool.
+            if (from_section == .Code) {
+                if (maybe_unique_data) |unique| {
+                    const got = module.get_got();
+                    if (unique.find_thunk(thunk_index, @intFromPtr(got.ptr), address_from)) |thunk_address| {
+                        target.* = thunk_address;
+                        continue;
+                    }
+                }
+            }
+
             target.* = address_from;
         }
     }

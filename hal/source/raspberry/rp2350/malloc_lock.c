@@ -21,14 +21,9 @@
 #include <stdint.h>
 
 // The lock itself lives in Zig (source/kernel/memory/heap/kheap_lock.zig) so
-// there is one implementation rather than two that have to be kept in step.
-// This file exists only to satisfy the link order described above: it must
-// *define* __malloc_lock, but it need not implement it.
-//
-// What changed: this used to be a PRIMASK nesting counter, which excludes this
-// core's own interrupt handlers and provides nothing at all against a second
-// core. It is now a ranked recursive spinlock underneath the same nesting
-// counter, so it does both.
+// there is one implementation rather than two to keep in step. This file exists
+// only to satisfy the link order described above: it must define
+// __malloc_lock, but it need not implement it.
 void yasos_kheap_lock(void);
 void yasos_kheap_unlock(void);
 

@@ -64,18 +64,77 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         var stats: interface.uart.RxStats = .{};
         var last_irq_us: u32 = 0;
 
+        // The receive lock. The RX path has two producers on SMP: the RX
+        // interrupt, which only core 0 enables, and the inline drain inside
+        // `write()`, on whichever core is writing -- a blocking per-byte TX line
+        // is far longer than the 32-byte FIFO can cover. `cpsid i` does not help,
+        // since it masks only the core that executes it. Unsynchronised, both
+        // halves lose bytes silently: UARTDR is a destructive read, and
+        // `RingBuffer.push` is read-modify-write on `head`, so a lost byte
+        // leaves every loss counter at zero.
+        //
+        // Producers never wait -- `drain_rx` try-locks and skips on failure --
+        // because the fault path logs, so a blocking acquire lets a HardFault
+        // land on a core that already holds the lock and spin on itself. Skipping
+        // loses nothing: the hardware FIFO is the backing store, the holder is
+        // inside the drain loop and will take the byte, and the RX/RTIM interrupt
+        // condition stays asserted so a skipping handler re-fires.
+        //
+        // Consumers (`getc`, `read`, `flush`'s ring clear) take it blocking with
+        // interrupts masked first, which cannot deadlock against a producer that
+        // never waits.
+        //
+        // TX is not covered here: serialising two cores in `write()`'s byte loop
+        // is the console lock's job one layer up. Ordering is console (rank 95)
+        // then this, which stays a leaf.
+        var rx_lock: common.utils.SpinLock = .{};
+
+        /// How often a producer found the lock busy and skipped its drain. Kept
+        /// out of `stats` and atomic because it is incremented on the path that
+        /// did not get the lock. A rising `skip` with `ovr` and `drop` flat is
+        /// the design working.
+        var drain_skips: std.atomic.Value(u32) = .init(0);
+
         fn uart_is_readable() linksection(".time_critical") bool {
             const derived_ptr = &RegisterVolatile.*.fr;
             return (derived_ptr.* & picosdk.UART_UARTFR_RXFE_BITS) == 0;
         }
 
         pub fn get_rx_stats(_: Self) interface.uart.RxStats {
+            const flags = rx_lock_acquire();
+            defer rx_lock_release(flags);
             var snapshot = stats;
-            snapshot.dropped = rx_buffer.dropped;
+            snapshot.dropped = @truncate(rx_buffer.dropped.load(.monotonic));
+            snapshot.drain_skips = drain_skips.load(.monotonic);
             return snapshot;
         }
 
+        /// The interrupt entry. Nothing but a calling-convention wrapper -- the
+        /// policy is all in `drain_rx`, which the write path shares.
         fn on_uart_rx_irq() linksection(".time_critical") callconv(.c) void {
+            drain_rx();
+        }
+
+        /// Drain the hardware FIFO into the ring, or skip if someone else is
+        /// already doing it. Never waits; see the block comment on `rx_lock`.
+        fn drain_rx() linksection(".time_critical") void {
+            // Masked before the try-lock, not after: an interrupt landing in
+            // between would reach `drain_rx`, fail the try-lock and skip a drain
+            // that was available to it -- harmless, but it turns `skip` into
+            // noise.
+            const primask = save_and_disable_interrupts();
+            defer restore_interrupts(primask);
+
+            if (!rx_lock.try_lock()) {
+                _ = drain_skips.fetchAdd(1, .monotonic);
+                return;
+            }
+            defer rx_lock.unlock();
+
+            drain_rx_locked();
+        }
+
+        fn drain_rx_locked() linksection(".time_critical") void {
             // Through a derived pointer, like every other register read here:
             // `picosdk.timer0_hw.*.timerawl` does not reliably keep its
             // volatile-ness in this compiler, and an optimised build is then
@@ -153,7 +212,13 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             picosdk.irq_set_enabled(get_rx_interrupt_id(index), true);
             picosdk.irq_set_priority(get_rx_interrupt_id(index), 0x01);
             picosdk.uart_set_irq_enables(Register, true, false);
-            rx_buffer.clear();
+            {
+                // The interrupt is live from the line above, so even this
+                // boot-time clear has a producer to exclude.
+                const flags = rx_lock_acquire();
+                defer rx_lock_release(flags);
+                rx_buffer.clear();
+            }
             self.flush();
             is_initialized = true;
         }
@@ -173,6 +238,8 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
 
         pub fn getc(self: Self) !u8 {
             _ = self;
+            const flags = rx_lock_acquire();
+            defer rx_lock_release(flags);
             const byte = rx_buffer.pop();
             if (byte == null) {
                 return error.NoData;
@@ -180,37 +247,90 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             return byte.?;
         }
 
+        /// Save PRIMASK and mask, to be handed back to `restore_interrupts`.
+        /// Save/restore, not `cpsid i` / `cpsie i`: a bare `cpsie i` unmasks
+        /// unconditionally, so a console write from inside a caller's masked
+        /// section silently ends it. Every kernel log line emitted under
+        /// `save_and_disable_interrupts()` -- `MmcIo`'s whole-transfer window,
+        /// FatFs, `__malloc_lock` -- would return with interrupts back on, which
+        /// leaves a spinlock held while PendSV can deschedule the holder.
+        inline fn save_and_disable_interrupts() usize {
+            return asm volatile (
+                \\ mrs %[ret], PRIMASK
+                \\ cpsid i
+                : [ret] "=r" (-> usize),
+                :
+                : .{ .memory = true });
+        }
+
+        inline fn restore_interrupts(primask: usize) void {
+            asm volatile (
+                \\ msr PRIMASK, %[mask]
+                :
+                : [mask] "r" (primask),
+                : .{ .memory = true });
+        }
+
+        /// Take the receive lock, waiting for it: the consumer side -- `getc`,
+        /// `read`, `flush`'s ring clear, and the stats snapshot. Masking first is
+        /// what makes waiting safe, since no handler on this core can then hold
+        /// the lock or reach for it, so the only holder we can wait for is the
+        /// other core, inside a drain bounded by the 32-byte FIFO. Producers must
+        /// keep using `drain_rx`'s try-lock.
+        fn rx_lock_acquire() linksection(".time_critical") usize {
+            const primask = save_and_disable_interrupts();
+            rx_lock.lock();
+            return primask;
+        }
+
+        /// Release, then unmask. Unmasking first would re-open the window the
+        /// mask exists to close.
+        fn rx_lock_release(primask: usize) linksection(".time_critical") void {
+            rx_lock.unlock();
+            restore_interrupts(primask);
+        }
+
         pub fn write(self: Self, data: []const u8) !usize {
-            asm volatile ("cpsid i" ::: .{ .memory = true });
+            const primask = save_and_disable_interrupts();
             const derived_ptr = &RegisterVolatile.*.dr;
             for (data) |byte| {
                 while (!self.is_writable()) {
-                    // PRIMASK is set, so on_uart_rx_irq cannot fire while we
-                    // busy-wait for TX FIFO space. The PL011 RX FIFO is only 32
-                    // bytes deep; for any write longer than that the host can
-                    // push inbound bytes (command echo is half-duplex) faster
-                    // than they drain, overflowing the HW FIFO and silently
-                    // dropping characters. Drain it inline so it never overruns.
-                    on_uart_rx_irq();
+                    // PRIMASK is set, so the RX interrupt cannot fire on this
+                    // core while we busy-wait for TX FIFO space, and the PL011
+                    // RX FIFO is only 32 bytes deep. Drain it inline so it never
+                    // overruns. This is the second producer on SMP; `drain_rx`
+                    // skips if core 0's interrupt has the lock. Keeping the call
+                    // matters -- while core 0 is deep in a `cpsid i` section it
+                    // is the only thing rescuing the FIFO.
+                    drain_rx();
                 }
                 derived_ptr.* = byte;
             }
             // Mop up anything that landed in the HW FIFO during the final byte's
-            // transmit before we unmask and return to the caller.
-            on_uart_rx_irq();
-            asm volatile ("cpsie i" ::: .{ .memory = true });
+            // transmit before we return to the caller.
+            drain_rx();
+            restore_interrupts(primask);
             return data.len;
         }
 
         pub fn read(self: Self, buffer: []u8) !usize {
             _ = self;
+            const flags = rx_lock_acquire();
+            defer rx_lock_release(flags);
             return rx_buffer.read(buffer);
         }
 
         pub fn flush(_: Self) void {
+            // The BUSY spin is outside the lock: it waits for the TX shift
+            // register to empty, bounded by the far end, and holding the receive
+            // lock across it would stall the other core's drain. Only the ring
+            // clear needs exclusion, and as a producer -- `clear` writes `head`.
             const uart_hw: *volatile picosdk.uart_hw_t = @ptrCast(picosdk.uart_get_hw(Register));
             const derived_ptr = &uart_hw.*.fr;
             while ((derived_ptr.* & picosdk.UART_UARTFR_BUSY_BITS) != 0) {}
+
+            const flags = rx_lock_acquire();
+            defer rx_lock_release(flags);
             rx_buffer.clear();
         }
 

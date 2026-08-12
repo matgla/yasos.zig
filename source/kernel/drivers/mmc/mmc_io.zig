@@ -17,11 +17,24 @@ const std = @import("std");
 
 const kernel = @import("../../kernel.zig");
 
-const arch = @import("arch");
-
 const hal = @import("hal");
 
 const log = std.log.scoped(.@"mmc/driver");
+
+/// Exclusive access to the card controller, for one whole transfer. The
+/// `save_and_disable_interrupts()` this replaced is not a lock: it excludes this
+/// core's handlers and nothing on the other core, so two processes doing file
+/// I/O drove the controller through interleaved command sequences -- `DataCrc`
+/// on reads, `WriteFail` on writes.
+///
+/// A sleeping mutex, not a `spin_irq`: the section is a whole multi-block
+/// transfer, so a spinlock would mask for milliseconds on the holder and on the
+/// other core spinning for it, against a ~93 us RX-FIFO budget. See
+/// `dev_lock.zig`, which makes the same trade one layer up.
+///
+/// Blocking is safe because every path to the controller is thread context, and
+/// `init` runs before any process exists, which `RankedMutex` handles.
+var sdio_lock: kernel.sync.RankedMutex(.sdio) = .{};
 
 const card_parser = @import("card_parser.zig");
 
@@ -81,8 +94,12 @@ pub const MmcIo = struct {
     }
 
     pub fn init(self: *Self) anyerror!void {
-        const state = arch.sync.save_and_disable_interrupts();
-        defer arch.sync.restore_interrupts(state);
+        // Card bring-up is a long command sequence with timing requirements of
+        // its own, so it takes the controller for the whole of it. It runs
+        // before the second core schedules, but holding the lock costs nothing
+        // and stops that being load-bearing.
+        sdio_lock.lock();
+        defer sdio_lock.unlock();
         try self._mmc.init();
         const config = self._mmc.get_config();
         switch (config.mode) {
@@ -114,8 +131,12 @@ pub const MmcIo = struct {
     }
 
     pub fn read(self: *const Self, address: u64, buf: []u8) isize {
-        const state = arch.sync.save_and_disable_interrupts();
-        defer arch.sync.restore_interrupts(state);
+        // Held across the whole transfer -- command, response and data are one
+        // indivisible sequence on a single controller. The driver keeps its own
+        // fine-grained PRIMASK sections around the DMA poll loops, which is
+        // where masking is actually required and is bounded.
+        sdio_lock.lock();
+        defer sdio_lock.unlock();
         const t_disk = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         defer if (kernel.perf.enabled)
             kernel.perf.disk_read(kernel.perf.read_cycles() -% t_disk, @intCast(buf.len / 512));
@@ -156,8 +177,9 @@ pub const MmcIo = struct {
     }
 
     pub fn write(self: *const Self, address: u64, buf: []const u8) isize {
-        const state = arch.sync.save_and_disable_interrupts();
-        defer arch.sync.restore_interrupts(state);
+        // See `read`: one transfer, one holder.
+        sdio_lock.lock();
+        defer sdio_lock.unlock();
         // Block-layer attribution: whether a slow write() or close() is the
         // card's time or the filesystem's bookkeeping above it.
         const t_disk = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
@@ -868,11 +890,8 @@ pub const MmcIo = struct {
             // Wait for the card to finish programming before moving on.
             //
             // Deferring this to the next operation's leading wait_for_card_dat0
-            // was tried and reverted: measured on the rig, a tcc compile's
-            // seven single-block writes spend 0.01 ms of 6.13 ms waiting on the
-            // card, because they are spaced far enough apart that it is always
-            // idle by the next one. The 875 us each costs is the command and
-            // data path itself, not this wait -- so deferring moved nothing and
+            // was tried and reverted: writes are spaced far enough apart that
+            // the card is already idle by the next one, so it moved nothing and
             // only made a flush mean "handed to the card".
             var timeout: u32 = 100_000;
             while (self._mmc.is_busy() and timeout > 0) : (timeout -= 1) {

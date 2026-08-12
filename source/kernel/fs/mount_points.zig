@@ -27,30 +27,19 @@ const IFile = kernel.fs.IFile;
 
 const config = @import("config");
 
-/// Guards the shape of the mount tree.
+/// Guards the shape of the mount tree: `find_longest_matching_point` walks it on
+/// every `open`, `stat` and `unlink` while `umount` frees nodes underneath, and
+/// there is no refcount to stop a walk following a freed pointer.
 ///
-/// The hazard the inventory names: `find_longest_matching_point` walks the tree
-/// on the hottest kernel path -- every `open`, `stat`, `unlink` goes through it
-/// -- while `umount` calls `deinit` on nodes underneath it. There is no refcount
-/// and no generation counter, so a walk in progress can follow a pointer into a
-/// node that has just been freed.
+/// Rank `mount` (10), and a sleeping mutex rather than a spin rwlock: it is
+/// acquired before `fs` (20), which is itself sleeping, so a spinlock here would
+/// be illegal the moment it were held across a filesystem call.
 ///
-/// Rank `mount` (10), the outermost lock in the hierarchy, and a *sleeping*
-/// mutex rather than the spin rwlock the plan's table sketches. It has to be:
-/// rank 10 is acquired before `fs` (20), which is itself a sleeping mutex, and
-/// "never take a sleeping mutex while holding a spinlock" would make a spin
-/// rwlock here illegal the moment it were held across a filesystem call.
-///
-/// ## What this does not yet fix
-///
-/// It makes the *walk* safe against a concurrent mount or umount. It does not
-/// make the *result* safe: the VFS calls into `node.point.filesystem` after the
-/// lookup returns and the lock is dropped, so a umount landing in that gap can
-/// still free the mount point out from under an in-flight operation. Closing
-/// that needs a reference on the returned point, which is the next step -- and
-/// holding this lock across the filesystem call instead is not an option,
-/// because RamFs's tier spills back through `kernel.fs.get_ivfs()` and would
-/// re-enter it.
+/// This makes the walk safe, not the result: the VFS calls into
+/// `node.point.filesystem` after the lock is dropped, so a umount in that gap
+/// can still free the point. Closing that needs a reference on the returned
+/// point -- holding this lock across the call is not an option, because RamFs's
+/// tier spills back through `kernel.fs.get_ivfs()` and would re-enter it.
 pub var mount_lock: kernel.sync.RankedMutex(.mount) = .{};
 const interface = @import("interface");
 

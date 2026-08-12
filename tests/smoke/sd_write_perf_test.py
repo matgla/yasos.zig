@@ -125,23 +125,15 @@ SEQ_WRITE_FLOORS = (
 RAND_WRITE_FLOOR = 180
 RAND_WRITE_REFERENCE = 368
 
-# Sequential 512-byte writes must reach multi-block speed.
+# Sequential 512-byte writes must reach multi-block speed. An absolute floor
+# rather than a speedup ratio against larger writes: the block layer combines
+# contiguous single-sector writes (`write_combined` in fatfs.zig), so every size
+# now measures about the same and the ratios collapsed to ~1.0.
 #
-# This replaced a set of speedup *ratios* (4 KiB and 32 KiB against the
-# 512-byte pass) on 2026-08-10, when the block layer started combining
-# contiguous single-sector writes into one multi-block request
-# (`write_combined` in source/fs/fatfs/fatfs.zig). Small sequential writes now
-# reach the card as 4 KiB runs, so every size measures about the same and the
-# ratios collapsed to ~1.0 -- not because batching was lost but because it
-# moved above the driver, where the 512-byte denominator gets it too.
-#
-# The regression those ratios existed to catch is still caught, and more
-# directly: if either the combining or the CMD25 path stopped working, small
-# sequential writes would fall back to one command per sector, which measures
-# ~376 KiB/s (the pre-combining reference). Observed after combining: 2695 and
-# 2728 KiB/s. The floor sits between the two with wide margin on both sides --
-# 2.7x above the value that means "broken", 2.7x below the value observed --
-# so it neither fires on a slower card nor passes a real regression.
+# If either the combining or the CMD25 path broke, small sequential writes would
+# fall back to one command per sector, measuring ~376 KiB/s against the ~2700
+# observed. The floor sits 2.7x above the broken value and 2.7x below the
+# observed one, so it neither fires on a slower card nor passes a regression.
 SEQ_WRITE_512_COMBINED_FLOOR = 1000
 SEQ_WRITE_512_COMBINED_REFERENCE = 2695
 SEQ_WRITE_512_PER_COMMAND_RATE = 376

@@ -49,6 +49,23 @@ pub fn UartFile(comptime UartType: anytype) type {
                 _ = self;
             }
 
+            /// Emit to the console UART under the console lock. Every byte this
+            /// file puts on the wire goes through here or through an explicit
+            /// `console_acquire` around a group of writes -- otherwise
+            /// `/dev/uart0` is a second front door onto the UART that
+            /// `stdout.zig` knows nothing about, and the two interleave
+            /// mid-token.
+            ///
+            /// Never call this while already inside a console section: the
+            /// underlying spinlock panics on a recursive acquisition. The
+            /// multi-write echo groups below take the lock once and call
+            /// `uart.write_some` directly inside it.
+            fn echo(data: []const u8) void {
+                const held = kernel.stdout.console_acquire();
+                defer kernel.stdout.console_release(held);
+                _ = uart.write_some(data) catch {};
+            }
+
             pub fn create(allocator: std.mem.Allocator, filename: []const u8) UartFileImpl {
                 return UartFileImpl.init(.{
                     ._icanonical = true,
@@ -115,6 +132,13 @@ pub fn UartFile(comptime UartType: anytype) type {
                             index -= 1;
                             cursor_pos -= 1;
                             if (self._echo) {
+                                // One console section for the whole sequence:
+                                // these bytes are a cursor movement, a repaint
+                                // and a move back, so a log line landing in the
+                                // middle leaves the cursor somewhere this code
+                                // no longer believes it is.
+                                const held = kernel.stdout.console_acquire();
+                                defer kernel.stdout.console_release(held);
                                 // Move cursor left
                                 _ = Self.uart.write_some("\x08") catch {};
                                 // Re-echo from cursor to end + space to clear last char
@@ -156,7 +180,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                                     if (cursor_pos > 0) {
                                         cursor_pos -= 1;
                                         if (self._echo) {
-                                            _ = Self.uart.write_some("\x1b[D") catch {};
+                                            echo("\x1b[D");
                                         }
                                     }
                                 },
@@ -165,7 +189,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                                     if (cursor_pos < index) {
                                         cursor_pos += 1;
                                         if (self._echo) {
-                                            _ = Self.uart.write_some("\x1b[C") catch {};
+                                            echo("\x1b[C");
                                         }
                                     }
                                 },
@@ -212,7 +236,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                             index += 1;
                             cursor_pos = index;
                             if (self._echo) {
-                                _ = uart.write_some(ch[0..1]) catch {};
+                                echo(ch[0..1]);
                             }
                         } else {
                             // Insert in middle: shift buffer right
@@ -224,6 +248,10 @@ pub fn UartFile(comptime UartType: anytype) type {
                             cursor_pos += 1;
                             index += 1;
                             if (self._echo) {
+                                // As above: repaint plus cursor-restore is one
+                                // indivisible sequence.
+                                const held = kernel.stdout.console_acquire();
+                                defer kernel.stdout.console_release(held);
                                 // Echo from cursor-1 to end of line
                                 _ = Self.uart.write_some(buffer[cursor_pos - 1 .. index]) catch {};
                                 // Move cursor back to cursor_pos
@@ -236,7 +264,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                     } else {
                         buffer[index] = ch[0];
                         if (self._echo) {
-                            _ = uart.write_some(ch[0..1]) catch {};
+                            echo(ch[0..1]);
                         }
                         index += 1;
                         cursor_pos = index;
@@ -251,8 +279,21 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return @intCast(index);
             }
 
+            /// Write to the console, serialised against the other core. One
+            /// `write_some` for the whole slice, deliberately not chunked:
+            /// `Uart.write` masks interrupts for its byte loop, so the console
+            /// lock is only ever held across a region that cannot be preempted.
+            /// Release it between chunks and PendSV can switch threads there,
+            /// after which the incoming thread's write sees `held_by_current`
+            /// -- which is per core, not per thread -- come back true and writes
+            /// ungoverned into the displaced thread's bytes.
+            ///
+            /// The hold is therefore as long as the caller's slice, ~3.4 ms per
+            /// KiB at 3 Mbaud, and libc hands us line-sized buffers.
             pub fn write(self: *Self, data: []const u8) isize {
                 _ = self;
+                const held = kernel.stdout.console_acquire();
+                defer kernel.stdout.console_release(held);
                 const result = uart.write_some(data) catch return 0;
                 return @intCast(result);
             }

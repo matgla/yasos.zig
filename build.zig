@@ -82,11 +82,8 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
     return parsed.value;
 }
 
-/// How many FAT volumes may be mounted at once.
-///
-/// Must match `source/fs/fatfs/fatfs.zig`'s `max_volumes`. One is what FatFs
-/// defaults to, and it made a second `FatFs` instance silently repoint the
-/// first at its own device rather than fail.
+/// How many FAT volumes may be mounted at once. Must match
+/// `source/fs/fatfs/fatfs.zig`'s `max_volumes`.
 const fat_volume_count: u5 = 4;
 
 pub fn build(b: *std.Build) !void {
@@ -182,6 +179,26 @@ pub fn build(b: *std.Build) !void {
     });
     fs_tests.root_module.addImport("kernel", kernel_module_for_tests);
 
+    // The board-independent half of the HAL. Self-contained (`std` only), so it
+    // needs none of the scaffolding the three above do, and it holds the UART
+    // receive ring whose SMP ordering is only testable on real cores.
+    const hal_utils_tests_module = b.addModule("hal_utils_tests_module", .{
+        .root_source_file = b.path("hal/source/common/utils/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const hal_tests = b.addTest(.{
+        .name = "hal_tests",
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .root_module = hal_utils_tests_module,
+        .use_llvm = true,
+        .filters = test_filters,
+    });
+
+    const install_hal_tests = b.addInstallBinFile(hal_tests.getEmittedBin(), "hal_tests");
+    run_tests_step.dependOn(&install_hal_tests.step);
+
     const yasld_stub = b.addModule("yasld_stub", .{
         .root_source_file = b.path("dynamic_loader/stub/yasld.zig"),
         .target = target,
@@ -249,17 +266,12 @@ pub fn build(b: *std.Build) !void {
     kernel_tests.root_module.addImport("hal", hal_for_tests);
     kernel_tests.root_module.addImport("arch", arch_for_tests);
 
-    // The kernel module exposes `kernel.perf` (perf_profile.zig) so filesystem
-    // code outside source/kernel can attribute its own work. That module reads
-    // the instrumentation Kconfig and the CPU frequency, so the module needs
-    // both imports even in a test build where profiling compiles out — without
-    // them fs_tests fails with "no module named 'config' available".
+    // `kernel.perf` reads the instrumentation Kconfig and the CPU frequency, so
+    // the module needs both imports even where profiling compiles out.
     kernel_module_for_tests.addImport("config", test_config_module);
     kernel_module_for_tests.addImport("hal", hal_for_tests);
-    // fs_tests reaches `kernel.sync` (ramfs refcounts), and the sync primitives
-    // ask the arch layer how wide a lock-free atomic is and how to mask
-    // interrupts. Zig only analyses an import when something references it, so
-    // this was previously satisfied by nothing in fs_tests touching that path.
+    // fs_tests reaches `kernel.sync` (ramfs refcounts), which asks the arch
+    // layer how wide a lock-free atomic is and how to mask interrupts.
     kernel_module_for_tests.addImport("arch", arch_for_tests);
 
     // Forward optimize, for the same reason as the MCU dependency in
@@ -296,10 +308,12 @@ pub fn build(b: *std.Build) !void {
     const run_kernel_tests = b.addRunArtifact(kernel_tests);
     const run_fs_tests = b.addRunArtifact(fs_tests);
     const run_arch_tests = b.addRunArtifact(arch_tests);
+    const run_hal_tests = b.addRunArtifact(hal_tests);
 
     run_tests_step.dependOn(&run_kernel_tests.step);
     run_tests_step.dependOn(&run_fs_tests.step);
     run_tests_step.dependOn(&run_arch_tests.step);
+    run_tests_step.dependOn(&run_hal_tests.step);
 
     kernel_tests.root_module.addIncludePath(b.path("."));
     kernel_tests.root_module.addIncludePath(b.path("libs/libc"));

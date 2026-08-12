@@ -13,25 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Shared reference counts, for the loader's two of them.
-//!
-//! Semantically identical to `source/kernel/sync/refcount.zig` and to
-//! `libs/oop`'s `refcount`, and it exists separately only because `yasld` is a
-//! standalone module that imports neither. Forty lines of duplication is the
-//! cheaper half of that trade against giving the dynamic loader a dependency on
-//! the kernel; if a fourth copy ever appears, that calculus has changed. Keep
-//! the three in step -- the ordering notes below are the contract.
-//!
-//! ## What this does and does not fix
-//!
-//! It makes each individual increment and decrement indivisible. It does **not**
-//! make `Loader.get_shared_data` safe: that is a check-then-act across a
-//! `StringHashMap` lookup and an insert, so two contexts can both miss, both
-//! create, and one `put` overwrites the other -- leaking an image and leaving a
-//! `users` count that never reaches zero. Nor does it stop a concurrent
-//! `get_shared_data` from resurrecting a pointer `unload_module` has just
-//! decided to free. Both of those need `loader_lock` (phase 4 of
-//! `docs/smp_plan.md`); the atomic is a prerequisite, not the fix.
+// Shared reference counts, for the loader's two of them. Semantically identical
+// to `source/kernel/sync/refcount.zig` and `libs/oop`'s `refcount`, and separate
+// only because `yasld` imports neither; keep the three in step.
+//
+// This makes each increment and decrement indivisible. It does not make
+// `Loader.get_shared_data` safe -- that is a check-then-act across a hash map
+// lookup and an insert, and needs `loader_lock`.
 
 const std = @import("std");
 

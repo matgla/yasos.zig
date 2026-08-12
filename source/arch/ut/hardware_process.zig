@@ -104,6 +104,10 @@ pub const HardwareProcess = struct {
 };
 
 pub fn init() void {}
+/// No-op counterpart to the arm-m hook: this target has one core and no
+/// per-core timer to program. See `source/arch/arm-m/process.zig`.
+pub fn init_secondary() void {}
+
 
 export fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: usize) i32 {
     _ = argc;
@@ -124,10 +128,11 @@ pub fn get_offset_of_hardware_stored_registers(use_fpu: bool) isize {
     return 0;
 }
 
-pub export fn process_vfork_child(r11: usize, got: usize, lr: usize) i32 {
-    _ = r11;
+pub export fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32 {
+    _ = sp;
     _ = got;
     _ = lr;
+    _ = is_fpu_used;
     return 0;
 }
 

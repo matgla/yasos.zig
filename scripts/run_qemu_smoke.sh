@@ -34,8 +34,8 @@
 #
 # Any non-option arguments are passed through to pytest. With none, the default
 # set is the core target tests plus the tcc suites:
-#   cd_test.py ls_test.py ps_test.py shell_test.py yaff_arch_test.py tcc_test.py
-#   tcc_suite_test.py
+#   cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py
+#   tcc_test.py tcc_suite_test.py
 # The tcc tests currently FAIL (known tinycc bug + a serial-upload corruption on
 # QEMU) and are enabled so they run as fixes land. Pass files to override, e.g.
 #   scripts/run_qemu_smoke.sh tcc_suite_test.py -k 00_assignment
@@ -49,6 +49,21 @@
 # Output is one line per test (pytest -v, added unless you pass your own -q/-v),
 # each carrying a [n/total] counter and the test's wall time, so a long run
 # streams progress instead of sitting on a single unterminated progress line.
+#
+# The run happens in two phases. Everything runs in parallel except the tests
+# named in tests/smoke/heavy_tests.txt, which run serially afterwards -- see
+# that file for what "heavy" means, how it was measured, and why the guest's
+# memory rather than qemu's is what decides it. Each phase writes its own log
+# and is printed from it afterwards, so the two do not interleave and the whole
+# thing survives being piped somewhere that truncates:
+#   .cache/qemu_smoke_phase_logs/pytest_parallel.log
+#   .cache/qemu_smoke_phase_logs/pytest_serial.log
+# Both are copied into .cache/qemu_smoke_logs/ at the end, next to the per-test
+# logs they refer to.
+#
+# YASOS_SMOKE_MEM_REPORT=<dir> records each test's peak guest memory (and qemu's
+# peak RSS beside it) to <dir>/<worker>.tsv, which is how heavy_tests.txt is
+# refreshed. Off by default -- it costs two target commands per test.
 #
 # Logs: each run's per-test session logs, logs/failed/, and the qemu process
 # logs are collected into .cache/qemu_smoke_logs/ (analogous to the remote
@@ -89,8 +104,20 @@ DEFCONFIG="configs/qemu_mps3_an524_defconfig"
 QEMU_MACHINE="mps3-an524"
 # QEMU models the SSE-200's CPU0 without an FPU by default; the kernel enables
 # CP10/CP11 in crt_init and would take a NOCP UsageFault on its first FP
-# instruction without this.
-QEMU_EXTRA="-global sse-200.CPU0_FPU=on"
+# instruction without this. CPU1 is given the same treatment so the two cores
+# are identical: with CONFIG_PROCESS_SMP the kernel brings core 1 up through the
+# same crt path, and a secondary core that differs from core 0 is a difference
+# that would only ever surface as a fault somewhere unrelated.
+#
+# Left on QEMU's default multi-threaded TCG deliberately, i.e. one host thread
+# per emulated core. `-accel tcg,thread=single` was tried as a workaround for a
+# boot stall and is the wrong answer twice over: round-robin TCG never runs the
+# cores at the same instant, so the kernel's cross-core self-test stops
+# detecting anything -- with the lock deliberately removed it still reported a
+# pass -- and it makes a contended lock crawl at about 140 sections a second.
+# The stall itself is fixed in the kernel: source/kernel/smp.zig's self-test no
+# longer blocks on a lock.
+QEMU_EXTRA="-global sse-200.CPU0_FPU=on -global sse-200.CPU1_FPU=on"
 MAP_CORPUS=1
 PRESERVE_STATE=0
 # Default to ReleaseSafe so safety checks (overflow, bounds, null-unwrap) stay on
@@ -145,7 +172,7 @@ if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
     # Core target tests plus the tcc suites. The tcc tests are expected to FAIL
     # for now (known tinycc miscompiles + a serial-upload corruption on QEMU);
     # they are enabled here so they run as fixes land. Override by passing files.
-    PYTEST_ARGS=(cd_test.py ls_test.py ps_test.py shell_test.py yaff_arch_test.py tcc_test.py tcc_suite_test.py)
+    PYTEST_ARGS=(cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py tcc_test.py tcc_suite_test.py)
 fi
 
 if [ "$DO_BUILD" -eq 1 ]; then
@@ -298,12 +325,73 @@ for _attempt in 1 2 3 4 5; do
     sleep 0.2
 done
 
-# Don't let a non-zero pytest exit (expected while tcc tests fail) abort the
-# script before logs are collected.
-set +e
-"$VENV/bin/python" -m pytest -s "${PYTEST_ARGS[@]}"
-status=$?
-set -e
+# Two phases: everything in parallel, then the memory-heavy tests on their own.
+#
+# Guest RAM is a 2 GB file-backed mapping, and what a test costs the host is how
+# much of it the guest touches. Most tests touch little and 32 of them fit side
+# by side; a few touch enough that running them together pushes the host into
+# reclaim, and a starved guest fails as a *boot timeout*, which reads like a
+# target bug rather than a memory one. tests/smoke/heavy_tests.txt names those,
+# and they run with parallelism off.
+#
+# Both phases write to their own log file and are printed from it rather than
+# streamed straight to the terminal. That is what makes the result readable
+# afterwards: `tee` would interleave the two phases, and a run whose output is
+# only ever a pipe loses everything the moment something upstream truncates it.
+# The files stay behind for grepping.
+# Deliberately NOT inside QEMU_SMOKE_LOGS_DIR: that directory is wiped and
+# repopulated from tests/smoke/logs after the run, which would delete these.
+PHASE_LOG_DIR="${YASOS_SMOKE_PHASE_LOG_DIR:-$REPO_ROOT/.cache/qemu_smoke_phase_logs}"
+rm -rf "$PHASE_LOG_DIR"
+mkdir -p "$PHASE_LOG_DIR"
+PARALLEL_LOG="$PHASE_LOG_DIR/pytest_parallel.log"
+SERIAL_LOG="$PHASE_LOG_DIR/pytest_serial.log"
+
+# A caller's own -m has to be combined with the phase selector rather than
+# replaced by it: pytest keeps only the last -m, so appending one would silently
+# drop theirs (`-m measure` would start running the whole suite).
+USER_MARK=""
+PHASE_ARGS=()
+skip_next=0
+for arg in "${PYTEST_ARGS[@]}"; do
+    if [ "$skip_next" -eq 1 ]; then USER_MARK="$arg"; skip_next=0; continue; fi
+    case "$arg" in
+        -m) skip_next=1 ;;
+        -m=*|--markers=*) USER_MARK="${arg#*=}" ;;
+        *) PHASE_ARGS+=("$arg") ;;
+    esac
+done
+
+phase_mark() {
+    if [ -n "$USER_MARK" ]; then echo "($USER_MARK) and $1"; else echo "$1"; fi
+}
+
+# A phase that matches no test exits 5 ("no tests collected"), which is normal
+# here -- most invocations name a handful of tests and none of them are heavy --
+# so it must not be reported as a failure.
+run_phase() {
+    local log="$1"; shift
+    local phase_status=0
+    set +e
+    "$VENV/bin/python" -m pytest -s "$@" &> "$log"
+    phase_status=$?
+    set -e
+    cat "$log"
+    [ "$phase_status" -eq 5 ] && return 0
+    return "$phase_status"
+}
+
+status=0
+echo ">> Phase 1/2: parallel -- everything not in tests/smoke/heavy_tests.txt"
+run_phase "$PARALLEL_LOG" -m "$(phase_mark 'not heavy')" "${PHASE_ARGS[@]}" || status=$?
+
+# `-n 0` last so it beats the -n added above (and any the caller passed):
+# pytest keeps the final value, and 0 is xdist's "run in this process". Using
+# -p no:xdist instead would make the earlier -n an unrecognised argument.
+echo ">> Phase 2/2: serial -- memory-heavy tests"
+serial_status=0
+run_phase "$SERIAL_LOG" -m "$(phase_mark 'heavy')" "${PHASE_ARGS[@]}" -n 0 || serial_status=$?
+[ "$status" -eq 0 ] && status=$serial_status
 
 # Collect this run's logs (per-test session logs, logs/failed/, and the qemu
 # process logs) into .cache/qemu_smoke_logs/ — the local analogue of the remote
@@ -313,6 +401,9 @@ if [ -d "$SMOKE_DIR/logs" ]; then
     mkdir -p "$QEMU_SMOKE_LOGS_DIR"
     cp -a "$SMOKE_DIR/logs/." "$QEMU_SMOKE_LOGS_DIR/"
     echo ">> Collected smoke logs in ${QEMU_SMOKE_LOGS_DIR#"$REPO_ROOT"/}"
+    # Copied in only now, after the wipe above, so both phases' pytest output
+    # ends up alongside the per-test logs it refers to.
+    cp -f "$PARALLEL_LOG" "$SERIAL_LOG" "$QEMU_SMOKE_LOGS_DIR/" 2>/dev/null || true
     if [ -d "$QEMU_SMOKE_LOGS_DIR/failed" ]; then
         echo ">> Failed-test logs in ${QEMU_SMOKE_LOGS_DIR#"$REPO_ROOT"/}/failed"
     fi

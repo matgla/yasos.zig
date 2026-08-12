@@ -22,21 +22,11 @@
 .cpu cortex-m33
 .thumb
 
-// Run this file out of RAM rather than XIP flash.
-//
-// Every syscall and every context switch enters through here, and on the
-// RP2350 the core runs at 532 MHz against QSPI flash: an instruction fetch
-// that misses the XIP cache is worth tens of core cycles. The Zig half of the
-// path already had this treatment -- _irq_svcall and syscall_fast_table carry
-// linksection(".time_critical") and link at 0x2000xxxx -- but this file
-// declared no section, so it landed in .text at 0x1000xxxx and the path
-// crossed flash -> RAM -> flash on the way in and back out again on the way
-// out, with the SVCall vector itself pointing into flash.
-//
-// Every board's linker script already collects .time_critical into the RAM
-// region it copies at boot (hal/source/*/linker_script.ld), so this is a
-// placement change only. "ax" because the section holds code; the region is
-// executable already, which is what lets the Zig side run there today.
+// Run this file out of RAM rather than XIP flash: every syscall and every
+// context switch enters through here, and an instruction fetch that misses the
+// XIP cache is worth tens of core cycles. The Zig half of the path already
+// carries linksection(".time_critical"), and every board's linker script
+// collects that into the RAM region it copies at boot.
 .section .time_critical, "ax", %progbits
 
 #include "libs/libc/sys/syscall_ids.h"
@@ -162,13 +152,10 @@ load_no_fpu:
 .thumb_func
 arch_store_registers_on_stack:
   push {lr}
-  // Drop any exclusive reservation the outgoing task left live.
-  //
-  // A thread preempted between its LDREX and its STREX must not be able to
-  // resume and complete that STREX against a monitor state that belongs to
-  // whatever ran in between. Exception entry is widely believed to clear the
-  // local monitor, but this is one cycle and the failure mode if the belief is
-  // wrong is a spinlock that hands the same lock to two owners.
+  // Drop any exclusive reservation the outgoing task left live: a thread
+  // preempted between its LDREX and STREX must not complete that STREX against
+  // a monitor state belonging to whatever ran in between. Exception entry is
+  // believed to clear the local monitor, but this costs one cycle.
   clrex
   mov r2, r1
   mrs r1, psp
@@ -230,21 +217,16 @@ dispatch_syscall:
 irq_svcall:
   // this is processed in irq
   // r0 in 0..4 is the kernel's own SVC protocol, which is why the SystemCall
-  // enum in sys/syscall.h starts at 5 rather than 0. Two numbers are live:
+  // enum in sys/syscall.h starts at 5. Two numbers are live:
   //
   //   r0 == 0  return from the syscall trampoline (issued by dispatch_syscall);
-  //   r0 == 1  no-op, issued by userspace `vfork` on its way out
-  //            (libs/libc/arm/vfork.S, after _vfork_process returns in the
-  //            parent). It once branched to a stub that released the preempt
-  //            window; it must not any more, because the window vfork opens is
-  //            already closed by process_vfork_child /
-  //            process_get_back_to_parent_vfork, and a third release underflows
-  //            the counter -- a panic now that preempt_enable is strict.
+  //   r0 == 1  no-op, issued by userspace `vfork` on its way out. It must not
+  //            release the preempt window -- process_vfork_child /
+  //            process_get_back_to_parent_vfork already did, and a third
+  //            release underflows the counter.
   //
-  // The r0 == 1 case still has to be caught *here*: r1 and r2 are dead
-  // registers at that call site, not the arg/out pointers the dispatch path
-  // assumes, so letting it fall through to the trampoline hands _irq_svcall a
-  // garbage `out` to write its 8-byte result through.
+  // The r0 == 1 case must be caught here: r1 and r2 are dead registers at that
+  // call site, not the arg/out pointers the dispatch path assumes.
   cmp r0, #1
   beq process_syscall_internal_noop
   cmp r0, #0
@@ -298,13 +280,9 @@ process_syscall_fast_check:
   pop {r0, r3}
 #endif
   // Fast-path decision, inlined: an out-of-range number falls through to the
-  // trampoline, where _irq_svcall reports NotImplemented.
-  //
-  // r3 is the scratch register throughout. It is free to clobber on both
-  // exits: the fast path exception-returns through the user's own stacked
-  // frame, and the trampoline's simulated frame carries r3 only as far as
-  // dispatch_syscall, which does not read it -- the user's r3 is restored at
-  // the end from the original frame, which is untouched here.
+  // trampoline, where _irq_svcall reports NotImplemented. r3 is the scratch
+  // register throughout, free to clobber on both exits -- the user's r3 is
+  // restored from the original frame, which is untouched here.
   cmp r0, #YASOS_SYSCALL_COUNT
   bcs process_syscall_entry
   ldr r3, =syscall_fast_table
@@ -374,21 +352,15 @@ arch_get_stack_pointer:
 //
 // Reached two ways, both of which must find MSP exactly where the push left it:
 // from `sys_stop_root_process` in thread mode (the CONTROL write below moves it
-// off PSP first), and from `pendsv_exit` in handler mode (where the SPSEL write
-// is ignored and MSP is already current).
+// off PSP first), and from `pendsv_exit` in handler mode.
 //
-// The register list must stay identical to the one in
-// `switch_to_the_first_task`; see the comment there for why it is not just
-// {r0, lr}.
+// The register list must stay identical to `switch_to_the_first_task`'s.
 //
-// `.thumb_func`, not `.thumb_func:` -- the stray colon made this a label
-// definition rather than the directive, so the symbol was emitted NOTYPE with
-// bit 0 clear. `pendsv_exit` reaches here with a local `b` and did not care,
-// but the `bl` from `sys_stop_root_process` crosses from flash into
-// .time_critical in RAM and goes through a linker-built long thunk, which ends
-// in `bx ip` -- a branch to an even address, i.e. to ARM state, on a core that
-// has none. That is an INVSTATE UsageFault escalating to HardFault, on the
-// shutdown path only, and only via the one of the two routes that is thunked.
+// `.thumb_func`, not `.thumb_func:` -- a stray colon makes it a label rather
+// than the directive, and the symbol is then emitted NOTYPE with bit 0 clear.
+// The `bl` from `sys_stop_root_process` crosses from flash into .time_critical
+// through a linker-built long thunk ending in `bx ip`, so an even address is an
+// INVSTATE UsageFault.
 .global switch_to_main_task
 .thumb_func
 switch_to_main_task:
@@ -426,14 +398,38 @@ pendsv_store_and_switch:
   pop {r0, r1}
   bl store_and_switch_to_next_task
   bl apply_resume_privilege
-  bx r0
+  b pendsv_exception_return
 pendsv_switch_to_next_task:
   pop {r0, r1}
   bl switch_to_next_task
   bl apply_resume_privilege
-  bx r0
+  b pendsv_exception_return
 pendsv_ignore:
   pop {r0, pc}
+
+// Resume the incoming task, refusing to `bx` through a word that is not an
+// EXC_RETURN. r0 is the `lr` slot of the incoming task's software frame; a valid
+// exception return has bits [31:24] set, and `mvns` then `lsrs #24` leaves zero
+// exactly in that case without a scratch constant.
+//
+// Without it the failure is an INVSTATE UsageFault at the `bx`, whose dump
+// points at `apply_resume_privilege` -- which returns via `pop {r0, r1, r2, pc}`
+// without restoring LR, so the crash reads as a fault inside a helper that has
+// already returned. See `report_bad_exc_return`.
+//
+// Clobbering r1 is safe: it is caller-saved and reloaded from the incoming
+// task's hardware exception frame by the `bx` below.
+.thumb_func
+pendsv_exception_return:
+  mvns r1, r0
+  lsrs r1, r1, #24
+  bne 1f
+  bx r0
+1:
+  // r0 already holds the offending value, which is the argument. Does not
+  // return -- it panics, and the panic path prints the postmortem.
+  bl report_bad_exc_return
+  b .
 
 // Set CONTROL.nPRIV for the thread we are about to return to, based on the
 // resumed process's privilege flag (the root/init process stays privileged; all
@@ -475,27 +471,15 @@ apply_privilege_tail:
 .global switch_to_the_first_task
 .thumb_func
 switch_to_the_first_task:
-  // Build the frame `switch_to_main_task` resumes on at shutdown.
+  // Build the frame `switch_to_main_task` resumes on at shutdown. This is a call
+  // that returns from somewhere else an entire system lifetime later: the
+  // `bx r0` below enters the first task and never comes back, and
+  // `switch_to_main_task` re-enters the caller by popping this frame. So it has
+  // to carry everything AAPCS promises a call preserves, not just pc -- callers
+  // keep live values in r4 across it.
   //
-  // This is a call that returns from somewhere else, an entire system lifetime
-  // later: the `bx r0` below enters the first task and never comes back, and
-  // `switch_to_main_task` re-enters the caller by popping this frame. So the
-  // frame has to carry everything the AAPCS promises a call preserves, not just
-  // pc.
-  //
-  // It used to push only {r0, lr}, which restored pc and sp and left r4-r11
-  // holding whatever the *shutdown* context had in them. The caller does not
-  // survive that: `spawn.root_process` materialises its `!void` success value
-  // into r4 before this call and returns it with `mov r0, r4` immediately
-  // after, so it resumed returning a foreign word as an error -- "Cannot start
-  // root process" on a clean `exit`, with `@errorName` indexing past its table
-  // and handing the logger a wild slice to memcpy from. The out-of-line
-  // `sys_start_root_process` is worse: it keeps its sret pointer in r4, so the
-  // resume stored 8 bytes through a stale address.
-  //
-  // r0 is in the list for the 8-byte stack alignment AAPCS requires (nine
-  // registers would not do), and restoring it costs nothing: it is the
-  // `with_fpu` argument, dead by then in both callers.
+  // r0 is in the list for the 8-byte stack alignment AAPCS requires; restoring
+  // it costs nothing, since it is the `with_fpu` argument and dead by then.
   push {r0, r4-r11, lr} // this will be taken by return to user mode
   mov r1, lr
   bl switch_to_next_task
@@ -521,45 +505,67 @@ switch_to_the_first_task:
 
 
 // r0 - pid
-// r1 - sp
-// r2 - lr
+// r1 - sp (the parent's resume position, stored by arch_store_vfork_back_point)
+// r2 - lr (process_vfork_back_here)
 .global process_get_back_to_parent_vfork
 .thumb_func
 process_get_back_to_parent_vfork:
   mov sp, r1
   push {r0, r2}
+  // The child has been running on this stack from r1 upwards, so the frames
+  // process_vfork_back_here is about to pop are whatever it left behind. Put
+  // the saved copy back first. Safe here and nowhere earlier: sp is already at
+  // the bottom of the saved region, so this call's own frame is underneath it.
+  bl arch_restore_vfork_back_stack
   bl process_unblock_context_switch
   pop {r0, r2}
   cpsie i
   bx r2
 
-// r0 - pointer to child sp value (to rescue registers)
-// r1 - pointer to child got value
-// r2 - pointer to child return
-// r3 - is fpu used
+// Release a freshly vforked child, which continues on its parent's stack.
+//
+// r0 - the child's register frame, as libc's vfork() left it: {r4-r11, lr},
+//      with {s0-s31} above them when r3 says so. libs/libc/arm/vfork.S builds
+//      it; the two have to agree on the layout, because unwinding it is what
+//      recovers the caller's stack pointer.
+// r1 - got for the child (unused: it inherits the parent's r9 with the frame)
+// r2 - where to resume the child (the instruction after its vfork() call)
+// r3 - 1 when the frame carries the FP registers as well
 .global process_vfork_child
 .thumb_func
 process_vfork_child:
   push {r4-r12, lr}
   cmp r3, #1
-  mov r3, sp
+  mov r3, sp                    // the parent stays suspended at this position
   mov sp, r0
-  pop {r4-r12, lr}
+  pop {r4-r11, lr}
   bne vfork_child_no_fpu
   vpop {s0-s31}
 vfork_child_no_fpu:
+  // sp is now what it was when the child called vfork(), the only value its
+  // caller's frame offsets are valid against. Returning it on the kernel's stack
+  // instead leaves every local in that frame reading whatever the syscall left
+  // there -- including the GOT base tcc spills around calls.
+  mov r0, sp
   mov sp, r3
-  push {r1, r2} // r9 for child, other for alignment
+  push {r0, r2}                 // [sp] = the child's sp, [sp,#4] = its resume point
   ldr r0, =process_vfork_back_here
   mov r1, r3
   bl arch_store_vfork_back_point
-  ldr r1, [sp, #4]
-  mov r0, #0
-  push {r0, r1}
+  cmp r0, #0
+  bne vfork_child_stack_saved
+  // Nowhere to save the parent's suspended frames, so they are still live and
+  // the child has to stay below them.
+  add r3, sp, #8
+  str r3, [sp, #0]
+vfork_child_stack_saved:
   bl process_unblock_context_switch
-  pop {r0, r1}
+  pop {r0, r2}
+  mov sp, r0
+  mov lr, r2
+  mov r0, #0                    // vfork() returns 0 in the child
   cpsie i
-  bx r1
+  bx lr
 
 .thumb_func
 process_vfork_back_here:

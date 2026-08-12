@@ -23,7 +23,16 @@ Baseline source: 2026-07-30 run (`run_logs.txt` + `.cache/remote_smoke_logs/mate
 - [ ] Phase 3 — tcc -O0 allocation reduction
 - [ ] Phase 4 — -O1/-O2 optimizer memory work
 - [ ] Phase 5 — fetch-side + spawn-cost levers (added 2026-08-03). 0.1 sized the per-compile floor at 85.8 ms (~380 s/run) which 5.2/5.3 attack, and 0.7 sized the miss stream which 5.1 attacks. **5.1 FIRST DELIVERY 2026-08-06: `.text` −551 KiB (−22.2%), mechanical throughout — no pass merge; the mechanical seam is now exhausted and the rejected remainder is tabulated so it is not re-proposed. Speed dividend and a timed hardware run both still owed.** **5.5 SHIPPED 2026-08-04: the tcc-init half of the floor was the builtin alias declarations, now built programmatically; with the loader fixes the floor is 85.8 → 25.8 ms and the resident-compiler case (5.3) is much weaker**
-- [ ] Phase 6 — suite-level levers: compile cache, changed-only runs, second board, core1 (added 2026-08-03; all opt-in)
+- [ ] Phase 6 — suite-level levers: compile cache, changed-only runs, second board, core1 (added 2026-08-03; all opt-in). **Test-level concurrency on one board is CLOSED, measured 2026-08-12: two concurrent compiles are 0.61x, and the cause is the shared 16 KiB XIP cache, so no ordering or memory budget rescues it. 6.3 (a second board) is untouched by this — it adds a second cache with the second core.**
+
+**Measured 2026-08-12: device-side concurrency is a 0.61x regression on
+compiles, and it is the XIP cache** — not the scheduler and not memory. The
+control arm settles it: a RAM-resident ALU loop gets **1.64x** from the second
+core, while two tcc instances take 44% more cache misses for the same work and
+lose almost exactly that much wall time. Quartering the compile's heap changes
+nothing, which rules out the PSRAM-spill explanation and with it the
+memory-aware co-scheduling such a feature would have needed. See
+[Measured: device-side concurrency is closed](#measured-device-side-concurrency-is-closed-2026-08-12-the-xip-contention-round).
 
 **Measured 2026-08-06: tcc `.text` 2,541,400 → 1,977,152 B (−551 KiB, −22.2%)**
 — the footprint round, the first real delivery against item 5.1. This is the
@@ -327,7 +336,7 @@ These do not make the target faster; they make a *run* cheaper by not repeating 
 
 **6.3 Second board (rig work; est. 1904 s → ~1000-1100 s).** The per-board state already isolates: manifests are per-worker suffixed, `/root/ci` is per-SD-card, crash recovery is per-session. Needed: runner support for a second serial device + probe with its own uhubctl port mapping in the recovery ladder, and a **duration-aware split** — `tcc_timing_report.json` has per-test wall, and a longest-first greedy partition keeps the 321 s top-100 tail from serializing one shard, which a naive count split would. Near-linear until tail-bound (the single 22.6 s `limits-fnargs` sets the floor of the slowest shard). Second use once it exists: run the -O2/torture configuration on board B *concurrently* with the default -O0 suite on board A — two configurations per calendar slot instead of one.
 
-**6.4 The idle second core (horizon; the only kernel-work item here).** Nothing in the tree references core1 today. Full SMP is a project, not a plan item, but two bounded core1 duties pay into this plan without a scheduler rewrite: (a) **background page re-zeroing** — 2.3 wants pages zeroed off the allocation path, and a core1 work queue does exactly that while preserving the pages-are-recycled invariant, turning the mmap-path memset into a queue pop (verify PSRAM cache coherency between the cores before core1 touches cached PSRAM windows); (b) **console TX draining**, so `Uart.write`'s busy-wait leaves the compile path entirely (1.4 removed the routine spawn logging; this removes the cost of whatever remains). Order (a) first — it has a measured cost attached. Both need the SIO spinlock story told first; neither is worth starting before Phases 3-4 have eaten the cheaper compile wins.
+**6.4 The idle second core (horizon; the only kernel-work item here).** *Superseded in part: core1 is no longer idle — SMP phases 0-7 landed and both cores schedule. What this item proposed is still unbuilt, but read [the XIP-contention round](#measured-device-side-concurrency-is-closed-2026-08-12-the-xip-contention-round) first: running a second **compile** on core1 is measured at 0.61x, and (a) below drives PSRAM traffic through the same QMI the compile is already saturating, so it needs measuring against that instrument before it is built. The paragraph below is the 2026-08-03 framing.* Nothing in the tree references core1 today. Full SMP is a project, not a plan item, but two bounded core1 duties pay into this plan without a scheduler rewrite: (a) **background page re-zeroing** — 2.3 wants pages zeroed off the allocation path, and a core1 work queue does exactly that while preserving the pages-are-recycled invariant, turning the mmap-path memset into a queue pop (verify PSRAM cache coherency between the cores before core1 touches cached PSRAM windows); (b) **console TX draining**, so `Uart.write`'s busy-wait leaves the compile path entirely (1.4 removed the routine spawn logging; this removes the cost of whatever remains). Order (a) first — it has a measured cost attached. Both need the SIO spinlock story told first; neither is worth starting before Phases 3-4 have eaten the cheaper compile wins.
 
 ## Verification (end-to-end)
 
@@ -1885,3 +1894,288 @@ peephole.
 - `build_rootfs.sh` **exits 0 when make fails.** A build whose compile errored
   reported success and left the objects wiped; the next step measured a stale
   binary. This is how a round gets attributed to the wrong change.
+
+## Measured: device-side concurrency is closed (2026-08-12, the XIP-contention round)
+
+**Running two compiles at once on the board is 0.61x — slower than running them
+one after the other — and the cause is the shared XIP cache, not the scheduler
+and not memory.** This closes test-level concurrency as a lever, including the
+memory-aware co-scheduling it would have needed. It does *not* close 6.3 (a
+second board), which adds a second cache along with the second core.
+
+Measured with `tests/smoke/prun_scaling_test.py` on the phase-7 SMP kernel,
+where both cores genuinely schedule (`test_secondary_core_actually_runs_processes`
+passes on the same build). Four workloads, each run lockstep (one console
+command per job, what the suite does today) then batched through `prun` at -j1
+and -j2, with -j1 arms bracketing the -j2 arm so drift is visible (it was
+±0.1%):
+
+| workload | lockstep | -j1 | -j2 | what it runs |
+|---|---|---|---|---|
+| compile (40 fn) | 511 ms/job | 0.96x | **0.61x** | tcc, from XIP flash |
+| compile-small (10 fn) | 167 ms/job | 0.92x | **0.59x** | tcc, from XIP flash |
+| compute | 200 ms/job | 1.01x | **1.64x** | ALU loop, from RAM |
+| spawn | 3.4 ms/job | 1.81x | 1.90x | trivial exec |
+
+### What each arm rules out
+
+**The cores are fine.** The compute arm — a tight integer loop in a
+RAM-resident binary, no allocation, no I/O — gets **1.64x** from a second core.
+Whatever is wrong with concurrent compiles is not the scheduler, the IPIs or
+phase 7.
+
+**It is not the memory pool.** compile-small quarters the heap and changes the
+penalty not at all (0.59x vs 0.61x). A PSRAM-spill explanation predicts the
+opposite, and this is the arm that kills it. Corroborating from the corpus side:
+against a ~8.4 MB pool (388 KiB SRAM + 8 MB PSRAM), only 2 of 4525 tests exceed
+4 MiB and the median is 0.50 MiB, so a memory-aware co-scheduler would have been
+gating ten tests out of four and a half thousand.
+
+**It is not a fixed per-job cost** — not a lock, not a syscall, not prun. The
+two compiles issue the *same* file operations; a fixed cost would add a similar
+absolute penalty to both. It scaled with compute time instead: **+325 ms on a
+511 ms job, +118 ms on a 167 ms job** (2.75x the penalty for 3.06x the work).
+
+### What it is, from the cache's own counters
+
+`/proc/xip` carries the RP2350 XIP cache's hit and access counters, and the arms
+bracket them:
+
+| workload | arm | hit rate | accesses | misses vs -j1 | wall vs -j1 |
+|---|---|---|---|---|---|
+| compile | -j1 | 95.5% | 179M | — | — |
+| compile | -j2 | 94.6% | 215M | **+44%** | +50% |
+| compile-small | -j1 | 95.6% | 62M | — | — |
+| compile-small | -j2 | 94.2% | 72M | **+53%** | +55% |
+| compute | -j1 | 97.8% | 5.1M | — | — |
+| compute | -j2 | 97.7% | 5.1M | **0%** | −38% |
+
+**The extra misses account for the lost time almost exactly.** Two tcc instances
+take 20% more accesses at a lower hit rate — they evict each other from a 16 KiB
+cache neither fits in — and on a workload that is 83% instruction fetch (see the
+predef-phase finding) every extra miss is a QMI fetch. The compute arm is what
+makes this causal rather than correlated: 35x less XIP traffic for a job of
+similar length, counters that do not move when a second copy runs beside it, and
+it is the one arm that speeds up.
+
+### Why nothing schedulable fixes it
+
+The cache is 16 KiB of fixed hardware. PSRAM sits behind the same QMI, so
+relocating tcc's text does not escape the contention, and tcc's 1.4 MiB of
+`.text` does not fit the 388 KiB of fast SRAM in any case. There is no ordering
+of tests, and no footprint budget, that makes two concurrent compiles cheaper
+than two sequential ones.
+
+Two things this *does* leave standing:
+
+- **Concurrency pays for RAM-resident work** (1.64x). The suite's execute step
+  runs compiled binaries out of /tmp, but it is `total_execute_ms` = 9.2 s of a
+  677 s run, so there is nothing to win there.
+- **6.4's core1 duties are not refuted by this**, but they are now suspect for
+  the same reason: background page re-zeroing drives PSRAM traffic through the
+  QMI the compile is already saturating, so it should be measured against this
+  instrument before being built.
+
+### Also measured
+
+- **Batching alone loses on compiles.** `prun -j1` removes the console round
+  trip and still costs 0.96x: its own spawn is **23 ms/job** where the round
+  trip it removes is worth ~9 ms. Batching only pays where the job is short
+  (spawn: 1.81x). Item 1.2 should be read against that.
+- **The round trip is 0.0297 ms/character echoed**, so the suite's 316
+  characters per test are 9.4 ms/test — **42 s over a 4453-test run**, and they
+  land in no bucket of `tcc_timing_report.json` (`compile_testcase` starts its
+  timer after `write_command` returns).
+- **`ticks` in /proc/cpus is elapsed time, not utilisation.** Every online core
+  takes its own SysTick whatever it is running, so both cores report near
+  identical tick deltas in every arm and the figure tracks the arm's wall time.
+  It cannot answer "did the work spread"; the compute arm is what answers that.
+
+### The pipelining variant: sound mechanism, wrong scale (2026-08-12)
+
+The follow-up idea — never overlap two compiles, but let core Y run the previous
+test and remove its artifacts while core X compiles — was measured with two more
+arms. **The mechanism works and is free. The suite has almost nothing for it to
+hide.**
+
+| workload | lockstep | -j1 | -j2 | XIP acc -j1 → -j2 | hit rate |
+|---|---|---|---|---|---|
+| mixed (compile + 200 ms compute) | 0.71 s | 0.97x | **1.32x** | 46.5M → 46.5M | 95.6% → 95.6% |
+| mixed-io (compile + execute-and-clean) | 0.52 s | 0.95x | 0.95x | 48.0M → 46.6M | 95.7% → 95.5% |
+
+**`mixed` is the proof of the mechanism:** 200 ms of RAM-resident work hidden
+behind a 511 ms compile for ~29 ms of cost — 85% hidden — with the cache
+counters *flat*. Overlapping non-compile work with a compile disturbs nothing,
+which is the opposite of what two compiles do to each other.
+
+**`mixed-io` is the proof of the scale problem.** It shows no gain, and not
+because it disturbs the compile (the hit rate holds): the io job and the `rm`
+together are ~10 ms against a 511 ms compile. There is nothing there to hide.
+
+That matches the run-51 buckets: **execute is 2.1 ms/test and cleanup 5.8 ms/test
+against a 111 ms compile.** So the ceiling is 35 s (execute+cleanup) or 53 s
+(+setup) of a 677 s run — 5.2% to 7.8% — while prun-shaped orchestration charges
+**9-23 ms/job**, i.e. 40-102 s over 4453 tests. The work to be hidden is the same
+order as the machinery that would hide it.
+
+Two further discounts before anyone sizes this again:
+
+- **Most of the 8 ms is console round trip, not device CPU.** `rm -f <artifact>`
+  is a command the harness waits on. A round trip cannot be hidden on core 1 —
+  only by batching, which is exactly what charges the 9-23 ms/job. The
+  genuinely CPU-bound part is nearer 3-5 ms/test, i.e. 15-22 s, i.e. 2-3%.
+- **The orchestration cost is not a constant to be designed around, it is the
+  same disturbance mechanism**: prun costs +23 ms/job on compiles, +12 ms on
+  mixed, +9 ms on mixed-io, and *saves* ~2 ms on compute and spawn. It tracks how
+  XIP-heavy the jobs are, because prun's own code and the kernel's both run from
+  flash between jobs.
+
+**What would have to be true for this to pay:** orchestration below ~8 ms/test.
+That is now measurable in isolation (the -j1 arm of any workload is exactly this
+number), and it is the thing to attack before building a pipeline — not the
+pipeline itself. A leaner runner with no per-job log files and fewer syscalls
+between jobs is the shape that could get there; prun was not written for it.
+
+### Three more paths checked (2026-08-12): one refuted, one real, one bug
+
+**Refuted: the command echo is not the host's fault.** `_wait_for_echo` reads one
+byte per `serial.read(1)`, and 232 characters costing 7.30 ms against 0.77 ms of
+wire time at 3 Mbaud looks exactly like host syscall overhead. It is not.
+Draining the same echo bytewise and in `in_waiting`-sized chunks, on the rig's
+own port, measures **24.06 vs 25.01 us per character** — identical. The cost is
+the device echoing, roughly 21 us of per-character processing on top of 3.3 us of
+wire time. **Do not rewrite the echo reader for bulk reads; it buys nothing.**
+The only host-side lever left on this path is sending fewer characters.
+
+**Real, and it is the SMP build: the echo path got 48% slower per character.**
+Same tree, same test, only `CONFIG_CONFIG_PROCESS_SMP` differs:
+
+| build | per character echoed | over a 4453-test run |
+|---|---|---|
+| `CONFIG_PROCESS_SMP=n` (`cpus=1 online=1 smp=0`) | **20.1 us** | 28 s |
+| `CONFIG_PROCESS_SMP=y` (both cores scheduling) | **29.7 us** | 42 s |
+
+That is **+9.6 us per character, ~14 s per run**, on a path that is a `read` and
+a `write` syscall per character — i.e. it reads as a syscall-entry tax from the
+locking, not as anything specific to the console. It corroborates independently:
+the pre-phase-7 measurement of this same slope was 19.4 us/char, which is the
+SMP=n number, not the SMP=y one. The compile bucket does *not* show a matching
+regression, and that is consistent rather than contradictory — a compile is 77%
+XIP miss stalls (8.06M misses x 204 ns of a 2.14 s arm), so a syscall tax hides
+inside it while the echo path, which is nothing but syscalls, exposes it.
+
+**Bug: `CONFIG_PROCESS_SMP=n` panics deterministically on this tree.**
+
+    $ prun -j 1 -o /tmp/pscal /tmp/pscal/compile.txt
+    PRUN 0 0
+    PRUN 1 0
+    PRUN 2 0
+    [ERR][kernel_heap] kernel heap exhausted: _sbrk(+1412) heap_end=0x20012fe4 limit=0x20013000 used=53728B
+    [ERR][kernel] KERNEL PANIC: kernel heap exhausted (_sbrk over __heap_limit__)
+    [ERR][kernel]     0: 0x10006070
+    [ERR][kernel]     1: 0x1003311E
+    [ERR][kernel]     2: 0x1000134C
+
+Four sequential tcc compiles through prun, on the single-core build: three
+complete, the fourth panics the kernel out of its 76 KiB heap. Identical panic on
+both attempts, same `used=53728B`, always on the fourth job. The *same four
+compiles run as four shell commands* (the lockstep arm) complete fine on the same
+boot, so it is the prun path, not the compiles. Note the direction: SMP=n should
+have *more* heap than SMP=y (no per-CPU statics), and the SMP=y build runs this
+same batch repeatedly without trouble — so this looks like per-spawn kernel-heap
+growth that only the single-core build is close enough to the limit to hit.
+**Not bisected against pre-SMP history**, so whether the SMP work caused it or
+merely uncovered it is open.
+
+**Also settled, for free, from the archived runs:** the wall-time growth from
+~591 s (2026-08-10) to 677 s (run 51) is **not** a performance regression. It
+tracks the failure count, because a failing test costs a rerun and a target reset
+and neither lands in a timing bucket:
+
+| run | failures | unattributed | compile bucket |
+|---|---|---|---|
+| 3-24 (08-10) | 0 | 27-43 s | ~484 s |
+| 26 (08-11) | 21 | 55.5 s | 514.9 s |
+| 51 (08-12) | 18 | 84.4 s | 495.9 s |
+
+18 failures x ~3 s of rerun-and-reset is almost exactly run 51's excess. The
+compile bucket itself moves 478-520 s across these runs, which is the drift band
+to beat before any change of a few seconds is called a win.
+
+#### Where the echo cost actually is (2026-08-12, corrected)
+
+The console **write** path is fine: **3.81 us/byte marginal against a 3.33 us
+line rate at 3 Mbaud — 90% of wire speed, 231 KiB/s of a possible 293.** There
+is nothing to win there, and an attempt to win it confirmed as much: guarding the
+`drain_rx()` call in `Uart.write`'s TX spin loop behind the cheap
+`uart_is_readable()` check measured 3.72 vs 3.81 us/byte, i.e. noise. Reverted.
+
+**A correction, because the first version of this measurement was wrong and the
+wrong number is the kind that gets acted on.** An earlier probe reported the
+write path at 12.45 us/byte — 3.7x off line rate — and that was an artifact of
+the probe, not a property of the device: it timed `serial.read(4096)` against a
+4022-byte file, and pyserial returns when it has the requested count *or* the
+timeout expires, so every arm dutifully reported the 50 ms timeout and looked
+identical to three figures whatever the firmware did. **Read to an expected byte
+count, never to a buffer size, or the timeout is what gets measured.**
+
+So the ~24 us per echoed character decomposes as roughly **3.8 us of UART write
+and ~20 us of syscall-and-shell**, and that is a per-*character* cost because the
+shell reads in raw mode with VMIN=1 — one `read` syscall per byte, one `write`
+syscall to echo it. Two syscalls per character, at roughly 5-10 us each.
+
+That makes the remaining levers, in order of size:
+
+1. **Bulk read-and-echo in the shell** (~37 s/run, the big one). When the host
+   sends a 232-character command it arrives as one burst and sits in the 4 KiB
+   RX ring; the line editor could take it in one `read` and echo it in one
+   `write` instead of 232 of each. This is a toysh line-editor change, not a
+   kernel one, and it approaches wire time (3.3 us/char) from 29.7.
+2. **Send fewer characters** (~20 s/run). 316 characters per test today, of
+   which ~130 are the compile line's identical status-check boilerplate. Folding
+   that into a device-side helper or shell function is harness-only work, but
+   watch the trade: a helper that costs an extra spawn (~2-3 ms) loses to the
+   ~3 ms of characters it saves.
+3. **The SMP syscall tax** (~14 s/run), which is the same two syscalls per
+   character seen from the other side — see the SMP=n/=y table above.
+
+#### Shipped: bulk read-and-echo in the shell (2026-08-12)
+
+**29.7 -> 19.7 us per echoed character, a 33% cut, worth ~14 s of a 677 s run.**
+Lever 1 from the list above, in `apps/toybox/toys/pending/sh.c`
+(`tty_take_pending`, called from `read_line_tty`'s literal-insert fast path).
+
+The editor cost two syscalls per byte of every command line: `scan_key` reads
+exactly one byte -- deliberately, so it cannot overshoot an escape sequence --
+and the echo writes exactly one byte. A pasted or harness-sent line arrives as
+one burst and then sits in the terminal buffer being drained a byte at a time.
+
+The change keeps scan_key's one-byte discipline for anything that could begin a
+sequence and fast-paths only what cannot: when appending at the end of the line
+with nothing half-parsed in `scratch`, it takes a run of plain printable bytes
+in one `read` and echoes them in one `write`. raw mode sets VMIN=1, so the read
+blocks exactly as the `scan_key` call it replaces would have. **No `poll` is
+involved**, which matters: the interactive path never calls poll today, so
+whether this target implements it is not something to find out here.
+
+**Why 33% and not 6x.** The remaining cost is not syscalls. The host cannot send
+faster than the wire, so at 3 Mbaud a byte lands every 3.3 us while the shell
+drains the buffer faster than that -- each read comes back with only ~6 bytes,
+not the 15 it asks for. The floor for this shape is ~2x wire time (6.7 us/char);
+19.7 is what partial batching against a live wire actually yields.
+
+**The bug this nearly shipped with.** `scratch` was a per-call local, zeroed at
+the top of `read_line_tty`. Reading ahead means a burst carrying `cmd1\ncmd2\n`
+leaves the bytes after the newline in `scratch` when the function returns for
+`cmd1` -- and a per-call buffer drops them, losing the next command outright,
+silently, and only when input happened to arrive in one piece. `scratch` is now
+static and deliberately not cleared per line.
+
+**Validated on hardware:** two commands in one write both run; three commands in
+one write including a 200-character line all run intact; byte-at-a-time typing
+unaffected; backspace still edits (output line is exactly `EDITED`); shell
+responsive afterwards. Plus shell/cd/ls/pipe/vfork (15 passed, and the one
+failure -- `test_pipe_carries_more_than_it_can_hold` -- reproduces identically on
+run 51 before any of this, same `crash detected` signature) and a 7-test tcc
+slice. The compile arms are unmoved (519 ms/job, XIP 95.6% hit), as expected:
+this touches the console, not the compiler.

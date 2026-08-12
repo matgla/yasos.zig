@@ -1425,11 +1425,20 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         gpio_set_input_enabled(io_pins[i], true);
     }
     
-    // Install the handler into the RAM-backed vector table used by yasos.
-    // The polled wrapper still calls the handler directly, which keeps SDIO
-    // working when the kernel has interrupts masked around a transfer.
+    // Install the handler into the RAM-backed vector table used by yasos, but
+    // leave the NVIC line DISABLED: yasos drives this driver purely in polled
+    // mode -- rx_poll() and tx_poll() both open with a direct call to
+    // rp2350_sdio_dma_irq(), and command*() waits on dma_channel_is_busy() --
+    // so the hardware interrupt contributes nothing and can only corrupt.
+    //
+    // What it did instead was advance g_sdio's transfer state from an ISR at
+    // any instant not covered by a cpsid. The mask can no longer span a whole
+    // transfer (see mmc_io.zig's sdio_lock), so every gap between the command
+    // and data phases became a window, reported by the card as CRC failures
+    // that were really blocks_checksumed desync. The handler stays installed so
+    // a future async mode only has to re-enable the line.
     rp2350_install_irq_handler(SDIO_DMAIRQ, rp2350_sdio_dma_irq);
-    irq_set_enabled(SDIO_DMAIRQ, true);
+    irq_set_enabled(SDIO_DMAIRQ, false);
 
     // Go to idle state
     rp2350_sdio_stop();

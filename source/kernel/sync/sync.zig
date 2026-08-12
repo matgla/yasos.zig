@@ -13,27 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Kernel synchronization primitives.
-//!
-//! Phase 0 of `docs/smp_plan.md`: everything here works identically on one core
-//! and on two, so it can land, be reviewed and be tested before a second core
-//! exists. Nothing in this directory changes single-core behaviour.
-//!
-//! Three things live here and the split is deliberate:
-//!
-//!   * `Atomic(T)` -- `std.atomic.Value` that refuses widths the CPU would turn
-//!     into a libcall.
-//!   * `SpinLock` -- one portable implementation, four tiny arch hooks.
-//!   * `placement` -- the assertion that a lock is somewhere its exclusives
-//!     actually work.
-//!
-//! What is *not* here, and where it went instead:
-//!
-//!   * Barriers. Ordering belongs on the operation (`.acquire` / `.release` on
-//!     the atomic itself, which lowers to LDAEX/STL), not in a separate `dmb`
-//!     next to it. The RP2350 has no data cache for SRAM and its XIP cache is
-//!     shared between cores, so no cache maintenance is ever required either.
-//!   * Sleeping mutexes and the lock hierarchy. Phase 4.
+// Kernel synchronization primitives. Everything here works identically on one
+// core and on two. No standalone barriers: ordering belongs on the operation
+// (`.acquire`/`.release`, which lower to LDAEX/STL), and the RP2350 needs no
+// cache maintenance -- SRAM is uncached and the XIP cache is shared.
 
 pub const Atomic = @import("atomic.zig").Atomic;
 pub const atomic = @import("atomic.zig");
@@ -63,16 +46,8 @@ pub const preempt_disable = preempt.preempt_disable;
 pub const preempt_enable = preempt.preempt_enable;
 
 /// Install the hooks that let library code outside this tree be checked against
-/// the board's memory map.
-///
-/// Must run after the board is up, because the PSRAM window's size is not known
-/// until external memory has been detected -- before that the layout reports
-/// size 0 and `is_coherent` accepts everything.
-///
-/// Currently one hook: `libs/oop`'s shared reference count. That counter is a
-/// heap allocation, and for a process-owned `IFile`/`IDirectory` the heap
-/// backing it is the process pool, whose tier 1 is PSRAM. `libs/oop` has no
-/// memory map of its own, so it asks.
+/// the board's memory map. Must run after external memory has been detected, or
+/// the PSRAM window reports size 0 and `is_coherent` accepts everything.
 pub fn init() void {
     const oop = @import("interface");
     oop.refcount.placement_check = &refcount_placement_check;

@@ -23,9 +23,8 @@ import re
 
 
 # Kernel per-process totals: syscall count, kernel-side syscall time, the
-# handler-body half of it, this process's dynamic-load time, and the bytes and
-# microseconds spent in read()/write(). `top` carries only the three costliest
-# syscalls of the process -- enough for a corpus histogram, not a complete one.
+# handler-body half of it, dynamic-load time, and the bytes and microseconds in
+# read()/write(). `top` carries only the three costliest syscalls per process.
 SYSPROF_RE = re.compile(
     r"sysprof pid=(?P<pid>\d+) calls=(?P<calls>\d+) us=(?P<us>\d+)"
     r" handler_us=(?P<handler_us>\d+) load_us=(?P<load_us>\d+)"

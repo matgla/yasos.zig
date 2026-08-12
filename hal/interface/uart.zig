@@ -95,6 +95,11 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
 /// corrupted line from a merely congested one. The two `max_*_gap_us` values
 /// are how long the interrupt had been away when it happened, which sizes the
 /// critical section responsible.
+///
+/// `drain_skips` is not a loss counter: it is how often a core found another
+/// already draining the FIFO and declined to join in, leaving those bytes for
+/// the holder. Skips climbing while `overruns` and `dropped` stay flat is the
+/// serialisation working.
 pub const RxStats = struct {
     bytes: u32 = 0,
     overruns: u32 = 0,
@@ -103,6 +108,7 @@ pub const RxStats = struct {
     framing_errors: u32 = 0,
     max_overrun_gap_us: u32 = 0,
     max_late_gap_us: u32 = 0,
+    drain_skips: u32 = 0,
 };
 
 pub const WriteError = error{

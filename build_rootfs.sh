@@ -180,6 +180,7 @@ if $CLEAR; then
   rm -rf apps/ascii_animations/build
   rm -rf apps/textvaders/build
   rm -rf apps/hello_world/build
+  rm -rf apps/prun/build
   rm -rf libs/libc/build
   rm -rf libs/libdl/build
   rm -rf libs/pthread/build
@@ -271,6 +272,18 @@ tinycc_sources_newer_than()
     ! -name 'config.h' \
     ! -name 'config.mak' \
     ! -name 'conftest.c' \
+    -newer "$stamp_file" -print -quit | grep -q . && return 0
+
+  # lib/ is pruned above because the build copies headers and archives into it,
+  # which would otherwise make every rebuild look stale forever.  lib/fp is the
+  # exception: it is hand-written FP runtime source, and leaving it unscanned
+  # meant an edit to librp2350fp (__aeabi_d2f, the DCP sequences) rebuilt
+  # nothing and silently shipped the previous archive -- the change appears to
+  # have no effect at all, which is a bad way to spend a device test cycle.
+  # Its build/ subdirectory holds the generated objects and stays pruned.
+  find "$TINYCC_DIR/lib/fp" \
+    -path "$TINYCC_DIR/lib/fp/build" -prune -o \
+    -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name 'Makefile' \) \
     -newer "$stamp_file" -print -quit | grep -q .
 }
 
@@ -634,6 +647,39 @@ build_cross_compiler
 # (including the target C compiler and all applications) will
 # automatically pick them up from rootfs.
 
+# tcc links the -mfpu runtime (librp2350fp.a and friends) into every shared
+# object it produces, and none of the per-library Makefiles knows that.  When
+# only the FP runtime changed, their own sources were untouched, make relinked
+# nothing, and libc.so kept the __aeabi_* copies it absorbed on some earlier
+# build.  That split is genuinely hard to read from the outside: the freshly
+# built compiler used the new __aeabi_d2f (so hex float literals were right)
+# while every program it compiled resolved the symbol to libc.so's stale one.
+# Drop any built library older than the FP runtime so the next make relinks it.
+# Written as an explicit glob rather than `find ... -delete`: -delete implies
+# -depth, which silently disables -prune, so the obvious spelling would have
+# walked into libs/tinycc and removed the FP archives it was comparing against.
+refresh_fp_dependents()
+{
+  local newest lib stale
+  newest=$(ls -t "$SCRIPT_DIR"/libs/tinycc/lib/fp/lib*.a 2>/dev/null | head -n 1)
+  if [ -z "$newest" ]; then
+    return 0
+  fi
+  stale=0
+  for lib in "$SCRIPT_DIR"/libs/*/build/*.so \
+             "$SCRIPT_DIR"/libs/*/build/*.so.elf \
+             "$SCRIPT_DIR"/libs/*/build/*.a; do
+    [ -f "$lib" ] || continue
+    if [ "$lib" -ot "$newest" ]; then
+      echo "  relink (FP runtime is newer): ${lib#"$SCRIPT_DIR"/}"
+      rm -f "$lib"
+      stale=$((stale + 1))
+    fi
+  done
+  echo "FP-dependent libraries dropped for relink: $stale (reference: ${newest#"$SCRIPT_DIR"/})"
+}
+refresh_fp_dependents
+
 echo "Building libc..."
 build_makefile libc
 
@@ -674,6 +720,7 @@ build_makefile cowsay
 build_makefile ascii_animations
 build_makefile textvaders
 build_makefile hello_world
+build_makefile prun
 build_makefile hexdump
 build_makefile yasvi
 build_makefile mkfs

@@ -52,17 +52,12 @@ const ap_rw_any: u32 = 0b01 << 1;
 const ap_ro_any: u32 = 0b11 << 1;
 // SH[4:3] = 0b00 non-shareable.
 //
-// This is safe *only because* `ACTLR.EXTEXCLALL` is set, which forces every
-// exclusive access through the global monitor regardless of the region's
-// shareability. The pico-sdk sets it from `.preinit_array`
-// (hardware_sync_spin_lock/sync_spin_lock.c), which `crt_init` runs -- so it is
-// already on for core 0 today, by accident of the build rather than by
-// intention here.
-//
-// If anyone ever clears it -- the documented reason to is wanting exclusives in
-// PSRAM, which the global monitor does not cover on the RP2350 -- then every
-// region containing a lock word or an atomic must become SH = 0b11, or the
-// kernel's spinlocks silently stop excluding anything between cores. See
+// Safe only because `ACTLR.EXTEXCLALL` is set, which forces every exclusive
+// through the global monitor regardless of the region's shareability. The
+// pico-sdk sets it from `.preinit_array`, which `crt_init` runs. If it is ever
+// cleared -- the reason to would be wanting exclusives in PSRAM, which the
+// global monitor does not cover -- every region holding a lock word must become
+// SH = 0b11, or the spinlocks silently stop excluding between cores. See
 // source/kernel/sync/placement.zig.
 
 // MAIR attribute index 0 holds "Normal memory, Outer/Inner Non-cacheable".
@@ -80,13 +75,10 @@ fn encode_rlar(end_exclusive: usize, attr_index: u32) u32 {
     return last | (attr_index << 1) | 1; // EN = 1
 }
 
-/// Programs one region and advances `cursor`.
-///
-/// The cursor is a parameter, not a module global. The MPU is a per-core block,
-/// so each core programs its own from region 0 -- with a shared cursor, core 1's
-/// pass would carry on from wherever core 0 left off and try to program regions
-/// 5..9 on a part that has 8, silently dropping the mappings that did not fit
-/// and leaving core 1's user code unable to reach its own RAM.
+/// Programs one region and advances `cursor`. The cursor is a parameter, not a
+/// module global: the MPU is a per-core block, so each core programs its own
+/// from region 0, and a shared cursor would have the second core run off the end
+/// of the region file and silently drop its own mappings.
 fn program_region(cursor: *u32, start: usize, end_exclusive: usize, ap: u32, exec_never: u32) void {
     if (end_exclusive <= start) {
         return;

@@ -99,6 +99,22 @@ __vector_table:
   .word irq50
   .word irq51
 
+/* Core 1's reset vector table. The SSE-200 resets a released core through
+ * INITSVTOR1, so core 1 needs an entry of its own -- pointing it at
+ * __vector_table would restart _start and re-zero a .bss core 0 is using.
+ *
+ * Only the first two words are read: reset takes MSP from word 0 and the entry
+ * point from word 1, and _start_core1 repoints VTOR at the shared
+ * __vector_table before anything can raise an exception, so both cores share
+ * every handler.
+ *
+ * 128-byte aligned because INITSVTOR1's VTOR field starts at bit 7. */
+.align 7
+.global __vector_table_core1
+__vector_table_core1:
+  .word __stack_top_core1__
+  .word _start_core1
+
 
 /* Weak symbol since it will be overriden if needed */
 .macro declare_irq_handler_breakpoint name
@@ -208,3 +224,29 @@ _start:
 _loop:
   wfi
   b _loop
+
+/* Core 1's reset entry, reached from __vector_table_core1 once CPUWAIT bit 1 is
+ * cleared (source/cpu.zig `start_core`).
+ *
+ * NOT a second _start: .data and .bss are already set up, and redoing either
+ * would wipe state core 0 is using. What is left is what ARMv8-M banks per core
+ * -- MSPLIM, VTOR and CPACR. MSP needs no instruction; reset loaded it from
+ * word 0 of __vector_table_core1. */
+.global _start_core1
+.type _start_core1,%function
+.thumb_func
+_start_core1:
+  ldr r1, =__stack_bottom_core1__
+  msr msplim, r1
+  ldr r1, =__vector_table
+  ldr r0, =SCB_VTOR
+  str r1, [r0]
+  ldr r1, =crt_init_core1
+  blx r1
+  ldr r1, =kernel_secondary_core_entry
+  blx r1
+  // kernel_secondary_core_entry never returns. If it somehow does, park rather
+  // than run off into whatever follows: this core has no caller to return to.
+_loop_core1:
+  wfi
+  b _loop_core1

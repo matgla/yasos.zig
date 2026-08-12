@@ -60,13 +60,10 @@ var saturated_samples: u32 = 0;
 /// 64-bit total on a 32-bit core can splice the low word of one value onto the
 /// high word of another.
 ///
-/// Atomic with `seq_cst` ordering rather than the plain `+%=` on a `volatile`
-/// this used to be. `volatile` stops the *compiler* reordering the accesses and
-/// says nothing to a second core; the sequence is the whole protocol, so it is
-/// the one field that must carry real ordering. See `sync/seqlock.zig`, which
-/// this predates -- the totals are three fields read together, which `Seq64`
-/// does not model, so the protocol stays hand-rolled here and only its ordering
-/// is fixed.
+/// Atomic with `seq_cst` rather than a plain `+%=` on a `volatile`, which stops
+/// the compiler reordering and says nothing to a second core. The protocol stays
+/// hand-rolled rather than using `sync/seqlock.zig`, because the totals are
+/// three fields read together and `Seq64` does not model that.
 var sequence: kernel_sync.Atomic(u32) = .init(0);
 
 /// Eight is far past what could ever be needed: losing a race costs one retry

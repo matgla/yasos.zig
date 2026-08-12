@@ -159,6 +159,16 @@ pub const NVIC = extern struct {
     reserved6: [580]u32,
     stir: u32,
 
+    /// Unmask an external interrupt on the calling core. The NVIC is banked per
+    /// core, so each core has to issue this for itself; the SMP doorbell relies
+    /// on that -- one shared handler, enabled separately on each core.
+    ///
+    /// `iser` is write-1-to-set, so a single bit enables one interrupt without
+    /// disturbing the others; a read-modify-write would race the other core.
+    pub fn enable(self: *volatile NVIC, irq_num: u32) void {
+        self.iser[irq_num >> 5] = @as(u32, 1) << @intCast(irq_num & 0x1f);
+    }
+
     pub fn set_priority(self: *volatile NVIC, irq_num: i32, priority: u32) void {
         const priority_mask: u8 = @as(u8, @truncate((priority << (8 - c.__NVIC_PRIO_BITS))));
         if (irq_num > 0) {
@@ -176,6 +186,29 @@ pub const Registers = struct {
     pub const scs_base: u32 = ppb_base + 0xe000;
 
     pub const scb: *volatile SystemControlBlock = @ptrFromInt(scb_base);
+
+    /// Auxiliary Control Register (SCS + 0x008). Implementation-defined; these
+    /// are the Cortex-M33's bits.
+    ///
+    /// `EXTEXCLALL` is the one that matters: with it clear, an exclusive to an
+    /// address not covered by an enabled MPU region is handled by the core's
+    /// local monitor only, so `ldrex`/`strex` on two cores never see each other
+    /// and every lock built on them silently stops excluding. Per core, so it
+    /// has to be set on each. Note the "with no MPU" in the field name -- once
+    /// an enabled region covers the address, its Shareable attribute decides.
+    pub const actlr: *volatile mmio.Mmio(packed struct(u32) {
+        dismcycint: u1, // 0
+        reserved0: u1, // 1
+        disfold: u1, // 2
+        reserved1: u6, // 3..8
+        disoofp: u1, // 9
+        fpexcodis: u1, // 10
+        reserved2: u1, // 11
+        disitmatbflush: u1, // 12
+        reserved3: u16, // 13..28
+        extexclall: u1, // 29
+        reserved4: u2, // 30..31
+    }) = @ptrFromInt(scs_base + 0x008);
 
     pub const systick_base: u32 = scs_base + 0x0010;
     pub const systick: *volatile SysTick = @ptrFromInt(systick_base);

@@ -53,6 +53,19 @@ def _strip_ansi(text):
 # fast; individual call sites that legitimately need longer (boot, compile,
 # slow programs) pass an explicit ``timeout=`` or use ``Session.timeout()``.
 SERIAL_TIMEOUT = float(os.environ.get("YASOS_SMOKE_SERIAL_TIMEOUT", "1"))
+
+# Idle timeout for a command echo specifically, much tighter than SERIAL_TIMEOUT.
+#
+# The debug probe drops the occasional host->target byte; the harness recovers by
+# resyncing and resending, but on the shared SERIAL_TIMEOUT noticing costs a full
+# second of silence per drop. An echo cannot legitimately be slow -- the shell
+# echoes character by character as it reads the line, so this is an idle deadline
+# reset on every byte, and even a 200-character command echoes inside ~5 ms. The
+# cost of being wrong is one extra resend, not a failure.
+#
+# Lowering the line rate instead was measured and rejected: 3 Mbaud -> 1 Mbaud
+# adds ~33 s to the source upload alone, against ~23 s of drops per run.
+ECHO_IDLE_TIMEOUT = float(os.environ.get("YASOS_SMOKE_ECHO_TIMEOUT", "0.25"))
 # Reset/boot produces the prompt much later than a regular command echo.
 BOOT_TIMEOUT = float(os.environ.get("YASOS_SMOKE_BOOT_TIMEOUT", "15"))
 
@@ -174,6 +187,37 @@ class Session:
         if any(marker in normalized for marker in Session.crash_markers):
             Session.target_crashed = True
             Session.target_needs_reset = True
+
+    @contextlib.contextmanager
+    def expect_process_fault(self):
+        """Run a block that deliberately faults a *user process*.
+
+        The kernel survives those by design -- it resumes the faulting process
+        at _exit(-1) and carries on -- but the diagnostics it prints carry the
+        same marker as a kernel that died, so the scanner would call the target
+        crashed and reset it out from under the test. Scanning is suppressed
+        for the block and the flags are put back exactly as they were, so a
+        crash that had already been recorded still counts.
+
+        This does not weaken what such a test proves: a kernel that really did
+        die returns no prompt, and the test fails on that instead.
+
+        Usage::
+
+            with session.expect_process_fault():
+                session.write_command("/tmp/crashes")
+                output = session.read_until_prompt()
+        """
+        previous_collecting = Session._collecting
+        previous_crashed = Session.target_crashed
+        previous_needs_reset = Session.target_needs_reset
+        Session._collecting = True
+        try:
+            yield
+        finally:
+            Session._collecting = previous_collecting
+            Session.target_crashed = previous_crashed
+            Session.target_needs_reset = previous_needs_reset
 
     @contextlib.contextmanager
     def timeout(self, seconds):
@@ -418,6 +462,62 @@ class Session:
             return False
         return True
 
+    # How long to keep reading after a crash marker before resetting, and how
+    # long a gap counts as "the dump has finished".
+    CRASH_DUMP_QUIET_S = float(os.environ.get("YASOS_SMOKE_CRASH_QUIET", "2.0"))
+    CRASH_DUMP_CAP_S = float(os.environ.get("YASOS_SMOKE_CRASH_CAP", "20.0"))
+
+    def _drain_crash_dump(self):
+        """Read the rest of the HardFault postmortem before resetting.
+
+        ``collect_crash_logs`` used to reset immediately, on the stated grounds
+        that "the live HardFault postmortem is already in this file from the
+        serial stream". It was not. ``_record_serial_output`` raises
+        ``target_crashed`` the moment it sees ``hardfault diagnostics:``, and
+        the reader that noticed it unwinds straight out of the read loop -- so
+        what reached the log was whatever happened to be in the same 256-byte
+        chunk as the marker. Every dump in runs 47-49 is cut off two or three
+        lines in, mid-token:
+
+            [ERR][hardfault]   stacked r0=0x100407C8 r1=0xFFFFFFED ...
+            er[ER
+            ===== crash detected: rebooting ... =====
+
+        The parts that would actually identify the bug -- the fault status
+        registers, the module map that turns a stacked PC into a file, and the
+        per-core context-switch event ring -- are all printed *after* that and
+        were being thrown away, on every crash, for every run. The SD fallback
+        did not cover it either: ``cat /root/logs/kernel.prev.log`` came back
+        "cat: /root/logs/kernel.prev.log" (no such file) in all of them.
+
+        So: keep reading until the target has been quiet for
+        ``CRASH_DUMP_QUIET_S``, capped at ``CRASH_DUMP_CAP_S`` in case the fault
+        path is stuck in a loop emitting forever. Crash-marker scanning is
+        suppressed meanwhile -- the target is already flagged as crashed, and
+        the dump is full of markers that would just re-flag it.
+        """
+        was_collecting = Session._collecting
+        Session._collecting = True
+        old_timeout = self.serial.timeout
+        deadline = time.monotonic() + Session.CRASH_DUMP_CAP_S
+        try:
+            self.serial.timeout = 0.25
+            last_data = time.monotonic()
+            while time.monotonic() < deadline:
+                pending = self.serial.in_waiting
+                chunk = self.serial.read(pending if pending > 0 else 1)
+                if chunk:
+                    self._record_serial_output(chunk.decode("utf-8", "ignore"))
+                    last_data = time.monotonic()
+                elif time.monotonic() - last_data >= Session.CRASH_DUMP_QUIET_S:
+                    break
+        except (OSError, serial.SerialException) as exc:
+            self.file.write(f"\n(crash-dump drain stopped: {exc})\n")
+        finally:
+            self.serial.timeout = old_timeout
+            Session._collecting = was_collecting
+            self.file.flush()
+
     def collect_crash_logs(self):
         """After a crash: reboot the board and pull the persisted kernel logs
         off the SD card into this test's log file.
@@ -429,6 +529,7 @@ class Session:
         the serial stream; this appends the persisted context next to it and
         leaves the target at a clean prompt for the next test.
         """
+        self._drain_crash_dump()
         self.file.write("\n===== crash detected: rebooting to collect persisted SD logs =====\n")
         self.file.flush()
         try:
@@ -572,8 +673,14 @@ class Session:
 
         Returns True if the command echoed back intact; False on idle timeout
         (a byte was dropped in flight, or the target went quiet -> resend).
+
+        Capped at ``ECHO_IDLE_TIMEOUT`` rather than following the session's read
+        timeout, because those measure different things: callers raise the read
+        timeout for a slow *program* (a compile, a boot), but the echo of the
+        command that starts it is immediate either way. See ECHO_IDLE_TIMEOUT.
         """
-        idle_timeout = self.serial.timeout
+        idle_timeout = min(self.serial.timeout or ECHO_IDLE_TIMEOUT,
+                           ECHO_IDLE_TIMEOUT)
         poll = min(0.1, idle_timeout) if idle_timeout else 0.1
         tail = command.encode('utf-8')[-1:]
         old_timeout = self.serial.timeout

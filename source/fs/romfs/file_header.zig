@@ -24,6 +24,7 @@ const kernel = @import("kernel");
 
 const FileType = kernel.fs.FileType;
 const IFile = kernel.fs.IFile;
+const dev_lock = kernel.driver.dev_lock;
 const FileName = kernel.fs.FileName;
 
 const c = @import("libc_imports").c;
@@ -72,25 +73,14 @@ pub const FileHeader = struct {
     _name_heap: ?[]u8,
     _size: u32,
     _specinfo: u32,
-    /// Offset of the next entry in this directory, already masked. Kept from
-    /// the header read so stepping to the sibling costs no read of its own --
-    /// `next()` used to re-read the very word `init` had just parsed, which on
-    /// a directory scan doubled the reads.
+    /// Offset of the next entry in this directory, already masked. Kept from the
+    /// header read so stepping to the sibling costs no read of its own.
     _next: u32,
 
-    /// Read one directory entry.
-    ///
-    /// This is the hot loop of every path lookup: resolving `/usr/lib/libc.so`
-    /// constructs one of these per entry it steps over, in every directory
-    /// along the way. It used to cost about six virtual reads and a
-    /// malloc/free pair each time -- `FileReader.init` seeking and reading to
-    /// find where the name ended, then a separate seek+read for each of the
-    /// three u32 fields, then `read_string` copying the name onto the kernel
-    /// heap purely so the caller could compare it and free it again. All of
-    /// that reads the same 32 bytes of memory-mapped XIP flash.
-    ///
-    /// It is now a single read of those 32 bytes, parsed in place, with the
-    /// name left in the header rather than on the heap.
+    /// Read one directory entry -- the hot loop of every path lookup, which
+    /// constructs one of these per entry it steps over. A single 32-byte read
+    /// parsed in place, with the name left in the header rather than copied onto
+    /// the kernel heap for the caller to compare and free.
     pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) !FileHeader {
         var self: FileHeader = undefined;
         self._name_heap = null;
@@ -99,20 +89,29 @@ pub const FileHeader = struct {
     }
 
     /// Fill this header from the entry at `start_offset`, reusing the storage
-    /// already here rather than returning a new one.
-    ///
-    /// The struct is ~120 bytes, and returning it by value made the directory
-    /// scan in `get_file_header` copy it two or three times per entry it
-    /// stepped over: the walk compiled to nine `__aeabi_memcpy8` calls against
-    /// a byte/word copy that checks its pointers as it goes. Loading in place
-    /// is what `step_to_next` uses, so a scan of N entries now copies nothing.
+    /// already here rather than returning a new one. The struct is ~120 bytes,
+    /// and returning it by value made the directory scan copy it two or three
+    /// times per entry stepped over.
     pub fn load(self: *FileHeader, device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) !void {
         const t_start = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         var buffer: [first_read_bytes]u8 = undefined;
         var df = device_file;
-        kernel.perf.romfs_read();
-        _ = try df.interface.seek(@intCast(start_offset), c.SEEK_SET);
-        _ = df.interface.read(buffer[0..]);
+
+        // The seek and the read are one operation and the device position they
+        // share is global: split them and the other core's romfs read lands in
+        // between, so this returns bytes from elsewhere in the image and parses
+        // them as a header.
+        //
+        // Scoped to the pair, and it has to be: the long-name path below calls
+        // `FileReader.read_string`, which takes this same lock, and
+        // `RankedMutex` does not recurse.
+        {
+            dev_lock.acquire();
+            defer dev_lock.release();
+            kernel.perf.romfs_read();
+            _ = try df.interface.seek(@intCast(start_offset), c.SEEK_SET);
+            _ = df.interface.read(buffer[0..]);
+        }
 
         const fileheader = std.mem.bigToNative(u32, std.mem.bytesToValue(u32, buffer[0..4]));
         const specinfo_data = std.mem.bigToNative(u32, std.mem.bytesToValue(u32, buffer[4..8]));
@@ -161,11 +160,8 @@ pub const FileHeader = struct {
         if (kernel.perf.enabled) kernel.perf.romfs_header(kernel.perf.read_cycles() -% t_start);
     }
 
-    /// Advance to the next entry in the same directory, in place.
-    ///
-    /// Returns false when this was the last entry, leaving the header as it
-    /// was. The in-place form is what keeps a directory scan free of struct
-    /// copies -- see `load`.
+    /// Advance to the next entry in the same directory, in place. Returns false
+    /// when this was the last entry, leaving the header as it was.
     pub fn step_to_next(self: *FileHeader) !bool {
         if (self._next == 0) {
             return false;

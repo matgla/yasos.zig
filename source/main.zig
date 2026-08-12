@@ -82,7 +82,10 @@ fn get_log_level() std.log.Level {
         return .info;
     }
     if (config.instrumentation.log_warning) {
-        return .warning;
+        // `.warn`, not `.warning`: std.log.Level spells it the short way, so
+        // this branch failed to compile and CONFIG_INSTRUMENTATION_LOG_WARNING
+        // could never be turned on -- the one log level nothing had selected.
+        return .warn;
     }
     if (config.instrumentation.log_error) {
         return .err;
@@ -252,6 +255,7 @@ fn initialize_board() void {
                 .framing_errors = stats.framing_errors,
                 .max_overrun_gap_us = stats.max_overrun_gap_us,
                 .max_late_gap_us = stats.max_late_gap_us,
+                .drain_skips = stats.drain_skips,
             };
         }
     }.get);
@@ -355,14 +359,11 @@ fn mount_fatdisk(allocator: std.mem.Allocator) !void {
     defer fnode.delete();
     var maybe_file = fnode.as_file();
     if (maybe_file) |*file| {
-        // `as_file()` hands back a borrowed copy of the node's interface — same
-        // refcount, no acquire — and `FatFs.init` deep-clones it into references
-        // of its own. Releasing this copy here as well as through
-        // `fnode.delete()` is a double release of the node's single reference:
-        // the first drops it to zero and frees the counter, the second
-        // decrements freed memory, which by then is a newlib free-list `next`
-        // pointer. That is the boot-time heap corruption that made ReleaseSafe
-        // hand out overlapping allocations later on.
+        // `as_file()` hands back a borrowed copy of the node's interface -- same
+        // refcount, no acquire -- and `FatFs.init` deep-clones it. Releasing
+        // this copy as well as `fnode.delete()` double-releases the node's
+        // single reference, and the second decrement lands on freed memory that
+        // is by then a newlib free-list `next` pointer.
         var fatdisk = try allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*));
         // The window only holds a FAT image when the host pre-loaded one into
         // the RAM backing file (memory-backend-file launch, see
@@ -615,6 +616,12 @@ pub export fn main() void {
         kernel.sync.init();
         splashscreen();
 
+        // Release the other cores: after the console exists, so a failed
+        // bring-up can say so, and before anything is scheduled, so the
+        // cross-core self-test runs against a system nothing else is mutating.
+        // A board that cannot start its secondary keeps booting on core 0.
+        kernel.smp.start_secondary_cores();
+
         // Lock the kernel heap and stack away from unprivileged user processes.
         // Must run before any process is scheduled.
         if (mpu_kernel_protection) {
@@ -646,20 +653,11 @@ pub export fn main() void {
         // we need to get real return address to get back from user mode successfully
         //
         // This call returns twice over: once if creating or scheduling the root
-        // process actually fails, and once at shutdown, when
-        // `switch_to_main_task` pops the frame `switch_to_the_first_task` left
-        // on MSP a whole system lifetime earlier and resumes this call's callee
-        // mid-function.
-        //
-        // The second return used to arrive with foreign callee-saved registers,
-        // because that hand-off saved only `{r0, lr}` -- and the compiler parks
-        // `root_process`'s success value in r4 across the call (`mov r0, r4`
-        // right at the resume point). So a clean `exit` reported a random word
-        // as an error here, `@errorName` indexed past its table, and the logger
-        // HardFaulted memcpy'ing the wild slice it got back. The frame now
-        // carries r4-r11, so the value landing in `err` is a real error again
-        // and is worth naming. See `switch_to_the_first_task` in
-        // source/arch/armv8-m/context_switch.S.
+        // process fails, and once at shutdown, when `switch_to_main_task` pops
+        // the frame `switch_to_the_first_task` left on MSP a whole system
+        // lifetime earlier. The second return needs r4-r11 back, because the
+        // compiler parks `root_process`'s value in r4 across the call -- see
+        // `switch_to_the_first_task` in source/arch/armv8-m/context_switch.S.
         @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, kernel.process.process_manager.instance.get_default_stack_size() }) catch |err| {
             kernel.log.err("Cannot start root process: {s}", .{@errorName(err)});
         };

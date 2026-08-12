@@ -18,12 +18,8 @@ const std = @import("std");
 pub const CpuStub = struct {
     var _coreid: u8 = 0;
 
-    /// Pretend to be a different core.
-    ///
-    /// This is what makes per-CPU code testable on the host at all: the unit
-    /// tests drive `coreid()` by hand and check that a write on one core is not
-    /// visible in the other's slot. Restore it with a `defer` -- it is process
-    /// global.
+    /// Pretend to be a different core, which is what makes per-CPU code testable
+    /// on the host. Restore it with a `defer` -- it is process global.
     pub fn set_coreid(id: u8) void {
         _coreid = id;
     }
@@ -32,13 +28,9 @@ pub const CpuStub = struct {
         return _coreid;
     }
 
-    /// Two, matching the RP2350, not the host machine.
-    ///
-    /// The unit-test target exists to stand in for the device, and this number
-    /// sizes every per-CPU array in the kernel. Reporting 1 here would compile
-    /// all the per-CPU code down to a single slot, so the tests would exercise
-    /// array-of-one and the device would run array-of-two -- and the second slot
-    /// is exactly where the bugs are.
+    /// Two, matching the RP2350, not the host machine: this sizes every per-CPU
+    /// array, and reporting 1 would compile them down to a single slot so the
+    /// tests never exercise the second one.
     pub fn number_of_cores() u8 {
         return 2;
     }

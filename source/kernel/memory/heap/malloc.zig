@@ -393,36 +393,57 @@ pub fn MallocAllocator(comptime options: anytype) type {
             };
         }
 
+        /// What `malloc` on this libc already guarantees. A request for no more
+        /// than this is handed straight through.
+        const malloc_alignment: usize = 8;
+
+        /// Carve an `alignment`-aligned block out of one `malloc` returned, and
+        /// leave the address to hand back to `free` in the word just below it.
+        /// `alignment` is larger than `@sizeOf(usize)` on every path here, so
+        /// that word stays aligned for a `usize` store.
+        fn align_within(base: [*]u8, alignment: usize) [*]u8 {
+            const aligned = std.mem.alignForward(usize, @intFromPtr(base) + @sizeOf(usize), alignment);
+            const back_reference: *usize = @ptrFromInt(aligned - @sizeOf(usize));
+            back_reference.* = @intFromPtr(base);
+            return @ptrFromInt(aligned);
+        }
+
+        /// Recover what `align_within` was given.
+        fn base_of(ptr: [*]u8) [*]u8 {
+            const back_reference: *const usize = @ptrFromInt(@intFromPtr(ptr) - @sizeOf(usize));
+            return @ptrFromInt(back_reference.*);
+        }
+
+        /// How much has to be asked of `malloc` to fit `len` bytes at
+        /// `alignment`. A pure function of the two, so `free` can recompute it
+        /// without a header of its own.
+        fn padded_length(len: usize, alignment: usize) usize {
+            return if (alignment > malloc_alignment) len + alignment - 1 + @sizeOf(usize) else len;
+        }
+
         fn alloc(
             _: *anyopaque,
             len: usize,
             log2_align: std.mem.Alignment,
             return_address: usize,
         ) ?[*]u8 {
-            _ = log2_align;
             std.debug.assert(len > 0);
-            // The accounting and the leak tracker below are *not* covered by
-            // `__malloc_lock`, which guards only newlib's own free list. They
-            // are this wrapper's own shared state: `memory_in_use`, `counter`,
-            // nine size buckets, and an intrusive tracker list that `push`
-            // walks to its tail before splicing.
-            //
-            // That walk-then-splice is a long window, and until syscalls became
-            // preemptible nothing could land inside it. `sys_open` allocates
-            // (path resolution) and no longer refuses preemption, so two
-            // contexts can now interleave here and lose a node or build a cycle
-            // -- which does not fault at the time. It faults at shutdown, when
-            // `detect_leaks` walks the list end to end and follows the wild
-            // pointer, with the exception frame long gone.
-            //
-            // Taking the heap lock over the whole body -- the `c.malloc` call
-            // included -- makes the allocation and its bookkeeping one
-            // operation. It nests into `__malloc_lock`, which is why that lock
-            // is recursive.
+            // `malloc` aligns to 8 and cannot be asked for more, so anything
+            // stricter is carved out of a larger block by hand. Ignoring the
+            // request hands back a pointer the caller's `@alignCast` panics on,
+            // and only for the allocations that happen to land wrong.
+            const alignment = log2_align.toByteUnits();
+            // The lock covers the whole body, the `c.malloc` call included: the
+            // accounting and leak tracker below are this wrapper's own shared
+            // state and are not guarded by `__malloc_lock`. The tracker's
+            // walk-then-splice is a long window, and now that syscalls are
+            // preemptible two contexts can interleave in it and build a cycle
+            // that only faults at shutdown, in `detect_leaks`.
             kheap_lock.yasos_kheap_lock();
             defer kheap_lock.yasos_kheap_unlock();
             const t_alloc = if (perf.enabled) perf.read_cycles() else 0;
-            const ptr = @as([*]u8, @ptrCast(c.malloc(len) orelse return null));
+            const base = @as([*]u8, @ptrCast(c.malloc(padded_length(len, alignment)) orelse return null));
+            const ptr = if (alignment > malloc_alignment) align_within(base, alignment) else base;
             if (perf.enabled) perf.kernel_heap_op(perf.read_cycles() -% t_alloc);
             memory_in_use += @as(isize, @intCast(len));
             if (memory_in_use > peak_memory_in_use) {
@@ -502,13 +523,15 @@ pub fn MallocAllocator(comptime options: anytype) type {
             log2_buf_align: std.mem.Alignment,
             return_address: usize,
         ) void {
-            _ = log2_buf_align;
             _ = return_address;
             // Same reasoning as `alloc`: the free and its bookkeeping have to be
             // one operation, or `tracker.remove` races the splice in `push`.
             kheap_lock.yasos_kheap_lock();
             defer kheap_lock.yasos_kheap_unlock();
-            c.free(buf.ptr);
+            // An over-aligned block is somewhere inside what `malloc` returned;
+            // handing this pointer back would be freeing an interior address.
+            const alignment = log2_buf_align.toByteUnits();
+            c.free(if (alignment > malloc_alignment) base_of(buf.ptr) else buf.ptr);
             memory_in_use -= @as(isize, @intCast(buf.len));
             counter -= 1;
             bucket_dec(buf.len);
@@ -535,6 +558,55 @@ test "MallocAllocator.ShouldAllocateAndFree" {
     defer allocator.free(ptr);
 
     try std.testing.expectEqual(@as(usize, 100), ptr.len);
+}
+
+test "MallocAllocator.ShouldHonourAlignmentBeyondMallocs" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+    const allocator = malloc_alloc.allocator();
+
+    // 32 is the reservation granule a `Ranked` lock is aligned to; malloc
+    // guarantees 8. Enough allocations in a row to catch a fix that only works
+    // when the underlying block happens to be aligned already.
+    inline for (.{ 16, 32, 64 }) |alignment| {
+        var blocks: [8][]align(alignment) u8 = undefined;
+        for (&blocks) |*block| {
+            block.* = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), 48);
+            try std.testing.expectEqual(@as(usize, 0), @intFromPtr(block.ptr) % alignment);
+            // Writable over its whole length, i.e. the block really is the size
+            // that was asked for and not the padding in front of it.
+            @memset(block.*, 0xAB);
+        }
+        for (blocks) |block| {
+            for (block) |byte| try std.testing.expectEqual(@as(u8, 0xAB), byte);
+            allocator.free(block);
+        }
+    }
+}
+
+test "MallocAllocator.ShouldHoldAnOverAlignedTypeOnTheHeap" {
+    var malloc_alloc = MallocAllocator(.{}).init();
+    defer malloc_alloc.deinit();
+    const allocator = malloc_alloc.allocator();
+
+    // The shape that broke: a heap object carrying an over-aligned member.
+    // `create` @alignCasts what the allocator returns, so a wrong answer here
+    // is a panic rather than a wrong value.
+    const Guarded = struct {
+        guard: u32 align(32) = 0,
+        payload: u32 = 0,
+    };
+
+    var objects: [8]*Guarded = undefined;
+    for (&objects) |*object| {
+        object.* = try allocator.create(Guarded);
+        object.*.* = .{ .payload = 7 };
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(object.*) % 32);
+    }
+    for (objects) |object| {
+        try std.testing.expectEqual(@as(u32, 7), object.payload);
+        allocator.destroy(object);
+    }
 }
 
 test "MallocAllocator.ShouldTrackMemoryUsage" {

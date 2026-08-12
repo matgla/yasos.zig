@@ -31,6 +31,10 @@ pub fn prepare_process_stack(
 
 pub fn initialize_context_switching() void {}
 pub fn init() void {}
+/// No-op counterpart to the arm-m hook: this target has one core and no
+/// per-core timer to program. See `source/arch/arm-m/process.zig`.
+pub fn init_secondary() void {}
+
 
 var thread_counter: i32 = 0;
 

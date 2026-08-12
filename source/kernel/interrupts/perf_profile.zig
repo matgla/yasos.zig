@@ -333,14 +333,8 @@ pub fn open_call(found: bool) void {
     if (!found) open_misses +|= 1;
 }
 
-// Why the *lookup* phase costs what it does.
-//
-// The phase split above says the VFS walk is ~86% of an open, and no more. A
-// warm two-component lookup in the XIP romfs still costs ~126 us, which at
-// 532 MHz is ~67 000 cycles to compare a handful of names in memory-mapped
-// flash -- so the cost is structural, not IO. These count the two things the
-// romfs walk does per directory entry it steps over, which is what turns "the
-// walk is slow" into a specific thing to remove:
+// What the romfs walk does per directory entry it steps over, which is what
+// turns "the lookup is slow" into something specific:
 //
 //   headers  FileHeader.init calls, i.e. directory entries visited
 //   reads    IFile.read calls made underneath them (each preceded by a seek,
@@ -348,15 +342,13 @@ pub fn open_call(found: bool) void {
 //   allocs   kernel-heap allocations, one per entry for a name that exists
 //            only to be compared and freed
 //
-// Counts rather than cycles on purpose: there are hundreds of reads per open
-// and timing each one with a DWT read would cost more than it measured.
+// Counts rather than cycles: there are hundreds of reads per open, and a DWT
+// read per one would cost more than it measured.
 var romfs_headers: u32 = 0;
 var romfs_reads: u32 = 0;
 var romfs_name_allocs: u32 = 0;
 /// Cycles spent inside FileHeader.init, so the walk can be separated from the
-/// rest of the lookup. Removing 82% of the reads took only 20% off the lookup,
-/// which says the walk is not where the remaining time is -- this is what
-/// turns that inference into a number.
+/// rest of the lookup.
 var romfs_header_cycles: u64 = 0;
 
 pub fn romfs_header(cycles: u32) void {
@@ -370,19 +362,14 @@ pub fn romfs_read() void {
     romfs_reads +|= 1;
 }
 
-// Kernel-heap traffic, which is the other candidate for the lookup time the
-// romfs walk does not account for: `open` allocates a node per hit, and a miss
-// sends the VFS through resolve_symlinks, which builds and normalises a path
-// per component. newlib's malloc is a free-list walk, so these are counted and
-// timed together.
+// Kernel-heap traffic: `open` allocates a node per hit, and a miss sends the VFS
+// through resolve_symlinks, which builds and normalises a path per component.
+// newlib's malloc is a free-list walk, so these are counted and timed together.
 var kheap_calls: u32 = 0;
 var kheap_cycles: u64 = 0;
 
-// The lookup residue. Entry reads and heap traffic together account for well
-// under half of a romfs lookup, and the FAT rows carry the same large remainder
-// with no romfs walk at all -- so the rest is in the VFS layer itself. These
-// bracket its two halves: resolving which mount owns the path, and the
-// filesystem's own get() (of which the romfs walk is a measured part).
+// The lookup residue, in the VFS layer itself. These bracket its two halves:
+// resolving which mount owns the path, and the filesystem's own get().
 var vfs_mount_cycles: u64 = 0;
 var vfs_fsget_cycles: u64 = 0;
 
@@ -393,9 +380,7 @@ var romfs_walk_cycles: u64 = 0;
 var romfs_node_cycles: u64 = 0;
 
 // SD block traffic, so `write` and `close` can be split into the filesystem's
-// bookkeeping and the card's own time. tcc's writes cost 208 us a call and its
-// closes 291 us, on 91-byte average writes -- which is per-operation cost, not
-// bandwidth, and these say which side of the block layer it is on.
+// bookkeeping and the card's own time.
 var disk_writes: u32 = 0;
 var disk_write_cycles: u64 = 0;
 var disk_write_blocks: u32 = 0;
@@ -403,10 +388,9 @@ var disk_reads: u32 = 0;
 var disk_read_cycles: u64 = 0;
 var disk_read_blocks: u32 = 0;
 
-/// Time spent in wait_for_card_dat0, i.e. blocked on the card rather than
-/// moving data. Separates "the card is still programming the last write" from
-/// "the write path itself is slow", which is what decides whether deferring
-/// the post-write wait can help a given workload at all.
+/// Time spent in wait_for_card_dat0, i.e. blocked on the card rather than moving
+/// data -- separates "the card is still programming" from "the write path is
+/// slow".
 var disk_wait_cycles: u64 = 0;
 
 pub fn disk_wait(cycles: u32) void {
@@ -580,10 +564,9 @@ pub fn summary() Summary {
                 if (taken[r] and used[r] == i) already = true;
             }
             if (already) continue;
-            // Cycles first, call count as the tie-break. Without the tie-break a
-            // target with no working cycle counter compares 0 > 0 forever and
-            // "top" degenerates to the three lowest-numbered syscalls the
-            // process happened to use -- which looks like a ranking and is not.
+            // Cycles first, call count as the tie-break: without it a target
+            // with no working cycle counter compares 0 > 0 forever and "top"
+            // degenerates to the three lowest-numbered syscalls used.
             const better = if (best) |b|
                 total_cycles[i] > total_cycles[b] or
                     (total_cycles[i] == total_cycles[b] and call_counts[i] > call_counts[b])

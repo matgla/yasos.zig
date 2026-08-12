@@ -13,36 +13,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! The kernel heap lock -- `__malloc_lock` / `__malloc_unlock`, rank `kheap`.
-//!
-//! The kernel heap **is** newlib malloc: the dynamic loader allocates through it
-//! during execve and lazy PLT resolve, and so does every kernel structure. Its
-//! free list is the single most consequential shared structure in the tree; the
-//! comment this replaces records what happens without a lock, which is a wild
-//! `pop {pc} == 0` HardFault in `sbrk_aligned` under load.
-//!
-//! ## Why it is recursive, and why that is not a choice
-//!
-//! newlib's `realloc` takes `__malloc_lock` and then calls the also-locking
-//! `_malloc_r` / `_free_r`. The recursion is in libc's API, not in our design,
-//! which is why `RecursiveRanked` has a second instantiation besides the BKL.
-//!
-//! ## Why a spinlock and not the sleeping mutex
-//!
-//! Two independent reasons, and either alone would settle it. The lazy PLT
-//! resolver runs in SVC/exception context, where `RankedMutex` refuses to block
-//! (and a nested SVC would HardFault anyway); and yielding the CPU with the heap
-//! invariant half-updated is the exact failure the lock exists to prevent. Rank
-//! 90 is inner to every sleeping lock in the hierarchy for precisely this
-//! reason.
-//!
-//! ## What changed
-//!
-//! The previous implementation -- two of them, one in Zig for mps2/mps3 and one
-//! in C for the rp2350 -- was a PRIMASK nesting counter. That is correct against
-//! this core's own interrupts and provides nothing at all against a second core.
-//! It is now a real lock word underneath the same nesting counter, so it does
-//! both, and there is one implementation instead of two.
+// The kernel heap lock -- `__malloc_lock` / `__malloc_unlock`, rank `kheap`.
+// The kernel heap is newlib malloc: the dynamic loader allocates through it
+// during execve and lazy PLT resolve, and so does every kernel structure.
+//
+// Recursive because newlib's API forces it: `realloc` takes `__malloc_lock` and
+// then calls the also-locking `_malloc_r` / `_free_r`.
+//
+// A spinlock, not the sleeping mutex, for two independent reasons: the lazy PLT
+// resolver runs in exception context where `RankedMutex` refuses to block, and
+// yielding with the heap invariant half-updated is the failure the lock exists
+// to prevent. Rank 90 is inner to every sleeping lock for that reason.
 
 const std = @import("std");
 
@@ -52,11 +33,10 @@ const locks = @import("../../sync/locks.zig");
 /// what lets the allocator log without inverting the hierarchy.
 var lock: locks.RecursiveRanked(.kheap) = .{};
 
-/// `__malloc_lock`. Exported under a stable C name because the rp2350 build has
-/// to define `__malloc_lock` from a C object (link-order: the pico-sdk pulls
-/// newlib's strong `mlock.o` in before the Zig compilation unit is scanned, so
-/// the override must resolve from an object linked ahead of `libc_nano.a`).
-/// That C file forwards here rather than carrying a second copy of the logic.
+/// `__malloc_lock`. Exported under a stable C name because the rp2350 build must
+/// define `__malloc_lock` from a C object linked ahead of `libc_nano.a` -- the
+/// pico-sdk pulls newlib's strong `mlock.o` in before the Zig unit is scanned.
+/// That C file forwards here rather than carrying a second copy.
 pub export fn yasos_kheap_lock() callconv(.c) void {
     lock.lock_irqsave();
 }
@@ -65,10 +45,9 @@ pub export fn yasos_kheap_unlock() callconv(.c) void {
     lock.unlock_irqrestore();
 }
 
-/// Whether this context holds the kernel heap lock.
-///
-/// For `assert_held` at the head of the allocator's own accounting, which is
-/// mutated under the same lock but through a different entry point.
+/// Whether this context holds the kernel heap lock. For `assert_held` in the
+/// allocator's own accounting, which is mutated under the same lock through a
+/// different entry point.
 pub fn held_by_current() bool {
     return lock.held_by_current();
 }
@@ -105,10 +84,8 @@ test "Sync.KernelHeapLock.IsInnerToTheSleepingLocks" {
     locks.reset();
     defer locks.reset();
 
-    // The ordering that matters: a filesystem operation may allocate, so `fs`
-    // (20) must be takeable before `kheap` (90) and never the other way. If the
-    // ranks were reversed, every allocation inside a filesystem call would be a
-    // lock-order violation.
+    // A filesystem operation may allocate, so `fs` (20) must be takeable before
+    // `kheap` (90) and never the other way.
     var fs = locks.Ranked(.fs){};
     const flags = fs.lock_irqsave();
     yasos_kheap_lock();

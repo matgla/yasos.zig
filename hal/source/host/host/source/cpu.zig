@@ -33,12 +33,9 @@ pub const Cpu = struct {
         return 123000000;
     }
 
-    /// One, not the host machine's core count.
-    ///
-    /// This number sizes `ProcessManager.core[]` and bounds every
-    /// `percpu[coreid()]` array in the kernel. Reporting 4 claimed three cores
-    /// that will never be scheduled on and, worse, made `coreid()` -- which was
-    /// pinned at 1 -- index a slot that no bring-up path ever initialises.
+    /// One, not the host machine's core count: this sizes `ProcessManager.core[]`
+    /// and bounds every `percpu[coreid()]` array, and the host schedules on one
+    /// core.
     pub fn number_of_cores() u8 {
         return 1;
     }

@@ -1,6 +1,42 @@
 # SMP — plan
 
-**Status (2026-08-10):** **phases 0-5 are complete.** Every structure the
+> **Two things measured on hardware 2026-08-12, both owed a follow-up.**
+>
+> 1. **`CONFIG_PROCESS_SMP=n` panics deterministically on this tree.** Four
+>    sequential tcc compiles driven through `prun -j1`: three complete, the
+>    fourth dies with `kernel heap exhausted: _sbrk(+1412) heap_end=0x20012fe4
+>    limit=0x20013000 used=53728B`. Identical on both attempts, always the fourth
+>    job. The same four compiles issued as four shell commands complete fine on
+>    the same boot, so it is the spawn path rather than the compiles, and the
+>    direction is the odd part: SMP=n has *more* heap available than SMP=y (no
+>    per-CPU statics) and the SMP=y build runs the same batch repeatedly without
+>    trouble. Reads like per-spawn kernel-heap growth that only the single-core
+>    build sits close enough to the 76 KiB limit to hit. **Not bisected against
+>    pre-SMP history**, so "the SMP work caused it" is unproven — but the
+>    single-core configuration is currently broken either way.
+> 2. **SMP costs ~48% on the per-syscall console path.** Same tree, same test,
+>    only this symbol differs: the shell's per-character command echo (a `read`
+>    plus a `write` per character) goes **20.1 us/char at SMP=n to 29.7 us/char
+>    at SMP=y**, which is ~14 s over a 4453-test smoke run. The pre-phase-7
+>    measurement of the same slope was 19.4 us/char, i.e. the SMP=n number, so
+>    this corroborates independently. It does not show up in the compile bucket
+>    because a compile is 77% XIP miss stalls and a syscall tax hides inside
+>    that; the echo path is nothing but syscalls, so it exposes it. See
+>    docs/remote_smoke_speedup_plan.md, "Three more paths checked".
+>
+> Neither is a reason to hold phase 7 — but the second says the lock/entry cost
+> is now measurable, and there is an instrument for it
+> (`tests/smoke/prun_scaling_test.py`, the round-trip anatomy section).
+
+**Status (2026-08-11):** **phases 0-5 are complete, and core 1 now boots on both
+targets.** `CONFIG_PROCESS_SMP=y` on `mps3-an524` and on `pimoroni_pico_plus2`;
+on each, core 1 boots, passes a two-core mutual-exclusion test and parks — see
+[Core 1 on QEMU](#core-1-on-qemu-mps3-an524) and
+[Core 1 on the RP2350](#core-1-on-the-rp2350). What is left of phase 6 is the
+doorbell IPI and two diagnostic globals, none of which a parked core reaches.
+Apart from those two sections the prose below is the phases 0-5 record.
+
+Every structure the
 inventory names as needing synchronization before a second core starts now has
 it: the kernel heap, page pool, pid map, process table, mount tree, filesystem,
 block device, loader tables and console, plus atomic refcounts throughout and a
@@ -9,7 +45,8 @@ and converted, the alias deleted, a CI grep guarding it. Nine of the twelve
 named locks exist; the three that do not are phase-6, -7 and -9 work by nature
 (see below).
 
-What is left before core 1 is therefore **phase 6 itself**, not more of this.
+What stood between phases 0-5 and core 1 was therefore **phase 6 itself**, not
+more of this — and on QEMU that step has now been taken.
 This document is the design and the work breakdown. Its centre of gravity is
 [the synchronization inventory](#the-synchronization-inventory) — the list of
 every place in the tree that needs synchronization and the mechanism chosen for
@@ -23,10 +60,653 @@ each, because that list, not the core-1 bring-up, is the actual project.
 | 3. Split `block_context_switch` (37 sites) | **done** — 0 sites; the alias is deleted and grep-guarded |
 | 4. Lock hierarchy + big kernel lock | **hierarchy done** — 9 locks + lockdep + audit; `rq`/`fd`/BKL deferred with reasons |
 | 5. Non-reentrant libraries (FatFs, littlefs, SDIO) | **done for what is mounted** — FatFs, block device, loader |
-| 6. Core 1 bring-up + doorbell IPI | not started |
+| 6. Core 1 bring-up + doorbell IPI | **bring-up done on both targets** (mps3-an524 and rp2350); the doorbell IPI and two per-CPU diagnostics remain — see below |
 | 7. SMP scheduler | not started |
 | 8. Split the BKL | not started |
 | 9. Threads (`clone`, pthreads, TLS) | not started |
+
+### Core 1 on QEMU (mps3-an524)
+
+Phase 6, on the QEMU leg only. **`CONFIG_PROCESS_SMP=y` on `mps3-an524`**, core 1
+boots, runs a two-core mutual-exclusion test, and parks in an idle loop. The
+rp2350 is deliberately untouched and stays `n`.
+
+**The plan said QEMU could not do this, and that was an assumption rather than a
+fact.** The AN524 is an **SSE-200**, not an IoTKit: `qemu-system-arm -machine
+mps3-an524` is documented as "dual Cortex-M33" and `info cpus` lists both. The
+[Testing](#testing) table is corrected accordingly. This matters beyond
+convenience — it means the cross-core paths get exercised on every CI run,
+including under `-n auto` where each xdist worker boots its own two-core guest,
+rather than only on the rig that is already the flakiest part of CI.
+
+**How core 1 starts.** The SSE-200 holds it at reset through the system control
+block's `CPUWAIT` (secure alias `0x5002_1000`, `+0x118`), whose reset value is 2
+— core 0 boots, core 1 waits. Clearing bit 1 starts it, and it resets through
+`INITSVTOR1` (`+0x114`) rather than through the table core 0 booted from. So core
+1 needs a vector table of its own; pointing it at `__vector_table` would re-enter
+`_start`, which re-runs `crt_init` and re-zeroes a `.bss` core 0 is already
+using. `__vector_table_core1` is therefore two words — initial MSP and
+`_start_core1` — and `_start_core1` repoints VTOR at the shared table before
+anything can raise an exception, so the cores share every handler, which is what
+phase 7 needs. (128-byte aligned: `INITSVTOR1`'s VTOR field starts at bit 7.)
+
+`coreid()` is a load from the per-core CPU_IDENTITY block at `0x4001_f000` —
+each core sees its own copy, which is this board's answer to the rp2350's SIO
+CPUID load. It was hardcoded to 0 before, along with `number_of_cores()`
+returning 1 for a part that has two.
+
+`kstack` is split so each core has an MSP of its own: MSP is banked per core, the
+memory behind it is not. Core 0's `MSPLIM` is exactly core 1's stack top, so
+neither can grow into the other and an attempt faults instead of corrupting.
+
+**What core 1 does not do.** It does not schedule — no run queue, no entry in the
+process table — so `irq_systick` refuses to pend PendSV on a core that does not
+run the scheduler (`smp.core_schedules`, deleted in phase 7 along with
+`scheduler_core`). It does not log either: core 0 reports the handshake, so the
+boot log stays a single-writer stream. It parks in **WFI**, not a spin — under
+emulation a spinning idle core burns a whole host CPU, which on a suite that runs
+one QEMU per worker would halve the machine.
+
+**The self-test is the point, not the boot message.** "Core 1 did not start" is
+loud. "Core 1 started and its exclusives do not exclude" is silent, and is what
+this phase exists to catch — the `ACTLR.EXTEXCLALL` hazard named above. It runs
+in two stages, because the lock and the primitive under it fail differently:
+both cores `fetchAdd` a shared atomic with no lock involved (a short total means
+one core's `ldrex`/`strex` never reached the other), and then both take a real
+`SpinLock` section carrying two signatures — a marker that catches *overlap*, and
+a deliberately non-atomic counter read into a register, held across a delay and
+written back, which catches *lost updates*.
+
+**Nothing in it blocks, and that rule was learned the hard way.** Stage 2 used a
+blocking `lock_irqsave` first, which made a self-test able to hang the boot it
+verifies — and under QEMU's multi-threaded TCG it did, wedging about one smoke
+run in five past the 15 s boot timeout. gdb on a stalled guest: both cores
+online, the other core finished and idle, lock word **free**, and the spinning
+core still in its retry loop 19 seconds later. A losing try-lock now skips its
+turn, so sections are *counted* rather than predicted and the test is bounded by
+its own loop counts however the cores are scheduled. Fourteen consecutive clean
+suite runs, against roughly one-in-five before.
+
+Two workarounds were tried and rejected on evidence, both worth recording
+because both look reasonable:
+
+- **A larger spin budget / a wall-clock timeout on the handshake.** The timeout
+  was a real bug fix — an iteration budget measures the *host*, not the guest,
+  and `hal.time.get_time_us()` runs from a free-running timer long before
+  SysTick — but it did not touch the stall, which was inside the lock.
+- **`-accel tcg,thread=single`.** It does remove the stall, and it silently
+  guts the test: round-robin TCG never runs the cores at the same instant, so
+  with the lock deliberately removed the suite still reported **pass**. It also
+  drops a contended lock to ~140 sections a second. Do not reach for it.
+
+**The detector was verified by breaking it**, which is the only way to tell a
+test that passes from a test that cannot fail. Replacing the lock with a bare
+PRIMASK mask: 1853 guarded increments against 2048 sections taken, an overlap
+seen, verdict `fail`, three runs out of three. It doubles as proof that the two
+cores genuinely run at the same time, since a lost update requires real overlap
+— as does the section count itself, where about half the try-locks lose.
+
+**`/proc/cpus`** is the surface, and it answers three different questions:
+
+```
+smp 1                          cpus 2                     online 2
+selftest pass                  selftest_atomic_expected 8192
+selftest_atomic_counted 8192   selftest_sections 1029
+selftest_guarded 1029          selftest_overlaps 0        selftest_us 1393
+cpu0_online 1                  cpu0_ticks 1268
+cpu1_online 1                  cpu1_ticks 1281
+```
+
+`selftest_us` is reported rather than kept internal because the cost of this is
+*contention*, and contention is the thing an emulator makes least
+representative; it is the number to look at before changing an iteration count.
+
+The tick counts are there because the online flag cannot answer liveness: a core
+that came up and then wedged still reads back online forever. Two reads a moment
+apart separate "started once" from "running now", and that is what
+`tests/smoke/smp_test.py` asserts, along with the self-test verdict. It runs on
+**both** QEMU boards rather than skipping on the single-core one — an505 must
+report `smp 0`/`cpus 1`/`selftest skipped`, so `smp 0` silently appearing on the
+an524 leg is a failure rather than a skip.
+
+### Core 1 on the RP2350
+
+Phase 6 on real silicon. **`CONFIG_PROCESS_SMP=y` on
+`pimoroni_pico_plus2`**, core 1 boots, runs the same two-core
+mutual-exclusion test, and parks. `/proc/cpus` from the rig:
+
+```
+smp 1        cpus 2        online 2       selftest pass
+selftest_atomic_expected 8192   selftest_atomic_counted 8192
+selftest_sections 1038          selftest_guarded 1038
+selftest_overlaps 0             selftest_us 165
+cpu0_online 1  cpu0_ticks 18    cpu1_online 1  cpu1_ticks 82
+```
+
+`selftest_us` is **165 against QEMU's 1393** — the one number in this document
+where the emulator was off by an order of magnitude, and a reminder that the
+contention figures above are emulator artefacts. `cpu1_ticks > cpu0_ticks` is
+expected rather than alarming: `init()` leaves core 0's SysTick *disabled* until
+the root process exists, while `init_secondary` leaves core 1's running.
+
+**How core 1 starts, and why it is less work than the SSE-200.** There is no
+`CPUWAIT` and no `INITSVTOR1`. Core 1 comes out of reset into the **bootrom**,
+which sits in a receive loop on the inter-core FIFO and takes VTOR, SP and the
+entry point *as messages* — the six-word sequence `{0, 0, 1, VTOR, SP, entry}`,
+each word echoed back, a mismatch restarting the sequence from the beginning
+(`hal/.../rp2350/source/cpu.zig` `start_core`). So **there is no second vector
+table to build**: core 1 is handed core 0's live VTOR, which is the RAM vector
+table `crt_init` relocated to, and the cores share every handler from the first
+instruction. `__vector_table_core1`, which the QEMU board needs, has no rp2350
+counterpart.
+
+Every wait in that path is on one 100 ms deadline, so a core that never answers
+costs the boot 100 ms once instead of hanging it. The kernel's own 2 s handshake
+timeout sits outside it.
+
+`_start_core1` (`startup.S`) therefore has almost nothing to do — the bootrom
+already set MSP and VTOR. It sets `MSPLIM`, calls `crt_init_core1`, and enters
+`kernel_secondary_core_entry`. It is deliberately not a second `_start`: .data,
+.bss, the constructors, clocks, QMI and PSRAM are all already up and chip-wide.
+
+**Stacks.** `core1_stack`, 4 KB at `0x2007D000`, taken off `process_ram` (396K →
+392K) rather than out of `scratch`, so core 0's 16 KB is unchanged to the byte.
+`__stack_top_core1__` is exactly `__stack_bottom__`, i.e. core 0's MSPLIM, so
+either core overflowing faults on a limit instead of eating the other's stack —
+a linker `ASSERT` holds that adjacency. 4 KB is **not** enough for the hardfault
+maps dump (a 4 KB stack buffer on its own), so a core-1 fault hits MSPLIM partway
+through it. Bounded and loud, and the right trade until phase 7 gives core 1
+real work.
+
+**`ACTLR.EXTEXCLALL` is set on both cores**, in `init_per_core_state()` called
+from `crt_init` and `crt_init_core1`. Note the pico-sdk *also* sets it on core 0
+via its own runtime initializer (`spinlock_set_extexclall`, visible in the
+disassembly) — the explicit write removes the dependency on that initializer's
+ordering and is the only thing that covers core 1, which runs no SDK per-core
+init. Verified in the disassembly rather than assumed: `ldr`/`orr #0x20000000`/
+`str` against `0xE000E008` in both.
+
+**`sio.zig` was RP2040-shaped and is now RP2350-shaped.** Two things moved: GPIO
+is interleaved low/high from `+0x14` (`GPIO_HI_OUT` at `+0x14`, `GPIO_OUT_SET` at
+`+0x18`), and **there is no divider** — `+0x60`..`+0x7c` is reserved, not `DIV_*`.
+What made this survivable, and what makes it a trap, is that both layouts have
+exactly 32 words ahead of `INTERP0`: `cpuid` and `spinlocks` landed correctly and
+the `@sizeOf` check passed. The asserts are now per-field `@offsetOf`.
+
+**Two races that only exist on this part**, both found by walking core 1's path
+rather than by a test:
+
+- **`xip_stats.accumulate()` in `irq_systick`** is a seqlock *writer* with no
+  writer-side exclusion — a single-writer assumption that a second core's SysTick
+  breaks. It is now timekeeper-only, like the clock beside it. The QEMU boards
+  publish no sampler, so their second core returns on the null check and can
+  never reach it: this one was structurally invisible to the QEMU leg.
+- **`FPCCR.LSPEN`** is banked per core, and only core 0 was clearing it.
+  `init_secondary` now does too. Nothing a phase-6 core 1 runs can trip the
+  unbalanced-`EXC_RETURN` bug that setting exists for, but phase 7 would.
+
+**Still phase-6 work:** the doorbell IPI and the `hal.irq.Type` extension that
+carries it, and `hardfault_callee` / `ctx_ring` becoming per-CPU. Neither is
+reachable from a core that only idles, which is why core 1 parks today without
+them. (`mpu.zig`'s `next_region`, listed here previously, is already a local.)
+
+**Erratum RP2350-E2 is a constraint on the doorbell work, and the tree already
+satisfies it.** The SDK's wording: "writes to new SIO registers above an offset
+of +0x180 alias the spinlocks, causing spurious lock releases." The doorbells are
+at exactly `+0x180`, so ringing one can release a SIO *hardware* spinlock. That
+is harmless here only because this kernel does not use them — its locks are
+LDAEX/STLEX exclusives and the sole write to `spinlocks` is the boot release loop
+in `crt.zig`. Treat that as an invariant, not a coincidence.
+
+**Not yet measured: the overclock.** The rig runs at 532 MHz and VREG margin
+above 600 MHz is already known to be thin and ~80% intermittent, so single runs
+lie. A second active core changes current draw and die temperature. The stability
+sweep has *not* been re-run with core 1 live, and it should be before this is
+trusted under load.
+
+### Both cores scheduling
+
+Phase 7. **`CONFIG_PROCESS_SMP=y` on both targets, and both cores now run
+processes.** The evidence, from `/proc/cpus` on the QEMU an524 leg across a
+workload with three concurrent jobs:
+
+```
+cpu0_scheduling 1   cpu0_switches 2 -> 8    cpu0_pid 6   cpu0_idle_pid 2
+cpu1_scheduling 1   cpu1_switches 1 -> 5    cpu1_pid 3   cpu1_idle_pid 3
+```
+
+Core 1 performing four context switches under load is the whole milestone.
+Note what it replaces: through phase 6 that counter would have read `1 -> 1`,
+because core 1 booted, passed the exclusives self-test and sat in WFI.
+
+**The claim is the scan, and the lock is the claim.** `RoundRobin.try_claim`
+stores `Running` into the node it picks, inside the same `proctable_lock`
+critical section that tested it for `Ready`. No CAS, deliberately, and the code
+says so at the site: every caller arrives through `ProcessManager.schedule_next`,
+which holds the lock across the whole walk, and a lock held over test-and-store
+is strictly stronger than a CAS. A CAS there would also imply the surrounding
+walk is safe unlocked, which it is not — it reads `node.next` while the other
+core may be inserting.
+
+**The release is deferred to after the context store, and that ordering is the
+subtle half.** `store_and_switch_to_next_task` calls
+`arch_store_registers_on_stack` — which reaches `update_stack_pointer` and writes
+the outgoing stack pointer — *before* `switch_to_next_task`. So
+`RoundRobin.update_current`, reached from `process_set_next_task`, is the first
+moment at which there is a valid context to resume, and that is where
+`release_from_core` publishes the process as `Ready` again. Releasing at pick
+time instead would let the other core resume it from a stack pointer belonging
+to the previous switch.
+
+**`Running` had to become sticky.** `reevaluate_state` is called on *other*
+processes by every waker in the tree, and it fell through to `Ready`. On one core
+that was harmless because a woken process could not also be executing. On two it
+is the same double-claim by another route, so `reevaluate_state` now refuses to
+demote `Running`, and `release_from_core` is the single exception — issued by the
+core that owns the claim, after the store. `Running -> Blocked` stays allowed: it
+is always a process blocking itself.
+
+**Every core has a real idle process**, held in `ProcessManager.idle[]` and
+deliberately not in `processes`, so `ps`, `is_empty`, `has_live_child`,
+`wake_all_blocked_on` and the other core's scan never see it. Created after the
+root so the root keeps pid 1. Three things fall out of it: `core[]` is valid on
+every core from the moment idle exists rather than `undefined` until first
+switch; `process_set_next_task`'s "no tasks available" panic is unreachable; and
+the reaper gets a thread context.
+
+That last one also fixed a *single-core* pathology. A process blocked in
+`waitpid` used to keep its core and spin on `hal.irq.trigger(.pendsv)`. On one
+core that merely wasted the slice. On two it actively throttles the other core:
+the spin re-enters `schedule_next` as fast as the core can issue it and every
+pass takes `proctable_lock`. Blocked processes now switch to idle and the core
+parks in WFI.
+
+**The reaper left PendSV**, as phase 4 required. `reap_terminated` runs in the
+idle process and at process creation, and skips any process still pointed at by
+some core's cursor (`is_claimed_by_any_core`) — the exiting process is its own
+core's `current` while that core is switching away from it, and freeing its stack
+in that window is a use-after-free of the context the switch is about to store.
+
+**The `scheduler_core` constant and `system_call.scheduler_running` were one
+question asked twice**, and both answers were per-system where the question is
+per-core. They are now a single `smp.scheduling_mask` bit per core, set when a
+core takes its own first switch. This is load-bearing rather than tidy: a
+secondary core enables its SysTick in `init_secondary()` while still on MSP with
+no PSP of its own, so a PendSV taken there would store its context through an
+unset stack pointer. Both `irq_systick` and `do_context_switch` refuse on that
+basis.
+
+#### The rig is the aggressive case, not the gentle one
+
+Worth stating before the list, because it inverts the obvious assumption. QEMU
+has no doorbell, so an idle core there only looks for work every 100 ms. **The
+rp2350 does have one, so an idle core is interrupted the moment work appears** —
+which makes the rig behave like the 1 ms poll configuration, not like the QEMU
+default. Two bugs that were nearly unreachable on QEMU showed up in the first
+minute of a rig suite run, as reruns:
+
+- the vfork parent claim race below, and
+- SDIO driven from both cores at once.
+
+So: **a clean QEMU suite is not evidence for the rig.** Run both.
+
+#### Twelve bugs the first two-core workload found
+
+None of them was in the scheduler, and none is reachable on one core. That is
+the pattern worth noting: the scheduler change was the easy part, and everything
+that actually broke was **per-core state that should have been per-process**, or
+**unlocked state that only one core used to reach**. Those two questions are the
+ones to ask of any code this phase touches next.
+
+**Per-core lock accounting breaks when processes migrate.** lockdep's held-rank
+bitmask is `PerCpu(u16)`, which is right for every `Ranked` in the tree — they
+are `spin_irq`, taken with interrupts masked, so a core cannot be switched while
+holding one — and wrong for all four `RankedMutex`es. Blocking is what a sleeping
+mutex is *for*, blocking means a context switch, and the holder may resume on the
+other core. Two `sha256sum` jobs were enough:
+
+```
+lockdep: lock order violation: taking dev (rank 30) while holding ranks 0x10
+lockdep: releasing dev (rank 30), which this core does not hold
+```
+
+Both are the same accounting error seen from the two ends: the core the holder
+left keeps the bit, so the next process to take that lock there looks like an
+order violation; the core it arrives on never had it, so the release looks
+unmatched. `locks.migrating_ranks` now names the four sleeping-mutex bits, and
+`RoundRobin.update_current` moves them onto the process being switched away from
+and back off the one being switched to. This is the same hazard the plan
+predicted for the BKL — "`RecursiveRanked` tracks ownership by *core*, so the
+depth survives a switch while the process it belongs to does not" — arriving via
+lockdep instead, because the BKL was never wired.
+
+**Exception priorities are banked per core.** `initialize_context_switching` runs
+on core 0, so core 1 came up with SVCall, SysTick and PendSV all at the reset
+value of 0. The entire ordering argument — PendSV strictly lowest so it can never
+preempt SysTick or SVCall and strand their ACTIVE bits — is a property of those
+registers, and it simply did not hold on the core that had just started running
+user code. Equal priorities happen not to preempt, which is why this reads as
+working right up until something moves. `init_secondary` sets them now.
+
+**The exit path held a preempt window across two sleeping mutexes.** `sys_exit`
+disables preemption before `delete_process` — correctly, for the hand-off at the
+tail of that function, where the process takes itself off the run queue and gives
+the core away. But `clear_fds` (filesystem, rank 20) and `release_executable`
+(loader, rank 8) were *inside* that window, and `RankedMutex` refuses to block
+with preemption disabled — rightly, since the yield that would resume it could
+never run. Uncontended on one core, so it stood; it panicked within minutes of
+core 1 scheduling, when a `cat | cat` stage exited while the other core was
+inside the loader:
+
+```
+KERNEL PANIC: sleeping mutex would block with preemption disabled
+  modules.release_executable / ProcessManager.delete_process / sys_exit
+```
+
+Both calls moved to a preemptible cleanup phase at the head of `delete_process`,
+before the window is retaken. They are ordinary teardown and the process is still
+`Running` and still on the run queue there, so being preempted is no different
+from being preempted anywhere else in a syscall.
+
+**Three loader functions walk the module tables with no lock at all.**
+`load_executable` and `release_executable` take `loader_lock`;
+`restore_parent_writable_sections`, `save_parent_writable_sections` and
+`get_executable_for_pid` do not. `vfork_snapshots` is a `HashMap` mutated by the
+first two, and with two cores one shell exec'ing while another vforks is the
+ordinary shape of running a command. An unsynchronised rehash under a concurrent
+lookup is how a module name comes back empty:
+
+```
+[ERR][yasld] Can't find child module ''
+[ERR][loader] loading '/tmp/null_envp' failed: DependencyNotFound
+```
+
+Measured rather than assumed, by stashing the change and re-running the same
+command:
+
+| build | rounds of `pipe_test` + `vfork_test` + `smp_test` | rounds with a failure |
+|---|---|---|
+| phase 6 baseline (core 1 parked) | 5 | **0** |
+| phase 7, before the loader lock | 6 | **4** |
+| phase 7, after locking one of the three | 8 | **1** |
+| phase 7, after locking all three | 10 | **0** |
+| phase 7, final (all nine fixes) | 10 | **0** |
+
+`restore_parent_writable_sections` now takes the lock — both its callers
+(`delete_process`'s cleanup phase and the head of `prepare_exec`) are
+preemptible, which is what makes a rank-8 sleeping mutex legal there. The
+baseline row is the one that matters for attribution: this flakiness is phase 7's
+to own, not something that was already there.
+
+**All three are locked now, and `vfork` was restructured to allow it.**
+`save_parent_writable_sections` and `get_executable_for_pid` are called from
+`vfork`, which held its preempt window across the whole function — so taking a
+rank-8 sleeping mutex there would have panicked exactly as the exit path did.
+
+The window could not simply move to the end either: **`wait_for_process` marks
+the parent `Blocked`**, so from that call onwards a PendSV would switch the
+parent out before it reached the hand-off, leaving the child created, unreleased
+and unreachable. So the window now opens exactly at `wait_for_process`. Above it
+is preemptible setup that touches nothing another core can see — the child is not
+in `processes` yet — and below it is the hand-off. Snapshotting the parent's
+writable sections earlier is sound because the requirement is only "before the
+child runs", and the child does not run until `process_vfork_child`.
+
+`get_executable_for_pid` needed splitting into a locked public accessor and an
+`executable_for_pid_locked` helper, because `save_parent_writable_sections` calls
+it and `RankedMutex` does not recurse.
+
+With that, **ten rounds of ten, clean.**
+
+**The MPU is banked per core, and core 1 had none.** `main.zig` calls
+`arch.mpu.enable_kernel_protection()` once, on core 0. Through phase 6 that was
+harmless because core 1 ran only kernel code; a core that schedules runs *user*
+processes, so on the QEMU boards (`CONFIG_PROCESS_USE_MPU_KERNEL_PROTECTION=y`)
+every unprivileged process that landed on core 1 had the run of the kernel heap
+and stack. Core 1 now programs its own, after the self-test — the same position
+core 0's call occupies relative to it.
+
+This is safe with respect to the `ACTLR.EXTEXCLALL` hazard, and the reason is
+worth stating rather than assuming: EXTEXCLALL stops helping once an *enabled MPU
+region covers the address*, and `enable_kernel_protection` deliberately leaves
+kernel RAM unmapped — that is the whole point of it. Every kernel lock word lives
+there, so they stay uncovered and their exclusives keep reaching both cores.
+
+Note also what this exposes about the self-test: it runs *before* either core
+enables its MPU, so "cross-core exclusives work" has only ever been verified in
+the MPU-off configuration. That remains true and is worth keeping in mind, though
+the argument above says it should not matter for kernel locks.
+
+**romfs read the device with a split seek/read.** `FileHeader.load` did
+`seek(offset)` then `read(buffer)` on the **shared** device file with nothing
+holding the two together. `FileReader` already knew better and took `dev_lock`
+around its own pairs; `file_header.zig` and `file_system_header.zig` simply
+never did. With two cores the other core's romfs read lands between them, this
+read returns bytes from elsewhere in the image, and they are parsed as a header —
+so the size and offset fields come back as garbage and the next read indexes off
+the end of the device:
+
+```
+KERNEL PANIC: index out of bounds: index 1497450080, len 67108864
+  RamFlash.read / FileHeader.load / RomFs.get_file_header / RomFs.get
+```
+
+This matters more than it looks: romfs *is* the rootfs, so every `open` and every
+`exec` walks it. The lock has to be scoped to the pair rather than held across
+the function, because the long-name path calls `FileReader.read_string`, which
+takes the same lock — and `RankedMutex` does not recurse, so holding it across
+that is a same-rank re-acquisition that lockdep panics on.
+
+**`Ranked.lock_irqsave` set the rank bit before masking interrupts.** It called
+`enter(rank)` and *then* `inner.lock_irqsave()`, which is what does the masking —
+leaving a window with the bit set and interrupts still enabled. On one core that
+window is harmless. With a second core running processes, a PendSV landing in it
+migrates the caller, and the bit is per-core: the core it left keeps a bit nobody
+holds, and the core it arrives on releases one it never took.
+
+```
+[lockdep] releasing pipe (rank 40), which this core does not hold
+[lockdep] lock order violation: taking pipe (rank 40) while holding ranks 0x20
+```
+
+The pipe code was doing nothing wrong — it takes `pipe_lock` with `lock_irqsave`
+and releases it before yielding, exactly as its comments promise. The defect was
+one level down, in the lock type itself, and it applies to **every** `Ranked` in
+the tree. Masking first closes it outright: from there to `unlock_irqrestore`'s
+`leave` the caller cannot be preempted, so the bit cannot outlive its core. The
+hierarchy is still checked before the acquire, which is what the original
+ordering was reaching for.
+
+**A lost wake-up in `waitpid`, and it is the textbook one.** The decision block
+tested for an already-exited child and then blocked, guarded only by
+`preempt_disable()` — which stops *this* core switching and says nothing about
+the other core, where the child is exiting:
+
+```
+core 0 (parent)                 core 1 (child)
+  take_exited_child -> null
+                                  record_child_exit -> appends
+                                  wake_from -> parent not blocked yet, a no-op
+  block_on -> Blocked
+  ...never woken; the wake already happened
+```
+
+The result is a shell parked forever on `hello & wait`. `proctable_lock` is now
+held across the whole decision, and `delete_process` holds the same lock across
+`record_child_exit`, the unblocks and the list move — condition-and-sleep under
+one lock, make-condition-true-and-wake under the same one. There is no cheaper
+answer. This needed `has_live_child_locked` / `get_process_for_pid_locked`, since
+the public forms take the lock themselves and `Ranked` does not recurse.
+
+**The vfork parent was published as `Ready` before it was claimed — and then the
+other core was invited to take it.** `delete_process`'s hand-off path calls
+`unblock_parent()` (parent becomes `Ready`), drops `proctable_lock`, calls
+`kick_idle_core()`, and only then does `set_next(&parent.node)` claim it for this
+core. A vfork parent is the one process that must never be resumed from its
+stored context: the hand-off re-enters it through `_vfork_context` and rewrites
+its stack, so the frame at its `stack_position` is stale. The other core resuming
+it there reads the frame at the wrong offset:
+
+```
+HardFault: EXC_RETURN=0xFFFFFFE1 stacked_pc=0x2002AA98      (a user address)
+           stacked r0=0x2002AA98 r1=0xFFFFFFED r2=0x2002AA98 psr=...000E
+```
+
+`bx r0` into user code from PendSV, with the EXC_RETURN one word out of place in
+r1. **QEMU has no doorbell, so `kick_idle_core` was a no-op there and the window
+was nearly unreachable; the rig hit it in the first minute.** The claim now
+happens inside the same locked region as the unblock.
+
+**SDIO was driven from both cores.** `MmcIo.read`/`write`/`init` guarded a whole
+transfer with `arch.sync.save_and_disable_interrupts()`, which excludes this
+core's handlers and nothing else. Two processes reading or writing files at once
+interleaved two command sequences on one controller, and the card said so:
+`DataCrc` on reads, `WriteFail` on writes, both after six retries. There is now
+an `sdio` rank (35, below `dev`) held across each transfer — below `dev` so a
+caller already holding it (FatFs, romfs) nests legally, while the raw `/dev/mmc`
+path, which holds nothing, is still excluded. A single controller cannot
+interleave two transfers, so file I/O genuinely serialises across cores; that is
+the hardware's price, not a design choice.
+
+**The console degraded to ungoverned writes whenever it was busy, including when
+the other core held it.** `console_acquire` used a bare `try_lock_no_irq()` in
+handler context and wrote regardless on failure. That was right by construction
+on one core: the only possible holder was this core's thread mode or a
+lower-priority handler, neither of which can run to release until the handler
+returns, so waiting would hang and garbled output is the better failure. The same
+test also catches "the *other* core holds it" — where that core is running and
+will release, so writing anyway is not graceful degradation but plain corruption,
+two cores emitting into one UART:
+
+```
+[ERR][mmc/sdio] 0x1003c142 (4, 0x4[ERR][E[m][mcc//sdio] 0x1003b90b (42791(...
+```
+
+The question is not "is it free" but "is it *mine*", so it now asks
+`held_by_current()` — race-free here, since only this core can make it true and
+nothing else on this core can run while we are in the handler. A panic or
+HardFault on the core already holding the lock still writes straight through,
+preserving "a garbled panic beats a hung panic". The cost is that a logging
+handler may wait for the other core to finish a line, which is the same wait
+thread context has always taken.
+
+`lock_no_irq` also moved its rank bookkeeping to *after* the acquire, for the
+same reason `lock_irqsave` masks before it: it cannot mask — not masking is its
+entire purpose — so recording afterwards is what stops a migration stranding the
+bit. It gives up the pre-acquire hierarchy check, which costs nothing at rank 95
+with nothing above it.
+
+**A secondary core's first switch had a window with no PSP.**
+`process_set_next_task` marks the core as scheduling — which is what permits
+PendSV on it — part-way through `switch_to_the_first_task`, before
+`arm_load_registers_from_stack` sets PSP and before the CONTROL write. A SysTick
+there finds a core that is nominally scheduling but still on MSP with no context
+of its own, and if anything is runnable, PendSV stores through that unset PSP.
+It surfaces later as a resume into nothing (`stacked_pc=0x00000000`, "branch to
+NULL"). Core 0 has the identical window and has always been fine, because it
+takes its first switch when the root process is the only process and
+`schedule_next` has nothing to hand it. `enter_scheduler_on_secondary_core` now
+masks interrupts across the sequence and `idle_process_entry` re-enables them,
+which is exactly how the vfork hand-off closes its own equivalent window.
+
+#### The doorbell IPI
+
+`SCB.ICSR` is banked, so `hal.irq.trigger(.pendsv)` only ever pends on the
+calling core, and an idle core would otherwise wait up to a full tick to notice
+work that is runnable now. On a 1 ms tick that is most of the cost of a short job.
+
+`SIO_IRQ_BELL` (IRQ 26) carries it on the rp2350. The registers were already
+mapped; what is new is `ring_doorbell`/`clear_doorbell`/`enable_doorbell` on the
+HAL cpu interface, an idle-core bitmask in `smp.zig` that says who is worth
+ringing, and `kick_idle_core` calls on the paths that make a process runnable
+(creation, `wake_all_blocked_on`, process exit).
+
+Three things worth keeping straight:
+
+- **The vector table is shared, the NVIC is banked.** Core 1 is handed core 0's
+  live VTOR by the bootrom, so one `install_doorbell_handler` covers both cores,
+  while `enable_doorbell` has to be issued by each core for itself.
+- **The idle mask is a hint and is allowed to be stale in both directions.** A
+  spurious doorbell costs an interrupt that finds nothing; a missed one costs a
+  tick of latency, which is exactly what a board without a doorbell pays anyway.
+  At most one core is rung — waking every idle core to race for one runnable
+  process is a thundering herd whose losers each pay a lock acquisition.
+- **Erratum RP2350-E2 still binds.** The doorbell write is at SIO `+0x180` and
+  aliases the SIO hardware spinlocks, so it can spuriously release one. This is
+  safe only because the kernel does not use them. That is an invariant to keep,
+  not a coincidence, and it is now commented at both the register declaration and
+  the ring site.
+
+**The QEMU leg has no doorbell and must stay correct without one.** The SSE-200
+has no equivalent, so `hal.cpu.ring_doorbell` returns false there and the an524
+falls back to tick discovery — which means the CI leg exercises the *fallback*
+path and the doorbell path only runs on the rig. `/proc/cpus` reports `doorbell`
+so a latency figure says which of the two produced it.
+
+#### Still open
+
+- **`ArmProcess.vfork` still hands the child a raw PSP as its `stack_position`.**
+  Fixed in practice by claiming the parent under the lock (above), so no path
+  now reaches a vfork frame through PendSV — but the representation is still a
+  trap for the next person, and giving vfork children a real initial frame (or a
+  state the scheduler refuses) would remove the trap rather than avoid it.
+
+  Historical note on the symptom, which is what made it findable:
+  child's `stack_position` to the parent's raw **PSP** — it is meant to be entered
+  only by the `process_vfork_child` assembly hand-off, never by the scheduler. If
+  PendSV ever picks it, `arm_load_registers_from_stack` reads the hardware
+  exception frame as though it were a software frame, so the LR slot yields a
+  word of user data and `bx r0` branches into user code from handler mode:
+
+  ```
+  HardFault: EXC_RETURN=0xFFFFFFF1 stacked_pc=0x6602491C  (a user address)
+             stacked r0=0x6602491C r2=0x6602491C psr=...000E   (exception 14, PendSV)
+  ```
+
+  The route to it was `delete_process` publishing the vfork parent as `Ready`
+  and then *ringing the other core's doorbell* before claiming it — see the
+  entry above. With that closed the symptom is gone, and what remains is the
+  representation, not a live bug.
+
+- **The idle core's 1 ms poll is written but commented out**, in
+  `interrupts/systick.zig`. An idle core has no timeslice to protect, so looking
+  for work every tick rather than every 100 ms is the obviously right behaviour,
+  and on a board with no doorbell the period *is* the discovery mechanism. It is
+  off only because of the vfork frame bug above.
+
+  Keep it as the bug-finding knob it has proven to be: raising the rate
+  multiplies how often processes migrate, and **it found five of the nine bugs
+  above** — the unlocked loader tables, the unlocked romfs seek, the
+  `enter(rank)`-before-masking window, the lost wake-up, and the first-switch
+  window. Turn it on when hunting an SMP defect, run a handful of rounds of
+  `pipe_test`/`vfork_test`/`smp_test`, and turn it back off.
+
+- **The second core contributes little on a board without a doorbell**, and that
+  is a consequence of the same period rather than a separate defect. An idle core
+  gets one look for work every 100 ms, so anything shorter than that runs entirely
+  on one core: four `sha256sum` jobs over a 219 KB binary at `-j2` finished in
+  0.10 s with core 1 never taking any of it. `test_secondary_core_actually_runs_processes`
+  had to grow a 1.6 MB workload and up to four attempts to be reliable, and that
+  sampling difficulty *is* the finding. The rp2350 does not have this problem —
+  the doorbell wakes an idle core the moment work appears — which makes measuring
+  `prun -j2` on the rig the interesting comparison.
+- **`hardfault_callee` is still a single shared buffer.** Unlike `ctx_ring`,
+  which both cores write on every switch and which is now per-CPU, this is
+  written only by the faulting core — so it corrupts only if both cores fault at
+  once. Making it per-core means indexing by `coreid` inside the naked entry
+  stub, which is board-specific (SIO on the rp2350, CPU_IDENTITY on the SSE-200)
+  in a file that is generic `arm-m`, and that stub has already cost this project
+  two wrong diagnoses. Not worth the risk for a double-fault-only diagnostic.
+- **No per-core run queues.** One ready list under `proctable_lock`, so every
+  switch on both cores serialises on one lock. At a ~1 ms tick that is not
+  measurable; `rq_lock` (rank 60) stays reserved and unused, and work stealing is
+  a later change to make once there is a measurement asking for it.
+- **The 532 MHz stability sweep has not been re-run with core 1 executing.** It
+  was already flagged as not done for a core that only idled; a core running user
+  code changes current draw and die temperature considerably more. Single runs
+  lie here (~80% intermittent), so this needs the full sweep.
+- **`sleep_for_us` polls the clock while staying `Ready`**, so it round-robins
+  normally rather than blocking — meaning it now competes for both cores.
 
 ### The sleeping mutex
 
@@ -396,7 +1076,8 @@ for reasons that pull in opposite directions:
   leaves it with a single writer. Every other core's SysTick still fires and
   still drives its own preemption, off a per-CPU `last_preempt`.
 - **It is 64 bits on a machine with no `LDREXD`**, read concurrently by
-  `sleep_for_us` and `sysinfo`. A plain two-halves read can catch the increment
+  `sysinfo` (and, until it moved to the microsecond wall clock, by
+  `sleep_for_us`). A plain two-halves read can catch the increment
   mid-carry: `0x0000_0000_FFFF_FFFF` becoming `0x0000_0001_0000_0000` reads as
   `0x0000_0001_FFFF_FFFF`, four billion ticks in the future.
 
@@ -951,13 +1632,15 @@ stepping.
 interrupt on the *writing* core only. Useful as a self-directed soft IRQ, useless
 as an IPI. Say so in the header so nobody re-derives it.
 
-**`hal/source/raspberry/rp2350/source/sio.zig` has no doorbell registers** and
-must gain them — but **audit the whole struct first**: its GPIO fields from
-`+0x14` follow **RP2040** ordering (`gpio_out_set` at `+0x14`), whereas RP2350 has
-`GPIO_HI_OUT` at `+0x14` and `GPIO_OUT_SET` at `+0x18` (`regs/sio.h:113,133,188`).
-Latent today because only `cpuid` and `spinlocks` are read, but not something to
-build doorbell offsets on top of. `hal.irq.Type` must also grow beyond
-`{systick, pendsv, supervisor_call}` to carry an IPI.
+**`hal/source/raspberry/rp2350/source/sio.zig` now carries the doorbell
+registers**, and the struct audit this section called for was done first and
+found more than the doorbells: the GPIO block followed **RP2040** ordering, and
+the RP2040's `DIV_*` registers do not exist on this part at all. See
+[Core 1 on the RP2350](#core-1-on-the-rp2350) for why `@sizeOf` could not catch
+either. What remains here is `hal.irq.Type`, which must still grow beyond
+`{systick, pendsv, supervisor_call}` to carry an IPI, and the per-core NVIC
+enable that goes with it — the NVIC is a per-PE block, so each core has to enable
+`SIO_IRQ_BELL` for itself.
 
 ---
 
@@ -1177,6 +1860,15 @@ This is the last phase that is single-core-testable end to end.
 
 ### Phase 6 — Core 1 bring-up
 
+> **Bring-up done on both targets, 2026-08-11.** `CONFIG_PROCESS_SMP=y` on
+> `mps3-an524` and on `pimoroni_pico_plus2`; on each, core 1 boots, proves the
+> locks work across cores, and parks. What landed is described under
+> [Core 1 on QEMU](#core-1-on-qemu-mps3-an524) — including the correction that
+> **QEMU is not a single-core vehicle after all**, which changes the
+> [Testing](#testing) table's verdict — and under
+> [Core 1 on the RP2350](#core-1-on-the-rp2350). Still open in this phase: the
+> doorbell IPI, and `hardfault_callee` / `ctx_ring` becoming per-CPU.
+
 Launch sequence, second vector table / VTOR, second stack, `ACTLR.EXTEXCLALL` and
 MPU on core 1, doorbell IPI and the SIO register additions.
 
@@ -1195,6 +1887,10 @@ End state for this phase: **core 1 boots and parks in an idle loop**, core 0
 behaviour unchanged. That is a real, shippable, testable milestone.
 
 ### Phase 7 — SMP scheduler
+
+> **Done, 2026-08-11: both cores schedule.** See
+> [Both cores scheduling](#both-cores-scheduling) for what landed, the two bugs
+> the first two-core workload found, and what is deliberately still open.
 
 Per-core run queues. The critical correctness property is that a process is
 **claimed exactly once**, via a CAS on `Process.state`.
@@ -1360,7 +2056,8 @@ This is the weakest part of the plan and the honest answer is uncomfortable.
 
 | Vehicle | Verdict |
 |---|---|
-| QEMU mps2-an505 / mps3-an524 | **Single-core** (`number_of_cores()` returns 1). Cannot test SMP at all. Every defconfig except `host` targets these or the RP2350 |
+| QEMU mps2-an505 | **Single-core.** The AN505 is an IoTKit part with one M33, so this leg stays `CONFIG_PROCESS_SMP=n` and is what keeps the single-core path honest |
+| **QEMU mps3-an524** | **A real SMP vehicle, and this was wrong before.** The AN524 is an **SSE-200**, which QEMU models with **two** Cortex-M33s (`-machine mps3-an524` → `info cpus` lists both) — the claim that no QEMU board could test SMP was an assumption about the machine, never checked against it. Core 1 boots here today; see [Core 1 on QEMU](#core-1-on-qemu-mps3-an524) |
 | Renode | **Dead scaffolding.** `renode/run_raspberry_pico.resc` already drives `sysbus.cpu0` *and* `sysbus.cpu1` with two GDB servers — but it `path add`s `libs/hal/renode/Renode_RP2040`, **which does not exist**, and nothing in `build.zig`, `.github/workflows/` or `tests/` references Renode. It also targets RP2040 = armv6-m, which has **no exclusives**, so it could not validate phase 0 even if revived. A dual-M33 RP2350 `.repl` is a genuine option but is its own project — cost it, don't assume it |
 | Remote RP2350 rig | The **only** true SMP vehicle, and already the flakiest part of CI |
 | **Host `zig build test`** | **The recommended primary vehicle for phases 0–5, 7 logic and 8** |

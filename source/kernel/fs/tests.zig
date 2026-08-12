@@ -18,4 +18,5 @@ comptime {
     _ = @import("vfs.zig");
     _ = @import("mbr.zig");
     _ = @import("buffered_file.zig");
+    _ = @import("pipe.zig");
 }

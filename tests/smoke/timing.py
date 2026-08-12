@@ -61,10 +61,9 @@ class CaseTiming:
     # Component of `execute_ms`: loading the compiled test binary.
     execute_loader_ms: float = 0.0
 
-    # What the *kernel* says the two windows cost, over every process that
-    # exited inside them -- the compiled binary and the shell included, which
-    # tcc's own dump structurally cannot see. Present on any profiling-build
-    # run; unlike the fields above it does not need tcc's -bench.
+    # What the kernel says the two windows cost, over every process that exited
+    # inside them -- the compiled binary and the shell included, which tcc's own
+    # dump cannot see. Needs a profiling build, but not tcc's -bench.
     kernel_compile: KernelProfile = field(default_factory=KernelProfile)
     kernel_execute: KernelProfile = field(default_factory=KernelProfile)
 
@@ -124,8 +123,7 @@ PERF_IO_RE = re.compile(
 PERF_TOP_RE = re.compile(r"# perf: top (?P<entries>.*)")
 
 # No syscall on this device takes a second. Anything that claims to has a
-# wrapped 32-bit cycle counter behind it (DWT_CYCCNT wraps in single-digit
-# seconds), and one such sample is large enough to dominate every real
+# wrapped DWT_CYCCNT behind it, and one such sample dominates every real
 # measurement it is summed with.
 IMPLAUSIBLE_CALL_US = 1_000_000
 PERF_TOP_ENTRY_RE = re.compile(r"(?P<name>\w+)=(?P<calls>\d+)/(?P<us>\d+)")
@@ -832,11 +830,9 @@ def _write_component_breakdown(
         ):
             avg_us = (data["ms"] * 1000 / data["calls"]) if data["calls"] else 0.0
             if avg_us >= IMPLAUSIBLE_CALL_US:
-                # A 32-bit DWT_CYCCNT that wrapped inside one call: the kernel
-                # drops those it can recognise (`dropped`), but the compact
-                # dump's "other" bucket is a subtraction and inherits any that
-                # slipped through. Printing it as seconds invites reading a
-                # counter artefact as the suite's biggest syscall.
+                # A DWT_CYCCNT that wrapped inside one call. The kernel drops
+                # those it recognises, but the compact dump's "other" bucket is a
+                # subtraction and inherits any that slipped through.
                 terminalreporter.write_line(
                     f"  {name:<16} {data['calls']:>12} {'implausible':>11} "
                     f"{'(wrapped cycle counter — sample discarded)':>44}"

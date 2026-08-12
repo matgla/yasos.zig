@@ -24,6 +24,7 @@ const vfmt = @import("vfmt.zig");
 const board = @import("board");
 const arch = @import("arch");
 const kernel_sync = @import("sync/sync.zig");
+const preempt = @import("sync/preempt.zig");
 
 var stdout: std.Io.Writer = undefined;
 var write_callback: ?WriteCallback = null;
@@ -38,35 +39,64 @@ var secondary_context: ?*const anyopaque = null;
 
 pub const WriteCallback = *const fn (self: *const anyopaque, data: []const u8) anyerror!usize;
 
-/// Rank 95, the innermost leaf, and held **without** masking interrupts.
-///
-/// That is the unusual part and it is deliberate. The console is a blocking
-/// per-byte UART: a hundred-byte line at 460800 baud is over two milliseconds,
-/// and masking interrupts for it would blow the ~93 us RX-FIFO budget this very
-/// device is trying to meet -- the lock would create the problem it exists
-/// beside. So it excludes the *other core*, not this core's handlers.
-///
-/// Same-core interrupt context therefore does not block on it; it takes the
-/// lock if free and writes anyway if not, which is exactly today's behaviour
-/// (interleaved bytes) rather than a regression. That is also what the plan
-/// asks for on the panic path: a garbled panic beats a hung panic.
-///
-/// A thread can never *find* it held by a handler on one core -- handlers run
-/// to completion -- so the blocking path here cannot deadlock, and being the
-/// innermost rank it cannot invert against anything either.
+/// Rank 95, the innermost leaf, and held without masking interrupts: the console
+/// is a blocking per-byte UART, so a hundred-byte line is milliseconds and
+/// masking across it would blow the ~93 us RX-FIFO budget this device is trying
+/// to meet. It therefore excludes the other core, not this core's handlers,
+/// which take it if free and write anyway if not -- a garbled panic beats a hung
+/// one. A thread can never find it held by a same-core handler, since handlers
+/// run to completion, so the blocking path cannot deadlock.
 var console_lock: kernel_sync.Ranked(.console) = .{};
 
-/// Take the console if we are allowed to wait for it.
+/// Take the console if we are allowed to wait for it. Returns whether it was
+/// acquired; false means "write anyway, ungoverned".
 ///
-/// Returns whether it was acquired; a false means "write anyway, ungoverned".
-fn console_acquire() bool {
-    if (arch.sync.in_handler_mode()) return console_lock.try_lock_no_irq();
+/// In handler context the question is not "is it free" but "is it *mine*". If
+/// this core holds it, waiting would hang -- nothing on this core can run to
+/// release it -- so garbled output is the better failure. If the *other* core
+/// holds it, that core is running and will release, and writing ungoverned is
+/// just corruption: two cores' lines interleave mid-token. `held_by_current` is
+/// race-free for this, since only this core can make it true.
+///
+/// Public because `UartFile` -- the `/dev/uart0` node behind every process's
+/// fd 1 -- writes straight to the HAL. Anything that emits bytes to the console
+/// UART has to come through here.
+pub fn console_acquire() bool {
+    if (arch.sync.in_handler_mode()) {
+        // Ours already -- waiting would be waiting on ourselves.
+        if (console_lock.held_by_current()) return false;
+        console_lock.lock_no_irq();
+        return true;
+    }
+    // **Preemption off for the duration, and this is the price of not masking
+    // interrupts.** Leaving them on is what keeps the RX FIFO serviced, but it
+    // also means PendSV can land in the middle of the section -- and PendSV
+    // takes `proctable` (rank 50) while this core's held-set still says
+    // `console` (rank 95). lockdep is right to call that an inversion rather
+    // than bookkeeping noise: the other core can be inside `proctable` waiting
+    // for this console, while this core's PendSV waits for that `proctable`.
+    //
+    //   [ERR][lockdep] lock order violation: taking proctable (rank 50) while
+    //                  holding ranks 0x2000
+    //     do_context_switch -> ProcessManager.schedule_next
+    //
+    // Refusing preemption closes it without touching PRIMASK: `do_context_switch`
+    // sees the window and records `need_resched` instead of scheduling, and
+    // `preempt_enable` below re-pends PendSV. `proctable` is only ever taken in
+    // `process_manager.zig`, and the only handler that reaches it is PendSV, so
+    // this is the whole edge. Interrupts stay enabled throughout, so the ~93 us
+    // RX budget is unaffected -- only the *switch* is deferred, and only for as
+    // long as the other core is excluded anyway.
+    preempt.preempt_disable();
     console_lock.lock_no_irq();
     return true;
 }
 
-fn console_release(held: bool) void {
+pub fn console_release(held: bool) void {
     if (held) console_lock.unlock_no_irq();
+    // Mirrors the acquire: thread context always disabled preemption, handler
+    // context never did. Every caller pairs the two with `defer`.
+    if (!arch.sync.in_handler_mode()) preempt.preempt_enable();
 }
 
 fn drain_sink(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {

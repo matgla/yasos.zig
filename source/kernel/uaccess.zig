@@ -13,43 +13,21 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Validation of pointers handed to the kernel by userspace.
-//!
-//! Syscall handlers run *privileged* (the slow path clears CONTROL.nPRIV and
-//! runs the handler in thread mode), so every pointer a process passes in is
-//! dereferenced with full access to the address space. Nothing checked those
-//! pointers before this module existed, which made
-//!
-//!     read(fd, (void *)&kernel_ram, n)     -> kernel writes a file over itself
-//!     write(fd, (void *)&kernel_ram, n)    -> kernel dumps its own memory out
-//!
-//! an arbitrary read/write primitive available to any unprivileged process.
-//! The MPU is no defence here: it is configured with PRIVDEFENA and the
-//! background map, so it only ever restricted *unprivileged* access, and
-//! CONFIG_PROCESS_USE_MPU_KERNEL_PROTECTION is not even set on the rp2350
-//! defconfigs.
-//!
-//! What a valid user pointer may point at:
-//!
-//!   write  User-owned RAM only (memory_layout entries with owner == .User:
-//!          process SRAM and PSRAM). That is where every process stack, heap,
-//!          mmap and .data/.bss lives.
-//!   read   the above, plus the read-only executable image (flash + the XIP
-//!          romfs). String literals in a romfs binary are *not* copied into RAM
-//!          -- the loader borrows .rodata from XIP and shares it between
-//!          processes (dynamic_loader/source/module.zig:82-84) -- so
-//!          open("/bin/ls") legitimately passes a flash pointer.
-//!
-//! Deliberately excluded: kernel RAM (.data/.bss/heap/MSP stack), the /tmp
-//! arena (owner == .Temp, which is never mapped for unprivileged code), MMIO,
-//! and the PPB. A DMA engine programmed through MMIO can write kernel RAM, so
-//! MMIO is an escalation path in its own right.
-//!
-//! This is region-granular, not per-process: it stops a process reaching kernel
-//! memory, but not process A reaching process B's pages. That is a deliberate
-//! first tier -- cross-process isolation does not exist in this kernel today
-//! anyway (source/arch/armv8-m/mpu.zig maps all user RAM RW for everyone), and
-//! closing it needs the page pool's per-pid map, which is a separate change.
+// Validation of pointers handed to the kernel by userspace. Syscall handlers run
+// privileged, so an unchecked pointer is an arbitrary read/write primitive for
+// any process. The MPU is no defence: PRIVDEFENA plus the background map means
+// it only ever restricted unprivileged access.
+//
+// A valid user pointer may point at user-owned RAM (process SRAM and PSRAM) for
+// a write, and additionally at the read-only executable image for a read -- the
+// loader borrows .rodata from XIP rather than copying it, so open("/bin/ls")
+// legitimately passes a flash pointer. Kernel RAM, the /tmp arena, MMIO and the
+// PPB are all excluded; MMIO because a DMA engine programmed through it can
+// write kernel RAM.
+//
+// Region-granular, not per-process: it stops a process reaching kernel memory,
+// not process A reaching process B's pages. Closing that needs the page pool's
+// per-pid map.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -60,13 +38,10 @@ const ErrnoSet = @import("errno.zig").ErrnoSet;
 const log = std.log.scoped(.uaccess);
 
 /// Pointer validation only means anything where userspace and the kernel share
-/// one address space and the kernel is privileged over it, i.e. the Cortex-M
-/// targets. On the host build a "process" is a real OS process behind an MMU,
-/// and in unit tests there is no userspace at all; in both, callers pass
-/// ordinary heap pointers that no region list would ever cover. Those builds
-/// also implement `get_memory_layout()` by *allocating* fresh backing memory on
-/// every call (hal/source/host/host/source/memory.zig, hal/source/ut_stub/
-/// memory.zig), so consulting it per syscall would leak megabytes.
+/// one address space, i.e. the Cortex-M targets. The host and unit-test builds
+/// pass ordinary heap pointers no region list would cover, and their
+/// `get_memory_layout()` allocates fresh backing memory on every call, so
+/// consulting it per syscall would leak megabytes.
 pub const enabled = builtin.cpu.arch.isThumb();
 
 pub const Access = enum { read, write };
@@ -128,16 +103,10 @@ pub fn init() void {
     log.info("user ranges: {d} writable, {d} read-only", .{ writable_count, readonly_count });
 }
 
-/// Does [ptr, ptr+len) lie wholly inside a single region?
-///
-/// Pure, so it can be tested without a HAL. Two things here are load-bearing
-/// and are the usual ways this check is written wrong:
-///
-///   * `ptr + len` is checked for wraparound. Without it, a huge `len` makes
-///     the end address wrap below the start and every comparison passes.
-///   * the range must fit in ONE region. Accepting a range that starts in one
-///     region and ends in another would let a caller span the gap between them,
-///     which is exactly the kernel memory sitting in between.
+/// Does [ptr, ptr+len) lie wholly inside a single region? Pure, so it can be
+/// tested without a HAL. Two details are load-bearing: `ptr + len` is checked
+/// for wraparound, and the range must fit in ONE region -- spanning two would
+/// let a caller reach the kernel memory sitting between them.
 pub fn range_ok(regions: []const Region, ptr: usize, len: usize) bool {
     if (len == 0) return true;
     const end = std.math.add(usize, ptr, len) catch return false;
@@ -192,14 +161,10 @@ pub fn out_ptr(comptime T: type, ptr: ?*anyopaque) !*T {
     return @ptrCast(@alignCast(p));
 }
 
-/// Length of a NUL-terminated user string, without copying it.
-///
-/// Replaces `std.mem.span()` on user pointers, which scans for a NUL with no
-/// bound at all and no idea whether it is still inside memory the caller owns —
-/// a fault, or an oracle for reading whatever follows.
-///
-/// The scan is clamped to the end of the region containing `ptr`, so it can
-/// never walk out of the caller's memory even when no NUL is present.
+/// Length of a NUL-terminated user string, without copying it. Replaces
+/// `std.mem.span()` on user pointers, which scans unbounded. The scan is clamped
+/// to the end of the region containing `ptr`, so it cannot walk out of the
+/// caller's memory even when no NUL is present.
 pub fn strnlen_user(ptr: ?*const anyopaque, max: usize) !usize {
     const p = ptr orelse return ErrnoSet.InvalidArgument;
     const base = @intFromPtr(p);

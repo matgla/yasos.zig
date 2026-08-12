@@ -41,20 +41,11 @@ var kernel_allocator: std.mem.Allocator = undefined;
 var resolver_cache: std.StringHashMap(*const anyopaque) = undefined;
 
 /// Serialises the dynamic loader: rank 8, a sleeping mutex, held across a whole
-/// load rather than just the tables.
-///
-/// Holding it only around the table operations would not fix the bug that
-/// matters. `Loader.get_shared_data` is check-then-act across a hash-map lookup
-/// and an insert: two contexts can both miss, both create the image, and one
-/// `put` overwrites the other -- leaking an image and leaving a `users` count
-/// that never reaches zero. Closing that needs the lock held across
-/// miss -> create -> insert, and the create *is* the load.
-///
-/// It sleeps rather than spins because a load is milliseconds of card I/O, and
-/// it sits outside `mount`/`fs`/`dev` because it reads the executable through
-/// the VFS. `prepare_exec` had to stop holding a preempt window across the load
-/// before this was possible at all -- blocking with preemption disabled is a
-/// hang, and `RankedMutex` refuses it.
+/// load rather than just the tables. `Loader.get_shared_data` is check-then-act
+/// across a hash-map lookup and an insert, so the lock has to span
+/// miss -> create -> insert, and the create *is* the load. It sleeps because a
+/// load is milliseconds of card I/O, and sits outside `mount`/`fs`/`dev`
+/// because it reads the executable through the VFS.
 pub var loader_lock: kernel.sync.RankedMutex(.loader) = .{};
 
 const ModuleContext = struct {
@@ -392,11 +383,9 @@ pub fn release_executable(pid: c.pid_t) void {
     release_executable_locked(pid);
 }
 
-/// `release_executable` with `loader_lock` already held.
-///
-/// Split out because `load_executable` drops the previous image before
-/// installing the new one, and the lock is deliberately not recursive -- the
-/// nesting was caught the moment lockdep saw it.
+/// `release_executable` with `loader_lock` already held. Split out because
+/// `load_executable` drops the previous image before installing the new one,
+/// and `RankedMutex` is not recursive.
 fn release_executable_locked(pid: c.pid_t) void {
     loader_lock.assert_held();
     // Kernel-heap accounting around the release: a climbing kernel_used or
@@ -500,15 +489,10 @@ pub fn format_maps(pid: c.pid_t, buffer: []u8) usize {
     return written;
 }
 
-/// Is `library` a handle this process actually holds?
-///
-/// dlclose/dlsym receive the handle straight from userspace. Without this,
-/// `release_shared_library` would call `list.remove(&library.list_node)` on an
-/// attacker-chosen address -- an unlink of `node.prev`/`node.next` and so an
-/// arbitrary write -- and `dlsym` would parse arbitrary memory as a Module.
-///
-/// The per-process library list is a handful of entries, so a linear scan is
-/// cheaper than any bookkeeping that would replace it.
+/// Is `library` a handle this process actually holds? dlclose/dlsym receive the
+/// handle straight from userspace; without this, `release_shared_library` would
+/// unlink an attacker-chosen address, which is an arbitrary write. The
+/// per-process list is a handful of entries, so a linear scan is enough.
 pub fn owns_shared_library(pid: c.pid_t, library: *const yasld.Module) bool {
     const list = libraries_list.getPtr(pid) orelse return false;
     var maybe_node = list.first;
@@ -534,7 +518,9 @@ pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
     }
 }
 
-pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
+/// Look up a pid's executable. Caller must hold `loader_lock`; split out so the
+/// entry points that already hold it can reuse the lookup.
+fn executable_for_pid_locked(pid: c.pid_t) ?*yasld.Executable {
     if (!modules_list.contains(pid)) {
         return null;
     }
@@ -542,6 +528,18 @@ pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
         return exec;
     }
     return null;
+}
+
+/// The executable loaded for `pid`, or null. Takes `loader_lock` for the lookup,
+/// because `modules_list` is a `HashMap` the other core may be rehashing.
+///
+/// The lock covers the lookup, not the lifetime of what is returned: the pointer
+/// stays valid while that pid's executable is loaded, which both callers already
+/// depend on -- each is asking about a process that is running.
+pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    return executable_for_pid_locked(pid);
 }
 
 const SectionBackup = struct {
@@ -604,9 +602,16 @@ var vfork_snapshots: std.AutoHashMap(c.pid_t, *VForkSnapshot) = undefined;
 // correspondingly larger kernel_ram (see hal/.../linker_script.ld).
 const vfork_snapshot_enabled = false;
 
+/// Snapshot the parent's writable sections before a vfork child runs on them.
+/// Takes `loader_lock`: it walks `modules_list` and mutates `vfork_snapshots`,
+/// both of which the other core touches on its own exec/exit path. The caller
+/// must therefore be preemptible, since a sleeping mutex may not be taken with
+/// preemption off.
 pub fn save_parent_writable_sections(parent_pid: c.pid_t, child_pid: c.pid_t) void {
     if (!vfork_snapshot_enabled) return;
-    const exec = get_executable_for_pid(parent_pid) orelse return;
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    const exec = executable_for_pid_locked(parent_pid) orelse return;
 
     // Count modules with unique_data (executable + its library children)
     var count: usize = 0;
@@ -658,7 +663,15 @@ pub fn save_parent_writable_sections(parent_pid: c.pid_t, child_pid: c.pid_t) vo
     vfork_snapshots.put(child_pid, snapshot) catch snapshot.free();
 }
 
+/// Put a suspended parent's writable sections back, and drop the snapshot.
+/// Takes `loader_lock`, because `vfork_snapshots` is mutated here and in
+/// `save_parent_writable_sections`, which the other core can be running: one
+/// core exec'ing while the other vforks is the ordinary shape of a shell running
+/// a command. Both callers are in preemptible thread context, which is what
+/// makes a sleeping mutex legal here.
 pub fn restore_parent_writable_sections(child_pid: c.pid_t) void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     if (vfork_snapshots.fetchRemove(child_pid)) |kv| {
         kv.value.restore_and_free();
     }

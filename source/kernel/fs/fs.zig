@@ -40,3 +40,6 @@ pub const Node = @import("node.zig").Node;
 pub const IDirectory = @import("idirectory.zig").IDirectory;
 pub const DirectoryEntry = @import("idirectory.zig").DirectoryEntry;
 pub const BufferedFile = @import("buffered_file.zig").BufferedFile;
+pub const Pipe = @import("pipe.zig").Pipe;
+pub const PipeFile = @import("pipe.zig").PipeFile;
+pub const create_pipe = @import("pipe.zig").create_pair;

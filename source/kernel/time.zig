@@ -60,6 +60,10 @@ test "Time.ProcessShoulSleep" {
 
     const PendSvAction = struct {
         pub fn call() void {
+            // One second per switch, on both clocks -- `sleep_for_us` waits on
+            // the microsecond wall clock, and the stub's only advances when a
+            // test advances it.
+            hal.time.impl.set_time(hal.time.get_time_us() + 1000 * 1000);
             hal.time.systick.set_ticks(hal.time.systick.get_system_tick() + 1000);
             for (0..1000) |_| irq_systick();
             _ = irq_handlers.call_context_switch_handler(0);

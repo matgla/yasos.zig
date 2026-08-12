@@ -35,31 +35,16 @@ const c = @import("libc_imports").c;
 const handlers = @import("interrupts/syscall_handlers.zig");
 const perf = @import("interrupts/perf_profile.zig");
 const preempt = @import("sync/preempt.zig");
+const smp = @import("smp.zig");
 
-/// Rank 70, a leaf, and `spin_irq` rather than a sleeping mutex on purpose:
-/// `release_pid` is called from `schedule_next`, which runs in PendSV, where
-/// blocking is not allowed. The critical sections are a bitset scan and a bit
-/// flip -- microseconds -- so masking interrupts across them costs nothing
-/// against the ~93 us console budget.
-///
-/// This replaced a `block_context_switch` window, which is not a lock: it stops
-/// *this* core rescheduling and does nothing at all about a second one.
+/// Rank 70, a leaf. `spin_irq` rather than a sleeping mutex because
+/// `release_pid` is called from `schedule_next`, which runs in PendSV.
 var pidmap_lock: kernel.sync.Ranked(.pidmap) = .{};
 
 /// Rank 50: the process table itself -- `processes`, `terminate_list`, and the
-/// scheduler's cursor into them.
-///
-/// The inventory calls this "the entire process world, read unlocked from
-/// PendSV, HardFault, SVC and thread mode", and that is the reason it is
-/// `spin_irq`: PendSV walks the list on every context switch, so a lock that can
-/// block is not available here.
-///
-/// It is taken *outside* `pidmap` (70), `pagepool` (80) and `kheap` (90), which
-/// is what lets `schedule_next` reap a process -- releasing its pid, its pages
-/// and its kernel allocations -- with the table held. It is taken *inside*
-/// `fs` (20) and `dev` (30), which is the rule that keeps filesystem work off
-/// this path: `clear_fds` had to move to `delete_process` before that could be
-/// true.
+/// scheduler's cursor into them. `spin_irq`, since PendSV walks the list on
+/// every context switch. Outside `pidmap`, `pagepool` and `kheap`, so a reap can
+/// hold the table; inside `fs` and `dev`, which keeps filesystem work off it.
 var proctable_lock: kernel.sync.Ranked(.proctable) = .{};
 
 const arch = @import("arch");
@@ -74,11 +59,80 @@ else
     @compileError("Unsupported scheduler type");
 
 extern fn switch_to_next_task() void;
+extern fn switch_to_the_first_task(with_fpu: usize) void;
 extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
 extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 
 extern fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32;
 extern fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize) i32;
+
+/// Size of the register frame `libs/libc/arm/vfork.S` leaves for the kernel:
+/// `push {r4-r11, lr}`, plus `vpush {s0-s31}` when `is_fpu_used`. `context.sp`
+/// points at its base, so the caller's own stack pointer is just past the top.
+const vfork_frame_bytes: usize = 9 * @sizeOf(usize);
+const vfork_fpu_frame_bytes: usize = 32 * @sizeOf(u32);
+
+/// Headroom between this kernel frame and the point the child is released from
+/// (`process_vfork_child`, one call deeper). The only guessed part of the
+/// reservation; a ReleaseSafe build saves 848 B into the 1064 B reserved here,
+/// and `save_vfork_stack` refuses rather than overrun if that is ever too tight.
+const vfork_stack_slack: usize = 256;
+
+/// `WNOHANG` from `libs/libc/sys/wait.h`. Spelled out because it is a macro
+/// there, so it does not survive into the imported declarations.
+const wnohang: i32 = 0x1;
+
+/// Stack for a core's idle process. 8 KB, matching the secondary core's MSP: the
+/// idle body itself needs almost none of it, but `reap_terminated` unwinds
+/// through `Process.deinit` into the page pool and the kernel heap, and the
+/// fault handler's module-map dump alone wants a 4 KB buffer.
+const idle_stack_size: u32 = 8 * 1024;
+
+/// The body of every core's idle process. A process rather than a bare WFI loop
+/// because `reap_terminated` must run in thread context -- it frees to the
+/// kernel heap. WFI rather than a spin: under emulation a spinning idle core
+/// burns a whole host CPU. Woken by SysTick, or by the other core's doorbell.
+export fn idle_process_entry() void {
+    // Close the window `enter_scheduler_on_secondary_core` opened: a raw-entry
+    // frame is reached by `bx r0`, not an exception return, so nothing restores
+    // PRIMASK for us. Harmless on a core that arrived with interrupts enabled.
+    arch.enable_interrupts();
+
+    while (true) {
+        instance.reap_terminated();
+        if (comptime @hasDecl(arch.sync, "wait_for_interrupt")) {
+            arch.sync.wait_for_interrupt();
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+}
+
+fn current_stack_pointer() usize {
+    if (comptime !builtin.cpu.arch.isThumb()) return 0;
+    return asm volatile ("mov %[out], sp"
+        : [out] "=r" (-> usize),
+    );
+}
+
+fn vfork_caller_stack_pointer(context: *const volatile c.vfork_context) usize {
+    const frame = @intFromPtr(context.sp.?);
+    const fpu_bytes: usize = if (context.is_fpu_used == 1) vfork_fpu_frame_bytes else 0;
+    return frame + vfork_frame_bytes + fpu_bytes;
+}
+
+fn reserve_vfork_stack_for(parent: *Process, context: *const volatile c.vfork_context) !void {
+    if (comptime !builtin.cpu.arch.isThumb()) return;
+    const top = vfork_caller_stack_pointer(context);
+    const here = current_stack_pointer();
+    // `context.sp` is userspace-supplied and bounds a copy out of the caller's
+    // stack, so it has to be confined to that stack. `here` is this handler's
+    // own stack pointer, inside it by construction, so it pins the lower end.
+    if (top <= here) return error.InvalidVforkFrame;
+    if (top > @intFromPtr(parent.get_stack_top())) return error.InvalidVforkFrame;
+    if (here < @intFromPtr(parent.get_stack_bottom())) return error.InvalidVforkFrame;
+    try parent.reserve_vfork_stack(top, top - here + vfork_stack_slack);
+}
 
 pub const RuntimeConfiguration = struct {
     default_stack_size: u32,
@@ -156,6 +210,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         _process_memory_pool: kernel.memory.heap.ProcessMemoryPool,
         _pid_map: std.StaticBitSet(config.process.max_pid_value),
         core: [hal.cpu.number_of_cores()]*ProcessType,
+        /// What each core runs when the table holds nothing runnable. Not in
+        /// `processes`, because everything that walks that list -- `ps`,
+        /// `is_empty`, `has_live_child`, the other core's scan -- has no
+        /// business with an idle process. Reached only through this array, so
+        /// exactly one core can run it and no claim can contend.
+        idle: [hal.cpu.number_of_cores()]?*ProcessType,
         terminate_list: std.DoublyLinkedList,
         runtime_configuration: RuntimeConfiguration,
 
@@ -173,6 +233,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 ._process_memory_pool = processes_memory_pool,
                 ._pid_map = std.StaticBitSet(config.process.max_pid_value).full,
                 .core = undefined,
+                .idle = @splat(null),
                 .terminate_list = .{},
                 .runtime_configuration = RuntimeConfiguration.init(),
             };
@@ -190,47 +251,81 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return &self.runtime_configuration;
         }
 
-        /// Reap the terminate list and pick the next process.
-        ///
-        /// `assert_held` at the head of the functions this reaches is what
-        /// catches the bug review cannot: one correct only because *some*
-        /// caller was believed to hold the table, and one caller does not.
+        /// Pick what this core runs next. Runs in PendSV; reaping happens in
+        /// `reap_terminated` from thread context instead. The lock is held
+        /// across the whole scan because the scan *is* the claim -- a second
+        /// core allowed between the test and `try_claim`'s store to `Running`
+        /// would pick the same node.
         pub fn schedule_next(self: *Self) kernel.scheduler.Action {
-            // Held across the reap *and* the pick: they are one decision about
-            // the table, and a second core allowed between them could schedule
-            // a process this one is in the middle of freeing.
-            //
-            // The masked window is a list walk in the common case. It is longer
-            // when there is something to reap -- bitmap and heap frees, tens of
-            // microseconds -- but that happens once per process death, not per
-            // switch.
             const flags = proctable_lock.lock_irqsave();
             defer proctable_lock.unlock_irqrestore(flags);
-            var next = self.terminate_list.first;
-            while (next) |node| {
-                const p: *Process = @alignCast(@fieldParentPtr("node", node));
-                const pool = self.get_process_memory_pool();
-                log.info("schedule_next: reaping pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
-                // Advance BEFORE deinit: `node` lives inside the Process struct
-                // that deinit frees, so reading node.next afterwards is a
-                // use-after-free that walks a dead list when two or more
-                // processes are reaped in one pass.
-                next = node.next;
-                ctx_trace(.reap, p.pid, @intFromPtr(p.get_stack_bottom()), @intFromPtr(p.get_stack_top()));
-                self._scheduler.remove_process(&p.node);
-                self.terminate_list.remove(&p.node);
-                self.release_pid(p.pid);
-                p.deinit();
-                log.info("schedule_next: reaped pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
-            }
 
             if (self.processes.first) |first| {
-                return self._scheduler.schedule_next(first);
-            } else {
-                return .ReturnToMain;
+                const action = self._scheduler.schedule_next(first);
+                if (action != .NoAction) return action;
+                return self.fall_back_to_idle();
             }
+            // An empty table on the boot core is shutdown: `switch_to_main_task`
+            // pops the frame `switch_to_the_first_task` left. A secondary core
+            // has no such frame, and an empty table is normal for it, so it
+            // idles instead.
+            if (hal.cpu.coreid() == 0) return .ReturnToMain;
+            return self.fall_back_to_idle();
+        }
 
-            return .NoAction;
+        /// Nothing in the table is runnable on this core, so park it in the idle
+        /// process. Leaving a blocked process on the core instead would have it
+        /// spin on `hal.irq.trigger(.pendsv)`, re-entering `schedule_next` and
+        /// taking `proctable_lock` as fast as the core can issue it -- which
+        /// throttles real work on the other core.
+        ///
+        /// Caller holds `proctable_lock`.
+        fn fall_back_to_idle(self: *Self) kernel.scheduler.Action {
+            const idle_process = self.idle[hal.cpu.coreid()] orelse return .NoAction;
+            const current = self._scheduler.get_current() orelse return self._scheduler.claim(&idle_process.node);
+            // Already parked, or still holding a process that can run: stay.
+            if (current == idle_process) return .NoAction;
+            if (current.state == Process.State.Running) return .NoAction;
+            return self._scheduler.claim(&idle_process.node);
+        }
+
+        /// Free every terminated process no core is still standing on. Thread
+        /// context only: it releases a pid and frees the process's pages and the
+        /// `Process` itself, so it takes `pagepool` (80) and `kheap` (90).
+        ///
+        /// `is_claimed_by_any_core` is what keeps a process on the terminate
+        /// list until no core's cursor points at it -- an exiting process is
+        /// still its own core's `current` while that core switches away, and
+        /// freeing its stack there is a use-after-free of the context the switch
+        /// is about to store.
+        pub fn reap_terminated(self: *Self) void {
+            while (true) {
+                const victim = blk: {
+                    const flags = proctable_lock.lock_irqsave();
+                    defer proctable_lock.unlock_irqrestore(flags);
+
+                    var next = self.terminate_list.first;
+                    while (next) |node| {
+                        const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                        next = node.next;
+                        if (self._scheduler.is_claimed_by_any_core(&p.node)) continue;
+                        self._scheduler.remove_process(&p.node);
+                        self.terminate_list.remove(&p.node);
+                        break :blk p;
+                    }
+                    break :blk null;
+                };
+
+                const p = victim orelse return;
+                // Outside the lock: it is off both lists and no core is on it,
+                // so nothing can reach it, and the frees below are the long part.
+                const pool = self.get_process_memory_pool();
+                log.info("reap: pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
+                ctx_trace(.reap, p.pid, @intFromPtr(p.get_stack_bottom()), @intFromPtr(p.get_stack_top()));
+                self.release_pid(p.pid);
+                p.deinit();
+                log.info("reap: reaped pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
+            }
         }
 
         pub fn deinit(self: *Self) void {
@@ -239,6 +334,19 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 next = node.next;
                 p.deinit();
+            }
+            // `reap_terminated` may never have been reached, so anything still
+            // on the terminate list here is a process nobody collected.
+            next = self.terminate_list.first;
+            while (next) |node| {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                next = node.next;
+                p.deinit();
+            }
+            self.terminate_list = .{};
+            for (&self.idle) |*slot| {
+                if (slot.*) |idle_process| idle_process.deinit();
+                slot.* = null;
             }
             self._process_memory_pool.deinit();
         }
@@ -273,6 +381,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         pub fn create_process(self: *Self, stack_size: u32, process_entry: anytype, args: ?*const anyopaque, cwd: []const u8) !void {
+            // Reclaim before allocating: the idle process is the usual reaper,
+            // but it never runs while both cores stay busy.
+            self.reap_terminated();
             const maybe_pid = self.get_next_pid();
             if (maybe_pid) |pid| {
                 const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
@@ -284,6 +395,10 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     defer proctable_lock.unlock_irqrestore(flags);
                     self.processes.append(&new_process.node);
                 }
+                // A new runnable process. Outside the lock: ringing is an atomic
+                // load and one MMIO store, but there is no reason to do it with
+                // interrupts masked.
+                smp.kick_idle_core();
                 return;
             }
             return kernel.errno.ErrnoSet.TryAgain;
@@ -306,17 +421,87 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return kernel.errno.ErrnoSet.TryAgain;
         }
 
+        /// Give every core something to run when the table has nothing for it.
+        /// Called after `create_root_process`, so the root keeps pid 1.
+        pub fn create_idle_processes(self: *Self) !void {
+            for (0..hal.cpu.number_of_cores()) |core| {
+                try self.create_idle_process(core);
+            }
+        }
+
+        fn create_idle_process(self: *Self, core: usize) !void {
+            const pid = self.get_next_pid() orelse return kernel.errno.ErrnoSet.TryAgain;
+
+            // `is_root` selects the shape of the initial stack frame, not init
+            // status. A secondary core enters its idle process through
+            // `switch_to_the_first_task`, which ends in `bx r0` from thread
+            // mode, so the frame's LR slot must hold a raw entry address. Core 0
+            // is already running the root process, so its idle process is only
+            // entered by PendSV and needs a normal EXC_RETURN frame. The
+            // distinction lasts one switch.
+            const entered_by_first_task_hand_off = core != 0;
+            const idle_process = try Process.init(
+                self.allocator,
+                idle_stack_size,
+                &idle_process_entry,
+                null,
+                "/",
+                &self._process_memory_pool,
+                null,
+                pid,
+                entered_by_first_task_hand_off,
+            );
+
+            // Privileged regardless of the frame shape: the idle body reaps,
+            // which frees to the kernel heap, and with
+            // CONFIG_PROCESS_USE_MPU_KERNEL_PROTECTION an unprivileged idle
+            // process would take a MemManage DACCVIOL on the first collection.
+            idle_process.privileged = true;
+            idle_process.resume_privileged = true;
+
+            self.idle[core] = idle_process;
+
+            // Seed the other cores' `core[]` slots, which are `undefined` until
+            // their first switch, so every `instance.core[coreid()]` reader gets
+            // a real process. This core's slot holds the root process already.
+            if (core != hal.cpu.coreid()) {
+                self.core[core] = idle_process;
+            }
+
+            log.info("idle process for core {d} is pid {d}", .{ core, pid });
+        }
+
         pub fn get_process_memory_pool(self: *Self) *kernel.memory.heap.ProcessMemoryPool {
             return &self._process_memory_pool;
         }
 
         pub fn delete_process(self: *Self, pid: c.pid_t, return_code: i32) void {
 
+            // Preemptible cleanup. Everything here takes a sleeping mutex --
+            // the loader's directly, the filesystem's through `clear_fds` -- and
+            // `RankedMutex` panics rather than block with preemption disabled.
+            // The window `sys_exit`/`sys_kill` opened is for the tail of this
+            // function, where the process hands the core away; it must not cover
+            // this.
+            preempt.preempt_enable();
+
             // If a vfork child exits without calling exec, restore parent's
             // writable sections that may have been corrupted. Keyed by the
             // exiting (child) pid; a no-op if it wasn't a vfork child.
             dynamic_loader.restore_parent_writable_sections(pid);
 
+            if (self.get_process_for_pid(pid)) |exiting| {
+                // Close this process's files in its own thread context, not in
+                // `deinit`, which the reaper calls where the filesystem's
+                // sleeping mutex is unavailable. Idempotent, so `deinit` may
+                // still call it for the paths that never reach here.
+                exiting.clear_fds();
+                dynamic_loader.release_executable(pid);
+            }
+
+            preempt.preempt_disable();
+
+            // ── The hand-off, which is what the window is actually for ──────
             var next = self.processes.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -325,28 +510,47 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     // fix me
                     const ctx = p._vfork_context;
 
-                    // Close this process's files here, in its own thread
-                    // context, rather than leaving them to `deinit` -- which the
-                    // reaper calls from PendSV, where taking the filesystem's
-                    // sleeping mutex is not allowed. See Process.clear_fds.
-                    p.clear_fds();
-
-                    // i can't remove myself on my on stack
-                    dynamic_loader.release_executable(pid);
-                    p.unblock_parent();
-                    p.schedule_removal();
-                    p.unblock_all(return_code);
+                    // One lock across recording the exit, waking, and leaving
+                    // the table -- the other half of the pair `waitpid`
+                    // describes. Recording the exit makes the condition true and
+                    // the wake publishes it; a waiter on the other core that
+                    // tests between them sees neither and blocks forever.
                     {
                         const flags = proctable_lock.lock_irqsave();
                         defer proctable_lock.unlock_irqrestore(flags);
+
+                        // Leave the status where waitpid can find it. This is the
+                        // one funnel every exit path comes through.
+                        if (p._parent) |parent| {
+                            parent.record_child_exit(pid, return_code);
+                        }
+                        p.unblock_parent();
+                        p.schedule_removal();
+                        p.unblock_all(return_code);
+
                         self.processes.remove(&p.node);
                         self.terminate_list.append(&p.node);
+
+                        // Claim the parent before the lock drops. `unblock_parent`
+                        // just published it as `Ready`, and a vfork parent must
+                        // not be resumed from its stored context: the hand-off
+                        // below re-enters it through `_vfork_context` and
+                        // rewrites its stack, so the frame at its
+                        // `stack_position` is not where it resumes. Leaving it
+                        // claimable lets the other core take it and HardFault.
+                        if (ctx != null) {
+                            const parent = p._parent.?;
+                            self._scheduler.set_next(&parent.node);
+                            self.core[hal.cpu.coreid()] = parent;
+                        }
                     }
 
+                    // Outside the lock: an atomic load and one MMIO store, with
+                    // no reason to do it masked. A vfork parent is already
+                    // claimed above, so it cannot be taken by the woken core.
+                    smp.kick_idle_core();
+
                     if (ctx != null) {
-                        const parent = p._parent.?;
-                        self._scheduler.set_next(&parent.node);
-                        self.core[hal.cpu.coreid()] = parent;
                         arch.disable_interrupts();
                         _ = process_get_back_to_parent_vfork(pid, ctx.?.sp, ctx.?.lr);
                         return;
@@ -355,12 +559,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     break;
                 }
             }
-            // Closes the window `sys_exit` / `sys_kill` opened. Released once
-            // and then spun on: the release used to sit *inside* the loop, so
-            // every iteration after the first was an unmatched release that the
-            // old clamp absorbed. This process is never scheduled again, so the
-            // loop is only here to keep re-pending the switch that takes us off
-            // this stack for good.
+            // Closes the window `sys_exit` / `sys_kill` opened. Released once,
+            // outside the loop -- this process is never scheduled again, so the
+            // loop only keeps re-pending the switch off this stack.
             preempt.preempt_enable();
             arch.memory_barrier_release();
             if (!std.mem.eql(u8, "host", config.cpu.arch)) {
@@ -372,35 +573,37 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
         }
 
+        /// `vfork(2)`: create a child that runs on its parent's stack until it
+        /// execs or exits, and hand this core to it without a context switch.
+        ///
+        /// The preemption window opens at `wait_for_process`, and neither end is
+        /// free to move. Earlier would cover the loader calls, which take a
+        /// sleeping mutex and panic if they block with preemption disabled.
+        /// Later would let a PendSV switch the parent out after it is marked
+        /// Blocked, leaving the child created, unreleased and unreachable.
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
-            preempt.preempt_disable();
-            errdefer preempt.preempt_enable();
-
             const current_process = self.get_current_process();
             const maybe_pid = self.get_next_pid();
             if (maybe_pid == null) {
-                arch.enable_interrupts();
                 return kernel.errno.ErrnoSet.TryAgain;
             }
+
+            // Reserve room for the part of this stack the child will run over
+            // before anything else is committed, so a heap too small for it
+            // fails the call rather than the hand-off.
+            reserve_vfork_stack_for(current_process, context) catch |err| {
+                log.err("vfork failed reserving the stack backup for pid={d}: {s}", .{ current_process.pid, @errorName(err) });
+                return kernel.errno.ErrnoSet.TryAgain;
+            };
+
             const new_process = current_process.vfork(&self._process_memory_pool, maybe_pid.?) catch |err| {
                 log.err("vfork failed creating child for pid={d}: {s}", .{ current_process.pid, @errorName(err) });
-                arch.enable_interrupts();
                 return -1;
             };
 
-            const Action = struct {
-                pub fn on_process_unblock(ctx: ?*anyopaque, rc: i32) void {
-                    _ = ctx;
-                    _ = rc;
-                }
-            };
-
-            current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch |err| {
-                log.err("vfork failed registering wait for parent pid={d} child pid={d}: {s}", .{ current_process.pid, new_process.pid, @errorName(err) });
-                arch.enable_interrupts();
-                return -1;
-            };
-
+            // Both of these take `loader_lock`, so they have to happen up here.
+            // Safe to be preempted across: the parent is still `Running` and the
+            // child is not in `processes`, so nothing can observe or schedule it.
             var got: usize = 0;
             if (dynamic_loader.get_executable_for_pid(current_process.pid)) |exec| {
                 if (exec.module.unique_data) |ud| {
@@ -411,8 +614,28 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
             context.pid.* = new_process.pid;
 
-            // Save parent's writable sections before child runs on shared memory
+            // Save parent's writable sections before child runs on shared memory.
+            // The child does not run until `process_vfork_child` below, so this
+            // is early enough outside the window.
             dynamic_loader.save_parent_writable_sections(current_process.pid, new_process.pid);
+
+            // ── The hand-off. PendSV must not fire from here on ──────────────
+            preempt.preempt_disable();
+            errdefer preempt.preempt_enable();
+
+            const Action = struct {
+                pub fn on_process_unblock(ctx: ?*anyopaque, rc: i32) void {
+                    _ = ctx;
+                    _ = rc;
+                }
+            };
+
+            // This is what blocks the parent, and therefore what the window has
+            // to cover.
+            current_process.wait_for_process(new_process, &Action.on_process_unblock, new_process) catch |err| {
+                log.err("vfork failed registering wait for parent pid={d} child pid={d}: {s}", .{ current_process.pid, new_process.pid, @errorName(err) });
+                return -1;
+            };
 
             {
                 const flags = proctable_lock.lock_irqsave();
@@ -437,14 +660,35 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             envpc: i32,
         };
 
-        pub fn set_vfork_back_point(self: *Self, back_point: usize, stack_pointer: usize) void {
-            const current_process = self.core[hal.cpu.coreid()];
+        /// Record where the suspended parent resumes, and save the stack the
+        /// child is about to run over. Returns true when the save succeeded,
+        /// which is the condition for releasing the child on its caller's stack
+        /// pointer rather than the kernel's.
+        ///
+        /// `stack_pointer` is both the parent's resume position and the bottom
+        /// of the region to save; the caller is below it, which makes the copy
+        /// safe.
+        pub fn set_vfork_back_point(self: *Self, back_point: usize, stack_pointer: usize) bool {
+            // The core already runs the child here (`vfork` hands the core over
+            // before releasing it), so the context belongs to the child and the
+            // stack being saved to its parent.
+            const child = self.core[hal.cpu.coreid()];
             const ctx = VForkContext{
                 .fp = 0,
                 .sp = stack_pointer,
                 .lr = back_point,
             };
-            current_process._vfork_context = ctx;
+            child._vfork_context = ctx;
+            const parent = child._parent orelse return false;
+            return parent.save_vfork_stack(stack_pointer);
+        }
+
+        /// Put a suspended parent's stack back, immediately before it resumes.
+        /// Called from `process_get_back_to_parent_vfork` once it is on the
+        /// parent's resume position, so everything this pushes is below the
+        /// region being rewritten.
+        pub fn restore_vfork_back_stack(self: *Self) void {
+            self.core[hal.cpu.coreid()].restore_vfork_stack();
         }
 
         /// Clone the exec argv and envp into a single array owned by the new
@@ -611,24 +855,15 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 }
             }
 
-            // The window starts *here*, not at the top of the function.
+            // The window starts here, not at the top: what follows rewrites this
+            // process's own stack and hands the core to its parent, so PendSV
+            // must not fire inside it. Everything above is the image load, which
+            // is milliseconds of card I/O and takes the sleeping `loader_lock`.
             //
-            // What follows rewrites this process's own stack and then hands the
-            // core to its parent -- category (C): PendSV must not fire inside
-            // it. Everything above is the image load, which is long (milliseconds
-            // of card I/O), allocates, and reads the filesystem, and which
-            // refusing to be preempted across bought nothing once the loader
-            // tables, the process table and the heap each got a lock of their
-            // own. Holding it up there also made a *sleeping* `loader_lock`
-            // impossible: blocking with preemption disabled is a hang, so
-            // `RankedMutex` refuses it.
-            //
-            // A plain `defer` would be wrong, and a plain manual release was
-            // what the old code did and got wrong the other way: the vfork tail
-            // hands off through `process_get_back_to_parent_vfork`, which never
-            // returns, so a `defer` there would never run -- while every `try`
-            // and the ordinary `return 0` leaked the window outright. The flag
-            // covers both.
+            // The flag rather than a `defer`: the vfork tail hands off through
+            // `process_get_back_to_parent_vfork`, which never returns, so a
+            // `defer` would never run -- but every `try` and the ordinary return
+            // must still release.
             preempt.preempt_disable();
             var preempt_held = true;
             defer if (preempt_held) preempt.preempt_enable();
@@ -641,19 +876,27 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             current_process.set_heap_limit_bytes(executable.module.heap_size);
 
             try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv_copy.argv), symbol.address, symbol.target_got_address);
-            self._scheduler.set_next(&current_process._parent.?.node);
-            self.core[hal.cpu.coreid()] = current_process._parent.?;
+
+            // Under `proctable_lock`, like the identical hand-off in
+            // `delete_process`: `set_next` claims the parent and, through
+            // `update_current`, releases this process and moves this core's
+            // cursor, all of which the other core reads on every scan. Nothing
+            // inside takes a sleeping lock, and the image load above has already
+            // released the ones it held.
+            {
+                const flags = proctable_lock.lock_irqsave();
+                defer proctable_lock.unlock_irqrestore(flags);
+                self._scheduler.set_next(&current_process._parent.?.node);
+                self.core[hal.cpu.coreid()] = current_process._parent.?;
+            }
 
             if (current_process._vfork_context != null) {
                 const ctx = current_process._vfork_context.?;
                 current_process._vfork_context = null;
                 current_process.unblock_parent();
                 arch.disable_interrupts();
-                // `process_get_back_to_parent_vfork` issues the matching
-                // release itself (`bl process_unblock_context_switch` in
-                // context_switch.S) once it is on the parent's stack, which is
-                // also how `delete_process`'s hand-off works. Releasing here as
-                // well made this the one caller that released twice.
+                // `process_get_back_to_parent_vfork` issues the matching release
+                // itself, from the parent's stack, so this must not.
                 preempt_held = false;
                 return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
             }
@@ -663,6 +906,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
             const flags = proctable_lock.lock_irqsave();
             defer proctable_lock.unlock_irqrestore(flags);
+            return self.get_process_for_pid_locked(pid);
+        }
+
+        /// `get_process_for_pid` for a caller that already holds
+        /// `proctable_lock`. See `has_live_child_locked`.
+        fn get_process_for_pid_locked(self: *Self, pid: i32) ?*Process {
             var next = self.processes.first;
             while (next) |node| {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
@@ -674,41 +923,108 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return null;
         }
 
-        pub fn waitpid(self: *Self, pid: i32, status: *i32) !i32 {
+        /// Wake every process parked on `blocker` -- the counterpart to
+        /// `Process.block_on`, for a waiter that cannot be named in advance.
+        /// The caller must hold no lock ranked below `proctable`, which this
+        /// takes.
+        pub fn wake_all_blocked_on(self: *Self, blocker: *const anyopaque) void {
+            {
+                const flags = proctable_lock.lock_irqsave();
+                defer proctable_lock.unlock_irqrestore(flags);
+                var next = self.processes.first;
+                while (next) |node| {
+                    const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                    next = node.next;
+                    p.wake_from(blocker);
+                }
+            }
+            // Anything woken here is runnable now rather than at the woken
+            // process's next timer tick, which is the whole point of a doorbell.
+            smp.kick_idle_core();
+        }
+
+        /// Does this process still have a child that could be waited for?
+        pub fn has_live_child(self: *Self, parent: *const Process) bool {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            return self.has_live_child_locked(parent);
+        }
+
+        /// `has_live_child` for a caller that already holds `proctable_lock`.
+        /// `Ranked` does not recurse, so this is not optional -- see `waitpid`,
+        /// which has to hold the lock across the test *and* the block.
+        fn has_live_child_locked(self: *Self, parent: *const Process) bool {
+            var next = self.processes.first;
+            while (next) |node| {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                next = node.next;
+                if (p._parent != parent) continue;
+                if (p.state == Process.State.Terminated) continue;
+                return true;
+            }
+            return false;
+        }
+
+        /// `waitpid(2)`. `pid` of -1 means "any child", which is what a shell's
+        /// `wait` uses.
+        pub fn waitpid(self: *Self, pid: i32, status: *i32, options: i32) !i32 {
             const current_process = self.get_current_process();
+            const nohang = (options & wnohang) != 0;
 
             // Registration runs with preemption refused; the wait itself must
-            // not, and the two used to be tangled. The old shape blocked once
-            // and released inside the wait loop, so it leaked the block
-            // entirely when the pid was unknown or the child had already
-            // finished registering -- and released one time per loop iteration
-            // when it did wait. The leak left preemption refused for the rest
-            // of the process's life, which the clamp in the old
-            // `unblock_context_switch` then papered over.
+            // not. `proctable_lock` is held across the whole decision, which is
+            // what makes it safe on two cores: refusing preemption stops only
+            // *this* core switching between the test and the block, and the
+            // child is exiting on the other one. Without it the wake lands
+            // before `block_on` and is lost, parking a shell forever on
+            // `hello & wait`. The exit path takes the same lock across
+            // `record_child_exit` and the wake.
             {
                 preempt.preempt_disable();
                 defer preempt.preempt_enable();
 
-                const maybe_process = self.get_process_for_pid(pid);
-                if (maybe_process == null) {
-                    status.* = current_process.child_exit_code;
-                    return pid;
-                }
-                const p = maybe_process.?;
-                if (p.state == Process.State.Terminated) {
-                    status.* = current_process.child_exit_code;
-                    return pid;
+                const flags = proctable_lock.lock_irqsave();
+                defer proctable_lock.unlock_irqrestore(flags);
+
+                // A child that has already finished is collected without
+                // blocking, whichever form of the call this is.
+                if (current_process.take_exited_child(pid)) |exited| {
+                    status.* = exited.status;
+                    return exited.pid;
                 }
 
-                const Action = struct {
-                    pub fn on_process_finished(context: ?*anyopaque, rc: i32) void {
-                        const s: *i32 = @ptrCast(@alignCast(context));
-                        s.* = rc;
+                if (pid == -1) {
+                    if (!self.has_live_child_locked(current_process)) {
+                        return kernel.errno.ErrnoSet.NoChildProcesses;
                     }
-                };
-                current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
-                    return -1;
-                };
+                    if (nohang) return 0;
+                    // Blocking on the collection list rather than on one child:
+                    // whichever child finishes first records its exit there and
+                    // wakes this process (`Process.record_child_exit`).
+                    current_process.block_on(current_process.any_child_blocker());
+                } else {
+                    const maybe_process = self.get_process_for_pid_locked(pid);
+                    if (maybe_process == null) {
+                        status.* = current_process.child_exit_code;
+                        return pid;
+                    }
+                    const p = maybe_process.?;
+                    if (p.state == Process.State.Terminated) {
+                        status.* = current_process.child_exit_code;
+                        return pid;
+                    }
+                    if (nohang) return 0;
+
+                    const Action = struct {
+                        pub fn on_process_finished(context: ?*anyopaque, rc: i32) void {
+                            const s: *i32 = @ptrCast(@alignCast(context));
+                            s.* = rc;
+                        }
+                    };
+                    current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
+                        return -1;
+                    };
+                }
             }
 
             // Preemption is enabled here, which is the point: yielding is the
@@ -718,21 +1034,21 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 current_process.reevaluate_state();
             }
 
+            // Woken because a child finished: which one is known only from the
+            // record it left, so `waitpid(-1)` reports the pid it collected.
+            // Falling past this means the exit could not be recorded at all.
+            if (current_process.take_exited_child(pid)) |exited| {
+                status.* = exited.status;
+                return exited.pid;
+            }
             status.* = current_process.child_exit_code;
             return pid;
         }
 
-        /// The process running on this core.
-        ///
-        /// No window: `core[]` is per-CPU (one slot per core, written only by
-        /// its own core's context switch) and a pointer-sized aligned load
-        /// cannot tear. The old `block_context_switch()` pair here was two
-        /// PRIMASK round-trips on one of the most-called functions in the
-        /// kernel, protecting a single load.
-        ///
-        /// The value is stable for the caller that matters: a syscall handler
-        /// asking who it is *is* the current process, and if a switch happens
-        /// it is not running to observe the change.
+        /// The process running on this core. Unlocked: `core[]` is per-CPU,
+        /// written only by its own core's context switch, and a pointer-sized
+        /// aligned load cannot tear. Stable for the caller that matters -- a
+        /// syscall handler asking who it is *is* the current process.
         pub fn get_current_process(self: *const Self) *Process {
             return self.core[hal.cpu.coreid()];
         }
@@ -767,6 +1083,25 @@ pub fn deinitialize_process_manager() void {
     instance_initialized = false;
 }
 
+/// The pid running on `core`, or -1 if that core has not entered the scheduler.
+/// For `/proc/cpus`. Reading another core's slot cannot tear, so the worst case
+/// is the pid from either side of a switch -- which is what a sample means.
+pub fn pid_on_core(core: usize) c.pid_t {
+    if (!instance_initialized) return -1;
+    if (core >= hal.cpu.number_of_cores()) return -1;
+    if (!smp.core_schedules(core)) return -1;
+    return instance.core[core].pid;
+}
+
+/// The pid of `core`'s idle process, or -1 before the idle processes exist, so a
+/// reader can tell a busy core from a parked one.
+pub fn idle_pid_on_core(core: usize) c.pid_t {
+    if (!instance_initialized) return -1;
+    if (core >= hal.cpu.number_of_cores()) return -1;
+    const idle_process = instance.idle[core] orelse return -1;
+    return idle_process.pid;
+}
+
 /// Whether the global `instance` has been initialized. Code that reads global
 /// process/memory-pool state from contexts that may run before the process
 /// manager exists (e.g. /proc files constructed during early filesystem setup,
@@ -776,17 +1111,63 @@ pub fn is_initialized() bool {
     return instance_initialized;
 }
 
+/// Adopt the process this core claimed in `schedule_next`, and return the stack
+/// pointer the assembly should resume from. Runs after
+/// `arch_store_registers_on_stack`, which is what makes the release inside
+/// `update_current` safe. The lock is retaken for that release: the other core
+/// may be scanning the table at this instant.
 pub export fn process_set_next_task() *const u8 {
-    // The first invocation is from switch_to_the_first_task; from here on PendSV
-    // is allowed to drive context switches (see system_call.scheduler_running).
-    system_call.mark_scheduler_running();
+    // This core's first invocation is from switch_to_the_first_task; from here
+    // on PendSV may drive context switches on it. Per-core, because a secondary
+    // core reaches its first switch long after core 0 reached its own.
+    smp.mark_core_entered_scheduler();
     if (instance._scheduler.get_next()) |task| {
-        instance._scheduler.update_current();
+        {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            instance._scheduler.update_current();
+        }
         instance.core[hal.cpu.coreid()] = task;
+        smp.note_context_switch();
+        // Publish whether this core now has anything to do, so the other core
+        // knows whether ringing its doorbell is worth an interrupt. Here rather
+        // than in the idle body, which is switched away from without running
+        // again and so could never clear its own flag.
+        if (instance.idle[hal.cpu.coreid()]) |idle_process| {
+            if (task == idle_process) smp.mark_core_idle() else smp.mark_core_busy();
+        }
         ctx_trace(.load, task.pid, @intFromPtr(task.stack_pointer()), @intFromPtr(task.get_stack_bottom()));
         return task.stack_pointer();
     }
     @panic("Context switch called without tasks available");
+}
+
+/// Take a secondary core into the scheduler. Never returns. The mirror of
+/// `spawn.root_process` for a core with no root process: it claims this core's
+/// idle process and performs the same first switch, after which PendSV drives
+/// the core like any other. `switch_to_the_first_task` ends in `bx r0` from
+/// thread mode, which is why the idle frame has to be root-shaped.
+pub fn enter_scheduler_on_secondary_core() noreturn {
+    // Interrupts off across the whole first switch, re-enabled by
+    // `idle_process_entry`. `process_set_next_task` marks this core as
+    // scheduling part-way through `switch_to_the_first_task`, before PSP is set
+    // and before the CONTROL write: a SysTick in that window would have PendSV
+    // store this core's context through an unset PSP. Core 0 is safe only
+    // because its first switch happens when nothing else is runnable.
+    arch.disable_interrupts();
+
+    {
+        // `lock_irqsave` saves the already-masked state and restores it, so
+        // interrupts stay off across this.
+        const flags = proctable_lock.lock_irqsave();
+        defer proctable_lock.unlock_irqrestore(flags);
+        const idle_process = instance.idle[hal.cpu.coreid()] orelse
+            @panic("secondary core entered the scheduler with no idle process");
+        _ = instance._scheduler.claim(&idle_process.node);
+    }
+
+    switch_to_the_first_task(if (config.cpu.use_fpu) 1 else 0);
+    unreachable;
 }
 
 export fn get_stack_bottom() *const u8 {
@@ -835,7 +1216,8 @@ export fn process_resume_is_privileged() usize {
 // a crash shows what the switch machinery did just before it. Store events
 // carry the PSP the outgoing context was written below; load events carry the
 // incoming SP and its stack bottom; reap events carry the freed stack range.
-// Written only from handler context on one core, so a plain ring suffices.
+// One ring per core: both cores call `ctx_trace` from `update_stack_pointer` on
+// every switch, and a shared ring would interleave and race its counter.
 const CtxEventKind = enum(u8) { store, load, reap };
 
 const CtxEvent = struct {
@@ -846,23 +1228,32 @@ const CtxEvent = struct {
     b: usize = 0,
 };
 
-var ctx_ring: [24]CtxEvent = @splat(.{});
-var ctx_seq: u32 = 0;
+const CtxRing = struct {
+    events: [24]CtxEvent = @splat(.{}),
+    seq: u32 = 0,
+};
+
+var ctx_rings: kernel.sync.PerCpu(CtxRing) = .init(.{});
 
 fn ctx_trace(kind: CtxEventKind, pid: c.pid_t, a: usize, b: usize) void {
-    ctx_seq +%= 1;
-    ctx_ring[ctx_seq % ctx_ring.len] = .{ .seq = ctx_seq, .kind = kind, .pid = pid, .a = a, .b = b };
+    const ring = ctx_rings.current();
+    ring.seq +%= 1;
+    ring.events[ring.seq % ring.events.len] = .{ .seq = ring.seq, .kind = kind, .pid = pid, .a = a, .b = b };
 }
 
-// Called from the HardFault handler; oldest first. log.err so it is visible in
-// the normal smoke configuration (log_info is off there).
+// Called from the HardFault handler; oldest first, and every core's, because the
+// interesting history is often the other core's. log.err so it is visible in the
+// normal smoke configuration, where log_info is off.
 export fn dump_ctx_ring() void {
-    log.err("context-switch ring (oldest first, seq={d}):", .{ctx_seq});
-    var i: usize = 1;
-    while (i <= ctx_ring.len) : (i += 1) {
-        const e = ctx_ring[(ctx_seq +% i) % ctx_ring.len];
-        if (e.seq == 0) continue;
-        log.err("  [{d}] {s} pid={d} a=0x{X:0>8} b=0x{X:0>8}", .{ e.seq, @tagName(e.kind), e.pid, e.a, e.b });
+    for (0..kernel.sync.percpu.core_count) |core| {
+        const ring = ctx_rings.of(core);
+        log.err("context-switch ring core {d} (oldest first, seq={d}):", .{ core, ring.seq });
+        var i: usize = 1;
+        while (i <= ring.events.len) : (i += 1) {
+            const e = ring.events[(ring.seq +% i) % ring.events.len];
+            if (e.seq == 0) continue;
+            log.err("  [{d}] {s} pid={d} a=0x{X:0>8} b=0x{X:0>8}", .{ e.seq, @tagName(e.kind), e.pid, e.a, e.b });
+        }
     }
 }
 
@@ -872,6 +1263,21 @@ export fn get_current_pid() c.pid_t {
 
 export fn get_stack_top() *const u8 {
     return instance.core[hal.cpu.coreid()].get_stack_top();
+}
+
+/// The highest address the current process may put a fresh stack frame at: its
+/// stack top, except for a vfork child, whose stack is its parent's. Everything
+/// above the parent's `vfork()` call site is the parent's live frames. The fault
+/// handler builds its `_exit` frame here so a child killed mid-flight unwinds
+/// inside its own half instead of over the parent's suspended frames.
+export fn get_exit_frame_ceiling() *const u8 {
+    const current = instance.core[hal.cpu.coreid()];
+    if (current.has_stack_shared_with_parent()) {
+        if (current._parent) |parent| {
+            if (parent.vfork_stack_ceiling()) |ceiling| return @ptrFromInt(ceiling);
+        }
+    }
+    return current.get_stack_top();
 }
 
 export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
@@ -892,10 +1298,23 @@ export fn update_stack_pointer(ptr: *u8, uses_fpu: u32) void {
     current.set_stack_pointer(ptr);
 }
 
-export fn arch_store_vfork_back_point(back_point: usize, stack_pointer: usize) void {
+/// Returns 1 when the parent's stack was saved and the child may be released on
+/// its caller's stack pointer, 0 when it must be left below the parent's
+/// suspended frames instead.
+export fn arch_store_vfork_back_point(back_point: usize, stack_pointer: usize) u32 {
     preempt.preempt_disable();
-    instance.set_vfork_back_point(back_point, stack_pointer);
+    const saved = instance.set_vfork_back_point(back_point, stack_pointer);
     preempt.preempt_enable();
+    if (!saved) {
+        log.err("vfork: could not save the parent's stack; the child keeps a stale frame", .{});
+    }
+    return @intFromBool(saved);
+}
+
+/// Called from `context_switch.S` once it has switched to the resuming parent's
+/// stack position. See `ProcessManager.restore_vfork_back_stack`.
+export fn arch_restore_vfork_back_stack() void {
+    instance.restore_vfork_back_stack();
 }
 
 /// Called from `context_switch.S` to close a window opened in `vfork` or
@@ -1050,10 +1469,8 @@ test "ProcessManager.ShouldScheduleProcesses" {
     _ = process_set_next_task();
     try std.testing.expectEqual(2, sut.get_current_process().pid);
 
-    // `delete_process` closes a preemption window it does not open -- `sys_exit`
-    // and `sys_kill` are its only real callers and both open one. Calling it
-    // bare would release a window nobody took, which is now a panic rather than
-    // a silently clamped counter.
+    // `delete_process` closes a preemption window it does not open: `sys_exit`
+    // and `sys_kill` are its only real callers and both open one.
     preempt.preempt_disable();
     sut.delete_process(2, 0);
 
@@ -1216,7 +1633,7 @@ test "ProcessManager.ShouldWaitForProcess" {
         }
     };
     hal.irq.impl().set_irq_action(.pendsv, PendSvAction.Call);
-    try std.testing.expectEqual(4, try sut.waitpid(4, &status));
+    try std.testing.expectEqual(4, try sut.waitpid(4, &status, 0));
     const p = sut.get_process_for_pid(4).?;
     p.unblock_parent();
     try std.testing.expectEqual(0, status);

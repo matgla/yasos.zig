@@ -47,48 +47,33 @@ extern fn store_and_switch_to_next_task(is_fpu_used: usize) void;
 const uaccess = @import("../uaccess.zig");
 const ErrnoSet = kernel.errno.ErrnoSet;
 
-// Not `*const volatile`. `arg` now points at a kernel-owned copy of the caller's
-// context (see `syscall_arg_bytes`), so it is stable for the life of the call --
-// and `volatile` was actively harmful: it forced every field access to re-load
-// from the caller's memory, which is what made a validate-then-use pair two
-// independent reads of a value userspace could change in between.
+// Not `*const volatile`: `arg` points at a kernel-owned copy of the caller's
+// context (see `syscall_arg_bytes`), so it is stable for the life of the call.
+// `volatile` would re-load every field access from the caller's memory, making a
+// validate-then-use pair two reads of a value userspace can change in between.
 const SyscallHandler = *const fn (arg: *const anyopaque) anyerror!i32;
 
 const preempt = @import("../sync/preempt.zig");
 
-// Set true once the very first task has been switched in by
-// switch_to_the_first_task (via process_set_next_task). Until then PendSV must
-// NOT perform a context switch: the first switch into the root process is done
-// with a plain `bx entry` (the root's saved EXC_RETURN slot holds the raw entry
-// address, not a 0xFFxxxxxx magic). Doing that from a PendSV handler is not an
-// exception return, so PendSV would be left permanently ACTIVE
-// (SHCSR.PENDSVACT), silently killing all future context switches.
-var scheduler_running: bool = false;
-
-pub fn mark_scheduler_running() void {
-    const ptr: *volatile bool = &scheduler_running;
-    ptr.* = true;
-}
-
+const smp = @import("../smp.zig");
 
 export fn do_context_switch(is_fpu_used: usize) linksection(".time_critical") usize {
     _ = is_fpu_used;
-    // The first task switch is performed by switch_to_the_first_task, not by
-    // PendSV. Ignore PendSV until then so an early SysTick cannot strand
-    // SHCSR.PENDSVACT (see scheduler_running above).
+    // A core's first task switch is performed by switch_to_the_first_task, not
+    // PendSV, so PendSV is ignored until then: that first switch is a plain
+    // `bx entry`, which from a PendSV handler is not an exception return, and
+    // would leave PENDSVACT permanently set. Per-core, because a secondary
+    // core's SysTick runs from `init_secondary()` while it is still on MSP.
     //
-    // Checked *before* the preempt count on purpose: a reschedule recorded now
-    // would be re-triggered by the first `preempt_enable` and pend a PendSV
-    // ahead of the first switch, which is the exact hazard the flag exists for.
-    const running: *volatile bool = &scheduler_running;
-    if (!running.*) {
+    // Checked before the preempt count: a reschedule recorded now would be
+    // re-triggered by the first `preempt_enable`, which is the same hazard.
+    if (!smp.current_core_schedules()) {
         return 3;
     }
     if (preempt.preempt_disabled()) {
-        // Record it instead of dropping it. Returning 3 alone is what makes a
-        // SysTick that lands inside a block window simply vanish, handing the
-        // running process a free extra timeslice; `preempt_enable` re-pends
-        // PendSV when the outermost window closes.
+        // Record rather than drop: returning 3 alone makes a SysTick inside a
+        // block window vanish, handing the running process a free timeslice.
+        // `preempt_enable` re-pends PendSV when the outermost window closes.
         preempt.set_need_resched();
         return 3;
     }
@@ -170,6 +155,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_klog_ctl => return handlers.sys_klog_ctl,
             c.sys_ftruncate => return handlers.sys_ftruncate,
             c.sys_perf_dump => return handlers.sys_perf_dump,
+            c.sys_pipe => return handlers.sys_pipe,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -217,25 +203,14 @@ fn create_fast_syscall_table(comptime count: usize) [count]bool {
 const fast_syscall_table = create_fast_syscall_table(c.SYSCALL_COUNT);
 
 /// How many bytes of `arg` to copy into kernel memory before dispatching, or
-/// null for "do not copy".
+/// null for "do not copy". `arg` points into the caller's memory, so without the
+/// copy a validate-then-use pair is two reads of a value the caller can change
+/// in between.
 ///
-/// `arg` points into the *caller's* memory. Every field a handler reads is a
-/// fresh load from there, so a handler that validates a field and then uses it
-/// performs two independent reads of a value the caller can change in between --
-/// classically, `sys_read` checking `context.buf != null` and then dereferencing
-/// `context.buf.?`. Copying the whole context once, up front, collapses that to
-/// a single read and makes everything the handler sees immutable.
-///
-/// null means one of three things, and each is deliberate:
-///   * the syscall ignores `arg` entirely;
-///   * `arg` is not a pointer to a context at all -- `sys_start_root_process` is
-///     handed a raw stack-pointer *value* and does `@intFromPtr(arg)` on it;
-///   * the handler writes back through the caller's own struct, so it needs the
-///     real address (`sys_perf_dump`), and validates it itself.
-///
-/// Adding a syscall that takes a context and forgetting to list it here costs
-/// the copy, not correctness: the handler still sees the caller's memory, as it
-/// does today. `SyscallArgTableCoversContexts` below is the reminder.
+/// null means the syscall ignores `arg`, or `arg` is not a context pointer at
+/// all (`sys_start_root_process` gets a raw stack-pointer value), or the handler
+/// writes back through the caller's struct and validates it itself
+/// (`sys_perf_dump`). `SyscallArgTableCoversContexts` below is the reminder.
 fn syscall_arg_bytes(comptime index: usize) ?usize {
     return switch (index) {
         c.sys_getpid => @sizeOf(u8),
@@ -298,35 +273,26 @@ const max_syscall_arg_bytes = blk: {
     break :blk largest;
 };
 
-/// Whether the current caller's pointers have to be checked.
-///
-/// Only unprivileged processes are untrusted. The root/init process runs
-/// privileged in thread mode and can already reach any address directly, so
-/// validating its pointers would buy nothing -- and would break boot, because
-/// the kernel issues syscalls of its own before there is a current process at
-/// all, with `arg` and `out` sitting on the kernel MSP stack rather than in any
-/// user region.
+/// Whether the current caller's pointers have to be checked. Only unprivileged
+/// processes are untrusted: root runs privileged and can reach any address
+/// directly anyway, and the kernel issues syscalls of its own during boot with
+/// `arg` and `out` on the MSP stack rather than in any user region.
 fn caller_is_untrusted() bool {
     if (comptime !uaccess.enabled) return false;
-    const running: *volatile bool = &scheduler_running;
-    if (!running.*) return false;
+    // "Is there a current process on this core yet?" -- which is per-core for
+    // the same reason the switch gate above is: a secondary core has none until
+    // it has taken its own first switch.
+    if (!smp.current_core_schedules()) return false;
     if (!process_manager.is_initialized()) return false;
     return !process_manager.instance.get_current_process().is_privileged();
 }
 
 /// The same predicate as a plain byte array, indexed by syscall number and read
 /// directly by the SVCall stub (`process_syscall_fast_check` in
-/// context_switch.S).
-///
-/// The stub used to reach this decision through an exported Zig function, and
-/// that call was a real one -- push/pop of a frame pointer and link register
-/// around three instructions of table lookup -- which *both* paths paid, the
-/// trampoline included, before it had even been decided that they were slow.
-/// Read inline at the call site it is a bounds check and one `ldrb`.
-///
-/// `u8` rather than `bool` because the assembler indexes it with `ldrb`: Zig
-/// guarantees `bool` a size of one byte but not which bit patterns it uses, and
-/// the stub tests the whole byte.
+/// context_switch.S) -- inline, that is a bounds check and one `ldrb`, where an
+/// exported Zig function cost a real call on both paths. `u8` rather than `bool`
+/// because the stub tests the whole byte and Zig does not guarantee `bool`'s bit
+/// patterns.
 pub export const syscall_fast_table: [c.SYSCALL_COUNT]u8 linksection(".time_critical") = blk: {
     var table: [c.SYSCALL_COUNT]u8 = undefined;
     for (&table, 0..) |*f, index| {
@@ -337,9 +303,9 @@ pub export const syscall_fast_table: [c.SYSCALL_COUNT]u8 linksection(".time_crit
 
 test "SystemCall.FastTableMatchesPredicate" {
     // The stub indexes `syscall_fast_table` with no way to check it against the
-    // predicate it is generated from, and a table that silently disagreed would
-    // either strand a fast syscall on the trampoline or -- far worse -- run a
-    // blocking one in handler mode, where it deadlocks at SVCall priority.
+    // predicate it is generated from. A table that disagreed would strand a fast
+    // syscall on the trampoline, or run a blocking one in handler mode, where it
+    // deadlocks at SVCall priority.
     for (0..c.SYSCALL_COUNT) |index| {
         try std.testing.expectEqual(fast_syscall_table[index], syscall_fast_table[index] != 0);
     }
@@ -347,9 +313,8 @@ test "SystemCall.FastTableMatchesPredicate" {
 
 test "SystemCall.FastTableCoversEverySyscall" {
     // The stub bounds-checks against YASOS_SYSCALL_COUNT from sys/syscall_ids.h,
-    // which the assembler can read and the enum is not. sys/syscall.h fails to
-    // compile if the two drift; this covers the Zig side of the same contract,
-    // since the table it indexes is sized from the enum.
+    // which the assembler can read and the enum is not. This covers the Zig side
+    // of that contract, since the table it indexes is sized from the enum.
     try std.testing.expectEqual(@as(usize, c.SYSCALL_COUNT), syscall_fast_table.len);
     try std.testing.expectEqual(@as(usize, c.YASOS_SYSCALL_COUNT), syscall_fast_table.len);
 }
@@ -367,10 +332,9 @@ test "SystemCall.ArgLandingBufferFitsEverySyscall" {
 }
 
 test "SystemCall.FastSyscallsCopyOrIgnoreTheirArgs" {
-    // A fast syscall runs in handler mode. It must not be one of the entries
-    // deliberately left uncopied for write-back reasons (sys_perf_dump) or
-    // because `arg` is a raw value (sys_start_root_process), since neither is
-    // safe to reach from there.
+    // A fast syscall runs in handler mode, so it must not be one of the entries
+    // left uncopied for write-back (sys_perf_dump) or because `arg` is a raw
+    // value (sys_start_root_process).
     for (0..c.SYSCALL_COUNT) |index| {
         if (!fast_syscall_table[index]) continue;
         try std.testing.expect(index != c.sys_perf_dump);
@@ -431,15 +395,11 @@ pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *vol
     const start_cycles = if (perf.enabled) perf.read_cycles() else 0;
     // log.err("System call processing started for: {d}", .{number});
 
-    // 0..4 are the SVCall stub's own protocol, not syscalls -- which is the
-    // whole reason the SystemCall enum starts at 5. `irq_svcall` consumes them
-    // and one that arrives here is a stub regression, so say so; the part that
-    // matters is that it is not treated as a syscall. Those call sites pass no
-    // arg/out pair at all (userspace `vfork`'s trailing svc leaves r1 and r2
-    // holding whatever its last C call did), so reporting through `out` writes
-    // eight bytes through a junk pointer -- and one that often lands *inside*
-    // the caller's own writable regions, where the validation below waves it
-    // through and the corruption surfaces much later as a HardFault.
+    // 0..4 are the SVCall stub's own protocol, not syscalls, which is why the
+    // SystemCall enum starts at 5. Those call sites pass no arg/out pair at all,
+    // so reporting through `out` writes eight bytes through a junk pointer --
+    // often one inside the caller's own writable regions, where the validation
+    // below waves it through and the corruption surfaces much later.
     if (number < c.sys_start_root_process) {
         log.err("reserved svc protocol id {d} reached the syscall dispatcher", .{number});
         return -1;
@@ -447,14 +407,11 @@ pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *vol
 
     const untrusted = caller_is_untrusted();
 
-    // `out` first, and before the range check: without it there is nowhere safe
-    // to report a failure, so a bad `out` can only be refused outright -- and
-    // the out-of-range exit below reports NotImplemented *through* `out`, which
-    // is an unvalidated 8-byte kernel write for any caller that pairs a bogus
-    // syscall number with a bogus result pointer. Both are entirely under the
-    // caller's control: the SVCall stub sends every number it cannot classify
-    // down this path rather than rejecting it (process_syscall_fast_check in
-    // context_switch.S).
+    // `out` first, and before the range check: the out-of-range exit below
+    // reports NotImplemented *through* `out`, which would be an unvalidated
+    // 8-byte kernel write for a caller pairing a bogus syscall number with a
+    // bogus result pointer. The stub sends every number it cannot classify down
+    // this path rather than rejecting it, so both are caller-controlled.
     if (untrusted and !uaccess.access_ok(@intFromPtr(out), @sizeOf(c.syscall_result), .write)) {
         return -1;
     }
@@ -560,10 +517,9 @@ test "SystemCall.VerifyLookupTable" {
 }
 
 test "SystemCall.ReservedProtocolIdsAreNotSyscalls" {
-    // The enum leaving 0..4 free is load-bearing, not cosmetic: `irq_svcall`
-    // dispatches on the raw r0 before it is a syscall number at all, so a
-    // SystemCall member that reached down into that range would be swallowed by
-    // the stub's own protocol and never arrive at the table.
+    // The enum leaving 0..4 free is load-bearing: `irq_svcall` dispatches on the
+    // raw r0 before it is a syscall number, so a member in that range would be
+    // swallowed by the stub's own protocol and never reach the table.
     try std.testing.expect(c.sys_start_root_process >= 5);
     for (0..c.sys_start_root_process) |index| {
         // Nothing may be dispatched, run in handler mode, or have its arg copied

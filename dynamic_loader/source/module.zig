@@ -63,6 +63,13 @@ pub const ThunkHolderData = struct {
             .refcount = 1,
             .generated = false,
         };
+        // Zeroed so that a slot which never gets generated reads back as an
+        // all-zero {r9, fn} descriptor. Slots are packed by a counter that only
+        // advances on a real generate_thunk(), while the pool is sized from the
+        // relocation count, so an unresolved weak function pointer leaves a hole
+        // -- and find_thunk() must not match one, nor may a stray branch land in
+        // one and execute whatever the allocator last left there.
+        @memset(self.data, 0);
         return self;
     }
 
@@ -191,6 +198,38 @@ pub const LoadedUniqueData = struct {
             return @intFromPtr(&thunks.data[position]) | 1;
         }
         return error.ThunksNotAllocated;
+    }
+
+    /// Find an already-built thunk for `symbol`, or null when there is none.
+    ///
+    /// C requires every pointer to the same function to compare equal, and a
+    /// function reached both through the GOT and through a data initializer
+    /// went through two different relocation passes: the GOT entry was given a
+    /// thunk, the initializer got the raw code address, and the two compared
+    /// unequal (gcc-torture 930608-1: `p = &f; if (p != a[0]) abort();`).
+    ///
+    /// The {r9, fn} descriptor each slot embeds at +12/+16 is itself the key,
+    /// so the slots already written can be searched with no side table.
+    /// `count` is how many slots the caller has filled so far — slots past it
+    /// hold stale or uninitialised bytes.
+    pub fn find_thunk(self: *LoadedUniqueData, count: usize, r9: usize, symbol: usize) ?usize {
+        if (self.thunks) |thunks| {
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const position = i * indirect_call_thunk_template_size;
+                if (position + indirect_call_thunk_template_size > thunks.data.len) {
+                    break;
+                }
+                var slot_r9: usize = 0;
+                var slot_fn: usize = 0;
+                @memcpy(std.mem.asBytes(&slot_r9), thunks.data[position + 12 .. position + 12 + @sizeOf(usize)]);
+                @memcpy(std.mem.asBytes(&slot_fn), thunks.data[position + 16 .. position + 16 + @sizeOf(usize)]);
+                if (slot_r9 == r9 and slot_fn == symbol) {
+                    return @intFromPtr(&thunks.data[position]) | 1;
+                }
+            }
+        }
+        return null;
     }
 
     pub fn get_thunk_address(self: *LoadedUniqueData, index: usize) !usize {

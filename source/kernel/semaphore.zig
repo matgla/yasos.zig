@@ -28,17 +28,12 @@ const c = @import("libc_imports").c;
 
 pub const Semaphore = struct {
     max_value: u32,
-    /// Plain, and deliberately not an atomic.
-    ///
-    /// A `Semaphore` is a *userspace* object: it is constructed by the process
-    /// that owns it and reached by the kernel through a raw pointer in
-    /// `SemaphoreEvent`. That puts it in the process heap, whose tier 1 on the
-    /// rp2350 is PSRAM -- and PSRAM is outside the global exclusive monitor, so
-    /// an atomic here would appear to work and guarantee nothing across cores.
-    ///
-    /// Every mutation happens on the kernel side instead, under the lock in
-    /// `interrupts/kernel_semaphore.zig`. The reads below are an unsynchronised
-    /// fast path, exactly as they were before, and the syscall re-checks.
+    /// Plain, not an atomic: a `Semaphore` is a userspace object living in the
+    /// process heap, whose tier 1 is PSRAM, which is outside the global
+    /// exclusive monitor -- an atomic here would appear to work and guarantee
+    /// nothing across cores. Every mutation happens kernel-side under the lock
+    /// in `interrupts/kernel_semaphore.zig`; the reads below are an
+    /// unsynchronised fast path that the syscall re-checks.
     counter: u32,
 
     pub fn create(init: u32) Semaphore {

@@ -93,10 +93,33 @@ pub fn dump_stack_trace(log: anytype, address: usize) void {
 
 pub const max_stack_depth: usize = 16;
 
+/// How far above the walker's own stack pointer a frame pointer may point.
+///
+/// The walk only ever climbs -- a caller's frame is above its callee's -- so
+/// the current stack pointer is an exact floor, and this bounds the other side
+/// without having to know where the stack is. Sixteen frames of kernel code
+/// occupy a fraction of it; the size is chosen to keep a wild pointer from
+/// being dereferenced far away rather than to accommodate real frames.
+const stack_window_bytes: usize = 8 * 1024;
+
+inline fn current_stack_pointer() usize {
+    return asm volatile ("mov %[out], sp"
+        : [out] "=r" (-> usize),
+    );
+}
+
+/// Is `addr` plausibly a frame pointer on the stack being walked?
+///
+/// Anchored to the live stack pointer rather than to named RAM ranges. The
+/// ranges this used to check were RP2350's SRAM and PSRAM, so on every other
+/// board -- QEMU's mps3-an524 included -- the first step failed and each panic
+/// printed its message followed by no trace at all, exactly when the trace is
+/// what is wanted.
 pub fn is_valid_stack_ptr(addr: usize) bool {
-    // SRAM: 0x20000000 - 0x2005FFFF, PSRAM: 0x11000000 - 0x117FFFFF
-    return (addr >= 0x11000000 and addr < 0x11800000) or
-        (addr >= 0x20000000 and addr < 0x20060000);
+    if (addr % @alignOf(usize) != 0) return false;
+    const stack_pointer = current_stack_pointer();
+    if (addr < stack_pointer) return false;
+    return addr - stack_pointer < stack_window_bytes;
 }
 
 pub fn get_stack_trace_depth(address: usize) usize {

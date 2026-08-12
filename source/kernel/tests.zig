@@ -30,6 +30,7 @@ comptime {
     _ = @import("errno.zig");
     _ = @import("uaccess.zig");
     _ = @import("spawn.zig");
+    _ = @import("smp.zig");
     _ = @import("semaphore.zig");
     _ = @import("dump_hardware.zig");
     _ = @import("process.zig");
