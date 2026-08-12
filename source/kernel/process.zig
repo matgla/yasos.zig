@@ -85,6 +85,12 @@ pub const VForkContext = struct {
     lr: usize,
     sp: usize,
     fp: usize,
+    /// Whether the parent's frames were copied out for this vfork. False means
+    /// `save_vfork_stack` declined and the child was released *below* them, so
+    /// they are still live and the hand-off must not expect a restore. Without
+    /// this the two cases are both "`_vfork_stack_len == 0`" and a lost restore
+    /// is indistinguishable from a legitimate one.
+    saved: bool = false,
 };
 
 pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolType: anytype) type {
@@ -448,6 +454,34 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return true;
         }
 
+        /// Diagnostic: the state of this process's vfork save, and the `lr` word
+        /// inside it. `process_vfork_child` pushes `{r4-r12, lr}` for the parent
+        /// and `process_vfork_back_here` pops it back as `{r4-r12, pc}`, so that
+        /// word -- 40-byte frame, `lr` last, hence offset 36 -- is the address
+        /// the parent resumes at. Reading it here says whether a zero `pc` was
+        /// already in the buffer at save time or arrived after the restore.
+        pub const VForkSaveState = struct {
+            base: usize,
+            len: usize,
+            top: usize,
+            resume_pc: ?u32,
+        };
+
+        pub fn vfork_save_state(self: *const Self) VForkSaveState {
+            var resume_pc: ?u32 = null;
+            if (self._vfork_stack) |buffer| {
+                if (self._vfork_stack_len >= 40) {
+                    resume_pc = std.mem.readInt(u32, buffer[36..40][0..4], .little);
+                }
+            }
+            return .{
+                .base = self._vfork_stack_base,
+                .len = self._vfork_stack_len,
+                .top = self._vfork_stack_top,
+                .resume_pc = resume_pc,
+            };
+        }
+
         /// The stack pointer this process had at its `vfork()` call site, while
         /// the frames below it are saved and can be scribbled on. Null once they
         /// are not -- with no backup, those frames are the parent's only copy.
@@ -460,13 +494,19 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// with the stack pointer below `_vfork_stack_base`, which
         /// `process_get_back_to_parent_vfork` guarantees by switching to the
         /// parent's resume position first.
-        pub fn restore_vfork_stack(self: *Self) void {
-            const buffer = self._vfork_stack orelse return;
+        /// False when there was nothing to put back. Legitimate only when
+        /// `save_vfork_stack` declined for this vfork -- the context's `saved`
+        /// flag records which case it is. Returning it, rather than no-opping,
+        /// is what makes a lost restore reportable instead of showing up later
+        /// as a branch through an unrestored frame.
+        pub fn restore_vfork_stack(self: *Self) bool {
+            const buffer = self._vfork_stack orelse return false;
             const length = self._vfork_stack_len;
-            if (length == 0) return;
+            if (length == 0) return false;
             self._vfork_stack_len = 0;
             const destination: [*]u8 = @ptrFromInt(self._vfork_stack_base);
             @memcpy(destination[0..length], buffer[0..length]);
+            return true;
         }
 
         pub fn release_parent_after_getting_freedom(self: *Self) *std.DoublyLinkedList.Node {

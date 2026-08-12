@@ -64,7 +64,7 @@ extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const any
 extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 
 extern fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32;
-extern fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize) i32;
+extern fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize, stack_bottom: usize) i32;
 
 /// Size of the register frame `libs/libc/arm/vfork.S` leaves for the kernel:
 /// `push {r4-r11, lr}`, plus `vpush {s0-s31}` when `is_fpu_used`. `context.sp`
@@ -507,17 +507,23 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 const p: *Process = @alignCast(@fieldParentPtr("node", node));
                 next = node.next;
                 if (p.pid == pid) {
-                    // fix me
-                    const ctx = p._vfork_context;
-
-                    // One lock across recording the exit, waking, and leaving
-                    // the table -- the other half of the pair `waitpid`
-                    // describes. Recording the exit makes the condition true and
-                    // the wake publishes it; a waiter on the other core that
-                    // tests between them sees neither and blocks forever.
+                    // One lock across taking the context, recording the exit,
+                    // waking, and leaving the table -- the other half of the pair
+                    // `waitpid` describes. Recording the exit makes the condition
+                    // true and the wake publishes it; a waiter on the other core
+                    // that tests between them sees neither and blocks forever.
+                    var handoff: VForkHandoff = .none;
                     {
                         const flags = proctable_lock.lock_irqsave();
                         defer proctable_lock.unlock_irqrestore(flags);
+
+                        // Decided before anything below acts on it, and taken
+                        // rather than read: the parent's saved frames can be
+                        // restored exactly once, so a second hand-off would reach
+                        // `process_vfork_back_here` with nothing left to restore
+                        // and resume the parent by popping whatever the child had
+                        // scribbled over its frames.
+                        handoff = take_vfork_handoff("exit", p);
 
                         // Leave the status where waitpid can find it. This is the
                         // one funnel every exit path comes through.
@@ -538,10 +544,17 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         // rewrites its stack, so the frame at its
                         // `stack_position` is not where it resumes. Leaving it
                         // claimable lets the other core take it and HardFault.
-                        if (ctx != null) {
-                            const parent = p._parent.?;
-                            self._scheduler.set_next(&parent.node);
-                            self.core[hal.cpu.coreid()] = parent;
+                        //
+                        // Only for a hand-off that is actually going to happen.
+                        // The claim is half of a pair, and claiming without the
+                        // branch below is the same fault by a slower route; a
+                        // `.refused` parent is parked and must stay unclaimed.
+                        switch (handoff) {
+                            .take => |h| {
+                                self._scheduler.set_next(&h.parent.node);
+                                self.core[hal.cpu.coreid()] = h.parent;
+                            },
+                            .none, .refused => {},
                         }
                     }
 
@@ -550,10 +563,16 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     // claimed above, so it cannot be taken by the woken core.
                     smp.kick_idle_core();
 
-                    if (ctx != null) {
-                        arch.disable_interrupts();
-                        _ = process_get_back_to_parent_vfork(pid, ctx.?.sp, ctx.?.lr);
-                        return;
+                    switch (handoff) {
+                        .take => |h| {
+                            arch.disable_interrupts();
+                            vfork_restore_target.current().* = h.parent;
+                            _ = process_get_back_to_parent_vfork(pid, h.sp, h.lr, @intFromPtr(h.parent.get_stack_bottom()));
+                            return;
+                        },
+                        // Nothing was committed to the parent, so this is the
+                        // ordinary exit tail: fall through to the PendSV loop.
+                        .none, .refused => {},
                     }
 
                     break;
@@ -673,22 +692,56 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // before releasing it), so the context belongs to the child and the
             // stack being saved to its parent.
             const child = self.core[hal.cpu.coreid()];
-            const ctx = VForkContext{
+            const parent = child._parent orelse {
+                child._vfork_context = .{ .fp = 0, .sp = stack_pointer, .lr = back_point, .saved = false };
+                return false;
+            };
+            // Save first, then publish the context carrying the outcome. The
+            // hand-off reads `saved` to tell "nothing to restore because the
+            // child stayed below the frames" from "nothing to restore because
+            // the frames were already consumed" -- the second is a lost restore
+            // and used to be silent.
+            const saved = parent.save_vfork_stack(stack_pointer);
+            child._vfork_context = .{
                 .fp = 0,
                 .sp = stack_pointer,
                 .lr = back_point,
+                .saved = saved,
             };
-            child._vfork_context = ctx;
-            const parent = child._parent orelse return false;
-            return parent.save_vfork_stack(stack_pointer);
+            return saved;
         }
 
         /// Put a suspended parent's stack back, immediately before it resumes.
         /// Called from `process_get_back_to_parent_vfork` once it is on the
         /// parent's resume position, so everything this pushes is below the
         /// region being rewritten.
+        /// Restores the process the hand-off named, not whatever this core
+        /// happens to hold. `core[coreid()]` is per-core state the scheduler
+        /// rewrites on every switch, so inferring the target from it made the
+        /// restore silently correct-looking against the wrong process.
         pub fn restore_vfork_back_stack(self: *Self) void {
-            self.core[hal.cpu.coreid()].restore_vfork_stack();
+            _ = self;
+            const slot = vfork_restore_target.current();
+            const target = slot.* orelse {
+                log.err("vfork: restore ran with no hand-off target recorded", .{});
+                return;
+            };
+            slot.* = null;
+
+            const before = target.vfork_save_state();
+            const restored = target.restore_vfork_stack();
+            var written: usize = 0;
+            if (before.len >= 40) {
+                const dest: [*]const u8 = @ptrFromInt(before.base);
+                written = std.mem.readInt(u32, dest[36..40][0..4], .little);
+            }
+            ctx_trace(.vrestore, target.pid, before.base, written);
+            if (!restored) {
+                // Reached only when `saved` said there would be something here;
+                // the hand-off check upstream refuses that case, so this is the
+                // last line of defence rather than the expected path.
+                log.err("vfork: pid={d} resumes with nothing restored at 0x{X}", .{ target.pid, before.base });
+            }
         }
 
         /// Clone the exec argv and envp into a single array owned by the new
@@ -883,24 +936,77 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // cursor, all of which the other core reads on every scan. Nothing
             // inside takes a sleeping lock, and the image load above has already
             // released the ones it held.
-            {
+            //
+            // The decision comes first and inside the same lock. The claim is
+            // only correct paired with the branch that follows it: a parent
+            // claimed for a hand-off that then does not happen is left unblocked
+            // and never resumed, so the scheduler enters it at its stored
+            // context -- the one position a vfork parent must not be entered at.
+            const handoff = blk: {
                 const flags = proctable_lock.lock_irqsave();
                 defer proctable_lock.unlock_irqrestore(flags);
-                self._scheduler.set_next(&current_process._parent.?.node);
-                self.core[hal.cpu.coreid()] = current_process._parent.?;
-            }
+                const decision = take_vfork_handoff("exec", current_process);
+                switch (decision) {
+                    .take => |h| {
+                        self._scheduler.set_next(&h.parent.node);
+                        self.core[hal.cpu.coreid()] = h.parent;
+                    },
+                    // A plain `execve` with no parked parent behind it, left as
+                    // it was: `set_next` releases this process through
+                    // `update_current`, and its frame is freshly built and
+                    // marked uninitialised, so the switch away enters the new
+                    // image rather than storing over it.
+                    .none => {
+                        self._scheduler.set_next(&current_process._parent.?.node);
+                        self.core[hal.cpu.coreid()] = current_process._parent.?;
+                    },
+                    // A parked, unresumable parent. Naming it here is the bug
+                    // this split exists to prevent -- the claim would hand it to
+                    // the next switch. See the branch below for what settles
+                    // this process instead.
+                    .refused => {},
+                }
+                break :blk decision;
+            };
 
-            if (current_process._vfork_context != null) {
-                const ctx = current_process._vfork_context.?;
-                current_process._vfork_context = null;
-                current_process.unblock_parent();
-                arch.disable_interrupts();
-                // `process_get_back_to_parent_vfork` issues the matching release
-                // itself, from the parent's stack, so this must not.
-                preempt_held = false;
-                return process_get_back_to_parent_vfork(current_process.pid, ctx.sp, ctx.lr);
+            switch (handoff) {
+                .take => |h| {
+                    current_process.unblock_parent();
+                    arch.disable_interrupts();
+                    // `process_get_back_to_parent_vfork` issues the matching
+                    // release itself, from the parent's stack, so this must not.
+                    preempt_held = false;
+                    vfork_restore_target.current().* = h.parent;
+                    return process_get_back_to_parent_vfork(current_process.pid, h.sp, h.lr, @intFromPtr(h.parent.get_stack_bottom()));
+                },
+                .refused => {
+                    // Nothing was committed to the parent, so the only thing
+                    // left to settle is this process. The image is loaded and
+                    // its frame rebuilt, but the hand-off was the exec's way of
+                    // leaving this stack, so report the failure and let the
+                    // caller's own error path run: a vfork child is still on its
+                    // parent's stack here, which is where it was before the
+                    // call, so returning to it is safe and it normally `_exit`s
+                    // straight away. Reported rather than returning 0, which
+                    // libc reads as "exec succeeded and came back" and turns
+                    // into whatever errno happened to be lying around.
+                    //
+                    // The pend is for the case where something else is runnable:
+                    // this process is uninitialised, so a switch away releases it
+                    // without storing, and it is entered at `call_main` if it is
+                    // ever picked again. When nothing else is runnable the
+                    // scheduler keeps it here (`fall_back_to_idle` holds a
+                    // `Running` current), which is why the error return, not the
+                    // pend, is what makes this path defined. Released explicitly
+                    // rather than through the `defer` so the pend is not swallowed
+                    // by the window this opened.
+                    preempt_held = false;
+                    preempt.preempt_enable();
+                    hal.irq.trigger(.pendsv);
+                    return kernel.errno.ErrnoSet.TryAgain;
+                },
+                .none => return 0,
             }
-            return 0;
         }
 
         pub fn get_process_for_pid(self: *Self, pid: i32) ?*Process {
@@ -1218,7 +1324,11 @@ export fn process_resume_is_privileged() usize {
 // incoming SP and its stack bottom; reap events carry the freed stack range.
 // One ring per core: both cores call `ctx_trace` from `update_stack_pointer` on
 // every switch, and a shared ring would interleave and race its counter.
-const CtxEventKind = enum(u8) { store, load, reap };
+// `vrestore` records a vfork stack restore: `a` is the address it copied to,
+// `b` the word left at +36 -- what `process_vfork_back_here` pops into `pc`.
+// Ring rather than a log line, so it costs one store and cannot shift the
+// timing of the window it is measuring.
+const CtxEventKind = enum(u8) { store, load, reap, vrestore };
 
 const CtxEvent = struct {
     seq: u32 = 0,
@@ -1235,10 +1345,111 @@ const CtxRing = struct {
 
 var ctx_rings: kernel.sync.PerCpu(CtxRing) = .init(.{});
 
+/// The parent a hand-off is switching to, handed from the Zig side to
+/// `arch_restore_vfork_back_stack` across the assembly that has no room for
+/// another argument. Per-core, and written with interrupts already masked, so
+/// the restore names the same process the hand-off decided on rather than
+/// re-deriving it from `core[coreid()]` after the scheduler may have moved on.
+var vfork_restore_target: kernel.sync.PerCpu(?*Process) = .init(null);
+
 fn ctx_trace(kind: CtxEventKind, pid: c.pid_t, a: usize, b: usize) void {
     const ring = ctx_rings.current();
     ring.seq +%= 1;
     ring.events[ring.seq % ring.events.len] = .{ .seq = ring.seq, .kind = kind, .pid = pid, .a = a, .b = b };
+}
+
+/// True when the parent may be resumed through `process_vfork_back_here`.
+///
+/// That entry is `pop {r4-r12, pc}` off `ctx.sp`, so it is only safe when the
+/// frames there are the parent's own: either still live (the child was released
+/// below them, `saved == false`) or about to be copied back. When `saved` says a
+/// copy was made and nothing is left to copy, the frames belong to the child and
+/// popping them branches somewhere arbitrary -- refuse instead.
+///
+/// The report distinguishes a frame that was already bad when saved from one
+/// clobbered after the restore. Silent on the healthy path.
+fn vfork_handoff_ok(site: []const u8, child_pid: c.pid_t, parent: anytype, ctx: anytype) bool {
+    if (!ctx.saved) return true;
+
+    const save = parent.vfork_save_state();
+    if (save.base == ctx.sp and save.len >= 40) {
+        if (save.resume_pc) |pc| {
+            if (pc != 0) return true;
+        }
+    }
+    log.err("vfork handoff[{s}]: refusing -- child={d} parent={d} ctx.sp=0x{X} base=0x{X} len={d} top=0x{X} resume_pc=0x{X}", .{
+        site,      child_pid, parent.pid, ctx.sp,
+        save.base, save.len,  save.top,   save.resume_pc orelse 0,
+    });
+    return false;
+}
+
+/// What a vfork child owes its parent when it stops needing the shared stack.
+/// Three outcomes rather than an optional, because "no hand-off" splits into two
+/// cases the caller has to treat differently: `.none` is an ordinary `exec` with
+/// no parent parked behind it, while `.refused` leaves a parent that must never
+/// be handed to the scheduler.
+const VForkHandoff = union(enum) {
+    /// Not a vfork child, or its context was already taken.
+    none,
+    /// A vfork child whose parent can no longer be resumed. Already parked by
+    /// `take_vfork_handoff`; the caller's only duty is not to claim it.
+    refused,
+    take: struct {
+        parent: *Process,
+        sp: usize,
+        lr: usize,
+    },
+};
+
+/// Blocker token for a vfork parent that lost its resume path. Its address is
+/// the whole value: `block_on` stores it and only a `wake_from` naming the same
+/// address clears it, which nothing does.
+var vfork_unresumable: u8 = 0;
+
+/// Decide whether `child` may hand its core back to the parent it vforked from,
+/// and take the context when it may.
+///
+/// Nothing here changes what the scheduler can pick, so the caller can honour a
+/// refusal by simply doing nothing. That is the point of separating it: both
+/// hand-off sites used to claim the parent first and validate second, and a
+/// refusal then left it claimed, unblocked and never resumed -- the scheduler
+/// would enter it at its stored context, which for a vfork parent is the one
+/// position it must not be entered at.
+///
+/// Call with `proctable_lock` held. Taking the context is what makes a hand-off
+/// happen at most once: `exec` and `exit` both reach for it, and a second one
+/// would resume the parent by popping frames the child has since run over.
+fn take_vfork_handoff(site: []const u8, child: *Process) VForkHandoff {
+    const ctx = child._vfork_context orelse return .none;
+    const parent = child._parent orelse {
+        // `set_vfork_back_point` records a context even when it cannot find a
+        // parent, so this is reachable -- which is why the two call sites no
+        // longer unwrap `_parent` themselves.
+        log.err("vfork handoff[{s}]: pid={d} carries a vfork context with no parent", .{ site, child.pid });
+        child._vfork_context = null;
+        return .none;
+    };
+    child._vfork_context = null;
+    if (vfork_handoff_ok(site, child.pid, parent, ctx)) {
+        return .{ .take = .{ .parent = parent, .sp = ctx.sp, .lr = ctx.lr } };
+    }
+
+    // The hand-off *is* this parent's resume path. `process_vfork_child`
+    // suspended it in place rather than through PendSV, so its stored context
+    // still names wherever it was last switched out -- a position the child has
+    // since run over. With the saved frames gone there is nothing left to enter
+    // it at, and the one thing that must not happen is for it to become
+    // schedulable: `unblock_parent` on the exiting child would otherwise publish
+    // it `Ready` and the next core to scan would resume it into that.
+    //
+    // So park it out of reach instead. `reevaluate_state` keeps any process with
+    // a `waiting_for` Blocked, and only a `wake_from` naming this exact token
+    // clears it. The process is lost either way; this makes it a stuck process
+    // instead of a wild branch, and keeps its children's `_parent` valid.
+    parent.block_on(&vfork_unresumable);
+    log.err("vfork handoff[{s}]: parked pid={d} -- no resume path left after child={d}", .{ site, parent.pid, child.pid });
+    return .refused;
 }
 
 // Called from the HardFault handler; oldest first, and every core's, because the

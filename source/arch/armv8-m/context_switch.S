@@ -507,9 +507,15 @@ switch_to_the_first_task:
 // r0 - pid
 // r1 - sp (the parent's resume position, stored by arch_store_vfork_back_point)
 // r2 - lr (process_vfork_back_here)
+// r3 - the parent's stack bottom, the psplim this core adopts with its stack.
+//      The hand-off is a context switch PendSV never sees, so it owes the
+//      per-core state that path installs; without it `mov sp` raises STKOF.
 .global process_get_back_to_parent_vfork
 .thumb_func
 process_get_back_to_parent_vfork:
+  msr psplim, r3
+  isb
+  dsb
   mov sp, r1
   push {r0, r2}
   // The child has been running on this stack from r1 upwards, so the frames

@@ -63,8 +63,9 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "heavy: memory-heavy; run serially rather than under -n auto."
-        " Applied from tests/smoke/heavy_tests.txt, not written on the test",
+        "heavy: memory-heavy. Applied from tests/smoke/heavy_tests.txt, not"
+        " written on the test. Nothing selects on it by default -- it is there"
+        " for a hand-written -m 'not heavy'",
     )
 
     global _running_announcer
@@ -243,7 +244,7 @@ def _is_heavy(nodeid, patterns):
 
 
 def pytest_itemcollected(item):
-    """Tag the memory-heavy tests so the runner can hold them out of -n auto.
+    """Tag the memory-heavy tests so a run can hold them out of -n auto.
 
     Applied here rather than in pytest_collection_modifyitems, and that is not a
     style choice: -m deselection *is* a pytest_collection_modifyitems hook, and

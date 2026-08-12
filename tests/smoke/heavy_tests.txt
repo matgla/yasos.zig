@@ -1,7 +1,11 @@
-# Memory-heavy smoke tests -- the ones that must NOT run in parallel.
+# Memory-heavy smoke tests.
 #
-# scripts/run_qemu_smoke.sh runs the suite in two phases: everything not listed
-# here at -n auto (one qemu per CPU), then everything listed here serially.
+# conftest.py tags every test matched here with the `heavy` marker. Nothing
+# selects on it automatically any more: scripts/run_qemu_smoke.sh used to run
+# the suite in two phases (everything not listed here at -n auto, then these
+# serially) and now runs it in one. The marker is left in place as a manual
+# escape hatch -- `-m 'not heavy'` on a machine that cannot fit these alongside
+# a full set of workers -- and this list as the record of what was measured.
 #
 # Format: one glob per line, matched against the pytest node id (fnmatch, so
 # `*` and `?` work); `#` starts a comment. A pattern with no wildcard is also
@@ -29,8 +33,7 @@
 # ~72 MiB of qemu overhead times the worker count, and the lever is
 # YASOS_SMOKE_XDIST=<n>, not this file.
 #
-# Threshold below: 2 MiB, 4x the median. Everything listed costs full serial
-# wall time, so it is deliberately short.
+# Threshold below: 2 MiB, 4x the median.
 
 *gcc_compile/limits-fnargs*
 *gcc_execute/pr92904*

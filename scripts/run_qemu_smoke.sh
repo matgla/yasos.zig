@@ -50,20 +50,17 @@
 # each carrying a [n/total] counter and the test's wall time, so a long run
 # streams progress instead of sitting on a single unterminated progress line.
 #
-# The run happens in two phases. Everything runs in parallel except the tests
-# named in tests/smoke/heavy_tests.txt, which run serially afterwards -- see
-# that file for what "heavy" means, how it was measured, and why the guest's
-# memory rather than qemu's is what decides it. Each phase writes its own log
-# and is printed from it afterwards, so the two do not interleave and the whole
-# thing survives being piped somewhere that truncates:
-#   .cache/qemu_smoke_phase_logs/pytest_parallel.log
-#   .cache/qemu_smoke_phase_logs/pytest_serial.log
-# Both are copied into .cache/qemu_smoke_logs/ at the end, next to the per-test
-# logs they refer to.
+# The run is a single pytest invocation. It used to be split in two -- a
+# parallel phase for everything, then a serial one for the tests named in
+# tests/smoke/heavy_tests.txt -- which is gone; see the comment above the run
+# below. Its output streams to the terminal as it happens and is teed to
+#   .cache/qemu_smoke_pytest_logs/pytest.log
+# which is copied into .cache/qemu_smoke_logs/ at the end, next to the per-test
+# logs it refers to.
 #
 # YASOS_SMOKE_MEM_REPORT=<dir> records each test's peak guest memory (and qemu's
-# peak RSS beside it) to <dir>/<worker>.tsv, which is how heavy_tests.txt is
-# refreshed. Off by default -- it costs two target commands per test.
+# peak RSS beside it) to <dir>/<worker>.tsv, which is how heavy_tests.txt was
+# measured. Off by default -- it costs two target commands per test.
 #
 # Logs: each run's per-test session logs, logs/failed/, and the qemu process
 # logs are collected into .cache/qemu_smoke_logs/ (analogous to the remote
@@ -158,7 +155,9 @@ while [ "$#" -gt 0 ]; do
             shift ;;
         --no-map-corpus) MAP_CORPUS=0; shift ;;
         --preserve-state) PRESERVE_STATE=1; shift ;;
-        -h|--help) sed -n '2,77p' "$0"; exit 0 ;;
+        # The whole leading comment block, rather than a fixed line range that
+        # goes stale as soon as the header grows or shrinks.
+        -h|--help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
         --) shift; while [ "$#" -gt 0 ]; do PYTEST_ARGS+=("$1"); shift; done ;;
         *) PYTEST_ARGS+=("$1"); shift ;;
     esac
@@ -325,73 +324,46 @@ for _attempt in 1 2 3 4 5; do
     sleep 0.2
 done
 
-# Two phases: everything in parallel, then the memory-heavy tests on their own.
+# One pytest invocation for the whole selection.
 #
-# Guest RAM is a 2 GB file-backed mapping, and what a test costs the host is how
-# much of it the guest touches. Most tests touch little and 32 of them fit side
-# by side; a few touch enough that running them together pushes the host into
-# reclaim, and a starved guest fails as a *boot timeout*, which reads like a
-# target bug rather than a memory one. tests/smoke/heavy_tests.txt names those,
-# and they run with parallelism off.
+# This used to run in two phases: everything except the tests named in
+# tests/smoke/heavy_tests.txt in parallel, then those on their own with
+# parallelism off. Guest RAM is a 2 GB file-backed mapping and what a test costs
+# the host is how much of it the guest touches, so the worry was that a few
+# heavy tests running side by side push the host into reclaim, where a starved
+# guest fails as a *boot timeout* that reads like a target bug. Measured, no
+# such outlier exists -- heavy_tests.txt records the distribution -- and the
+# split cost a second collection of the whole suite plus a fully serial tail,
+# so it is gone. conftest.py still tags those tests `heavy`, so a machine that
+# does hit the wall can still hold them out by hand with -m 'not heavy'.
 #
-# Both phases write to their own log file and are printed from it rather than
-# streamed straight to the terminal. That is what makes the result readable
-# afterwards: `tee` would interleave the two phases, and a run whose output is
-# only ever a pipe loses everything the moment something upstream truncates it.
-# The files stay behind for grepping.
+# pytest's output is streamed to the terminal as it happens and copied to a log
+# file at the same time (tee), so a long run shows progress live and still
+# leaves something behind to grep -- a run whose output is only ever a pipe
+# loses everything the moment something upstream truncates it. It was written to
+# the log and printed from it at the end while there were two phases, whose
+# outputs would otherwise have interleaved; with one phase there is nothing to
+# interleave with.
 # Deliberately NOT inside QEMU_SMOKE_LOGS_DIR: that directory is wiped and
-# repopulated from tests/smoke/logs after the run, which would delete these.
-PHASE_LOG_DIR="${YASOS_SMOKE_PHASE_LOG_DIR:-$REPO_ROOT/.cache/qemu_smoke_phase_logs}"
-rm -rf "$PHASE_LOG_DIR"
-mkdir -p "$PHASE_LOG_DIR"
-PARALLEL_LOG="$PHASE_LOG_DIR/pytest_parallel.log"
-SERIAL_LOG="$PHASE_LOG_DIR/pytest_serial.log"
+# repopulated from tests/smoke/logs after the run, which would delete it.
+PYTEST_LOG_DIR="${YASOS_SMOKE_PYTEST_LOG_DIR:-$REPO_ROOT/.cache/qemu_smoke_pytest_logs}"
+rm -rf "$PYTEST_LOG_DIR"
+mkdir -p "$PYTEST_LOG_DIR"
+PYTEST_LOG="$PYTEST_LOG_DIR/pytest.log"
 
-# A caller's own -m has to be combined with the phase selector rather than
-# replaced by it: pytest keeps only the last -m, so appending one would silently
-# drop theirs (`-m measure` would start running the whole suite).
-USER_MARK=""
-PHASE_ARGS=()
-skip_next=0
-for arg in "${PYTEST_ARGS[@]}"; do
-    if [ "$skip_next" -eq 1 ]; then USER_MARK="$arg"; skip_next=0; continue; fi
-    case "$arg" in
-        -m) skip_next=1 ;;
-        -m=*|--markers=*) USER_MARK="${arg#*=}" ;;
-        *) PHASE_ARGS+=("$arg") ;;
-    esac
-done
-
-phase_mark() {
-    if [ -n "$USER_MARK" ]; then echo "($USER_MARK) and $1"; else echo "$1"; fi
-}
-
-# A phase that matches no test exits 5 ("no tests collected"), which is normal
-# here -- most invocations name a handful of tests and none of them are heavy --
-# so it must not be reported as a failure.
-run_phase() {
-    local log="$1"; shift
-    local phase_status=0
-    set +e
-    "$VENV/bin/python" -m pytest -s "$@" &> "$log"
-    phase_status=$?
-    set -e
-    cat "$log"
-    [ "$phase_status" -eq 5 ] && return 0
-    return "$phase_status"
-}
-
+# Exit 5 ("no tests collected") used to be mapped to success, because the heavy
+# phase legitimately matched nothing on most invocations. With one pass there is
+# no such case left: a selection that collects nothing is a mistake in the
+# selection, so it stays a failure.
+# PIPESTATUS[0], not $?: through the tee, $? is tee's status, which is 0 even
+# when the suite failed. PYTHONUNBUFFERED (exported above) is what keeps the
+# per-test lines coming through the pipe as they are produced rather than in
+# block-buffered lumps.
 status=0
-echo ">> Phase 1/2: parallel -- everything not in tests/smoke/heavy_tests.txt"
-run_phase "$PARALLEL_LOG" -m "$(phase_mark 'not heavy')" "${PHASE_ARGS[@]}" || status=$?
-
-# `-n 0` last so it beats the -n added above (and any the caller passed):
-# pytest keeps the final value, and 0 is xdist's "run in this process". Using
-# -p no:xdist instead would make the earlier -n an unrecognised argument.
-echo ">> Phase 2/2: serial -- memory-heavy tests"
-serial_status=0
-run_phase "$SERIAL_LOG" -m "$(phase_mark 'heavy')" "${PHASE_ARGS[@]}" -n 0 || serial_status=$?
-[ "$status" -eq 0 ] && status=$serial_status
+set +e
+"$VENV/bin/python" -m pytest -s "${PYTEST_ARGS[@]}" 2>&1 | tee "$PYTEST_LOG"
+status=${PIPESTATUS[0]}
+set -e
 
 # Collect this run's logs (per-test session logs, logs/failed/, and the qemu
 # process logs) into .cache/qemu_smoke_logs/ — the local analogue of the remote
@@ -401,9 +373,9 @@ if [ -d "$SMOKE_DIR/logs" ]; then
     mkdir -p "$QEMU_SMOKE_LOGS_DIR"
     cp -a "$SMOKE_DIR/logs/." "$QEMU_SMOKE_LOGS_DIR/"
     echo ">> Collected smoke logs in ${QEMU_SMOKE_LOGS_DIR#"$REPO_ROOT"/}"
-    # Copied in only now, after the wipe above, so both phases' pytest output
-    # ends up alongside the per-test logs it refers to.
-    cp -f "$PARALLEL_LOG" "$SERIAL_LOG" "$QEMU_SMOKE_LOGS_DIR/" 2>/dev/null || true
+    # Copied in only now, after the wipe above, so the pytest output ends up
+    # alongside the per-test logs it refers to.
+    cp -f "$PYTEST_LOG" "$QEMU_SMOKE_LOGS_DIR/" 2>/dev/null || true
     if [ -d "$QEMU_SMOKE_LOGS_DIR/failed" ]; then
         echo ">> Failed-test logs in ${QEMU_SMOKE_LOGS_DIR#"$REPO_ROOT"/}/failed"
     fi

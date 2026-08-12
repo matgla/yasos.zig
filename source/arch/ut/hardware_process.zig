@@ -136,10 +136,11 @@ pub export fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used:
     return 0;
 }
 
-pub export fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize) i32 {
+pub export fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize, stack_bottom: usize) i32 {
     _ = pid;
     _ = sp;
     _ = lr;
+    _ = stack_bottom;
     return 0;
 }
 
