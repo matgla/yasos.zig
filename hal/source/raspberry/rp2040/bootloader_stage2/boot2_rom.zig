@@ -8,7 +8,7 @@ comptime {
 
 const Boot2Data = struct {
     fn prepare_boot_sector(comptime stage2_rom: []const u8) [256]u8 {
-        var boot2: [256]u8 = .{0xFF} ** 256;
+        var boot2: [256]u8 = @splat(0xFF);
         @memcpy(boot2[0..stage2_rom.len], stage2_rom);
         const Hash = std.hash.crc.Crc(u32, .{
             .polynomial = 0x04c11db7,

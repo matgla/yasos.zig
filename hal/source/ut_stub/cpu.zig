@@ -17,14 +17,21 @@ const std = @import("std");
 
 pub const CpuStub = struct {
     var _coreid: u8 = 0;
+
+    /// Pretend to be a different core, which is what makes per-CPU code testable
+    /// on the host. Restore it with a `defer` -- it is process global.
     pub fn set_coreid(id: u8) void {
         _coreid = id;
     }
+
     pub fn coreid() u8 {
         return _coreid;
     }
 
+    /// Two, matching the RP2350, not the host machine: this sizes every per-CPU
+    /// array, and reporting 1 would compile them down to a single slot so the
+    /// tests never exercise the second one.
     pub fn number_of_cores() u8 {
-        return 1;
+        return 2;
     }
 };

@@ -30,6 +30,8 @@ const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
 const c = @import("libc_imports").c;
+/// Named to avoid colliding with the local `refcount` binding in `create`.
+const kernel_refcount = kernel.sync.refcount;
 
 const log = std.log.scoped(.@"vfs/driverfs");
 
@@ -54,7 +56,7 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
 
     pub fn init(allocator: std.mem.Allocator) !DriverDirectory {
         const refcount: *i16 = try allocator.create(i16);
-        refcount.* = 1;
+        kernel_refcount.init(refcount);
         return DriverDirectory.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
             ._allocator = allocator,
@@ -65,12 +67,11 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        self._refcount.* += 1;
+        kernel_refcount.acquire(self._refcount);
     }
 
     pub fn delete(self: *Self) void {
-        self._refcount.* -= 1;
-        if (self._refcount.* > 0) {
+        if (!kernel_refcount.release(self._refcount)) {
             return;
         }
         var it = self._container.iterator();

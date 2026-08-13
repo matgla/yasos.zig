@@ -19,7 +19,8 @@
 //
 
 .{
-    .name = "yasos_hal",
+    .name = .yasos_hal,
+    .fingerprint = 0xd150dedafb718115,
     .version = "0.0.1",
     .dependencies = .{
         .@"mcu/rp2040" = .{ .path = "source/raspberry/rp2040" },

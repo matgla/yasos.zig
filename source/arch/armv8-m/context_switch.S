@@ -22,6 +22,13 @@
 .cpu cortex-m33
 .thumb
 
+// Run this file out of RAM rather than XIP flash: every syscall and every
+// context switch enters through here, and an instruction fetch that misses the
+// XIP cache is worth tens of core cycles. The Zig half of the path already
+// carries linksection(".time_critical"), and every board's linker script
+// collects that into the RAM region it copies at boot.
+.section .time_critical, "ax", %progbits
+
 #include "libs/libc/sys/syscall_ids.h"
 
 // ─── DCP (RP2350 double coprocessor, CP4) context ───────────────────────────
@@ -145,6 +152,11 @@ load_no_fpu:
 .thumb_func
 arch_store_registers_on_stack:
   push {lr}
+  // Drop any exclusive reservation the outgoing task left live: a thread
+  // preempted between its LDREX and STREX must not complete that STREX against
+  // a monitor state belonging to whatever ran in between. Exception entry is
+  // believed to clear the local monitor, but this costs one cycle.
+  clrex
   mov r2, r1
   mrs r1, psp
   isb
@@ -204,8 +216,19 @@ dispatch_syscall:
 .thumb_func
 irq_svcall:
   // this is processed in irq
+  // r0 in 0..4 is the kernel's own SVC protocol, which is why the SystemCall
+  // enum in sys/syscall.h starts at 5. Two numbers are live:
+  //
+  //   r0 == 0  return from the syscall trampoline (issued by dispatch_syscall);
+  //   r0 == 1  no-op, issued by userspace `vfork` on its way out. It must not
+  //            release the preempt window -- process_vfork_child /
+  //            process_get_back_to_parent_vfork already did, and a third
+  //            release underflows the counter.
+  //
+  // The r0 == 1 case must be caught here: r1 and r2 are dead registers at that
+  // call site, not the arg/out pointers the dispatch path assumes.
   cmp r0, #1
-  beq process_syscall_unblock_context_switch
+  beq process_syscall_internal_noop
   cmp r0, #0
   bne process_syscall_fast_check
   mrs r2, psp
@@ -244,21 +267,27 @@ process_syscall_return_without_fpu:
 // CONTROL.nPRIV is left untouched, so the thread resumes at its prior privilege.
 // r0 = syscall number, r1 = arg pointer, r2 = out pointer, lr = EXC_RETURN.
 process_syscall_fast_check:
-  push {r0-r3, lr}
 #if YASOS_PERF_SYSCALL_STAMP
   // Stamp DWT_CYCCNT for the syscall profiler before anything else runs. This
   // is the only point that sees the cost of exception entry and of the
   // trampoline the slow path is about to build; _irq_svcall can only time
-  // itself. r1/r2 are restored by the pop below, so nothing user-visible is
-  // clobbered. Compiled in only with CONFIG_INSTRUMENTATION_PERF_PROFILING.
-  ldr r1, =0xE0001004     // DWT_CYCCNT
-  ldr r1, [r1]
-  ldr r2, =perf_svc_entry_cycles
-  str r1, [r2]
+  // itself. Compiled in only with CONFIG_INSTRUMENTATION_PERF_PROFILING.
+  push {r0, r3}
+  ldr r3, =0xE0001004     // DWT_CYCCNT
+  ldr r3, [r3]
+  ldr r0, =perf_svc_entry_cycles
+  str r3, [r0]
+  pop {r0, r3}
 #endif
-  bl syscall_is_fast      // r0(number) -> r0 (1 fast, 0 otherwise)
-  cmp r0, #0
-  pop {r0-r3, lr}         // ldmia preserves the condition flags
+  // Fast-path decision, inlined: an out-of-range number falls through to the
+  // trampoline, where _irq_svcall reports NotImplemented. r3 is the scratch
+  // register throughout, free to clobber on both exits -- the user's r3 is
+  // restored from the original frame, which is untouched here.
+  cmp r0, #YASOS_SYSCALL_COUNT
+  bcs process_syscall_entry
+  ldr r3, =syscall_fast_table
+  ldrb r3, [r3, r0]
+  cmp r3, #0
   beq process_syscall_entry
   // fast: dispatch in handler mode, args (r0-r2) already in place
   push {r0, lr}           // r0 for 8-byte alignment; lr = EXC_RETURN
@@ -302,10 +331,11 @@ process_syscall_entry:
   pop {r4, r5, r6, r7}
   // process stack is modified, but not yet ready to be switched, block context switch till prepared
   bx r3 // we are taking back context from 134
-process_syscall_unblock_context_switch:
-  push {r0, lr}
-  bl process_unblock_context_switch
-  pop {r0, pc}
+process_syscall_internal_noop:
+  // lr is still the EXC_RETURN this handler was entered with, and nothing here
+  // has touched CONTROL, so the thread resumes at its own privilege level with
+  // its own registers -- which is the whole of what this svc is for.
+  bx lr
 .thumb_func
 return_from_syscall:
   pop {r1, pc}
@@ -317,8 +347,22 @@ arch_get_stack_pointer:
   bx lr
 
 
+// Resume `sys_start_root_process` on the frame `switch_to_the_first_task` left
+// on MSP, restoring the callee-saved registers it parked there.
+//
+// Reached two ways, both of which must find MSP exactly where the push left it:
+// from `sys_stop_root_process` in thread mode (the CONTROL write below moves it
+// off PSP first), and from `pendsv_exit` in handler mode.
+//
+// The register list must stay identical to `switch_to_the_first_task`'s.
+//
+// `.thumb_func`, not `.thumb_func:` -- a stray colon makes it a label rather
+// than the directive, and the symbol is then emitted NOTYPE with bit 0 clear.
+// The `bl` from `sys_stop_root_process` crosses from flash into .time_critical
+// through a linker-built long thunk ending in `bx ip`, so an even address is an
+// INVSTATE UsageFault.
 .global switch_to_main_task
-.thumb_func:
+.thumb_func
 switch_to_main_task:
   mrs r0, control
   isb
@@ -326,7 +370,7 @@ switch_to_main_task:
   msr control, r0
   isb
   dsb
-  pop {r0, pc}
+  pop {r0, r4-r11, pc}
 
 // caller saved registers are already saved by exception entry
 .global irq_pendsv
@@ -354,14 +398,38 @@ pendsv_store_and_switch:
   pop {r0, r1}
   bl store_and_switch_to_next_task
   bl apply_resume_privilege
-  bx r0
+  b pendsv_exception_return
 pendsv_switch_to_next_task:
   pop {r0, r1}
   bl switch_to_next_task
   bl apply_resume_privilege
-  bx r0
+  b pendsv_exception_return
 pendsv_ignore:
   pop {r0, pc}
+
+// Resume the incoming task, refusing to `bx` through a word that is not an
+// EXC_RETURN. r0 is the `lr` slot of the incoming task's software frame; a valid
+// exception return has bits [31:24] set, and `mvns` then `lsrs #24` leaves zero
+// exactly in that case without a scratch constant.
+//
+// Without it the failure is an INVSTATE UsageFault at the `bx`, whose dump
+// points at `apply_resume_privilege` -- which returns via `pop {r0, r1, r2, pc}`
+// without restoring LR, so the crash reads as a fault inside a helper that has
+// already returned. See `report_bad_exc_return`.
+//
+// Clobbering r1 is safe: it is caller-saved and reloaded from the incoming
+// task's hardware exception frame by the `bx` below.
+.thumb_func
+pendsv_exception_return:
+  mvns r1, r0
+  lsrs r1, r1, #24
+  bne 1f
+  bx r0
+1:
+  // r0 already holds the offending value, which is the argument. Does not
+  // return -- it panics, and the panic path prints the postmortem.
+  bl report_bad_exc_return
+  b .
 
 // Set CONTROL.nPRIV for the thread we are about to return to, based on the
 // resumed process's privilege flag (the root/init process stays privileged; all
@@ -403,7 +471,16 @@ apply_privilege_tail:
 .global switch_to_the_first_task
 .thumb_func
 switch_to_the_first_task:
-  push {r0, lr} // this will be taken by return to user mode
+  // Build the frame `switch_to_main_task` resumes on at shutdown. This is a call
+  // that returns from somewhere else an entire system lifetime later: the
+  // `bx r0` below enters the first task and never comes back, and
+  // `switch_to_main_task` re-enters the caller by popping this frame. So it has
+  // to carry everything AAPCS promises a call preserves, not just pc -- callers
+  // keep live values in r4 across it.
+  //
+  // r0 is in the list for the 8-byte stack alignment AAPCS requires; restoring
+  // it costs nothing, since it is the `with_fpu` argument and dead by then.
+  push {r0, r4-r11, lr} // this will be taken by return to user mode
   mov r1, lr
   bl switch_to_next_task
   // Switch to PSP (SPSEL=1) and set nPRIV for the first task from its privilege
@@ -428,45 +505,73 @@ switch_to_the_first_task:
 
 
 // r0 - pid
-// r1 - sp
-// r2 - lr
+// r1 - sp (the parent's resume position, stored by arch_store_vfork_back_point)
+// r2 - lr (process_vfork_back_here)
+// r3 - the parent's stack bottom, the psplim this core adopts with its stack.
+//      The hand-off is a context switch PendSV never sees, so it owes the
+//      per-core state that path installs; without it `mov sp` raises STKOF.
 .global process_get_back_to_parent_vfork
 .thumb_func
 process_get_back_to_parent_vfork:
+  msr psplim, r3
+  isb
+  dsb
   mov sp, r1
   push {r0, r2}
+  // The child has been running on this stack from r1 upwards, so the frames
+  // process_vfork_back_here is about to pop are whatever it left behind. Put
+  // the saved copy back first. Safe here and nowhere earlier: sp is already at
+  // the bottom of the saved region, so this call's own frame is underneath it.
+  bl arch_restore_vfork_back_stack
   bl process_unblock_context_switch
   pop {r0, r2}
   cpsie i
   bx r2
 
-// r0 - pointer to child sp value (to rescue registers)
-// r1 - pointer to child got value
-// r2 - pointer to child return
-// r3 - is fpu used
+// Release a freshly vforked child, which continues on its parent's stack.
+//
+// r0 - the child's register frame, as libc's vfork() left it: {r4-r11, lr},
+//      with {s0-s31} above them when r3 says so. libs/libc/arm/vfork.S builds
+//      it; the two have to agree on the layout, because unwinding it is what
+//      recovers the caller's stack pointer.
+// r1 - got for the child (unused: it inherits the parent's r9 with the frame)
+// r2 - where to resume the child (the instruction after its vfork() call)
+// r3 - 1 when the frame carries the FP registers as well
 .global process_vfork_child
 .thumb_func
 process_vfork_child:
   push {r4-r12, lr}
   cmp r3, #1
-  mov r3, sp
+  mov r3, sp                    // the parent stays suspended at this position
   mov sp, r0
-  pop {r4-r12, lr}
+  pop {r4-r11, lr}
   bne vfork_child_no_fpu
   vpop {s0-s31}
 vfork_child_no_fpu:
+  // sp is now what it was when the child called vfork(), the only value its
+  // caller's frame offsets are valid against. Returning it on the kernel's stack
+  // instead leaves every local in that frame reading whatever the syscall left
+  // there -- including the GOT base tcc spills around calls.
+  mov r0, sp
   mov sp, r3
-  push {r1, r2} // r9 for child, other for alignment
+  push {r0, r2}                 // [sp] = the child's sp, [sp,#4] = its resume point
   ldr r0, =process_vfork_back_here
   mov r1, r3
   bl arch_store_vfork_back_point
-  ldr r1, [sp, #4]
-  mov r0, #0
-  push {r0, r1}
+  cmp r0, #0
+  bne vfork_child_stack_saved
+  // Nowhere to save the parent's suspended frames, so they are still live and
+  // the child has to stay below them.
+  add r3, sp, #8
+  str r3, [sp, #0]
+vfork_child_stack_saved:
   bl process_unblock_context_switch
-  pop {r0, r1}
+  pop {r0, r2}
+  mov sp, r0
+  mov lr, r2
+  mov r0, #0                    // vfork() returns 0 in the child
   cpsie i
-  bx r1
+  bx lr
 
 .thumb_func
 process_vfork_back_here:

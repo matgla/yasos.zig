@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const c = @import("libc_imports").c;
 const interface = @import("interface");
@@ -122,19 +123,19 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
 
     fn write_stat_content(stat: *const PidStat, buffer: []u8) usize {
         var written: usize = 0;
-        inline for (@typeInfo(PidStat).@"struct".fields) |field| {
-            if (std.mem.eql(u8, field.name, "comm")) {
-                const buf = std.fmt.bufPrint(buffer[written..], "({s}) ", .{stat.comm}) catch buffer[written..];
+        inline for (@typeInfo(PidStat).@"struct".field_names) |field_name| {
+            if (comptime std.mem.eql(u8, field_name, "comm")) {
+                const buf = vfmt.print(buffer[written..], "({s}) ", .{stat.comm});
                 written += buf.len;
-            } else if (std.mem.eql(u8, field.name, "state")) {
-                const buf = std.fmt.bufPrint(buffer[written..], "{s} ", .{stat.state}) catch buffer[written..];
+            } else if (comptime std.mem.eql(u8, field_name, "state")) {
+                const buf = vfmt.print(buffer[written..], "{s} ", .{stat.state});
                 written += buf.len;
             } else {
-                const buf = std.fmt.bufPrint(buffer[written..], "{any} ", .{@field(stat, field.name)}) catch buffer[written..];
+                const buf = vfmt.print(buffer[written..], "{d} ", .{@field(stat, field_name)});
                 written += buf.len;
             }
         }
-        const buf = std.fmt.bufPrint(buffer[written..], "\n", .{}) catch buffer[written..];
+        const buf = vfmt.print(buffer[written..], "\n", .{});
         written += buf.len;
 
         return written;
@@ -152,7 +153,7 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
                 }
             }
             if (self._human_readable) {
-                const buf = std.fmt.bufPrint(buffer, human_readable_file_content_format, .{ name, 0, 0, self._pid, 0 }) catch buffer;
+                const buf = vfmt.print(buffer, human_readable_file_content_format, .{ name, 0, 0, self._pid, 0 });
                 interface.base(self)._end = buf.len;
             } else {
                 const stat: PidStat = .{
@@ -239,7 +240,7 @@ test "PidStatFile.ShouldCreateStatFile" {
     const filemock = try FileMock.create(std.testing.allocator);
 
     const IoctlCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
             const cmd = args[0];
             try std.testing.expectEqual(cmd, @as(i32, @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
 

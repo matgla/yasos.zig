@@ -24,10 +24,12 @@ import json
 import logging
 import os
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
 
+from .framework.paths import smoke_log_dir
 from .framework.session import Session
 from .log_artifacts import move_failed_target_logs
 from .log_artifacts import write_failed_pytest_log
@@ -58,6 +60,12 @@ def pytest_configure(config):
         "markers",
         "measure: opt-in instruments that report numbers instead of asserting;"
         " skipped unless selected with -m measure",
+    )
+    config.addinivalue_line(
+        "markers",
+        "heavy: memory-heavy. Applied from tests/smoke/heavy_tests.txt, not"
+        " written on the test. Nothing selects on it by default -- it is there"
+        " for a hand-written -m 'not heavy'",
     )
 
     global _running_announcer
@@ -105,7 +113,22 @@ def pytest_collection_modifyitems(config, items):
     _test_progress_current = 0
 
 
-@pytest.hookimpl
+# Under xdist the controller never collects -- the workers do -- so the hook
+# above leaves the controller total at 0 and the [n/total] suffix vanishes from
+# the parallel QEMU gate. Every worker collects the same set, so the first node
+# to report its ids fixes the total. optionalhook because the hardware venv has
+# no pytest-xdist, where an unknown hook name is a PluginValidationError.
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_node_collection_finished(node, ids):
+    global _test_progress_total
+    if _test_progress_total == 0:
+        _test_progress_total = len(ids)
+
+
+# tryfirst so the counter is incremented before the terminal reporter asks
+# pytest_report_teststatus for the word it prints; a later hook would label the
+# first test [0/N] and the last [N-1/N].
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_logreport(report):
     global _test_progress_current
     if report.when == "setup":
@@ -114,7 +137,7 @@ def pytest_runtest_logreport(report):
         _test_progress_current += 1
         if report.failed:
             nodeid = report.nodeid
-            logs_dir = Path("logs")
+            logs_dir = smoke_log_dir()
             move_failed_target_logs(logs_dir, test_log_paths_by_nodeid.get(nodeid, []))
             write_failed_pytest_log(logs_dir, nodeid, [report])
             _failed_nodeids_handled.add(nodeid)
@@ -177,6 +200,126 @@ def _commands_for_item(item):
     return {"setup": (), "teardown": ()}
 
 
+HEAVY_LIST_PATH = Path(__file__).with_name("heavy_tests.txt")
+MEM_REPORT_DIR = os.environ.get("YASOS_SMOKE_MEM_REPORT", "").strip()
+
+
+_heavy_patterns_cache = None
+
+
+def _heavy_patterns():
+    """Globs naming the tests that must not run in parallel.
+
+    Kept in a data file rather than as markers on the tests themselves because
+    the entries are mostly individual parametrised cases out of a generated
+    corpus -- there is no source line to decorate, and the set is a property of
+    how big a translation unit happens to be rather than of what the test means.
+    """
+    global _heavy_patterns_cache
+    if _heavy_patterns_cache is not None:
+        return _heavy_patterns_cache
+    try:
+        raw = HEAVY_LIST_PATH.read_text(encoding="utf-8")
+    except OSError:
+        _heavy_patterns_cache = []
+        return _heavy_patterns_cache
+    patterns = []
+    for line in raw.splitlines():
+        entry = line.split("#", 1)[0].strip()
+        if entry:
+            patterns.append(entry)
+    _heavy_patterns_cache = patterns
+    return _heavy_patterns_cache
+
+
+def _is_heavy(nodeid, patterns):
+    for pattern in patterns:
+        if fnmatch(nodeid, pattern):
+            return True
+        # A pattern with no wildcard is also accepted as a plain substring, so
+        # a whole family can be named by the fragment its ids share.
+        if not any(ch in pattern for ch in "*?[") and pattern in nodeid:
+            return True
+    return False
+
+
+def pytest_itemcollected(item):
+    """Tag the memory-heavy tests so a run can hold them out of -n auto.
+
+    Applied here rather than in pytest_collection_modifyitems, and that is not a
+    style choice: -m deselection *is* a pytest_collection_modifyitems hook, and
+    this file's own implementation of that hook is trylast, so a marker added
+    there lands after the filter has already picked its items and the entries in
+    heavy_tests.txt are silently ignored. pytest_itemcollected runs while the
+    items are still being collected, before any of that.
+    """
+    patterns = _heavy_patterns()
+    if patterns and _is_heavy(item.nodeid, patterns):
+        item.add_marker(pytest.mark.heavy)
+
+
+def _guest_mempeak(session):
+    """Sample /proc/mempeak on the target, in bytes, and clear it.
+
+    The number that matters is the *guest's*, not the qemu process's. A qemu
+    running this kernel sits at about 72 MiB of host RSS no matter what the
+    guest is doing, and the per-test differences ride on top of that as a couple
+    of MiB -- which is why these tests also fit on an rp2350 with 8 MB. In the
+    guest the same two tests differ by 3.6x.
+    """
+    try:
+        session.write_command("cat /proc/mempeak")
+        for line in session.wait_for_prompt_except_logs():
+            if line.startswith("process_peak_bytes "):
+                return int(line.split()[1])
+    except Exception:
+        # A wedged target must not turn a bookkeeping read into a failure.
+        return None
+    return None
+
+
+def _reset_guest_mempeak(item):
+    """Open this test's measurement window (the read is what clears the mark)."""
+    if not MEM_REPORT_DIR:
+        return
+    session = item.stash.get(session_key, None)
+    if session is not None and not Session.target_crashed:
+        _guest_mempeak(session)
+
+
+def _record_peak_memory(item):
+    """Append this test's peak memory to the per-worker report.
+
+    Off unless YASOS_SMOKE_MEM_REPORT names a directory: it costs two target
+    commands per test, and it exists to *maintain* heavy_tests.txt rather than
+    to run all the time. One file per xdist worker, because appends from
+    parallel workers to one file interleave.
+
+    Both numbers are recorded -- guest peak first, since that is what ranks the
+    tests, and host RSS beside it because it is what actually has to fit N times
+    over in the machine running them.
+    """
+    if not MEM_REPORT_DIR:
+        return
+    session = item.stash.get(session_key, None)
+    if session is None or Session.target_crashed:
+        return
+    guest_peak = _guest_mempeak(session)
+    if guest_peak is None:
+        return
+    backend = getattr(Session, "backend", None)
+    host_peak = getattr(backend, "peak_rss", None)
+    host_kb = host_peak() if host_peak is not None else 0
+    try:
+        report_dir = Path(MEM_REPORT_DIR)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+        with open(report_dir / f"{worker}.tsv", "a", encoding="utf-8") as report:
+            report.write(f"{guest_peak}\t{host_kb}\t{item.nodeid}\n")
+    except OSError:
+        logging.getLogger(__name__).warning("could not write the memory report", exc_info=True)
+
+
 def _run_target_commands(session, commands):
     for command in commands:
         session.write_command(command)
@@ -190,9 +333,16 @@ def pytest_runtest_setup(item):
     log_path = getattr(session, "log_path", "")
     if log_path:
         test_log_paths_by_nodeid.setdefault(item.nodeid, []).append(Path(log_path))
+    # Session() has just (re)launched qemu for this test, so the measurement
+    # window starts here -- the backend is shared by every test this worker
+    # runs, and its peak would otherwise be the worst of all of them.
+    backend = getattr(Session, "backend", None)
+    if backend is not None and hasattr(backend, "reset_peak_rss"):
+        backend.reset_peak_rss()
     commands = _commands_for_item(item)
     item.stash[test_command_hooks_key] = commands
     _run_target_commands(session, commands["setup"])
+    _reset_guest_mempeak(item)
 
 
 def _imported_module(name):
@@ -246,6 +396,9 @@ def pytest_runtest_teardown(item):
     session = item.stash.get(session_key, None)
     if session is None:
         return
+    # Read while qemu is still up: stop() would take the process, and VmHWM
+    # with it.
+    _record_peak_memory(item)
     try:
         if Session.target_crashed:
             # Board is wedged in a panic; running teardown commands on it would
@@ -275,7 +428,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         failed_reports_by_nodeid.setdefault(nodeid, []).append(report)
 
     if failed_reports_by_nodeid:
-        logs_dir = Path("logs")
+        logs_dir = smoke_log_dir()
         for nodeid, reports in failed_reports_by_nodeid.items():
             if nodeid in _failed_nodeids_handled:
                 continue

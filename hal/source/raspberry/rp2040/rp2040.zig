@@ -24,15 +24,12 @@ pub const internal = struct {
     pub const Cpu = @import("source/cpu.zig").Cpu;
     pub const Mmio = @import("source/mmio.zig").Mmio;
     pub const Irq = @import("cortex-m0plus").Irq;
-    pub const HardwareAtomic = @import("source/atomic.zig").HardwareAtomic;
 };
 
 pub const uart = @import("hal_interface").uart;
 pub const time = @import("hal_interface").time.Time(internal.Time).create();
 pub const cpu = @import("hal_interface").cpu.Cpu(internal.Cpu).create();
 pub const irq = @import("hal_interface").irq.Irq(internal.Irq).create();
-pub const atomic = @import("hal_interface").atomic.AtomicInterface(internal.HardwareAtomic);
-pub const hw_atomic = internal.HardwareAtomic;
 
 pub const mmio = struct {
     pub fn Mmio(comptime RegisterDescription: anytype) type {

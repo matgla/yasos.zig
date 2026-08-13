@@ -34,18 +34,17 @@ pub const targetOptions = std.Target.Query{
 };
 
 fn configureCmake(b: *std.Build) ![]const u8 {
-    const cmake_exe = b.findProgram(&.{"cmake"}, &.{}) catch {
+    const cmake_exe = b.findProgram(.{ .names = &.{"cmake"} }) orelse {
         std.log.err("Can't find CMake in system path", .{});
         unreachable;
     };
 
-    const pico_sdk_path = b.pathJoin(&.{ b.pathFromRoot("../../../libs"), "pico-sdk" });
+    const pico_sdk_path = b.pathResolve(&.{ try b.root.toString(b.graph.arena), "../../../libs", "pico-sdk" });
     std.log.info("Used PicoSDK: {s}", .{pico_sdk_path});
     std.log.info("CMake: {s}", .{cmake_exe});
 
-    const cmake_binary_dir = b.pathJoin(&.{ b.cache_root.path.?, "pico_sdk_generated" });
-    const cache_dir = try std.fs.openDirAbsolute(b.cache_root.path.?, .{});
-    _ = try cache_dir.makePath("pico_sdk_generated");
+    const cmake_binary_dir = b.pathJoin(&.{ try b.root.toString(b.graph.arena), "pico_sdk_generated" });
+    try std.Io.Dir.cwd().createDirPath(b.graph.io, cmake_binary_dir);
     std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
 
     const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });

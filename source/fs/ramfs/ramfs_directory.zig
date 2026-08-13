@@ -22,6 +22,7 @@ const RamFsDirectoryIterator = @import("ramfs_directory_iterator.zig").RamFsDire
 const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 
 const log = std.log.scoped(.ramfsdirectory);
+const refcount = kernel.sync.refcount;
 
 pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
@@ -33,7 +34,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     pub fn create(allocator: std.mem.Allocator, nodename: []const u8) !RamFsDirectory {
         const list = try allocator.create(std.DoublyLinkedList);
         const refcounter = try allocator.create(i16);
-        refcounter.* = 1;
+        refcount.init(refcounter);
         list.* = std.DoublyLinkedList{};
         return RamFsDirectory.init(.{
             ._allocator = allocator,
@@ -45,7 +46,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        self._refcounter.* += 1;
+        refcount.acquire(self._refcounter);
     }
 
     pub fn create_node(allocator: std.mem.Allocator, nodename: []const u8) anyerror!kernel.fs.Node {
@@ -66,7 +67,11 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
-    fn get_node(self: *Self, nodename: []const u8) ?*RamFsNode {
+    /// The entry named `nodename`, borrowed -- no clone, and so no allocation.
+    /// `get` hands back an owned Node, which costs one: right for `open`, whose
+    /// handle needs its own file position, and wrong on a tiered /tmp, where the
+    /// allocator is the arena and `unlink` has to work once it is full.
+    pub fn get_node(self: *Self, nodename: []const u8) ?*RamFsNode {
         var it = self._root.first;
         while (it) |child| : (it = child.next) {
             const file_node: *RamFsNode = @fieldParentPtr("list_node", child);
@@ -84,15 +89,20 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     pub fn unlink(self: *Self, nodename: []const u8) anyerror!void {
         const maybe_node = self.get_node(nodename);
         if (maybe_node) |node| {
-            if (node.node.as_directory()) |*dir| {
-                var dir_it = try dir.interface.iterator();
-                defer dir_it.interface.delete();
-                if (dir_it.interface.next() != null) {
+            if (node.node.as_directory()) |directory| {
+                // Read the child's entry list directly rather than through an
+                // iterator: `iterator()` allocates, and removal must not need
+                // memory -- on a tiered /tmp that comes from the arena.
+                var child_directory = directory;
+                if (child_directory.as(RamFsDirectory).data()._root.first != null) {
                     return kernel.errno.ErrnoSet.DeviceOrResourceBusy;
                 }
             }
-            node.delete(self._allocator);
+            // Unlink from the list BEFORE destroying the node: `node.delete`
+            // frees the RamFsNode, and `list_node` is a field inside it, so the
+            // other order reads freed memory to find its neighbours.
             self._root.remove(&node.list_node);
+            node.delete(self._allocator);
             return;
         }
         return kernel.errno.ErrnoSet.NoEntry;
@@ -107,8 +117,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     }
 
     pub fn delete(self: *Self) void {
-        self._refcounter.* -= 1;
-        if (self._refcounter.* == 0) {
+        if (refcount.release(self._refcounter)) {
             var next = self._root.pop();
             while (next) |child| {
                 const file_node: *RamFsNode = @fieldParentPtr("list_node", child);

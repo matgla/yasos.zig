@@ -52,6 +52,22 @@ fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
     data.st_nlink = 1;
 }
 
+/// Scratch for normalising a path. A stack buffer rather than an allocation, and
+/// that is a correctness requirement: a tiered RamFs (the hybrid /tmp) is built
+/// over a bounded arena, so normalising through the allocator makes `unlink`
+/// fail exactly when the arena is full and the filesystem can never be emptied.
+///
+/// 4x the system PATH_MAX. `resolvePosix` builds its answer in an ArrayList that
+/// grows geometrically and extends in place, so the peak is the first step at or
+/// above the result length; the syscall layer admits paths up to 2x PATH_MAX,
+/// whose step is 390.
+const path_scratch_bytes = 4 * 128;
+
+fn resolve_into(buffer: []u8, path: []const u8) ![]const u8 {
+    var scratch = std.heap.FixedBufferAllocator.init(buffer);
+    return std.fs.path.resolve(scratch.allocator(), &.{path});
+}
+
 pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     const Self = @This();
     _allocator: std.mem.Allocator,
@@ -89,8 +105,8 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     fn get_parent_node(self: *Self, path: []const u8) !kernel.fs.Node {
-        const resolved_path = try std.fs.path.resolve(self._allocator, &.{path});
-        defer self._allocator.free(resolved_path);
+        var scratch: [path_scratch_bytes]u8 = undefined;
+        const resolved_path = try resolve_into(&scratch, path);
         const maybe_dirpath: ?[]const u8 = std.fs.path.dirname(resolved_path);
 
         if (maybe_dirpath) |dirpath| {
@@ -172,20 +188,50 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
-    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        var node = try self.get(path);
-        defer node.delete();
-        const nodename = std.fs.path.basename(path);
-        var parent_node = try self.get_parent_node(path);
-        defer parent_node.delete();
-        var maybe_directory = parent_node.as_directory();
-        if (maybe_directory) |*parent_dir| {
-            try parent_dir.as(RamFsDirectory).data().unlink(nodename);
-            return;
-        } else {
+    /// Walk to the directory at `dirpath`, borrowing every step. `get` returns
+    /// an owned Node, which costs an allocation per level -- right for `open`,
+    /// whose handle carries its own file position, and wrong for `unlink`, which
+    /// has to keep working once a tiered /tmp's arena is full.
+    fn borrow_directory(self: *Self, dirpath: []const u8) !kernel.fs.IDirectory {
+        var current = self._root.as_directory() orelse
             return kernel.errno.ErrnoSet.NotADirectory;
+        var it = std.fs.path.componentIterator(dirpath);
+        while (it.next()) |component| {
+            const child = current.as(RamFsDirectory).data().get_node(component.name) orelse
+                return kernel.errno.ErrnoSet.NoEntry;
+            current = child.node.as_directory() orelse
+                return kernel.errno.ErrnoSet.NotADirectory;
         }
-        return kernel.errno.ErrnoSet.NoEntry;
+        return current;
+    }
+
+    /// The node at `path`, borrowed -- no clone, and so no allocation. The
+    /// result aliases the one the tree owns: read it and drop it, never
+    /// `delete()` it. Callers that need to hold a node must use `get`.
+    fn borrow_node(self: *Self, path: []const u8) !kernel.fs.Node {
+        var scratch: [path_scratch_bytes]u8 = undefined;
+        const resolved_path = try resolve_into(&scratch, path);
+        if (resolved_path.len == 0 or std.mem.eql(u8, resolved_path, "/")) {
+            return self._root;
+        }
+        const dirpath = std.fs.path.dirname(resolved_path) orelse "/";
+        var parent = try self.borrow_directory(dirpath);
+        const child = parent.as(RamFsDirectory).data().get_node(
+            std.fs.path.basename(resolved_path),
+        ) orelse return kernel.errno.ErrnoSet.NoEntry;
+        return child.node;
+    }
+
+    pub fn unlink(self: *Self, path: []const u8) anyerror!void {
+        // Allocates nothing, deliberately -- see borrow_directory. The existence
+        // check a `get` would stand for is one the parent's own unlink already
+        // makes: it answers NoEntry for a name it does not hold.
+        var scratch: [path_scratch_bytes]u8 = undefined;
+        const resolved_path = try resolve_into(&scratch, path);
+        const nodename = std.fs.path.basename(resolved_path);
+        const dirpath = std.fs.path.dirname(resolved_path) orelse "/";
+        var parent = try self.borrow_directory(dirpath);
+        return parent.as(RamFsDirectory).data().unlink(nodename);
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -201,8 +247,10 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         _ = follow_symlinks;
         initialize_stat_identity(data, path);
-        var node = try self.get(path);
-        defer node.delete();
+        // Borrowed, because `rm` stats before it unlinks: a stat that allocates
+        // makes a full /tmp unremovable even though the unlink itself would have
+        // worked. Nothing here needs a handle — only the file type is read.
+        const node = try self.borrow_node(path);
         data.st_mode = switch (node.filetype()) {
             .File => c.S_IFREG,
             .Directory => c.S_IFDIR,
@@ -280,7 +328,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         const resolved_path = try std.fs.path.resolve(self._allocator, &.{path});
         defer self._allocator.free(resolved_path);
 
-        var it = try std.fs.path.componentIterator(resolved_path);
+        var it = std.fs.path.componentIterator(resolved_path);
         var current_directory: kernel.fs.IDirectory = self._root.as_directory().?;
         while (it.next()) |component| {
             if (it.peekNext() != null) {
@@ -335,8 +383,9 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
-        var n = try self.get(path);
-        defer n.delete();
+        // Borrowed for the same reason as `stat`: asking whether a path exists
+        // must not be a thing a full filesystem can refuse to answer.
+        const n = try self.borrow_node(path);
 
         if ((mode & c.W_OK) != 0 or (mode & c.X_OK) != 0) {
             if (n.filetype() == FileType.Directory) {
@@ -432,6 +481,86 @@ const TieredFixture = struct {
         try std.testing.expectEqualSlices(u8, expected, buffer[0..expected.len]);
     }
 };
+
+test "RamFs.Tiered.ShouldStillUnlinkWhenTheArenaIsFull" {
+    // A full arena must not make /tmp permanently full: path lookup resolves on
+    // the stack, so `unlink` still works once nothing can be allocated.
+    //
+    // Metadata is what fills the arena here, deliberately: file bodies spill to
+    // the backing store when it runs low, but the tree -- names, entries,
+    // refcounters -- has nowhere to go and never spills.
+    var arena_memory: [4096]u8 align(256) = undefined;
+    var pool = try kernel.memory.heap.TmpMemoryPool(256).init(std.testing.allocator, &arena_memory);
+    defer pool.deinit();
+    var page_allocator = kernel.memory.heap.TmpPageAllocator(@TypeOf(pool)).init(&pool);
+
+    // A threshold far above the arena, so nothing spills for size reasons and
+    // the arena fills with tree metadata as the device's did.
+    var fixture = try TieredFixture.init(std.testing.allocator, page_allocator.allocator(), 1024 * 1024);
+    defer fixture.deinit(std.testing.allocator);
+
+    var created: usize = 0;
+    while (created < 512) : (created += 1) {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "/f{d}", .{created});
+        fixture.sut.interface.create(path, 0) catch break;
+    }
+
+    // The premise of the test: the arena really did run out. If a future change
+    // makes creation cheap enough that 512 files fit, this needs more of them —
+    // it must not quietly become a test of an arena with room to spare.
+    try std.testing.expect(created < 512);
+    try std.testing.expect(created > 0);
+
+    // The whole `rm` sequence, not just the unlink: toybox's rm stats a path
+    // before removing it, so a stat that allocates makes a full /tmp unremovable
+    // even when the unlink itself would have worked.
+    const full = pool.get_used_size();
+    var info: c.struct_stat = undefined;
+    try fixture.sut.interface.stat("/f0", &info, false);
+    try fixture.sut.interface.access("/f0", c.F_OK, 0);
+    try fixture.sut.interface.unlink("/f0");
+    try std.testing.expect(pool.get_used_size() < full);
+
+    // And `rm -f` on a path that is not there must answer NoEntry rather than
+    // ENOMEM: with the arena full it used to answer the latter for every path,
+    // existing or not, which is what made a wedged /tmp look bottomless.
+    try std.testing.expectError(
+        kernel.errno.ErrnoSet.NoEntry,
+        fixture.sut.interface.unlink("/never-existed"),
+    );
+
+    // And having freed some, the filesystem is usable again rather than wedged.
+    try fixture.sut.interface.create("/after", 0);
+}
+
+test "RamFs.Tiered.ShouldReclaimTheArenaOnUnlink" {
+    // The arena has to come back after a file is removed: a slow climb across
+    // CONFIG_TMPFS_ARENA_RESERVE starts spilling bodies to SD, after which every
+    // operation on /tmp answers ENOMEM. A fresh name per round, because that is
+    // what the workload does and it exercises the entry and its name too.
+    var arena_memory: [8192]u8 align(256) = undefined;
+    var pool = try kernel.memory.heap.TmpMemoryPool(256).init(std.testing.allocator, &arena_memory);
+    defer pool.deinit();
+    var page_allocator = kernel.memory.heap.TmpPageAllocator(@TypeOf(pool)).init(&pool);
+
+    var fixture = try TieredFixture.init(std.testing.allocator, page_allocator.allocator(), 1024 * 1024);
+    defer fixture.deinit(std.testing.allocator);
+
+    var payload: [512]u8 = undefined;
+    @memset(&payload, 'x');
+
+    const baseline = pool.get_used_size();
+    for (0..8) |round| {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "/scratch{d}.o", .{round});
+        try fixture.sut.interface.create(path, 0);
+        try fixture.write(path, 0, &payload);
+        try fixture.sut.interface.unlink(path);
+    }
+
+    try std.testing.expectEqual(baseline, pool.get_used_size());
+}
 
 test "RamFs.Tiered.ShouldKeepSmallFilesInMemory" {
     var fixture = try TieredFixture.init(std.testing.allocator, std.testing.allocator, 64);

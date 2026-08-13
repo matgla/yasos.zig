@@ -92,6 +92,14 @@ The remote runner also exposes a cached `OpenOCD speed` field. It defaults to `2
 
 The TUI also caches `Test retries`. It defaults to `1` and is passed to pytest as `--reruns`, which helps mask occasional UART noise without rerunning the entire suite manually.
 
+## Run directories
+
+Every run gets its own numbered directory on the remote host — `<remote repo>/workdir/logs/1`, `logs/2`, … with `logs/latest` pointing at the newest — holding that run's serial transcripts, its `failed/` copies and its `tcc_timing_report.json`, plus a `run_info.txt` recording what the run was (kernel/rootfs hashes, opt levels, `--profile`, extra cflags, pytest args, git revision, exit status). Comparing two runs is therefore comparing two directories, which is what an A/B of a kernel or tcc change needs.
+
+It lives under `workdir/` because everything above it is rsynced with `--delete` on every run; a runs root in the repo tree itself is deleted before the run starts, which hands the previous run's number back and overwrites it.
+
+The remote keeps the last `Keep remote run dirs` runs (cached TUI field, default 20; `--keep-runs N`, `0` keeps all). The local mirror under `.cache/remote_smoke_logs/<ssh target>/<N>/` is rsynced during and after every run and is never pruned, so a baseline stays available locally after the remote has rotated it away.
+
 ## Optimization levels
 
 The smoke suites — `tests2`, `ir_tests` and GCC torture alike — run once per selected tcc `-O` level, and every runner defaults to the full `-O0 -O1 -O2` matrix: the QEMU gate (`scripts/run_qemu_smoke.sh`), the packaged hardware run (`scripts/run_hw_smoke.sh`), and the remote runner. Both CI smoke jobs pin the same three levels explicitly. With several levels selected, the `tests2`/`ir_tests` ids are tagged `[-ON]`; with one they stay untagged.

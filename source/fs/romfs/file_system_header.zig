@@ -26,6 +26,7 @@ const FileReader = @import("file_reader.zig").FileReader;
 const kernel = @import("kernel");
 const FileType = kernel.fs.FileType;
 const IFile = kernel.fs.IFile;
+const dev_lock = kernel.driver.dev_lock;
 const FileMemoryMapAttributes = kernel.fs.FileMemoryMapAttributes;
 const IoctlCommonCommands = kernel.fs.IoctlCommonCommands;
 
@@ -43,8 +44,14 @@ pub const FileSystemHeader = struct {
         var marker: [8]u8 = undefined;
         var df = device_file;
 
-        _ = try df.interface.seek(offset, c.SEEK_SET);
-        _ = df.interface.read(marker[0..]);
+        // Scoped, not held across the rest: `FileReader.init` below acquires the
+        // same lock, and `RankedMutex` does not recurse.
+        {
+            dev_lock.acquire();
+            defer dev_lock.release();
+            _ = try df.interface.seek(offset, c.SEEK_SET);
+            _ = df.interface.read(marker[0..]);
+        }
         if (!std.mem.eql(u8, marker[0..], "-rom1fs-")) {
             return kernel.errno.ErrnoSet.InvalidArgument;
         }
@@ -84,6 +91,11 @@ pub const FileSystemHeader = struct {
     // genromfs sets checksum field as 0 before calculation and returns -sum as a result
     // if result is equal to 0, then checksum is correct
     pub fn validate_checksum(self: *FileSystemHeader) !bool {
+        // The whole sequence, not just one pair: it reads forward from a single
+        // seek and then restores the position it found. Safe to hold across --
+        // nothing it calls takes this lock (`self.read` is a bare device read).
+        dev_lock.acquire();
+        defer dev_lock.release();
         const current = self._device_file.interface.tell();
         _ = try self._device_file.interface.seek(0, c.SEEK_SET);
         const dsize = self._device_file.interface.size();

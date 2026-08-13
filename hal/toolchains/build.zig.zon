@@ -18,15 +18,10 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-
 .{
-  .name = "toolchains",
-  .version = "0.0.0",
-  .dependencies = .{
-  },
-  .paths = .{
-    "build.zig",
-    "build.zig.zon",
-    "arm_none_eabi_toolchain.zig"
-  }
+    .name = .toolchains,
+    .fingerprint = 0xbe3d079af3a5d91,
+    .version = "0.0.0",
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "arm_none_eabi_toolchain.zig" },
 }

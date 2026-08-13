@@ -20,8 +20,19 @@
 
 const std = @import("std");
 
-pub fn decorateModuleWithArmToolchain(b: *std.Build, module: anytype, target: std.Build.ResolvedTarget) ![]const u8 {
-    const arm_gcc_exe = b.findProgram(&.{"arm-none-eabi-gcc"}, &.{}) catch {
+pub const ArmToolchain = struct {
+    gcc: []const u8,
+    sysroot: []const u8,
+    include_path: []const u8,
+    mcpu_arg: []const u8,
+    mfloat_arg: []const u8,
+    libgcc_dir: []const u8,
+    libc_dir: []const u8,
+    libgcc_path: []const u8,
+};
+
+pub fn resolveArmToolchain(b: *std.Build, target: std.Build.ResolvedTarget) !ArmToolchain {
+    const arm_gcc_exe = b.findProgram(.{ .names = &.{"arm-none-eabi-gcc"} }) orelse {
         std.log.err("Can't find arm-none-eabi-gcc in system path", .{});
         unreachable;
     };
@@ -61,11 +72,25 @@ pub fn decorateModuleWithArmToolchain(b: *std.Build, module: anytype, target: st
     else
         b.fmt("{s}/include", .{gcc_arm_sysroot_path});
 
-    module.addLibraryPath(.{ .cwd_relative = gcc_arm_lib_path1 });
-    module.addLibraryPath(.{ .cwd_relative = gcc_arm_lib_path2 });
-    module.addSystemIncludePath(.{ .cwd_relative = include_path });
+    return .{
+        .gcc = arm_gcc_exe,
+        .sysroot = gcc_arm_sysroot_path,
+        .include_path = include_path,
+        .mcpu_arg = mcpu_arg,
+        .mfloat_arg = mfloat_arg,
+        .libgcc_dir = gcc_arm_lib_path1,
+        .libc_dir = gcc_arm_lib_path2,
+        .libgcc_path = libgcc_path,
+    };
+}
+
+pub fn decorateModuleWithArmToolchain(b: *std.Build, module: anytype, target: std.Build.ResolvedTarget) ![]const u8 {
+    const tc = try resolveArmToolchain(b, target);
+    module.addLibraryPath(.{ .cwd_relative = tc.libgcc_dir });
+    module.addLibraryPath(.{ .cwd_relative = tc.libc_dir });
+    module.addSystemIncludePath(.{ .cwd_relative = tc.include_path });
     module.linkSystemLibrary("c_nano", .{});
     module.linkSystemLibrary("m", .{});
-    module.addObjectFile(.{ .cwd_relative = libgcc_path });
-    return gcc_arm_sysroot_path;
+    module.addObjectFile(.{ .cwd_relative = tc.libgcc_path });
+    return tc.sysroot;
 }

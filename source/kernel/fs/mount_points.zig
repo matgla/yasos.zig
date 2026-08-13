@@ -26,6 +26,21 @@ const IDirectoryIterator = kernel.fs.IDirectoryIterator;
 const IFile = kernel.fs.IFile;
 
 const config = @import("config");
+
+/// Guards the shape of the mount tree: `find_longest_matching_point` walks it on
+/// every `open`, `stat` and `unlink` while `umount` frees nodes underneath, and
+/// there is no refcount to stop a walk following a freed pointer.
+///
+/// Rank `mount` (10), and a sleeping mutex rather than a spin rwlock: it is
+/// acquired before `fs` (20), which is itself sleeping, so a spinlock here would
+/// be illegal the moment it were held across a filesystem call.
+///
+/// This makes the walk safe, not the result: the VFS calls into
+/// `node.point.filesystem` after the lock is dropped, so a umount in that gap
+/// can still free the point. Closing that needs a reference on the returned
+/// point -- holding this lock across the call is not an option, because RamFs's
+/// tier spills back through `kernel.fs.get_ivfs()` and would re-enter it.
+pub var mount_lock: kernel.sync.RankedMutex(.mount) = .{};
 const interface = @import("interface");
 
 const log = std.log.scoped(.@"kernel/fs/mount_points");
@@ -104,11 +119,28 @@ pub const MountPoints = struct {
         }
     }
 
-    pub fn find_longest_matching_point(self: anytype, T: type, path: []const u8) ?struct {
-        left: []const u8,
-        point: T,
-        parent: ?T,
-    } {
+    /// Named rather than anonymous so the locked and unlocked halves below
+    /// share one return type; two `?struct { ... }` literals are two distinct
+    /// types even when spelled identically.
+    pub fn Match(comptime T: type) type {
+        return struct {
+            left: []const u8,
+            point: T,
+            parent: ?T,
+        };
+    }
+
+    pub fn find_longest_matching_point(self: anytype, T: type, path: []const u8) ?Match(T) {
+        mount_lock.lock();
+        defer mount_lock.unlock();
+        return find_locked(self, T, path);
+    }
+
+    /// The walk itself, with `mount_lock` already held. Split out because the
+    /// mutators below look points up before changing them, and the lock is
+    /// deliberately not recursive.
+    pub fn find_locked(self: anytype, T: type, path: []const u8) ?Match(T) {
+        mount_lock.assert_held();
         if (self.root == null) {
             return null;
         }
@@ -143,7 +175,7 @@ pub const MountPoints = struct {
 
             if (bestchild) |child| {
                 parent = mountpoint;
-                left = std.mem.trimLeft(u8, left[child.path.len..], "/");
+                left = std.mem.trimStart(u8, left[child.path.len..], "/");
                 last_matched_point = child;
             }
             maybe_node = bestchild;
@@ -171,6 +203,8 @@ pub const MountPoints = struct {
     }
 
     pub fn mount_filesystem(self: *MountPoints, path: []const u8, filesystem: IFileSystem) !void {
+        mount_lock.lock();
+        defer mount_lock.unlock();
         if (path.len + 1 > config.fs.max_mount_point_size) {
             return error.PathTooLong;
         }
@@ -184,7 +218,7 @@ pub const MountPoints = struct {
             return MountPointError.MountPointNotAbsolutePath;
         }
 
-        const maybe_longest_matching_point = self.find_longest_matching_point(*MountPoint, path);
+        const maybe_longest_matching_point = find_locked(self, *MountPoint, path);
         if (maybe_longest_matching_point == null) {
             return MountPointError.RootNotMounted;
         }
@@ -205,7 +239,9 @@ pub const MountPoints = struct {
     }
 
     pub fn umount(self: *MountPoints, path: []const u8) !void {
-        const maybe_longest_matching_point = self.find_longest_matching_point(*MountPoint, path);
+        mount_lock.lock();
+        defer mount_lock.unlock();
+        const maybe_longest_matching_point = find_locked(self, *MountPoint, path);
         if (maybe_longest_matching_point == null) {
             return MountPointError.NotMounted;
         }
@@ -259,7 +295,7 @@ test "MountPoints.RejectTooLongPath" {
     const fs = filesystem_mock.get_interface();
 
     try sut.mount_filesystem("/", fs);
-    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem("/" ** (config.fs.max_mount_point_size + 1), fs));
+    try std.testing.expectError(MountPointError.PathTooLong, sut.mount_filesystem(&@as([config.fs.max_mount_point_size + 1]u8, @splat('/')), fs));
 }
 
 test "MountPoints.RejectRootIfAlreadyMounted" {
@@ -280,7 +316,7 @@ fn create_filesystem_mock(context: anytype) !kernel.fs.IFileSystem {
     const fs2 = fs2_mock.get_interface();
 
     const ReturnSharedMock = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{[]const u8})) anyerror!anyerror!kernel.fs.Node {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{[]const u8})) anyerror!anyerror!kernel.fs.Node {
             _ = args;
             const c: @TypeOf(context) = @ptrCast(@alignCast(ctx.?));
             return c.file.share();

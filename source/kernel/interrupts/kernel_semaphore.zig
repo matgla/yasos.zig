@@ -25,15 +25,35 @@ const hal = @import("hal");
 const process_manager = @import("../process_manager.zig");
 const Process = @import("../process.zig").Process;
 const Semaphore = @import("../semaphore.zig").Semaphore;
+const kernel_sync = @import("../sync/sync.zig");
 
 // this is kernel semaphore intended to be used by kernel events handlers
 // which means it shouldn't be interrupted since interrupt handlers are blocking
 
+/// Serialises every mutation of every `Semaphore.counter` in the system.
+///
+/// One lock for all of them rather than one per semaphore, because the counter
+/// lives in the semaphore -- i.e. in process memory, i.e. possibly in PSRAM,
+/// where neither an atomic nor a lock word works across cores (see
+/// `kernel/sync/placement.zig`). The guard has to be kernel-side, and this is
+/// it.
+///
+/// What it replaced was `hal.atomic.Atomic(u32)`, whose spinlock id was
+/// `hash(@typeName(T)) % n` -- so every `Atomic(u32)` in the system shared one
+/// physical lock anyway. This is the same coarseness, made explicit, minus a
+/// backend that released locks it had failed to take.
+///
+/// Phase 4 folds this into `proctable_lock`, which is the rank that already owns
+/// the wait lists these two functions walk.
+var counter_lock: kernel_sync.SpinLock = .{};
+
 pub const KernelSemaphore = struct {
     // blocking
     pub fn release(semaphore: *Semaphore) i32 {
-        while (!semaphore.counter.increment()) {
-            hal.irq.trigger(.pendsv);
+        {
+            const flags = counter_lock.lock_irqsave();
+            defer counter_lock.unlock_irqrestore(flags);
+            semaphore.counter += 1;
         }
         // unblock waiting processes
         var next = process_manager.instance.processes.first;
@@ -49,7 +69,14 @@ pub const KernelSemaphore = struct {
 
     // blocking
     pub fn acquire(semaphore: *Semaphore) !i32 {
-        if (!semaphore.counter.compare_not_equal_decrement(0)) {
+        const taken = blk: {
+            const flags = counter_lock.lock_irqsave();
+            defer counter_lock.unlock_irqrestore(flags);
+            if (semaphore.counter == 0) break :blk false;
+            semaphore.counter -= 1;
+            break :blk true;
+        };
+        if (!taken) {
             // this must be service call
             const process = process_manager.instance.get_current_process();
             process.block_semaphore(semaphore);
@@ -84,7 +111,7 @@ test "KernelSemaphore.ShouldBlockProcess" {
     const ActionCall = struct {
         pub fn acquire(id: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void {
             const event: *const volatile syscall_handlers.SemaphoreEvent = @ptrCast(@alignCast(arg));
-            event.object.counter.value -= 1;
+            event.object.counter -= 1;
             hal.irq.impl().calls[id] += 1;
             const result: *volatile bool = @ptrCast(@alignCast(out));
             result.* = true;
@@ -92,7 +119,7 @@ test "KernelSemaphore.ShouldBlockProcess" {
 
         pub fn release(id: u32, arg: *const volatile anyopaque, out: *volatile anyopaque) callconv(.c) void {
             const event: *const volatile syscall_handlers.SemaphoreEvent = @ptrCast(@alignCast(arg));
-            event.object.counter.value += 1;
+            event.object.counter += 1;
             hal.irq.impl().calls[id] += 1;
             const result: *volatile bool = @ptrCast(@alignCast(out));
             result.* = true;
@@ -115,14 +142,14 @@ test "KernelSemaphore.ShouldBlockProcess" {
 
     hal.irq.impl().set_irq_action(.pendsv, &PendSvAction.call);
     try std.testing.expectEqual(1, try KernelSemaphore.acquire(&semaphore));
-    try std.testing.expectEqual(0, semaphore.counter.value);
+    try std.testing.expectEqual(0, semaphore.counter);
     try std.testing.expectEqual(1, call_count);
     const process = kernel.process.process_manager.instance.get_current_process();
     try std.testing.expectEqual(Process.State.Blocked, process.state);
     process.reevaluate_state();
     try std.testing.expectEqual(Process.State.Blocked, process.state);
     try std.testing.expectEqual(0, KernelSemaphore.release(&semaphore));
-    try std.testing.expectEqual(1, semaphore.counter.value);
+    try std.testing.expectEqual(1, semaphore.counter);
     process.reevaluate_state();
     try std.testing.expectEqual(Process.State.Ready, process.state);
 }

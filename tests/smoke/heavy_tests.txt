@@ -1,0 +1,47 @@
+# Memory-heavy smoke tests.
+#
+# conftest.py tags every test matched here with the `heavy` marker. Nothing
+# selects on it automatically any more: scripts/run_qemu_smoke.sh used to run
+# the suite in two phases (everything not listed here at -n auto, then these
+# serially) and now runs it in one. The marker is left in place as a manual
+# escape hatch -- `-m 'not heavy'` on a machine that cannot fit these alongside
+# a full set of workers -- and this list as the record of what was measured.
+#
+# Format: one glob per line, matched against the pytest node id (fnmatch, so
+# `*` and `?` work); `#` starts a comment. A pattern with no wildcard is also
+# tried as a plain substring, so a family can be named by the fragment its ids
+# share. Patterns deliberately omit the `[-O0]`/`[-O2]` suffix so one line
+# covers every optimisation level the suite is run at.
+#
+# Ranked by the guest kernel's peak process-pool usage, read from /proc/mempeak;
+# reading that file clears it, so the harness brackets each test with two reads.
+# Host RSS is the wrong instrument: qemu sits at ~72 MiB whatever the guest does,
+# and the ordering it produces is inverted.
+#
+# To refresh:
+#
+#   YASOS_SMOKE_MEM_REPORT="$PWD/.cache/qemu_smoke_mem" \
+#       ./scripts/run_qemu_smoke.sh --no-build --opt-levels -O2 tcc_suite_test.py
+#   cat .cache/qemu_smoke_mem/*.tsv | sort -rn | head -20 \
+#       | awk -F'\t' '{printf "%7.2f MiB  %s\n", $1/1048576, $3}'
+#
+# Report columns are `guest_peak_bytes<TAB>host_peak_kb<TAB>nodeid`.
+#
+# Measured over 4525 tests at -O2 (2026-08-11): median 0.50 MiB, p99 1.03 MiB,
+# max 5.15 MiB. There is no real outlier, so this list is a margin rather than a
+# rescue -- if a parallel run exhausts a machine, the cause is the constant
+# ~72 MiB of qemu overhead times the worker count, and the lever is
+# YASOS_SMOKE_XDIST=<n>, not this file.
+#
+# Threshold below: 2 MiB, 4x the median.
+
+*gcc_compile/limits-fnargs*
+*gcc_execute/pr92904*
+*gcc_compile/pr34093*
+*ir_tests/mibench_rijndael.c*
+*gcc_execute/builtin-bitops-1*
+*gcc_execute/pr107881-1*
+*95_bitfields.c*
+*gcc_compile/limits-structmem*
+*gcc_execute/pr53645-2*
+*gcc_execute/scal-to-vec1*

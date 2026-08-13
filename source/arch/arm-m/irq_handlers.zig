@@ -32,6 +32,7 @@ const CpuRegisters = @TypeOf(hal.cpu).Registers;
 const HardwareStoredRegisters = arch_process.HardwareStoredRegisters;
 
 extern fn get_stack_top() *const u8;
+extern fn get_exit_frame_ceiling() *const u8;
 extern fn get_current_pid() c.pid_t;
 extern fn file_log_disable() void;
 extern fn klog_force_enable() void;
@@ -160,13 +161,52 @@ export var hardfault_callee: [8]usize = undefined;
 // faulting context's true values.
 export fn irq_hard_fault() callconv(.naked) void {
     asm volatile (
+    // EXC_RETURN and the faulting frame pointer are captured here, in the naked
+    // stub, and handed to `hard_fault_main` as arguments. Reading them from the
+    // Zig body is too late: `lr` is no longer EXC_RETURN once anything has been
+    // called, and the dump then names sixteen bytes of arbitrary memory.
         \\ ldr r0, =hardfault_callee
         \\ stmia r0, {r4-r11}
+        \\ mov r0, lr
+        \\ tst lr, #4
+        \\ ite eq
+        \\ mrseq r1, msp
+        \\ mrsne r1, psp
         \\ b hard_fault_main
     );
 }
 
-export fn hard_fault_main() void {
+/// The context switch loaded something that is not an EXC_RETURN. Report it and
+/// stop, instead of `bx`-ing through it.
+///
+/// PendSV resumes a task by `bx r0`, where r0 is the `lr` slot of that task's
+/// software frame and must be an EXC_RETURN (`0xFFxxxxxx`). When it is not, the
+/// `bx` is an INVSTATE UsageFault whose postmortem points at
+/// `apply_resume_privilege` -- which has already returned without restoring LR,
+/// so the dump reads like a fault inside a helper that is not running. Catching
+/// it here names the corrupt word instead, for two instructions on the resume
+/// path.
+export fn report_bad_exc_return(value: usize) callconv(.c) void {
+    file_log_disable();
+    klog_force_enable();
+    log.err("context switch loaded a corrupt EXC_RETURN: 0x{X:0>8} (pid={d})", .{
+        value, get_current_pid(),
+    });
+    log.err("  ^ this is the `lr` slot of the incoming task's software frame " ++
+        "(SoftwareStoredRegisters.lr); it must be 0xFFxxxxxx. A code address " ++
+        "there means the frame was built for `switch_to_the_first_task`, which " ++
+        "`bx r0`s in thread mode and so wants an entry point, not an exception " ++
+        "return -- see create_default_software_registers' is_root branch.", .{});
+    log.err("  PSP=0x{X:0>8} PSPLIM=0x{X:0>8} MSP=0x{X:0>8}", .{
+        read_psp(), read_psplim(), read_msp(),
+    });
+    dump_memory_window("incoming-frame", read_psp() -% 64, 32);
+    dump_fault_maps(get_current_pid());
+    dump_ctx_ring();
+    @panic("corrupt EXC_RETURN loaded by the context switch");
+}
+
+export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callconv(.c) void {
     const callee = hardfault_callee;
     // SDIO depends on lower-priority interrupts that are masked inside the
     // fault handler, so a blocking SD write here would hang. Route the
@@ -179,8 +219,6 @@ export fn hard_fault_main() void {
     // swallowed and the crash looks like the device going mute mid-transfer.
     klog_force_enable();
 
-    const exc_return = read_exception_return();
-    const active_stack_address = read_fault_stack_pointer();
     const frame_ptr: *volatile FaultFrame = @ptrFromInt(active_stack_address);
     const frame = frame_ptr.*;
 
@@ -243,23 +281,30 @@ export fn hard_fault_main() void {
     // faulting code) and the live process stack near PSP (reveals poison fills
     // like 0xAAAAAAAA and the saved-context layout).
     dump_memory_window("fault-frame", active_stack_address, 16);
-    if (uses_process_stack(exc_return)) {
-        // 72 words reaches past the corrupted caller frames up to (and a bit
-        // beyond) the stack top in the dijkstra-family crashes — the region
-        // above PSP is exactly where the writer's fingerprint is.
-        dump_memory_window("psp", psp, 72);
-    }
+    // 72 words reaches past the corrupted caller frames to the stack top -- the
+    // region above PSP is where the writer's fingerprint is.
+    //
+    // Dumped whichever stack the fault came in on. Gating this on
+    // `uses_process_stack` skips every fault taken on MSP, i.e. every fault
+    // inside the context switch, where PSP points at the incoming task's saved
+    // frame and is the most informative window there is.
+    // `dump_memory_window` skips unmapped addresses, so a garbage PSP costs a
+    // line rather than a nested fault.
+    dump_memory_window("psp", psp, 72);
     // Dump instruction words around the faulting PC so the exact executed
     // instruction can be disassembled directly from loaded memory (the loader's
     // reported .text base can be skewed vs the ELF, so trust these bytes).
     dump_memory_window("code", (frame.pc & ~@as(usize, 0xF)) -% 16, 12);
     // Resolve stacked_pc/lr to <module>+offset: dump the faulting process's
     // module load map (executable + shared libs).
-    if (uses_process_stack(exc_return)) {
-        dump_fault_maps(get_current_pid());
-        dump_backtrace_codes(psp, 64);
-        dump_ctx_ring();
-    }
+    dump_fault_maps(get_current_pid());
+    dump_backtrace_codes(psp, 64);
+    // Unconditional: the context-switch event ring records what the scheduler
+    // did, which is worth most when the scheduler is what faulted -- and a
+    // PendSV fault is always on MSP, so gating on `uses_process_stack` would
+    // suppress it on exactly those. The module maps go with it, since a fault
+    // address inside a loaded module resolves in no kernel ELF.
+    dump_ctx_ring();
 
     // A fault that originated in a user process (PSP) — whether a stack
     // overflow or any other fault (bus/usage/etc., e.g. from a miscompiled
@@ -340,22 +385,7 @@ const FaultFrame = struct {
     }
 };
 
-inline fn read_fault_stack_pointer() usize {
-    return asm volatile (
-        \\ tst lr, #4
-        \\ ite eq
-        \\ mrseq %[sp], msp
-        \\ mrsne %[sp], psp
-        : [sp] "=r" (-> usize),
-    );
-}
 
-inline fn read_exception_return() usize {
-    return asm volatile (
-        \\ mov %[lr_out], lr
-        : [lr_out] "=r" (-> usize),
-    );
-}
 
 inline fn read_psp() usize {
     return asm volatile (
@@ -404,8 +434,17 @@ fn uses_process_stack(exc_return: usize) bool {
 }
 
 fn prepare_stack_overflow_exit_frame() usize {
-    const stack_top = @intFromPtr(get_stack_top());
-    const stack_frame_address = (stack_top - @sizeOf(HardwareStoredRegisters)) & ~@as(usize, 0x7);
+    // Not the top of the stack: a vfork child shares its parent's, whose top is
+    // the parent's live frames. `get_exit_frame_ceiling` reports the top of the
+    // part this process owns, which for everything else is the same thing.
+    const ceiling = @intFromPtr(get_exit_frame_ceiling());
+    var stack_frame_address = (ceiling - @sizeOf(HardwareStoredRegisters)) & ~@as(usize, 0x7);
+    if (stack_frame_address <= read_psplim()) {
+        // No room under the ceiling to unwind in. Nothing good is available
+        // here, so take the old behaviour -- the process gets to exit, at the
+        // cost of whatever else shares this stack.
+        stack_frame_address = (@intFromPtr(get_stack_top()) - @sizeOf(HardwareStoredRegisters)) & ~@as(usize, 0x7);
+    }
     const recovery_frame: *volatile HardwareStoredRegisters = @ptrFromInt(stack_frame_address);
 
     recovery_frame.* = std.mem.zeroInit(HardwareStoredRegisters, .{});

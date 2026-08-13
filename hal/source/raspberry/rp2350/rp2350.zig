@@ -23,7 +23,6 @@ pub const internal = struct {
     pub const Time = @import("source/time.zig").Time;
     pub const Cpu = @import("source/cpu.zig").Cpu;
     pub const Mmio = @import("raspberry_common").mmio.Mmio;
-    pub const HardwareAtomic = @import("source/atomic.zig").HardwareAtomic;
     pub const Irq = @import("cortex-m").Irq;
     pub const ExternalMemory = @import("source/external_memory.zig").ExternalMemory;
     pub const Memory = @import("source/memory.zig").Memory;
@@ -35,13 +34,11 @@ pub const uart = @import("hal_interface").uart;
 pub const time = @import("hal_interface").time.Time(internal.Time).create();
 pub const cpu = @import("hal_interface").cpu.Cpu(internal.Cpu).create();
 pub const irq = @import("hal_interface").irq.Irq(internal.Irq).create();
-pub const atomic = @import("hal_interface").atomic.AtomicInterface(internal.HardwareAtomic);
 pub var external_memory = @import("hal_interface").external_memory.ExternalMemory(internal.ExternalMemory).create();
 pub const memory = @import("hal_interface").memory.Memory(internal.Memory).create();
 pub const flash = @import("hal_interface").flash;
 // pub const Flash = flash.Flash(internal.Flash);
 
-pub const hw_atomic = internal.HardwareAtomic;
 
 pub const mmc = struct {
     pub const Mmc = @import("hal_interface").mmc.Mmc(internal.Mmc);

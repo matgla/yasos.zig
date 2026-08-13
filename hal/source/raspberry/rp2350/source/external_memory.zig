@@ -16,12 +16,7 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("hardware/gpio.h");
-    @cInclude("hardware/clocks.h");
-    @cInclude("hardware/structs/xip.h");
-    @cInclude("hardware/structs/qmi.h");
-});
+const c = @import("external_memory_headers");
 
 const config = @import("config");
 

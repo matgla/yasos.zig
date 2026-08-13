@@ -18,20 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-const c = @cImport({
-    @cInclude("hardware/regs/resets.h");
-    @cInclude("hardware/resets.h");
-    @cInclude("pico/runtime_init.h");
-    @cInclude("pico/time.h");
-    @cInclude("hardware/vreg.h");
-    @cInclude("hardware/clocks.h");
-    @cInclude("hardware/pll.h");
-    @cInclude("hardware/xosc.h");
-    @cInclude("hardware/ticks.h");
-    @cInclude("hardware/structs/qmi.h");
-    @cInclude("hardware/regs/clocks.h");
-    @cInclude("overclock.h");
-});
+const c = @import("crt_headers");
 
 const config = @import("config").cpu;
 const flash_config = @import("config").flash;
@@ -204,7 +191,7 @@ fn initialize_libc_constructors() void {
 export fn _init() void {}
 
 const ram_vector_table_size: usize = c.VTABLE_FIRST_IRQ + c.PICO_NUM_VTABLE_IRQS;
-var ram_vector_table: [ram_vector_table_size]usize linksection(".ram_vector_table") = [_]usize{0} ** ram_vector_table_size;
+var ram_vector_table: [ram_vector_table_size]usize linksection(".ram_vector_table") = @splat(0);
 
 extern var __vectors_start: usize;
 extern var __vectors_end: usize;
@@ -212,7 +199,10 @@ extern var __vectors_end: usize;
 fn initialize_ram_vector_table() void {
     const vectors_start: *usize = @ptrCast(&__vectors_start);
     const vectors_end: *usize = @ptrCast(&__vectors_end);
-    _ = c.__builtin_memcpy(@ptrCast(&ram_vector_table), vectors_start, @intFromPtr(vectors_end) - @intFromPtr(vectors_start));
+    const bytes = @intFromPtr(vectors_end) - @intFromPtr(vectors_start);
+    const src: [*]const u8 = @ptrCast(vectors_start);
+    const dst: [*]u8 = @ptrCast(&ram_vector_table);
+    @memcpy(dst[0..bytes], src[0..bytes]);
     cpu.scb.vtor.write(@intFromPtr(&ram_vector_table));
 }
 
@@ -250,6 +240,19 @@ export fn crt_init() void {
     // apply_overclock() after UART is available for debug output.
     c.runtime_init_clocks();
 
+    init_per_core_state();
+
+    // release all spinlocks
+    for (&sio.spinlocks) |*lock| {
+        lock.write(1);
+    }
+
+    // c.alarm_pool_init_default();
+}
+
+/// CPU state the architecture banks per core, so every core has to do it itself.
+/// Touches nothing shared, which is what makes running it twice correct.
+fn init_per_core_state() void {
     if (config.has_fpu and config.use_fpu) {
         cpu.cpacr.cpacr.update(.{
             .cp0 = 0x3,
@@ -257,12 +260,25 @@ export fn crt_init() void {
             .cp10 = 0x3,
         });
     }
-    // release all spinlocks
-    for (&sio.spinlocks) |*lock| {
-        lock.write(1);
-    }
 
-    // c.alarm_pool_init_default();
+    // Send exclusives to the global monitor instead of this core's local one.
+    // With EXTEXCLALL clear, `ldrex`/`strex` against memory no enabled MPU
+    // region covers resolve locally, so both cores can hold the same
+    // reservation: every spinlock keeps its API and stops excluding, with no
+    // fault and no log line. `kernel/smp.zig`'s self-test catches it.
+    //
+    // The bit means "external exclusives allowed with no MPU": once an enabled
+    // region covers a lock word, that region's Shareable attribute decides
+    // instead. If the self-test starts failing after an MPU change, look there.
+    cpu.actlr.update(.{ .extexclall = 1 });
+}
+
+/// C runtime init for core 1 (`startup.S` `_start_core1`). Everything `crt_init`
+/// does to memory or to chip-wide peripherals is absent: .data, .bss, the
+/// constructors, the clocks, QMI and PSRAM are all done by the time core 1 is
+/// released, and repeating any of it would destroy state core 0 is using.
+export fn crt_init_core1() void {
+    init_per_core_state();
 }
 
 /// Apply overclock + QSPI configuration. Call after UART is initialized

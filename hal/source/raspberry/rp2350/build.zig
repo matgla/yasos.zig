@@ -33,33 +33,124 @@ pub const targetOptions = std.Target.Query{
     }),
 };
 
+const board_include_paths = [_][]const u8{
+    "source/mmc",
+    "startup",
+    "../../../libs/pico-sdk/src/rp2_common/cmsis/stub/CMSIS/Core/Include",
+    "../../../libs/pico-sdk/src/rp2_common/cmsis/stub/CMSIS/Device/RP2350/Include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_base/include",
+    "../../../libs/pico-sdk/src/rp2350/hardware_structs/include",
+    "../../../libs/pico-sdk/src/common/pico_base_headers/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_uart/include",
+    "../../../libs/pico-sdk/src/rp2350/hardware_regs/include",
+    "../../../libs/pico-sdk/src/rp2350/pico_platform/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_platform_common/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_platform_compiler/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_platform_sections/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_platform_panic/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_resets/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_clocks/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_timer/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_pll/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_irq/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_gpio/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_pio/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_dma/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_sync/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_vreg/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/include",
+    "../../../libs/pico-sdk/src/common/hardware_claim/include",
+    "../../../libs/pico-sdk/src/common/pico_sync/include",
+    "../../../libs/pico-sdk/src/common/pico_time/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_runtime/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_runtime_init/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_divider/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_divider/include",
+    "../../../libs/pico-sdk/src/common/pico_binary_info/include",
+    "../../../libs/pico-sdk/src/common/boot_picobin_headers/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_bootrom/include",
+    "../../../libs/pico-sdk/src/common/boot_picoboot_headers/include",
+    "../../../libs/pico-sdk/src/rp2_common/boot_bootrom_headers/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_time_adapter/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_ticks/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_watchdog/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_xosc/include",
+    "../../../libs/pico-sdk/src/rp2_common/hardware_boot_lock/include",
+    "../../../libs/pico-sdk/src/rp2_common/pico_flash/include",
+};
+
+fn addBoardIncludes(b: *std.Build, picosdk: []const u8, pio_dirs: []const std.Build.LazyPath, t: anytype) void {
+    for (pio_dirs) |dir| t.addIncludePath(dir);
+    t.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated" }) });
+    t.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated/pico_base" }) });
+    for (board_include_paths) |path| t.addIncludePath(b.path(path));
+}
+
+fn addBoardMacros(t: anytype) void {
+    if (@hasDecl(@typeInfo(@TypeOf(t)).pointer.child, "addCMacro")) {
+        t.addCMacro("PICO_RP2350", "1");
+        t.addCMacro("PICO_USE_GPIO_COPROCESSOR", "0");
+    } else {
+        t.defineCMacro("PICO_RP2350", "1");
+        t.defineCMacro("PICO_USE_GPIO_COPROCESSOR", "0");
+    }
+}
+
+fn addBoardHeaders(
+    b: *std.Build,
+    picosdk: []const u8,
+    pio_dirs: []const std.Build.LazyPath,
+    arm: toolchain.ArmToolchain,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    owner: *std.Build.Module,
+    import_name: []const u8,
+    header: []const u8,
+) void {
+    const pp = b.addSystemCommand(&.{
+        arm.gcc,        "-E",
+        "-dD",          "-std=gnu11",
+        arm.mcpu_arg,   arm.mfloat_arg,
+        "-DPICO_RP2350=1", "-DPICO_USE_GPIO_COPROCESSOR=0",
+    });
+    for (pio_dirs) |dir| pp.addPrefixedDirectoryArg("-I", dir);
+    pp.addArg(b.fmt("-I{s}", .{b.pathJoin(&.{ picosdk, "generated" })}));
+    pp.addArg(b.fmt("-I{s}", .{b.pathJoin(&.{ picosdk, "generated/pico_base" })}));
+    for (board_include_paths) |path| pp.addPrefixedDirectoryArg("-I", b.path(path));
+    pp.addFileArg(b.path(header));
+    pp.addArg("-o");
+    const expanded = pp.addOutputFileArg(b.fmt("{s}_pp.h", .{import_name}));
+
+    const step = b.addTranslateC(.{
+        .root_source_file = expanded,
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    owner.addImport(import_name, step.createModule());
+}
+
 fn configureCmake(b: *std.Build) ![]const u8 {
-    const cmake_exe = b.findProgram(&.{"cmake"}, &.{}) catch {
+    const cmake_exe = b.findProgram(.{ .names = &.{"cmake"} }) orelse {
         std.log.err("Can't find CMake in system path", .{});
         unreachable;
     };
 
-    const pico_sdk_path = b.pathJoin(&.{ b.pathFromRoot("../../../libs"), "pico-sdk" });
+    const pico_sdk_path = b.pathResolve(&.{ try b.root.toString(b.graph.arena), "../../../libs", "pico-sdk" });
     std.log.info("Used PicoSDK: {s}", .{pico_sdk_path});
     std.log.info("CMake: {s}", .{cmake_exe});
 
-    const cmake_binary_dir = b.pathJoin(&.{ b.cache_root.path.?, "pico_sdk_generated" });
+    const cmake_binary_dir = b.pathJoin(&.{ try b.root.toString(b.graph.arena), "pico_sdk_generated" });
     std.log.info("CMake project binary dir: {s}", .{cmake_binary_dir});
 
-    // Gate on the pioasm binary, not the cache directory: an interrupted build
-    // can leave pico_sdk_generated/ half-populated (e.g. only _deps fetched),
-    // which would otherwise skip the configure + pioasmBuild step and later fail
-    // with FileNotFound when generate_pio invokes the never-produced binary.
     const pioasm_path = b.pathJoin(&.{ cmake_binary_dir, "pioasm", "pioasm" });
-    std.fs.cwd().access(pioasm_path, .{}) catch |err| {
+    std.Io.Dir.cwd().access(b.graph.io, pioasm_path, .{}) catch |err| {
         if (err != error.FileNotFound) return err;
 
-        const cache_dir_absolute = try std.fs.cwd().realpathAlloc(b.allocator, b.cache_root.path.?);
-        const cache_dir = try std.fs.openDirAbsolute(cache_dir_absolute, .{});
         // Reconfiguring a stale/partial cache does not reliably regenerate the
         // pioasmBuild ExternalProject target, so start from a clean directory.
-        cache_dir.deleteTree("pico_sdk_generated") catch {};
-        _ = try cache_dir.makePath("pico_sdk_generated");
+        std.Io.Dir.cwd().deleteTree(b.graph.io, cmake_binary_dir) catch {};
+        try std.Io.Dir.cwd().createDirPath(b.graph.io, cmake_binary_dir);
 
         const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
         std.log.info("{s}", .{configure_project});
@@ -77,7 +168,8 @@ fn generate_pio(b: *std.Build, file: []const u8, picosdk: []const u8) !std.Build
     const pio_file = b.path(b.pathJoin(&.{ "source", file }));
     const output_filename = try std.mem.concat(b.allocator, u8, &.{ file, ".h" });
     const output_file = b.pathJoin(&.{ picosdk, "generated", output_filename });
-    const cmd = b.addSystemCommand(&.{ pioasm, @as([]const u8, pio_file.getPath(b)) });
+    const cmd = b.addSystemCommand(&.{pioasm});
+    cmd.addFileArg(pio_file);
     cmd.has_side_effects = true;
     return cmd.addOutputFileArg(output_file);
 }
@@ -159,55 +251,21 @@ pub fn build(b: *std.Build) !void {
     cortex_m.addImport("arch", hal_armv8_m);
     hal.addImport("cortex-m", cortex_m);
 
-    hal.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ picosdk, "generated/pico_base" }) });
     _ = halInterface.module("hal_interface");
     _ = try toolchain.decorateModuleWithArmToolchain(b, hal, target);
     _ = try toolchain.decorateModuleWithArmToolchain(b, hal_common, target);
 
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_base/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2350/hardware_structs/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/pico_base_headers/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_uart/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2350/hardware_regs/include"));
+    const pio_dirs = [_]std.Build.LazyPath{ mmc_pio.dirname(), mmc_spi_pio.dirname(), mmc_sdio_pio.dirname() };
+    addBoardIncludes(b, picosdk, &pio_dirs, hal);
+    addBoardMacros(hal);
 
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2350/pico_platform/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_common/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_compiler/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_sections/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_platform_panic/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_resets/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_clocks/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_timer/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_pll/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_irq/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_gpio/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_pio/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_dma/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_sync/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_vreg/include"));
-
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_sync_spin_lock/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/hardware_claim/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/pico_sync/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/pico_time/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_runtime/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_runtime_init/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_divider/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_divider/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/pico_binary_info/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/boot_picobin_headers/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_bootrom/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/common/boot_picoboot_headers/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/boot_bootrom_headers/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_time_adapter/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_ticks/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_watchdog/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_xosc/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/hardware_boot_lock/include"));
-    hal.addIncludePath(b.path("../../../libs/pico-sdk/src/rp2_common/pico_flash/include"));
-
-    hal.addCMacro("PICO_RP2350", "1");
-    hal.addCMacro("PICO_USE_GPIO_COPROCESSOR", "0");
+    const arm = try toolchain.resolveArmToolchain(b, target);
+    addBoardHeaders(b, picosdk, &pio_dirs, arm, target, optimize, hal, "picosdk_headers", "source/picosdk_c.h");
+    addBoardHeaders(b, picosdk, &pio_dirs, arm, target, optimize, hal, "clocks_headers", "source/cpu_c.h");
+    addBoardHeaders(b, picosdk, &pio_dirs, arm, target, optimize, hal, "external_memory_headers", "source/external_memory_c.h");
+    addBoardHeaders(b, picosdk, &pio_dirs, arm, target, optimize, hal, "mmc_spi_headers", "source/mmc/mmc_spi_c.h");
+    addBoardHeaders(b, picosdk, &pio_dirs, arm, target, optimize, hal, "mmc_sdio_headers", "source/mmc/mmc_sdio_c.h");
+    addBoardHeaders(b, picosdk, &pio_dirs, arm, target, optimize, hal, "crt_headers", "startup/crt_c.h");
 
     hal.addCSourceFiles(.{
         .files = &.{

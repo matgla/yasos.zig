@@ -21,9 +21,7 @@
 const std = @import("std");
 const log = std.log.scoped(.yasld);
 
-const c = @cImport({
-    @cInclude("tccyaff.h");
-});
+const c = @import("tccyaff_headers");
 
 pub const Header = c.YaffHeader;
 

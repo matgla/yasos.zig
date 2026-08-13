@@ -19,6 +19,8 @@ comptime {
     _ = @import("drivers/tests.zig");
     _ = @import("fs/tests.zig");
     _ = @import("scheduler/tests.zig");
+    _ = @import("sync/sync.zig");
+    _ = @import("memory/heap/kheap_lock.zig");
 
     _ = @import("benchmark.zig");
     _ = @import("mutex.zig");
@@ -26,7 +28,9 @@ comptime {
     _ = @import("process_manager.zig");
     _ = @import("memory/tests.zig");
     _ = @import("errno.zig");
+    _ = @import("uaccess.zig");
     _ = @import("spawn.zig");
+    _ = @import("smp.zig");
     _ = @import("semaphore.zig");
     _ = @import("dump_hardware.zig");
     _ = @import("process.zig");
@@ -36,5 +40,18 @@ comptime {
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    refAllDeclsRecursive(@This());
+}
+
+fn refAllDeclsRecursive(comptime T: type) void {
+    if (!@import("builtin").is_test) return;
+    inline for (comptime std.meta.declarations(T)) |decl_name| {
+        if (@TypeOf(@field(T, decl_name)) == type) {
+            switch (@typeInfo(@field(T, decl_name))) {
+                .@"struct", .@"enum", .@"union", .@"opaque" => refAllDeclsRecursive(@field(T, decl_name)),
+                else => {},
+            }
+        }
+        _ = &@field(T, decl_name);
+    }
 }

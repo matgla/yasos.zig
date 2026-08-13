@@ -47,7 +47,7 @@ test "MBRPartitionEntry.ShouldHaveCorrectSize" {
 }
 
 test "MBR.Create.ShouldParseValidMBR" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     
     // Set up a valid MBR signature
     buffer[510] = 0x55;
@@ -83,7 +83,7 @@ test "MBR.Create.ShouldParseValidMBR" {
 }
 
 test "MBR.Create.ShouldParseInvalidSignature" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     
     // Set up an invalid MBR signature
     buffer[510] = 0x00;
@@ -95,7 +95,7 @@ test "MBR.Create.ShouldParseInvalidSignature" {
 }
 
 test "MBR.Create.ShouldParseAllFourPartitions" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     
     // Set up valid signature
     buffer[510] = 0x55;
@@ -131,7 +131,7 @@ test "MBR.Create.ShouldParseAllFourPartitions" {
 }
 
 test "MBR.IsValid.ShouldReturnTrueForValidSignature" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     buffer[510] = 0x55;
     buffer[511] = 0xAA;
     
@@ -140,7 +140,7 @@ test "MBR.IsValid.ShouldReturnTrueForValidSignature" {
 }
 
 test "MBR.IsValid.ShouldReturnFalseForInvalidSignature" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     buffer[510] = 0xFF;
     buffer[511] = 0xFF;
     
@@ -149,7 +149,7 @@ test "MBR.IsValid.ShouldReturnFalseForInvalidSignature" {
 }
 
 test "MBR.Create.ShouldHandleEmptyPartitions" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     buffer[510] = 0x55;
     buffer[511] = 0xAA;
     
@@ -167,7 +167,7 @@ test "MBR.Create.ShouldHandleEmptyPartitions" {
 }
 
 test "MBR.Create.ShouldParseFAT32Partition" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     
     buffer[510] = 0x55;
     buffer[511] = 0xAA;
@@ -194,7 +194,7 @@ test "MBR.Create.ShouldParseFAT32Partition" {
 }
 
 test "MBR.Create.ShouldParseLinuxPartition" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     
     buffer[510] = 0x55;
     buffer[511] = 0xAA;
@@ -221,7 +221,7 @@ test "MBR.Create.ShouldParseLinuxPartition" {
 }
 
 test "MBR.Create.ShouldParseCHSValues" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     
     buffer[510] = 0x55;
     buffer[511] = 0xAA;
@@ -247,7 +247,7 @@ test "MBR.Create.ShouldParseCHSValues" {
 }
 
 test "MBR.Create.ShouldHandleMaxValues" {
-    var buffer: [512]u8 = [_]u8{0} ** 512;
+    var buffer: [512]u8 = @splat(0);
     
     buffer[510] = 0x55;
     buffer[511] = 0xAA;

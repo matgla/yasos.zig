@@ -54,29 +54,79 @@ pub fn exit_if_emulated(code: u32) void {
     }
 }
 
-pub fn dump_stack_trace(log: anytype, address: usize) void {
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
+pub const StackWalker = struct {
+    fp: usize,
+    skip_until: ?usize,
 
-    while (stack.next()) |return_address| : (index += 1) {
+    pub fn init(first_address: usize) StackWalker {
+        return .{ .fp = @frameAddress(), .skip_until = if (first_address != 0) first_address else null };
+    }
+
+    pub fn next(self: *StackWalker) ?usize {
+        var address = self.step() orelse return null;
+        if (self.skip_until) |target| {
+            while (address != target) address = self.step() orelse return null;
+            self.skip_until = null;
+        }
+        return address;
+    }
+
+    fn step(self: *StackWalker) ?usize {
+        if (!is_valid_stack_ptr(self.fp)) return null;
+        const frame: [*]const usize = @ptrFromInt(self.fp);
+        const caller_fp = frame[0];
+        const return_address = frame[1];
+        if (return_address == 0) return null;
+        if (caller_fp <= self.fp) return null;
+        self.fp = caller_fp;
+        return return_address;
+    }
+};
+
+pub fn dump_stack_trace(log: anytype, address: usize) void {
+    var walker: StackWalker = .init(address);
+    var index: usize = 0;
+    while (walker.next()) |return_address| : (index += 1) {
         log.err("  {d: >3}: 0x{X:0>8}", .{ index, if (return_address > 0) return_address - 1 else return_address });
     }
 }
 
 pub const max_stack_depth: usize = 16;
 
+/// How far above the walker's own stack pointer a frame pointer may point.
+///
+/// The walk only ever climbs -- a caller's frame is above its callee's -- so
+/// the current stack pointer is an exact floor, and this bounds the other side
+/// without having to know where the stack is. Sixteen frames of kernel code
+/// occupy a fraction of it; the size is chosen to keep a wild pointer from
+/// being dereferenced far away rather than to accommodate real frames.
+const stack_window_bytes: usize = 8 * 1024;
+
+inline fn current_stack_pointer() usize {
+    return asm volatile ("mov %[out], sp"
+        : [out] "=r" (-> usize),
+    );
+}
+
+/// Is `addr` plausibly a frame pointer on the stack being walked?
+///
+/// Anchored to the live stack pointer rather than to named RAM ranges. The
+/// ranges this used to check were RP2350's SRAM and PSRAM, so on every other
+/// board -- QEMU's mps3-an524 included -- the first step failed and each panic
+/// printed its message followed by no trace at all, exactly when the trace is
+/// what is wanted.
 pub fn is_valid_stack_ptr(addr: usize) bool {
-    // SRAM: 0x20000000 - 0x2005FFFF, PSRAM: 0x11000000 - 0x117FFFFF
-    return (addr >= 0x11000000 and addr < 0x11800000) or
-        (addr >= 0x20000000 and addr < 0x20060000);
+    if (addr % @alignOf(usize) != 0) return false;
+    const stack_pointer = current_stack_pointer();
+    if (addr < stack_pointer) return false;
+    return addr - stack_pointer < stack_window_bytes;
 }
 
 pub fn get_stack_trace_depth(address: usize) usize {
+    var walker: StackWalker = .init(address);
     var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
     while (index < max_stack_depth) : (index += 1) {
-        if (!is_valid_stack_ptr(stack.fp)) break;
-        if (stack.next() == null) break;
+        if (walker.next() == null) break;
     }
     return index;
 }

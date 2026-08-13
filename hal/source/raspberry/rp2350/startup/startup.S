@@ -200,3 +200,30 @@ _start:
 _loop:
   wfi
   b _loop
+
+/* Core 1's entry, reached from the bootrom's launch trampoline once the FIFO
+ * handshake in source/cpu.zig `start_core` completes.
+ *
+ * NOT a second _start: .data, .bss, the constructors, the clocks, QMI, PSRAM
+ * and the UART are all already up, and redoing any of it would wipe state core
+ * 0 is using.
+ *
+ * The bootrom has already loaded MSP and VTOR from the handshake, so this core
+ * is on its own stack and sharing core 0's RAM vector table. MSPLIM is the one
+ * it does not set, and without it an overflow walks down into process RAM
+ * instead of faulting. crt_init_core1 covers the rest (FPU, EXTEXCLALL). */
+.global _start_core1
+.type _start_core1,%function
+.thumb_func
+_start_core1:
+  ldr r1, =__stack_bottom_core1__
+  msr msplim, r1
+  ldr r1, =crt_init_core1
+  blx r1
+  ldr r1, =kernel_secondary_core_entry
+  blx r1
+  /* kernel_secondary_core_entry never returns. If it somehow does, park rather
+   * than run off into whatever follows: this core has no caller to return to. */
+_loop_core1:
+  wfi
+  b _loop_core1

@@ -20,6 +20,7 @@
 
 .{
     .name = .mcu_rp2350,
+    .fingerprint = 0xd48f8981f103c832,
     .version = "0.0.0",
     .dependencies = .{
         .toolchains = .{

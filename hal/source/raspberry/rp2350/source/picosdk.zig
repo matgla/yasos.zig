@@ -13,10 +13,4 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub const picosdk = @cImport({
-    @cInclude("hardware/pio.h");
-    @cInclude("hardware/gpio.h");
-    @cInclude("hardware/uart.h");
-    @cInclude("hardware/clocks.h");
-    @cInclude("pico/time.h");
-});
+pub const picosdk = @import("picosdk_headers");

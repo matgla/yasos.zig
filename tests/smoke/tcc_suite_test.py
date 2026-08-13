@@ -22,6 +22,7 @@ from .timing import (
     elapsed_ms,
     attach_loader_timing,
     attach_compile_profile,
+    attach_kernel_profile,
     begin_case,
     end_case,
     record,
@@ -184,8 +185,9 @@ should_skip_gcc_test = _gcc_conftest.should_skip_gcc_test
 is_xfail_test = _gcc_conftest.is_xfail_test
 is_xfail_o1_test = _gcc_conftest.is_xfail_o1_test
 
-# Tests skipped only on the native embedded target due to resource exhaustion.
-# These run fine on a PC but OOM or overflow the process stack on bare-metal.
+# Tests skipped only on the native embedded target: they run fine on a PC but
+# hit a property of this hardware -- mostly resource exhaustion, plus the DCP's
+# lack of subnormal support at the bottom of the table.
 NATIVE_TARGET_SKIP_TESTS = {
     # compile/ tests — resource exhaustion on the embedded target
     "compile/20001226-1": "compile-time OOM: emits 'memory full'",
@@ -212,6 +214,23 @@ NATIVE_TARGET_SKIP_TESTS = {
     # 16384 macro-expanded cleanup blocks need ~60MB of compiler heap (host
     # measurement); the whole on-target process pool is ~7MB → genuine OOM.
     "115_cleanup_macro_unroll": "compile-time OOM: needs ~60MB heap, target pool is 7MB",
+    # ---- RP2350 DCP: no subnormal support in the compare ----
+    # Doubles are compared with the DCP's WXUP/WYUP/ADD0/RCMP sequence (exactly
+    # what pico-sdk's dcp_dcmp_m emits), and WXUP flushes a subnormal to zero.
+    # Measured on the device: a double with bits 0x0000000000000FFE compares
+    # EQUAL to 0.0.  Every resulting error is a spurious "equal", since ordering
+    # against a normal value still comes out right.
+    #
+    # This is a property of the silicon, not of tcc -- gcc built against
+    # pico-sdk's double_aeabi_dcp.S behaves the same way, and the datasheet
+    # documents no subnormal handling.  Correcting it means either ~10 extra
+    # instructions on every inline double compare or turning all of them into
+    # calls, which is a real cost to pay for two conformance vectors.  The
+    # sibling defect that WAS worth fixing -- the DCP flushing subnormal results
+    # in double->float -- is handled in software; see
+    # libs/tinycc/lib/fp/arm/rp2350/d2f_subnormal.c.
+    "20190901-1": "RP2350 DCP compare flushes subnormals: a subnormal double reads == 0.0",
+    "ieee/cdivchkd": "RP2350 DCP compare flushes subnormals; vectors are full of subnormal doubles",
 }
 
 IGNORE_NATIVE_TARGET_SKIP_TESTS = os.environ.get("YASOS_SMOKE_RERUN_FAILED", "").strip().lower() in {
@@ -322,12 +341,18 @@ COMPILE_TIMEOUT_TESTS = {
     # ir_tests / tests2
     "mibench_rijndael.c": 60,
     "95_bitfields.c": 30,
-    # The two densest fuzz cases: ~2x the compile work of the next-slowest
+    # The densest fuzz cases: ~2x the compile work of the next-slowest
     # ir_test at -O2, which puts them just past the 5 s default on the board.
     # Both compiles finish and exit 0 -- the harness only stopped listening
     # first, which surfaces as "Prompt not found" and reads like a miscompile.
     "219_fuzz_strd_spill_dryrun_offset.c": 30,
     "337_fuzz_genopif_double_round.c": 30,
+    # Measured 5046 ms at -O2 on the 532 MHz rig -- essentially exactly the 5 s
+    # default, so it passes on hardware (where the clock scaling widens the
+    # window to 5.8 s) and trips under QEMU, whose defconfig carries no
+    # cpu_clock_frequency_mhz and so gets the unscaled 5 s while one QEMU per
+    # xdist worker oversubscribes the host.
+    "252_fuzz_knownbits_imm_subword_sext.c": 30,
 }
 
 
@@ -2220,6 +2245,14 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
                 assert expected_line in actual_line, f"expected '{expected_line}' in '{filtered_lines}'"
         assert actual_exit_code == expected_exit_code, f"expected exit code {expected_exit_code}, got {actual_exit_code}"
     finally:
+        # Before cleanup, so the `rm` below -- harness work, and an expensive
+        # syscall on FAT -- is not charged to the test.
+        if timing is not None:
+            attach_kernel_profile(
+                timing,
+                getattr(session, "log_path", ""),
+                {"compile": COMPILE_MARKER_PREFIX, "execute": EXIT_MARKER_PREFIX},
+            )
         # Skip cleanup when the target is being reset (e.g. we aborted early on a
         # runaway program or it crashed): the foreground job is still running, so
         # the rm command would never echo back and the reset wipes /tmp anyway.

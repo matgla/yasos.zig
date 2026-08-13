@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) !void {
 
     const boardDep = b.dependency("yasos_hal", .{
         .board = board,
-        .root_file = @as([]const u8, b.pathJoin(&.{ b.build_root.path.?, "hello_uart.zig" })),
+        .root_file = b.path("hello_uart.zig"),
         .optimize = optimize,
         .name = @as([]const u8, "hello_uart"),
         .cmake = cmake,

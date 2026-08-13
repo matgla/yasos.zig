@@ -22,4 +22,6 @@ comptime {
     _ = @import("procfs.zig");
     _ = @import("uartstat_file.zig");
     _ = @import("xipstat_file.zig");
+    _ = @import("cpus_file.zig");
+    _ = @import("mempeak_file.zig");
 }

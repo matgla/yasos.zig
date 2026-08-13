@@ -22,6 +22,7 @@ from smoke.timing import (
     LOADER_TIMING_RE,
     add,
     attach_compile_profile,
+    attach_kernel_profile,
     attach_loader_timing,
     begin_case,
     end_case,
@@ -351,3 +352,107 @@ def test_report_warns_when_a_component_outlasts_its_window(tmp_path, monkeypatch
     text = "\n".join(reporter.lines)
     assert "WARNING" in text
     assert "do not trust the split" in text
+
+
+# ---------------------------------------------------------------------------
+# OS cost of the whole suite (kernel-measured, every process)
+# ---------------------------------------------------------------------------
+
+_TRANSCRIPT = """\
+$ tcc -bench a.c -o /tmp/a; compile_status=$?; echo __COMPILE_STATUS__:$compile_status
+[ERR][tprof] sysprof pid=3 calls=169 us=8750 handler_us=8726 load_us=4053 read=26985/864 write=1460/1781 dropped=0 top=16:9/2633,15:9/2488,20:16/1781
+[ERR][tprof] openprof pid=3 calls=9 misses=0 resolve_us=109 lookup_us=991 attach_us=127 rf_hdrs=136 rf_reads=140 rf_allocs=2 rf_hdr_us=289 kheap=66/111us mount_us=60 fsget_us=993 walk_us=482 node_us=71
+__COMPILE_STATUS__:0
+$ /tmp/a; echo __EXIT_STATUS__:$?
+[ERR][tprof] sysprof pid=4 calls=10 us=500 handler_us=480 load_us=1200 read=0/0 write=37/29 dropped=0 top=20:1/29,34:2/52,0:0/0
+__EXIT_STATUS__:0
+"""
+
+_MARKERS = {"compile": "__COMPILE_STATUS__:", "execute": "__EXIT_STATUS__:"}
+
+
+def _case_with_kernel_profile(tmp_path, test_id="00_assignment.c"):
+    log_path = tmp_path / f"{test_id}.txt"
+    log_path.write_text(_TRANSCRIPT)
+    case = CaseTiming(test_id=test_id, compile_ms=36.0, execute_ms=2.0)
+    attach_kernel_profile(case, str(log_path), _MARKERS)
+    return case
+
+
+def test_kernel_profile_covers_both_windows(tmp_path):
+    """tcc's own dump stops at tcc. The kernel's per-process lines are the only
+    account of what the *executed* binaries cost the OS."""
+    case = _case_with_kernel_profile(tmp_path)
+
+    assert case.kernel_compile.us == 8750
+    assert case.kernel_execute.us == 500
+    assert case.kernel_os_ms == 9.25
+
+
+def test_report_totals_the_os_cost_over_the_suite(tmp_path, monkeypatch):
+    reporter, report = _report(
+        tmp_path,
+        monkeypatch,
+        _case_with_kernel_profile(tmp_path, "00_assignment.c"),
+        _case_with_kernel_profile(tmp_path, "01_comment.c"),
+    )
+
+    kernel = report["summary"]["kernel"]
+    assert kernel["compile"]["ms"] == 17.5
+    assert kernel["execute"]["ms"] == 1.0
+    assert kernel["total"]["ms"] == 18.5
+    assert kernel["total"]["processes"] == 4
+    assert kernel["total"]["syscalls"]["close"]["calls"] == 18
+    assert kernel["total"]["open"]["calls"] == 18
+
+    text = "\n".join(reporter.lines)
+    assert "OS cost of the whole suite" in text
+    # The share of on-target wall is the headline the question asks for.
+    assert "OS total" in text
+    assert "after tcc's dump" in text
+    assert "syscalls, running" in text
+    # Loading is added to the syscall time, not folded into it: it runs in
+    # execve, and the execute window's loading routinely exceeds its syscalls.
+    assert "not part of the syscall time above" in text
+
+
+def test_report_says_the_os_cost_is_missing_rather_than_zero(tmp_path, monkeypatch):
+    reporter, _ = _report(
+        tmp_path,
+        monkeypatch,
+        CaseTiming(test_id="ir_tests/a.c", compile_ms=1000.0, execute_ms=10.0),
+    )
+    text = "\n".join(reporter.lines)
+    assert "OS cost: n/a" in text
+    assert "PERF_PROFILING" in text
+
+
+def test_os_total_adds_tccs_own_dump_to_the_kernels_remainder(tmp_path, monkeypatch):
+    """The two halves are disjoint: tcc's dump resets the counters, so the
+    kernel's exit line covers only what came after it. Reporting either alone
+    understates the OS cost of the suite."""
+    case = _case_with_kernel_profile(tmp_path)          # 8.75ms + 0.5ms kernel-side
+    attach_compile_profile(case, _PERF_LINES)           # 123.46ms tcc-side
+    reporter, _ = _report(tmp_path, monkeypatch, case)
+    text = " ".join(" ".join(line.split()) for line in reporter.lines)
+
+    # 123.456 + 9.25 syscalls + 5.253 loading (4053us tcc + 1200us binary)
+    assert "OS total 0.14s" in text
+    assert "syscalls, compiling 0.12s" in text
+    assert "after tcc's dump 0.01s" in text
+    assert "image loading 0.01s" in text
+
+
+def test_a_wrapped_cycle_counter_is_not_printed_as_a_finding(tmp_path, monkeypatch):
+    """DWT_CYCCNT wraps in single-digit seconds; the compact dump's "other"
+    bucket is a subtraction and inherits any wrap that slipped the kernel's own
+    filter. Summed over a suite it printed as 8589.93s -- larger than the run."""
+    case = CaseTiming(test_id="ir_tests/a.c", compile_ms=1000.0, execute_ms=10.0)
+    attach_compile_profile(
+        case, _PERF_LINES + ["# perf: top other=2/4294967313"]
+    )
+    reporter, _ = _report(tmp_path, monkeypatch, case)
+    text = "\n".join(reporter.lines)
+
+    assert "8589" not in text
+    assert "wrapped cycle counter" in text

@@ -33,21 +33,55 @@ pub const process = struct {
     pub const ProcFs = @import("process/procfs.zig").ProcFs;
     pub const uart_stats = @import("process/uartstat_file.zig");
     pub const xip_stats = @import("process/xipstat_file.zig");
-    pub const block_context_switch = @import("interrupts/system_call.zig").block_context_switch;
-    pub const unblock_context_switch = @import("interrupts/system_call.zig").unblock_context_switch;
     pub const create_default_resource_limits = @import("process.zig").create_default_resource_limits;
 };
 
 pub const sync = struct {
-    pub const Mutex = @import("interrupts/kernel_mutex.zig").KernelMutex;
+    /// Userspace-facing counting semaphore -- a syscall wrapper, not a kernel
+    /// primitive. `sync/` below is the kernel side.
     pub const Semaphore = @import("semaphore.zig").Semaphore;
+
+    const primitives = @import("sync/sync.zig");
+    pub const Atomic = primitives.Atomic;
+    pub const SpinLock = primitives.SpinLock;
+    pub const IrqState = primitives.IrqState;
+    pub const Isolated = primitives.Isolated;
+    pub const reservation_granule_bytes = primitives.reservation_granule_bytes;
+    pub const placement = primitives.placement;
+    pub const refcount = primitives.refcount;
+    pub const Seq64 = primitives.Seq64;
+    pub const locks = primitives.locks;
+    pub const RankedMutex = primitives.RankedMutex;
+    pub const Rank = primitives.Rank;
+    pub const Ranked = primitives.Ranked;
+    pub const RecursiveSpinLock = primitives.RecursiveSpinLock;
+    pub const PerCpu = primitives.PerCpu;
+    pub const percpu = primitives.percpu;
+    pub const preempt = primitives.preempt;
+    pub const init = primitives.init;
 };
 
 pub const spawn = @import("spawn.zig");
+
+/// Secondary-core bring-up. Forced into the build rather than merely exposed:
+/// `kernel_secondary_core_entry` is reached only from the board's core-N reset
+/// assembly, so nothing in Zig references it and it would otherwise not be
+/// emitted -- the same reason `source/arch/*/arch.zig` force their irq_handlers.
+pub const smp = @import("smp.zig");
+comptime {
+    _ = @import("smp.zig");
+}
+
+pub const uaccess = @import("uaccess.zig");
 pub const fs = @import("fs/fs.zig");
 pub const dynamic_loader = @import("modules.zig");
 
 pub const irq = @import("interrupts/interrupts.zig");
+
+/// Syscall/IO profiling counters. Exposed here so filesystem code, which lives
+/// outside the kernel directory, can attribute its own work; every entry point
+/// compiles to nothing unless CONFIG_INSTRUMENTATION_PERF_PROFILING is on.
+pub const perf = @import("interrupts/perf_profile.zig");
 
 pub const driver = @import("drivers/drivers.zig");
 pub const benchmark = @import("benchmark.zig");

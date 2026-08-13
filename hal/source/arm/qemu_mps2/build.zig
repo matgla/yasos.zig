@@ -79,24 +79,11 @@ pub fn build(b: *std.Build) !void {
 
     _ = try toolchain.decorateModuleWithArmToolchain(b, hal, target);
 
-    // Startup vector table + C runtime init, then the embedded romfs blob.
-    // The romfs image lives at the repository root; expose it to the assembler's
-    // include search path so `.incbin "rootfs.img"` resolves regardless of the
-    // dependency package layout. `zig build` runs with cwd == repo root.
-    const repo_root = try std.fs.cwd().realpathAlloc(b.allocator, ".");
+    const repo_root = try std.Io.Dir.cwd().realPathFileAlloc(b.graph.io, ".", b.allocator);
     hal.addAssemblyFile(b.path("startup/startup.S"));
 
-    // Embed the prebuilt romfs. The blob is pulled in by `.incbin "rootfs.img"`,
-    // resolved via the repo-root include path below. Zig cannot see `.incbin`
-    // dependencies, so it would cache the assembled object by the (static) .S
-    // hash and silently keep a STALE romfs after `./build_rootfs.sh` regenerates
-    // rootfs.img — the device would run an old userspace while you debug the new
-    // one. To force a re-embed, generate the romfs .S with a hash of the current
-    // rootfs.img baked into a comment: the generated source changes whenever the
-    // image does, busting zig's assembly cache (which then re-runs `.incbin` and
-    // reads the fresh image). See startup/rootfs.S for the hand-written original.
     const romfs_img_path = try std.fs.path.join(b.allocator, &.{ repo_root, "rootfs.img" });
-    const romfs_bytes = std.fs.cwd().readFileAlloc(b.allocator, romfs_img_path, 256 * 1024 * 1024) catch &[_]u8{};
+    const romfs_bytes = std.Io.Dir.cwd().readFileAlloc(b.graph.io, romfs_img_path, b.allocator, .limited(256 * 1024 * 1024)) catch &[_]u8{};
     const romfs_hash = std.hash.Wyhash.hash(0, romfs_bytes);
     const romfs_wf = b.addWriteFiles();
     const rootfs_s = romfs_wf.add("rootfs.S", b.fmt(

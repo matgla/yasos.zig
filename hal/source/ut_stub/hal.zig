@@ -13,14 +13,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub const AtomicStub = @import("atomic.zig").AtomicStub;
 pub const IrqStub = @import("irq.zig").IrqStub;
 pub const MemoryStub = @import("memory.zig").MemoryStub;
 pub const TimeStub = @import("time.zig").TimeStub;
 pub const CpuStub = @import("cpu.zig").CpuStub;
 pub const MmcStub = @import("mmc.zig").MmcStub;
 
-pub const atomic = @import("hal_interface").atomic.AtomicInterface(AtomicStub);
 pub const irq = @import("hal_interface").irq.Irq(IrqStub).create();
 
 pub const memory = @import("hal_interface").memory.Memory(MemoryStub).create();

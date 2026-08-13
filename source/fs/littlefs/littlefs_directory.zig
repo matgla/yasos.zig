@@ -125,7 +125,7 @@ pub const LittleFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, str
         }
 
         // Create appropriate node based on type
-        const node_path = try self._allocator.dupeZ(u8, full_path);
+        const node_path = try self._allocator.dupeSentinel(u8, full_path, 0);
         if (info.type == littlefs.LFS_TYPE_DIR) {
             node.* = try create_node(self._allocator, node_path, self._lfs);
         } else {

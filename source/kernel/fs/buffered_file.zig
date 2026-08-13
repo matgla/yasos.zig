@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const c = @import("libc_imports").c;
 
@@ -35,7 +36,7 @@ pub fn BufferedFile(comptime BufferSize: usize) type {
                 const file = BufferedFileInst.init(.{
                     .base = kernel.fs.ReadOnlyFile.init(.{}),
                     ._position = 0,
-                    ._buffer = .{0} ** BufferSize,
+                    ._buffer = @as([BufferSize]u8, @splat(0)),
                     ._name = filename,
                     ._end = 0,
                 });
@@ -124,7 +125,7 @@ const BufferedFileForTests = interface.DeriveFromBase(BufferedFile(128), struct 
     }
 
     pub fn sync(self: *Self) i32 {
-        const buf = std.fmt.bufPrint(&interface.base(self)._buffer, "Hello buffered file", .{}) catch return -1;
+        const buf = vfmt.print(&interface.base(self)._buffer, "Hello buffered file", .{});
         interface.base(self)._end = buf.len;
         return 0;
     }

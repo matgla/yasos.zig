@@ -20,9 +20,6 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("source/sys/include/syscall.h");
-});
 
 const hal = @import("hal");
 

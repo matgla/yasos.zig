@@ -23,22 +23,25 @@ const IFile = kernel.fs.IFile;
 
 const interface = @import("interface");
 
+var io_backend: std.Io.Threaded = .init_single_threaded;
+
 pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct {
     const Self = @This();
     base: kernel.fs.ReadOnlyFile,
-    file: ?std.fs.File,
+    file: ?std.Io.File,
     path: []const u8,
     mapped_memory: ?usize,
+    offset: u64,
 
     pub fn create(path: []const u8, mapped_address: ?usize) !RomfsDeviceStubFile {
-        const cwd = std.fs.cwd();
-        const file = try cwd.openFile(path, .{ .mode = .read_only });
+        const file = try std.Io.Dir.cwd().openFile(io_backend.io(), path, .{ .mode = .read_only });
 
         return RomfsDeviceStubFile.init(.{
             .base = kernel.fs.ReadOnlyFile.init(.{}),
             .file = file,
             .path = path,
             .mapped_memory = mapped_address,
+            .offset = 0,
         });
     }
 
@@ -48,35 +51,34 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
-        return @intCast(self.file.?.read(buffer) catch return -1);
+        const n = self.file.?.readPositionalAll(io_backend.io(), buffer, self.offset) catch return -1;
+        self.offset += n;
+        return @intCast(n);
     }
 
     pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
-        switch (whence) {
-            c.SEEK_SET => {
-                self.file.?.seekTo(@intCast(offset)) catch return -1;
-            },
-            c.SEEK_END => {
-                self.file.?.seekFromEnd(@intCast(offset)) catch return -1;
-            },
-            c.SEEK_CUR => {
-                self.file.?.seekBy(@intCast(offset)) catch return -1;
-            },
+        const base: i64 = switch (whence) {
+            c.SEEK_SET => 0,
+            c.SEEK_END => @intCast(self.file.?.length(io_backend.io()) catch return -1),
+            c.SEEK_CUR => @intCast(self.offset),
             else => return -1,
-        }
+        };
+        const target = base + offset;
+        if (target < 0) return -1;
+        self.offset = @intCast(target);
         return offset;
     }
 
     pub fn close(self: *Self) void {
-        self.file.?.close();
+        self.file.?.close(io_backend.io());
     }
 
     pub fn tell(self: *Self) i64 {
-        return @intCast(self.file.?.getPos() catch return 0);
+        return @intCast(self.offset);
     }
 
     pub fn size(self: *const Self) u64 {
-        return @intCast(self.file.?.getEndPos() catch return 0);
+        return self.file.?.length(io_backend.io()) catch return 0;
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -123,7 +125,7 @@ pub const RomfsDeviceStubFile = interface.DeriveFromBase(kernel.fs.ReadOnlyFile,
     }
 
     pub fn delete(self: *Self) void {
-        _ = self.file.?.close();
+        self.file.?.close(io_backend.io());
     }
 
     pub fn load(self: *Self) !void {

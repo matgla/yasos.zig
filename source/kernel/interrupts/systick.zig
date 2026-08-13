@@ -24,38 +24,96 @@ const hal = @import("hal");
 const arch = @import("arch");
 
 const process_manager = @import("../process_manager.zig");
+const smp = @import("../smp.zig");
 const xip_stats = @import("../process/xipstat_file.zig");
+const kernel_sync = @import("../sync/sync.zig");
 
-var tick_counter: u64 = 0;
-var last_time: u64 = 0;
+/// Milliseconds since boot. Advanced by exactly one core (`timekeeper_core`),
+/// because SysTick is per-core hardware and a shared counter incremented by both
+/// would run at twice wall-clock speed. Published through a seqlock, because it
+/// is 64 bits on a machine with no `LDREXD` and a plain two-halves read can
+/// catch the increment mid-carry.
+var ticks: kernel_sync.Seq64 = .init(0);
+
+/// The core that owns wall-clock time. Every other core's SysTick still fires
+/// and still drives *its own* preemption, but does not touch the clock.
+const timekeeper_core: usize = 0;
+
+/// Tick at which this core last forced a reschedule. Per-CPU: each core
+/// preempts on its own schedule, and a shared value would let one core's
+/// timeslice reset the other's.
+var last_preempt: kernel_sync.PerCpu(u64) = .init(0);
 
 pub export fn irq_systick() void {
     const state = arch.sync.save_and_disable_interrupts();
     defer arch.sync.restore_interrupts(state);
 
-    // Drain the XIP cache counters here because they saturate rather than wrap,
-    // so the only safe reading interval is one shorter than the time it takes
-    // to fill them -- seconds, against this tick's millisecond. Costs a null
-    // check on machines that publish no sampler.
-    xip_stats.accumulate();
+    // The XIP cache counters saturate rather than wrap, so they must be drained
+    // faster than they fill -- seconds, against this tick's millisecond.
+    //
+    // Timekeeper-only: `accumulate` is a seqlock writer with no writer-side
+    // exclusion, so two cores would both leave `sequence` even mid-write and
+    // lose increments in the non-atomic `+%=`. Nothing is lost by sampling from
+    // one core; the XIP cache is chip-wide and already counts both cores.
+    if (kernel_sync.percpu.current_core() == timekeeper_core) {
+        xip_stats.accumulate();
+    }
 
-    const tick_counter_ptr: *volatile u64 = &tick_counter;
-    tick_counter_ptr.* += 1;
-    if (tick_counter_ptr.* - last_time >= 100) { //config.process.context_switch_period) {
+    // Per-core tick count: what makes a core doing nothing else observably
+    // alive, since an online flag only says it reached kernel code once.
+    smp.note_tick();
+
+    // Only the timekeeper advances the clock. The read-modify-write is safe
+    // without a lock precisely because of that: one writer, and it is this
+    // handler, which cannot preempt itself.
+    const now = blk: {
+        if (kernel_sync.percpu.current_core() == timekeeper_core) {
+            const next = ticks.load() +% 1;
+            ticks.store(next);
+            break :blk next;
+        }
+        break :blk ticks.load();
+    };
+
+    // ...and only a core that has taken its first switch may pend PendSV: a
+    // secondary core enables this timer in `init_secondary()` while it is still
+    // on MSP, and a switch there would store its context through an unset PSP.
+    if (!smp.current_core_schedules()) return;
+
+    // Letting an idle core look for work on every tick, rather than once per
+    // 100 ms period, is the best bug-finding knob the kernel has -- it
+    // multiplies how often processes migrate between cores. It is off because it
+    // trips one unfixed bug (docs/smp_plan.md): a vfork child's `stack_position`
+    // is a raw PSP, not a software frame, so it is only enterable by the
+    // `process_vfork_child` hand-off, and PendSV scheduling it branches into
+    // user code from handler mode. Turn it on when hunting an SMP bug; on the
+    // rp2350 the doorbell already wakes an idle core, so it costs QEMU latency
+    // only.
+    //
+    //   if (smp.is_core_idle(kernel_sync.percpu.current_core())) {
+    //       hal.irq.trigger(.pendsv);
+    //       return;
+    //   }
+
+    // Preemption is per-core: every core forces its own reschedule on its own
+    // timeslice, whether or not it owns the clock.
+    const last = last_preempt.current();
+    if (now -% last.* >= 100) { //config.process.context_switch_period) {
         hal.irq.trigger(.pendsv);
-        last_time = tick_counter_ptr.*;
+        last.* = now;
     }
 }
 
-pub fn get_system_ticks() *const volatile u64 {
-    const ptr: *const volatile u64 = &tick_counter;
-    return ptr;
+/// Milliseconds since boot. Returns a value, not a pointer: a raw dereference is
+/// exactly the unretryable torn read the seqlock exists to prevent.
+pub fn get_system_ticks() u64 {
+    return ticks.load();
 }
 
 // Test helpers for resetting state
 fn reset_systick_state() void {
-    tick_counter = 0;
-    last_time = 0;
+    ticks = .init(0);
+    last_preempt.current().* = 0;
 }
 
 // test "Systick.GetSystemTicks.ShouldReturnInitialZero" {

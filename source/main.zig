@@ -82,7 +82,10 @@ fn get_log_level() std.log.Level {
         return .info;
     }
     if (config.instrumentation.log_warning) {
-        return .warning;
+        // `.warn`, not `.warning`: std.log.Level spells it the short way, so
+        // this branch failed to compile and CONFIG_INSTRUMENTATION_LOG_WARNING
+        // could never be turned on -- the one log level nothing had selected.
+        return .warn;
     }
     if (config.instrumentation.log_error) {
         return .err;
@@ -252,6 +255,7 @@ fn initialize_board() void {
                 .framing_errors = stats.framing_errors,
                 .max_overrun_gap_us = stats.max_overrun_gap_us,
                 .max_late_gap_us = stats.max_late_gap_us,
+                .drain_skips = stats.drain_skips,
             };
         }
     }.get);
@@ -355,8 +359,12 @@ fn mount_fatdisk(allocator: std.mem.Allocator) !void {
     defer fnode.delete();
     var maybe_file = fnode.as_file();
     if (maybe_file) |*file| {
+        // `as_file()` hands back a borrowed copy of the node's interface -- same
+        // refcount, no acquire -- and `FatFs.init` deep-clones it. Releasing
+        // this copy as well as `fnode.delete()` double-releases the node's
+        // single reference, and the second decrement lands on freed memory that
+        // is by then a newlib free-list `next` pointer.
         var fatdisk = try allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*));
-        file.interface.delete();
         // The window only holds a FAT image when the host pre-loaded one into
         // the RAM backing file (memory-backend-file launch, see
         // scripts/qemu_fatdisk_run.py). A plain `-kernel` launch
@@ -380,7 +388,7 @@ fn mount_fatdisk(allocator: std.mem.Allocator) !void {
 }
 
 fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) !void {
-    var buffer: [1024]u8 = [_]u8{0x00} ** 1024;
+    var buffer: [1024]u8 = @splat(0x00);
     _ = mmcfile.interface.read(buffer[0..]);
     const mbr = kernel.fs.MBR.create(buffer[0..]);
     if (mbr.is_valid()) {
@@ -443,13 +451,13 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     var maybe_mmcnode: ?kernel.fs.Node = null;
     var maybe_mmcdriver: ?kernel.driver.IDriver = null;
     if (@hasDecl(board, "mmc")) {
-        inline for (@typeInfo(board.mmc).@"struct".decls) |m| {
+        inline for (@typeInfo(board.mmc).@"struct".decl_names) |m| {
             comptime var i: i32 = 0;
             const name = std.fmt.comptimePrint("mmc{d}", .{i});
 
             maybe_mmcdriver = try (try kernel.driver.MmcDriver.InstanceType.create(allocator, &@field(board.mmc, name), name)).interface.new(allocator);
             driverfs.data().append(maybe_mmcdriver.?, name) catch {};
-            kernel.log.info("adding mmc driver: {s}", .{m.name});
+            kernel.log.info("adding mmc driver: {s}", .{m});
             i = i + 1;
             maybe_mmcnode = try maybe_mmcdriver.?.interface.node();
         }
@@ -478,8 +486,10 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
         if (maybe_mmcpart0) |*mmcnode| {
             var maybe_file = mmcnode.as_file();
             if (maybe_file) |*file| {
+                // Same borrowed-copy rule as mount_fatdisk: `mmcnode.delete()`
+                // below owns the single reference, so releasing it here too
+                // would decrement a freed refcount.
                 const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*)) catch null;
-                file.interface.delete();
                 if (maybe_rootfs) |rootfs| {
                     if (mount_filesystem(rootfs, "/root")) |_| {
                         root_mounted = true;
@@ -600,7 +610,17 @@ pub export fn main() void {
     {
         const allocator = kernel_allocator.allocator();
         initialize_board();
+        // After the board, because the PSRAM window's size is only known once
+        // external memory has been probed, and that is what the placement
+        // assertion checks against.
+        kernel.sync.init();
         splashscreen();
+
+        // Release the other cores: after the console exists, so a failed
+        // bring-up can say so, and before anything is scheduled, so the
+        // cross-core self-test runs against a system nothing else is mutating.
+        // A board that cannot start its secondary keeps booting on core 0.
+        kernel.smp.start_secondary_cores();
 
         // Lock the kernel heap and stack away from unprivileged user processes.
         // Must run before any process is scheduled.
@@ -631,6 +651,13 @@ pub export fn main() void {
         hal.external_memory.enable_fast_reads();
 
         // we need to get real return address to get back from user mode successfully
+        //
+        // This call returns twice over: once if creating or scheduling the root
+        // process fails, and once at shutdown, when `switch_to_main_task` pops
+        // the frame `switch_to_the_first_task` left on MSP a whole system
+        // lifetime earlier. The second return needs r4-r11 back, because the
+        // compiler parks `root_process`'s value in r4 across the call -- see
+        // `switch_to_the_first_task` in source/arch/armv8-m/context_switch.S.
         @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, kernel.process.process_manager.instance.get_default_stack_size() }) catch |err| {
             kernel.log.err("Cannot start root process: {s}", .{@errorName(err)});
         };

@@ -19,6 +19,7 @@
 //
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const c = @import("libc_imports").c;
 
@@ -29,6 +30,7 @@ const MountPoints = @import("mount_points.zig").MountPoints;
 const MountPoint = @import("mount_points.zig").MountPoint;
 
 const kernel = @import("../kernel.zig");
+const perf = @import("../interrupts/perf_profile.zig");
 
 const interface = @import("interface");
 
@@ -97,8 +99,12 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     fn raw_get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
+        const t_mount = if (perf.enabled) perf.read_cycles() else 0;
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        const t_fsget = if (perf.enabled) perf.read_cycles() else 0;
+        if (perf.enabled) perf.vfs_mount(t_fsget -% t_mount);
         if (maybe_node) |*node| {
+            defer if (perf.enabled) perf.vfs_fsget(perf.read_cycles() -% t_fsget);
             return try node.point.filesystem.interface.get(node.left);
         }
         return kernel.errno.ErrnoSet.NoEntry;
@@ -207,7 +213,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
                     // Absolute target replaces from root; relative target resolves
                     // against the link's parent directory (cur[0..comp_start]).
                     const base = if (target.len > 0 and target[0] == '/') "" else cur[0..comp_start];
-                    const joined = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ base, target, remainder });
+                    const joined = try vfmt.allocPrint(allocator, "{s}{s}{s}", .{ base, target, remainder });
                     defer allocator.free(joined);
                     const normalized = try std.fs.path.resolve(allocator, &.{joined});
                     allocator.free(cur);

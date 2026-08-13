@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) !void {
     // The romfs image lives at the repository root; expose it to the assembler's
     // include search path so `.incbin "rootfs.img"` resolves regardless of the
     // dependency package layout. `zig build` runs with cwd == repo root.
-    const repo_root = try std.fs.cwd().realpathAlloc(b.allocator, ".");
+    const repo_root = try std.Io.Dir.cwd().realPathFileAlloc(b.graph.io, ".", b.allocator);
     hal.addAssemblyFile(b.path("startup/startup.S"));
 
     // Embed the prebuilt romfs. The blob is pulled in by `.incbin "rootfs.img"`,
@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) !void {
     // image does, busting zig's assembly cache (which then re-runs `.incbin` and
     // reads the fresh image). See startup/rootfs.S for the hand-written original.
     const romfs_img_path = try std.fs.path.join(b.allocator, &.{ repo_root, "rootfs.img" });
-    const romfs_bytes = std.fs.cwd().readFileAlloc(b.allocator, romfs_img_path, 256 * 1024 * 1024) catch &[_]u8{};
+    const romfs_bytes = std.Io.Dir.cwd().readFileAlloc(b.graph.io, romfs_img_path, b.allocator, .limited(256 * 1024 * 1024)) catch &[_]u8{};
     const romfs_hash = std.hash.Wyhash.hash(0, romfs_bytes);
     const romfs_wf = b.addWriteFiles();
     const rootfs_s = romfs_wf.add("rootfs.S", b.fmt(

@@ -17,6 +17,7 @@
 // It keeps track of loaded modules and their addresses, for further deallocation when died.
 
 const std = @import("std");
+const vfmt = @import("vfmt.zig");
 const hal = @import("hal");
 const config = @import("config");
 
@@ -38,6 +39,14 @@ var kernel_allocator: std.mem.Allocator = undefined;
 // iteration + per-entry ioctl), which the loader phase timing showed dominates
 // load time (~1-1.7 ms per imported lib, vs ~0.1 ms relocating its GOT).
 var resolver_cache: std.StringHashMap(*const anyopaque) = undefined;
+
+/// Serialises the dynamic loader: rank 8, a sleeping mutex, held across a whole
+/// load rather than just the tables. `Loader.get_shared_data` is check-then-act
+/// across a hash-map lookup and an insert, so the lock has to span
+/// miss -> create -> insert, and the create *is* the load. It sleeps because a
+/// load is milliseconds of card I/O, and sits outside `mount`/`fs`/`dev`
+/// because it reads the executable through the VFS.
+pub var loader_lock: kernel.sync.RankedMutex(.loader) = .{};
 
 const ModuleContext = struct {
     name: []const u8,
@@ -266,6 +275,8 @@ pub fn deinit() void {
 }
 
 pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Executable {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     log.debug("load_executable: pid={d} path={s}", .{ pid, path });
     // Start the clock at the path lookup, not at the relocation. For an image
     // the filesystem cannot memory-map (anything outside the XIP romfs -- /tmp,
@@ -306,7 +317,7 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
             };
             last_executable_load_us = hal.time.get_time_us() - load_start_us;
             log_loader_timing("executable", path, pid, load_start_us);
-            release_executable(pid);
+            release_executable_locked(pid);
             entry.executable = executable;
             modules_list.put(pid, entry) catch |err| return err;
             const exec_ptr: *yasld.Executable = &modules_list.getPtr(pid).?.executable.?;
@@ -320,6 +331,8 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
 }
 
 pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Module {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     // Same window as load_executable: from the lookup, not from the relocation.
     const load_start_us = hal.time.get_time_us();
     var node = try fs.get_ivfs().interface.get(path);
@@ -365,6 +378,16 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
 }
 
 pub fn release_executable(pid: c.pid_t) void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    release_executable_locked(pid);
+}
+
+/// `release_executable` with `loader_lock` already held. Split out because
+/// `load_executable` drops the previous image before installing the new one,
+/// and `RankedMutex` is not recursive.
+fn release_executable_locked(pid: c.pid_t) void {
+    loader_lock.assert_held();
     // Kernel-heap accounting around the release: a climbing kernel_used or
     // alloc_count across the (no-reboot) suite is the signature of the leak that
     // ends in tcc "memory full" on a tiny input. It used to print at info, which
@@ -399,7 +422,7 @@ pub fn release_executable(pid: c.pid_t) void {
 }
 
 fn append_section(buffer: []u8, name: []const u8, section: []const u8, address: usize, size: usize) usize {
-    const written = std.fmt.bufPrint(buffer, "{s} {s} 0x{x} 0x{x}\n", .{ name, section, address, size }) catch return 0;
+    const written = vfmt.print(buffer, "{s} {s} 0x{x} 0x{x}\n", .{ name, section, address, size });
     return written.len;
 }
 
@@ -466,7 +489,23 @@ pub fn format_maps(pid: c.pid_t, buffer: []u8) usize {
     return written;
 }
 
+/// Is `library` a handle this process actually holds? dlclose/dlsym receive the
+/// handle straight from userspace; without this, `release_shared_library` would
+/// unlink an attacker-chosen address, which is an arbitrary write. The
+/// per-process list is a handful of entries, so a linear scan is enough.
+pub fn owns_shared_library(pid: c.pid_t, library: *const yasld.Module) bool {
+    const list = libraries_list.getPtr(pid) orelse return false;
+    var maybe_node = list.first;
+    while (maybe_node) |node| : (maybe_node = node.next) {
+        const module: *yasld.Module = @alignCast(@fieldParentPtr("list_node", node));
+        if (module == library) return true;
+    }
+    return false;
+}
+
 pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     const maybe_list = libraries_list.getPtr(pid);
     if (maybe_list) |list| {
         list.remove(&library.list_node);
@@ -479,7 +518,9 @@ pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
     }
 }
 
-pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
+/// Look up a pid's executable. Caller must hold `loader_lock`; split out so the
+/// entry points that already hold it can reuse the lookup.
+fn executable_for_pid_locked(pid: c.pid_t) ?*yasld.Executable {
     if (!modules_list.contains(pid)) {
         return null;
     }
@@ -487,6 +528,18 @@ pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
         return exec;
     }
     return null;
+}
+
+/// The executable loaded for `pid`, or null. Takes `loader_lock` for the lookup,
+/// because `modules_list` is a `HashMap` the other core may be rehashing.
+///
+/// The lock covers the lookup, not the lifetime of what is returned: the pointer
+/// stays valid while that pid's executable is loaded, which both callers already
+/// depend on -- each is asking about a process that is running.
+pub fn get_executable_for_pid(pid: c.pid_t) ?*yasld.Executable {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    return executable_for_pid_locked(pid);
 }
 
 const SectionBackup = struct {
@@ -549,9 +602,16 @@ var vfork_snapshots: std.AutoHashMap(c.pid_t, *VForkSnapshot) = undefined;
 // correspondingly larger kernel_ram (see hal/.../linker_script.ld).
 const vfork_snapshot_enabled = false;
 
+/// Snapshot the parent's writable sections before a vfork child runs on them.
+/// Takes `loader_lock`: it walks `modules_list` and mutates `vfork_snapshots`,
+/// both of which the other core touches on its own exec/exit path. The caller
+/// must therefore be preemptible, since a sleeping mutex may not be taken with
+/// preemption off.
 pub fn save_parent_writable_sections(parent_pid: c.pid_t, child_pid: c.pid_t) void {
     if (!vfork_snapshot_enabled) return;
-    const exec = get_executable_for_pid(parent_pid) orelse return;
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    const exec = executable_for_pid_locked(parent_pid) orelse return;
 
     // Count modules with unique_data (executable + its library children)
     var count: usize = 0;
@@ -603,7 +663,15 @@ pub fn save_parent_writable_sections(parent_pid: c.pid_t, child_pid: c.pid_t) vo
     vfork_snapshots.put(child_pid, snapshot) catch snapshot.free();
 }
 
+/// Put a suspended parent's writable sections back, and drop the snapshot.
+/// Takes `loader_lock`, because `vfork_snapshots` is mutated here and in
+/// `save_parent_writable_sections`, which the other core can be running: one
+/// core exec'ing while the other vforks is the ordinary shape of a shell running
+/// a command. Both callers are in preemptible thread context, which is what
+/// makes a sleeping mutex legal here.
 pub fn restore_parent_writable_sections(child_pid: c.pid_t) void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
     if (vfork_snapshots.fetchRemove(child_pid)) |kv| {
         kv.value.restore_and_free();
     }
@@ -632,7 +700,7 @@ const test_mapped_address: usize = 0x1000;
 fn create_filemock(allocator: std.mem.Allocator) !*FileMock {
     var file_mock = try FileMock.create(allocator);
     const IoctlCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
             const cmd = args[0];
             try std.testing.expectEqual(cmd, @as(i32, @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
 
@@ -963,7 +1031,7 @@ test "Modules.ResolverShouldReturnAddressIfFileFoundInDirectory" {
         .willReturn("libtest.so");
 
     const GetCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
             const node_name = args[0];
             const node = args[1];
             node.* = @as(*const kernel.fs.Node, @ptrCast(@alignCast(ctx))).*;
@@ -1022,7 +1090,7 @@ test "Modules.ResolverShouldReturnNullIfFileIsNotMemoryMapped" {
         .willReturn("libtest.so");
 
     const GetCallback = struct {
-        pub fn call(ctx: ?*const anyopaque, args: std.meta.Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ []const u8, *kernel.fs.Node })) anyerror!anyerror!void {
             const node_name = args[0];
             const node = args[1];
             node.* = @as(*const kernel.fs.Node, @ptrCast(@alignCast(ctx))).*;

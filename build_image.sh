@@ -9,7 +9,21 @@ if [ $? -ne 0 ]; then
     echo "Failed to configure project. Please check configuration output."
     exit 1
 fi
-zig build -Doptimize=ReleaseFast
+# ReleaseSafe by default so the image the board runs carries the same safety
+# checks (overflow, bounds, null-unwrap) as the QEMU gate — otherwise the two
+# CI legs exercise different kernels and a safety-check regression can only ever
+# be caught by one of them. Override with YASOS_KERNEL_OPTIMIZE for a size- or
+# speed-sensitive build.
+#
+# Exported, not just local: build_rootfs.sh below re-embeds rootfs.img and
+# rebuilds the kernel itself, and it reads the same variable. Without the export
+# it would fall back to its own default and quietly replace the kernel built
+# here with one at a different optimize level — the packaged ELF would not be
+# the one this line asked for.
+export KERNEL_OPTIMIZE="${YASOS_KERNEL_OPTIMIZE:-ReleaseSafe}"
+export YASOS_KERNEL_OPTIMIZE="$KERNEL_OPTIMIZE"
+echo "Building kernel with -Doptimize=$KERNEL_OPTIMIZE"
+zig build -Doptimize="$KERNEL_OPTIMIZE"
 if [ $? -ne 0 ]; then
     echo "Failed to build project. Please check build output."
     exit 1

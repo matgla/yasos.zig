@@ -45,6 +45,12 @@ pub const TimeStub = struct {
 
     var current_time: u64 = 0;
 
+    /// Microseconds every `get_time_us` adds to the clock. Zero by default, so
+    /// time only moves when a test moves it. For code that spins on the clock
+    /// with no other hook to advance it -- a sub-tick `Process.sleep_for_us`
+    /// triggers no PendSV, so a test would otherwise loop forever.
+    var auto_advance_us: u64 = 0;
+
     pub fn init() Self {
         return .{
             .current_time = 0,
@@ -52,7 +58,9 @@ pub const TimeStub = struct {
     }
 
     pub fn get_time_us() u64 {
-        return current_time;
+        const now = current_time;
+        current_time +%= auto_advance_us;
+        return now;
     }
 
     pub fn sleep_ms(ms: u64) void {
@@ -68,5 +76,10 @@ pub const TimeStub = struct {
     pub fn set_time(self: Self, time: u64) void {
         _ = self;
         current_time = time;
+    }
+
+    pub fn set_auto_advance_us(self: Self, us: u64) void {
+        _ = self;
+        auto_advance_us = us;
     }
 };

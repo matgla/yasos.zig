@@ -13,17 +13,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub const AtomicStub = struct {
-    pub fn lock(comptime id: u32) bool {
-        _ = id;
-        // no-op
-        return true;
-    }
-    pub fn number_of_spinlocks() u32 {
-        return 12;
-    }
-    pub fn unlock(comptime id: u32) void {
-        _ = id;
-        // no-op
-    }
-};
+#include <stdarg.h>
+#include <libs/libc/sys/syscall.h>
+#include <libs/libc/unistd.h>
+#include <libs/libc/stdlib.h>
+#include <libs/libc/sys/ioctl.h>
+#include <libs/libc/termios.h>
+#include <libs/libc/dirent.h>
+#include <libs/libc/fcntl.h>
+#include <libs/libc/errno.h>
+#include <libs/libc/sys/stat.h>
+#include <libs/libc/sys/sysinfo.h>
+#include <libs/libc/sys/mman.h>
+#include <libs/libc/sys/resource.h>

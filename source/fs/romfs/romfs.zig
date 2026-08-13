@@ -69,8 +69,12 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
+        const t_walk = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         var header = try self.get_file_header(path, true);
         defer header.deinit();
+        const t_node = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
+        if (kernel.perf.enabled) kernel.perf.romfs_walk(t_node -% t_walk);
+        defer if (kernel.perf.enabled) kernel.perf.romfs_node(kernel.perf.read_cycles() -% t_node);
         if (header.filetype() != FileType.Directory) {
             return try RomFsFile.InstanceType.create_node(self.allocator, try header.dupe());
         } else {
@@ -115,8 +119,8 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     fn get_file_header(self: *Self, path: []const u8, resolve_link: bool) !FileHeader {
-        const path_without_trailing_separator = std.mem.trimRight(u8, path, "/");
-        var it = try std.fs.path.componentIterator(path);
+        const path_without_trailing_separator = std.mem.trimEnd(u8, path, "/");
+        var it = std.fs.path.componentIterator(path);
         var component = it.first();
         var maybe_node: ?FileHeader = try self.root.first_file_header();
         if (path_without_trailing_separator.len < 1) {
@@ -126,13 +130,15 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             if (maybe_node == null) {
                 return kernel.errno.ErrnoSet.NoEntry;
             }
+            // Step the header in place rather than taking one by value from
+            // `next()`: the struct is ~120 bytes and this scan is per directory
+            // entry, so returning it by value made the walk memcpy its way
+            // through the directory. See FileHeader.load.
             var filename = maybe_node.?.name();
             while (!std.mem.eql(u8, filename, part.name)) {
                 errdefer if (maybe_node) |*n| n.deinit();
-                const next = try maybe_node.?.next();
-                maybe_node.?.deinit();
-                maybe_node = next;
-                if (maybe_node == null) {
+                if (!try maybe_node.?.step_to_next()) {
+                    maybe_node.?.deinit();
                     return kernel.errno.ErrnoSet.NoEntry;
                 }
                 filename = maybe_node.?.name();

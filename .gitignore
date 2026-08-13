@@ -19,3 +19,8 @@ decode_bundle/
 
 # Local smoke-run failure logs
 logs/
+
+pico_sdk_generated/
+
+# Zig fetched-package directory
+zig-pkg/

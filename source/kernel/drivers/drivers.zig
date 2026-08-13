@@ -25,4 +25,7 @@ pub const FlashDriver = @import("flash/flash_driver.zig").FlashDriver;
 pub const MmcDriver = @import("mmc/mmc_driver.zig").MmcDriver;
 pub const MmcPartitionDriver = @import("mmc/mmc_partition_driver.zig").MmcPartitionDriver;
 pub const IDriver = @import("idriver.zig").IDriver;
+/// Serialises the seek-then-transfer pair on shared block devices. See its
+/// module comment; it is rank `dev`, inner to `fs`.
+pub const dev_lock = @import("dev_lock.zig");
 pub const DriverFsIterator = @import("driverfs_iterator.zig").DriverFsIterator;

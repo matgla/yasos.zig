@@ -178,3 +178,18 @@ def test_reset_recovers_a_crashed_board_without_escalating(rebooted_session, mon
     assert escalations == []
     assert not Session.target_crashed
     assert not Session.target_needs_reset
+
+
+def test_session_logs_land_in_the_runs_own_directory(tmp_path, monkeypatch):
+    """The remote runner gives each run its own numbered directory (logs/1,
+    logs/2, ...) so two runs can be compared; every artifact of a run has to
+    follow it there, transcripts included."""
+    from smoke.framework.paths import smoke_log_dir
+
+    monkeypatch.delenv("YASOS_SMOKE_LOG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert smoke_log_dir() == Path("logs")
+
+    run_dir = tmp_path / "logs" / "7"
+    monkeypatch.setenv("YASOS_SMOKE_LOG_DIR", str(run_dir))
+    assert smoke_log_dir() == run_dir

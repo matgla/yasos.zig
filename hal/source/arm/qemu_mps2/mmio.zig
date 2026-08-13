@@ -51,8 +51,8 @@ pub fn Mmio(comptime RegisterFieldDescription: type) type {
 
         pub inline fn update(self: *volatile Self, fields: anytype) void {
             var original = self.read();
-            inline for (std.meta.fields(@TypeOf(fields))) |field| {
-                @field(original, field.name) = @field(fields, field.name);
+            inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |field_name| {
+                @field(original, field_name) = @field(fields, field_name);
             }
             self.write(original);
         }

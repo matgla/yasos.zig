@@ -66,6 +66,20 @@ pub const StubScheduler = struct {
         return .StoreAndSwitch;
     }
 
+    /// Part of the scheduler interface `ProcessManager` expects; see
+    /// `RoundRobin.claim`. The stub keeps one cursor rather than one per core,
+    /// which is all its callers (the host unit tests) need.
+    pub fn claim(self: *Self, node: *std.DoublyLinkedList.Node) kernel.scheduler.Action {
+        const process: *Process = @alignCast(@fieldParentPtr("node", node));
+        process.state = Process.State.Running;
+        self.next = node;
+        return .StoreAndSwitch;
+    }
+
+    pub fn is_claimed_by_any_core(self: *Self, node: *const std.DoublyLinkedList.Node) bool {
+        return self.current == node or self.next == node;
+    }
+
     pub fn remove_process(self: *Self, process: *std.DoublyLinkedList.Node) void {
         if (self.current) |current| {
             if (current == process) {

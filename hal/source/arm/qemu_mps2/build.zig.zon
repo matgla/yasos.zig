@@ -20,6 +20,7 @@
 
 .{
     .name = .mcu_qemu_mps2,
+    .fingerprint = 0xfb6bcd11c967eea6,
     .version = "0.0.0",
     .dependencies = .{
         .toolchains = .{

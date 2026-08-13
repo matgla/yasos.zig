@@ -31,3 +31,4 @@ pub const enable_interrupts = @import("sync.zig").enable_interrupts;
 pub const memory_barrier_acquire = @import("sync.zig").memory_barrier_acquire;
 pub const memory_barrier_release = @import("sync.zig").memory_barrier_release;
 pub const sync = @import("sync.zig");
+pub const atomic = @import("atomic.zig");

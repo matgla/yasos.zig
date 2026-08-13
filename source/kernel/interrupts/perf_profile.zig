@@ -58,17 +58,25 @@ const SYSCALL_COUNT = c.SYSCALL_COUNT;
 /// zero-length arrays, so the BSS cost is nothing rather than ~2 KiB.
 const SLOTS = if (enabled) SYSCALL_COUNT else 0;
 
-var call_counts: [SLOTS]u32 = [_]u32{0} ** SLOTS;
+var call_counts: [SLOTS]u32 = @splat(0);
 /// SVC entry (stamped in context_switch.S) through the end of the handler.
-var total_cycles: [SLOTS]u64 = [_]u64{0} ** SLOTS;
+var total_cycles: [SLOTS]u64 = @splat(0);
 /// Handler body only; `total - handler` is the dispatch overhead.
-var handler_cycles: [SLOTS]u64 = [_]u64{0} ** SLOTS;
-var max_cycles: [SLOTS]u32 = [_]u32{0} ** SLOTS;
+var handler_cycles: [SLOTS]u64 = @splat(0);
+var max_cycles: [SLOTS]u32 = @splat(0);
 /// Payload bytes moved by read/write, so IO throughput needs no filesystem
 /// instrumentation. Saturating: a single window never moves 4 GiB.
-var io_bytes: [SLOTS]u32 = [_]u32{0} ** SLOTS;
+var io_bytes: [SLOTS]u32 = @splat(0);
 var dropped: u32 = 0;
 var cycles_per_us: u32 = 0;
+/// Whether DWT_CYCCNT actually counts on this target.
+///
+/// QEMU's Cortex-M models implement the DWT registers as storage but never
+/// advance CYCCNT, so every delta is 0 and the profile prints `us=0` for a
+/// syscall that plainly took time. That reads as "syscalls are free" and is the
+/// single most expensive way this instrument can be wrong, so entry, and every
+/// report derived from it, is tagged with whether the counter was live.
+var cycles_available: bool = false;
 
 /// Cycle stamp taken by the SVC handler before it decides fast-path vs
 /// trampoline (see `process_syscall_fast_check` in context_switch.S). Reading
@@ -86,6 +94,30 @@ pub fn init() void {
     DWT_CYCCNT.* = 0;
     DWT_CTRL.* |= CYCCNTENA_BIT;
     cycles_per_us = @intCast(@max(1, hal.cpu.frequency() / 1_000_000));
+    cycles_available = probe_cycle_counter();
+    if (!cycles_available) {
+        tprof_log.err("DWT_CYCCNT does not advance on this target -- syscall CYCLE" ++
+            " counts are unavailable and every *_us figure below reads 0." ++
+            " Call counts and byte counts remain valid.", .{});
+    }
+}
+
+/// True when CYCCNT advances across a short known-nonzero amount of work.
+///
+/// Two back-to-back reads would be a weaker test: a target that latches the
+/// register could return the same value for both and be wrongly failed, so the
+/// probe spins a volatile counter between the samples.
+fn probe_cycle_counter() bool {
+    const before = read_cycles();
+    var spin: u32 = 0;
+    const spin_ptr: *volatile u32 = &spin;
+    while (spin_ptr.* < 64) spin_ptr.* += 1;
+    return read_cycles() -% before != 0;
+}
+
+/// Whether the numbers this module reports carry cycle information at all.
+pub fn has_cycle_counter() bool {
+    return enabled and cycles_available;
 }
 
 pub inline fn read_cycles() u32 {
@@ -163,18 +195,18 @@ pub const PoolPhase = enum(usize) {
     free_mark,
 };
 
-const POOL_PHASES = @typeInfo(PoolPhase).@"enum".fields.len;
+const POOL_PHASES = @typeInfo(PoolPhase).@"enum".field_names.len;
 const POOL_SLOTS = if (enabled) POOL_PHASES else 0;
 /// Two tiers on the boards that have PSRAM; anything beyond falls in the last.
 const POOL_TIERS = if (enabled) 2 else 0;
 
-var pool_cycles: [POOL_SLOTS]u64 = [_]u64{0} ** POOL_SLOTS;
+var pool_cycles: [POOL_SLOTS]u64 = @splat(0);
 var pool_allocs: u32 = 0;
 var pool_frees: u32 = 0;
 var pool_pages: u64 = 0;
 var pool_cleared_bytes: u64 = 0;
 var pool_max_bytes: u32 = 0;
-var pool_tier_allocs: [POOL_TIERS]u32 = [_]u32{0} ** POOL_TIERS;
+var pool_tier_allocs: [POOL_TIERS]u32 = @splat(0);
 /// Requests served from the per-process cache of freed runs (no pool work, no
 /// clear) against those that had to go to the pool. The hit rate is what says
 /// whether the cache is worth its held memory.
@@ -184,8 +216,8 @@ var pool_cache_misses: u32 = 0;
 // magnitude more against PSRAM than against SRAM, and the two point at
 // different fixes -- keep the process out of the slow tier, versus stop
 // handing pages back and re-clearing them.
-var pool_clear_cycles: [POOL_TIERS]u64 = [_]u64{0} ** POOL_TIERS;
-var pool_clear_bytes: [POOL_TIERS]u64 = [_]u64{0} ** POOL_TIERS;
+var pool_clear_cycles: [POOL_TIERS]u64 = @splat(0);
+var pool_clear_bytes: [POOL_TIERS]u64 = @splat(0);
 
 pub fn pool_record(phase: PoolPhase, cycles: u32) void {
     if (!enabled) return;
@@ -238,7 +270,7 @@ pub const PoolSummary = struct {
     clear_us: [2]u64 = .{ 0, 0 },
     clear_bytes: [2]u64 = .{ 0, 0 },
     /// Indexed by PoolPhase, in microseconds.
-    us: [POOL_PHASES]u64 = [_]u64{0} ** POOL_PHASES,
+    us: [POOL_PHASES]u64 = @splat(0),
 };
 
 pub fn pool_summary() PoolSummary {
@@ -279,10 +311,10 @@ pub const OpenPhase = enum(usize) {
     attach,
 };
 
-const OPEN_PHASES = @typeInfo(OpenPhase).@"enum".fields.len;
+const OPEN_PHASES = @typeInfo(OpenPhase).@"enum".field_names.len;
 const OPEN_SLOTS = if (enabled) OPEN_PHASES else 0;
 
-var open_cycles: [OPEN_SLOTS]u64 = [_]u64{0} ** OPEN_SLOTS;
+var open_cycles: [OPEN_SLOTS]u64 = @splat(0);
 var open_calls: u32 = 0;
 var open_misses: u32 = 0;
 
@@ -301,10 +333,154 @@ pub fn open_call(found: bool) void {
     if (!found) open_misses +|= 1;
 }
 
+// What the romfs walk does per directory entry it steps over, which is what
+// turns "the lookup is slow" into something specific:
+//
+//   headers  FileHeader.init calls, i.e. directory entries visited
+//   reads    IFile.read calls made underneath them (each preceded by a seek,
+//            both virtual calls through the file interface)
+//   allocs   kernel-heap allocations, one per entry for a name that exists
+//            only to be compared and freed
+//
+// Counts rather than cycles: there are hundreds of reads per open, and a DWT
+// read per one would cost more than it measured.
+var romfs_headers: u32 = 0;
+var romfs_reads: u32 = 0;
+var romfs_name_allocs: u32 = 0;
+/// Cycles spent inside FileHeader.init, so the walk can be separated from the
+/// rest of the lookup.
+var romfs_header_cycles: u64 = 0;
+
+pub fn romfs_header(cycles: u32) void {
+    if (!enabled) return;
+    romfs_headers +|= 1;
+    if (cycles < implausible_cycles) romfs_header_cycles +|= cycles;
+}
+
+pub fn romfs_read() void {
+    if (!enabled) return;
+    romfs_reads +|= 1;
+}
+
+// Kernel-heap traffic: `open` allocates a node per hit, and a miss sends the VFS
+// through resolve_symlinks, which builds and normalises a path per component.
+// newlib's malloc is a free-list walk, so these are counted and timed together.
+var kheap_calls: u32 = 0;
+var kheap_cycles: u64 = 0;
+
+// The lookup residue, in the VFS layer itself. These bracket its two halves:
+// resolving which mount owns the path, and the filesystem's own get().
+var vfs_mount_cycles: u64 = 0;
+var vfs_fsget_cycles: u64 = 0;
+
+// Inside the filesystem's get(): the path walk versus building the node object
+// it returns. fs.get is 102 us of a 114 us romfs lookup while the entry reads
+// inside it are only 26 us, so one of these two holds the rest.
+var romfs_walk_cycles: u64 = 0;
+var romfs_node_cycles: u64 = 0;
+
+// SD block traffic, so `write` and `close` can be split into the filesystem's
+// bookkeeping and the card's own time.
+var disk_writes: u32 = 0;
+var disk_write_cycles: u64 = 0;
+var disk_write_blocks: u32 = 0;
+var disk_reads: u32 = 0;
+var disk_read_cycles: u64 = 0;
+var disk_read_blocks: u32 = 0;
+
+/// Time spent in wait_for_card_dat0, i.e. blocked on the card rather than moving
+/// data -- separates "the card is still programming" from "the write path is
+/// slow".
+var disk_wait_cycles: u64 = 0;
+
+pub fn disk_wait(cycles: u32) void {
+    if (!enabled) return;
+    if (cycles < implausible_cycles) disk_wait_cycles +|= cycles;
+}
+
+pub fn disk_write(cycles: u32, blocks: u32) void {
+    if (!enabled) return;
+    disk_writes +|= 1;
+    disk_write_blocks +|= blocks;
+    if (cycles < implausible_cycles) disk_write_cycles +|= cycles;
+}
+
+pub fn disk_read(cycles: u32, blocks: u32) void {
+    if (!enabled) return;
+    disk_reads +|= 1;
+    disk_read_blocks +|= blocks;
+    if (cycles < implausible_cycles) disk_read_cycles +|= cycles;
+}
+
+pub const DiskSummary = struct {
+    writes: u32 = 0,
+    write_us: u64 = 0,
+    write_blocks: u32 = 0,
+    wait_us: u64 = 0,
+    reads: u32 = 0,
+    read_us: u64 = 0,
+    read_blocks: u32 = 0,
+};
+
+pub fn disk_summary() DiskSummary {
+    var result: DiskSummary = .{};
+    if (!enabled) return result;
+    const per_us: u64 = @max(1, cycles_per_us);
+    result.writes = disk_writes;
+    result.write_us = disk_write_cycles / per_us;
+    result.write_blocks = disk_write_blocks;
+    result.wait_us = disk_wait_cycles / per_us;
+    result.reads = disk_reads;
+    result.read_us = disk_read_cycles / per_us;
+    result.read_blocks = disk_read_blocks;
+    return result;
+}
+
+pub fn romfs_walk(cycles: u32) void {
+    if (!enabled) return;
+    if (cycles < implausible_cycles) romfs_walk_cycles +|= cycles;
+}
+
+pub fn romfs_node(cycles: u32) void {
+    if (!enabled) return;
+    if (cycles < implausible_cycles) romfs_node_cycles +|= cycles;
+}
+
+pub fn vfs_mount(cycles: u32) void {
+    if (!enabled) return;
+    if (cycles < implausible_cycles) vfs_mount_cycles +|= cycles;
+}
+
+pub fn vfs_fsget(cycles: u32) void {
+    if (!enabled) return;
+    if (cycles < implausible_cycles) vfs_fsget_cycles +|= cycles;
+}
+
+pub fn kernel_heap_op(cycles: u32) void {
+    if (!enabled) return;
+    kheap_calls +|= 1;
+    if (cycles < implausible_cycles) kheap_cycles +|= cycles;
+}
+
+pub fn romfs_name_alloc() void {
+    if (!enabled) return;
+    romfs_name_allocs +|= 1;
+}
+
 pub const OpenSummary = struct {
     calls: u32 = 0,
     misses: u32 = 0,
-    us: [OPEN_PHASES]u64 = [_]u64{0} ** OPEN_PHASES,
+    us: [OPEN_PHASES]u64 = @splat(0),
+    headers: u32 = 0,
+    reads: u32 = 0,
+    name_allocs: u32 = 0,
+    header_us: u64 = 0,
+    heap_calls: u32 = 0,
+    heap_us: u64 = 0,
+    mount_us: u64 = 0,
+    fsget_us: u64 = 0,
+    walk_us: u64 = 0,
+    node_us: u64 = 0,
 };
 
 pub fn open_summary() OpenSummary {
@@ -313,6 +489,16 @@ pub fn open_summary() OpenSummary {
     const per_us: u64 = @max(1, cycles_per_us);
     result.calls = open_calls;
     result.misses = open_misses;
+    result.headers = romfs_headers;
+    result.reads = romfs_reads;
+    result.name_allocs = romfs_name_allocs;
+    result.header_us = romfs_header_cycles / per_us;
+    result.heap_calls = kheap_calls;
+    result.heap_us = kheap_cycles / per_us;
+    result.mount_us = vfs_mount_cycles / per_us;
+    result.fsget_us = vfs_fsget_cycles / per_us;
+    result.walk_us = romfs_walk_cycles / per_us;
+    result.node_us = romfs_node_cycles / per_us;
     for (0..OPEN_SLOTS) |i| result.us[i] = open_cycles[i] / per_us;
     return result;
 }
@@ -378,7 +564,15 @@ pub fn summary() Summary {
                 if (taken[r] and used[r] == i) already = true;
             }
             if (already) continue;
-            if (best == null or total_cycles[i] > total_cycles[best.?]) best = i;
+            // Cycles first, call count as the tie-break: without it a target
+            // with no working cycle counter compares 0 > 0 forever and "top"
+            // degenerates to the three lowest-numbered syscalls used.
+            const better = if (best) |b|
+                total_cycles[i] > total_cycles[b] or
+                    (total_cycles[i] == total_cycles[b] and call_counts[i] > call_counts[b])
+            else
+                true;
+            if (better) best = i;
         }
         if (best) |i| {
             slot.* = .{ .id = @intCast(i), .calls = call_counts[i], .us = total_cycles[i] / per_us };
@@ -407,6 +601,23 @@ pub fn reset() void {
     for (0..OPEN_SLOTS) |i| open_cycles[i] = 0;
     open_calls = 0;
     open_misses = 0;
+    romfs_headers = 0;
+    romfs_reads = 0;
+    romfs_name_allocs = 0;
+    romfs_header_cycles = 0;
+    kheap_calls = 0;
+    kheap_cycles = 0;
+    vfs_mount_cycles = 0;
+    vfs_fsget_cycles = 0;
+    romfs_walk_cycles = 0;
+    romfs_node_cycles = 0;
+    disk_writes = 0;
+    disk_write_cycles = 0;
+    disk_write_blocks = 0;
+    disk_wait_cycles = 0;
+    disk_reads = 0;
+    disk_read_cycles = 0;
+    disk_read_blocks = 0;
     for (0..SLOTS) |i| {
         call_counts[i] = 0;
         total_cycles[i] = 0;

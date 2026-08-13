@@ -14,3 +14,13 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 pub const RingBuffer = @import("ring_buffer.zig").RingBuffer;
+pub const SpinLock = @import("spinlock.zig").SpinLock;
+
+// Both files are pure `std` -- no board, no registers, no arch hooks -- so
+// `hal_tests` in the root build.zig can run them on the host under genuine
+// `std.Thread` contention, which is the only way to exercise the SPSC ordering
+// the RP2350 receive path depends on.
+comptime {
+    _ = @import("ring_buffer.zig");
+    _ = @import("spinlock.zig");
+}

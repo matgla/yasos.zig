@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ARG TARGETPLATFORM
-ARG ZIG_VERSION="0.15.2"
+ARG ZIG_VERSION="0.17.0-dev.1640+2597da025"
 
 ARG ARM_NONE_EABI_GCC_VERSION="15.2.rel1"
 
@@ -31,7 +31,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
     echo "Unknown TARGET_PLATFORM: $TARGETPLATFORM"; \
     exit 1; \
     fi \
-    && wget "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -O /opt/zig/zig.tar.xz \
+    && wget "https://ziglang.org/builds/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -O /opt/zig/zig.tar.xz \
     && wget "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_NONE_EABI_GCC_VERSION}/binrel/arm-gnu-toolchain-${ARM_NONE_EABI_GCC_VERSION}-${ZIG_ARCH}-arm-none-eabi.tar.xz" -O /opt/arm-none-eabi-gcc/gcc.tar.xz \
     && cd /opt/zig && tar -xf zig.tar.xz --strip-components=1 \
     && cd /opt/arm-none-eabi-gcc && tar -xf gcc.tar.xz --strip-components=1 \
@@ -45,13 +45,22 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
 # hash with no network access. Retry to survive a flaky elm-chan during the
 # (infrequent) image build, then assert the package landed so we never publish
 # an image silently missing it.
-RUN mkdir -p "$ZIG_GLOBAL_CACHE_DIR" \
+#
+# Zig 0.17-dev keeps a fetched package as `p/<hash>.tar.gz`; older Zig unpacked
+# it into a `p/<hash>/` directory. Accept either, so a cache-layout change does
+# not fail the image build with a misleading "the fetch is flaky" symptom.
+RUN FATFS_HASH="N-V-__8AAFQITQCnpmdR7PARImvk-cgb-9lZmjKolexSWkUL" \
+    && mkdir -p "$ZIG_GLOBAL_CACHE_DIR" \
     && for i in 1 2 3 4 5; do \
          zig fetch "https://elm-chan.org/fsw/ff/arc/ff15a.zip" && break; \
          echo "zig fetch ff15a.zip attempt $i failed; retrying in 15s"; \
          sleep 15; \
        done \
-    && test -d "$ZIG_GLOBAL_CACHE_DIR/p/N-V-__8AAFQITQCnpmdR7PARImvk-cgb-9lZmjKolexSWkUL"
+    && { test -f "$ZIG_GLOBAL_CACHE_DIR/p/${FATFS_HASH}.tar.gz" \
+         || test -d "$ZIG_GLOBAL_CACHE_DIR/p/${FATFS_HASH}"; } \
+    || { echo "FatFs package ${FATFS_HASH} is not in $ZIG_GLOBAL_CACHE_DIR/p after 5 fetch attempts"; \
+         ls -la "$ZIG_GLOBAL_CACHE_DIR/p" 2>/dev/null; \
+         exit 1; }
 
 COPY tests/smoke/requirements.txt /opt/smoke/requirements.txt
 RUN pip3 install --break-system-packages -r /opt/smoke/requirements.txt

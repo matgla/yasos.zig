@@ -19,7 +19,8 @@
 //
 
 .{
-    .name = "hal_interface",
+    .name = .hal_interface,
+    .fingerprint = 0x285f4e9fa4107172,
     .version = "0.0.0",
     .dependencies = .{},
     .paths = .{

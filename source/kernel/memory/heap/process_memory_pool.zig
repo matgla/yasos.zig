@@ -19,6 +19,17 @@ const memory = @import("hal").memory;
 const c = @import("libc_imports").c;
 
 const perf = @import("../../interrupts/perf_profile.zig");
+const locks = @import("../../sync/locks.zig");
+
+/// Rank 80, a leaf, `spin_irq` rather than a sleeping mutex because
+/// `release_pages_for` is reached from PendSV. Affordable only because
+/// `allocate_pages` clears its pages outside this lock; what is left under it is
+/// a bitmap scan and a hashmap insert.
+///
+/// The scalar readers deliberately do not take it -- they feed /proc/meminfo,
+/// where a snapshot one allocation stale is fine. Every reader that walks
+/// `memory_map` does, since a concurrent insert can rehash it underneath.
+var pagepool_lock: locks.Ranked(.pagepool) = .{};
 
 const log = std.log.scoped(.@"kernel/memory_pool");
 // Only one process is owner of memory chunk
@@ -34,6 +45,13 @@ const log = std.log.scoped(.@"kernel/memory_pool");
 /// free while another owner is still using them, which surfaces much later as
 /// one process finding another's data in its memory. Cheap (it reuses the walk
 /// free_pages already does) but it does emit serial output, so it is opt-in.
+///
+/// The overlap arm is NOT cheap: it walks every live mapping of every process on
+/// every allocation, with `pagepool_lock` held and interrupts masked. Turn it on
+/// for a diagnostic run, not for a timing one -- it perturbs exactly the
+/// windows this kind of bug hides in. It reports through `log.err` rather than
+/// `perf.trace` so it works on a build without profiling enabled, which is every
+/// board build.
 const validate_frees = false;
 
 pub const ProcessMemoryPool = struct {
@@ -80,6 +98,11 @@ pub const ProcessMemoryPool = struct {
         // Diagnostic only (perf profiling): lets us see whether a process spilled
         // out of fast SRAM into slow PSRAM during a run.
         peak_used: usize = 0,
+        // The same high-water mark over a window the observer chooses. `peak_used`
+        // is reset at every exec, so it describes the last process a test
+        // spawned rather than the test; this one is cleared only on request
+        // (`/proc/mempeak`), so a caller can bracket a whole test with it.
+        watermark_used: usize = 0,
         // Set pages in page_bitmap, maintained by mark_used/mark_free. The
         // bitmap remains the truth; this is a running total so occupancy is O(1)
         // instead of a popcount over the whole bitmap. It used to be counted
@@ -100,6 +123,10 @@ pub const ProcessMemoryPool = struct {
     /// state, so a caller that overlaps an existing allocation cannot skew
     /// used_pages away from the bitmap's popcount.
     fn mark_used(region: *Region, from: usize, to: usize) void {
+        // Bitmap surgery is only ever legal with the pool held. The assert is
+        // the phase-3 completion item: it catches a caller that was *believed*
+        // to hold the lock, which no amount of review reliably does.
+        pagepool_lock.assert_held();
         for (from..to) |index| {
             if (!region.page_bitmap.isSet(index)) {
                 region.page_bitmap.set(index);
@@ -112,6 +139,7 @@ pub const ProcessMemoryPool = struct {
     /// free_pages will happily unset a range it never allocated (a bad address
     /// inside a region reaches it), and that must not drive the count negative.
     fn mark_free(region: *Region, from: usize, to: usize) void {
+        pagepool_lock.assert_held();
         for (from..to) |index| {
             if (region.page_bitmap.isSet(index)) {
                 region.page_bitmap.unset(index);
@@ -157,7 +185,6 @@ pub const ProcessMemoryPool = struct {
     // allocation is tagged .heap; the loader path leaves it false (.loader).
     // Safe because mmap serializes via block_context_switch and exec is single
     // threaded. Profiling diagnostic only.
-    tag_next_heap: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !ProcessMemoryPool {
         log.debug("Process memory pool initialized", .{});
@@ -231,14 +258,58 @@ pub const ProcessMemoryPool = struct {
         return ptr[0..len];
     }
 
+    /// A run of pages taken out of the bitmap but not yet handed to anyone.
+    const Reserved = struct {
+        address: []u8,
+        /// Region index, for the per-tier clear accounting.
+        tier: usize,
+        /// Pages in *that region's* grain, which is not the caller's grain.
+        region_pages: usize,
+    };
+
     pub fn allocate_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t) ?[]u8 {
-        // Read+clear the heap tag up front so a failed allocation can't taint
-        // the next (possibly loader) one.
-        const source: AllocSource = if (self.tag_next_heap) .heap else .loader;
-        self.tag_next_heap = false;
+        return self.allocate_pages_from(number_of_pages, pid, .loader);
+    }
+
+    /// `allocate_pages` naming the accounting bucket explicitly, rather than the
+    /// one-shot flag on the pool this replaced -- that was a global handshake
+    /// that only held while nothing else could allocate in between.
+    pub fn allocate_pages_from(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t, source: AllocSource) ?[]u8 {
         if (number_of_pages <= 0) {
             return null;
         }
+        const reserved = self.reserve_pages(number_of_pages, pid, source) orelse return null;
+
+        // Zeroing happens outside `pagepool_lock`, which is the point of the
+        // split: the run is already marked used and recorded against this pid,
+        // so clearing needs no exclusion, and doing it under a `spin_irq` would
+        // mask interrupts for the whole memset -- mmap's measured 407 us,
+        // against a ~93 us console budget.
+        //
+        // Pages are recycled between processes, so they must be cleared before
+        // handout. The guarantee reaches direct callers only: through
+        // std.mem.Allocator the fresh allocation is overwritten with `undefined`
+        // on the way out, so the dynamic loader's image block cannot skip its
+        // own zeroing on the strength of this.
+        const t_clear = if (perf.enabled) perf.read_cycles() else 0;
+        // A board may know a cheaper route to zeroed pages: the rp2350's PSRAM
+        // tier is cached write-allocate, so a plain memset moves twice the bytes
+        // it needs to and evicts the running process's code doing it.
+        memory.zero_pages(reserved.address);
+        if (perf.enabled) {
+            perf.pool_clear(reserved.tier, perf.read_cycles() -% t_clear, reserved.address.len);
+            perf.pool_alloc(reserved.region_pages, reserved.address.len, reserved.tier);
+        }
+        return reserved.address;
+    }
+
+    /// Find a free run, mark it used and record it against `pid`. Bitmap and
+    /// bookkeeping only -- microseconds -- which is what makes `spin_irq` the
+    /// right lock for this pool.
+    fn reserve_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t, source: AllocSource) ?Reserved {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+
         // Bytes requested: callers count in page_size (the 256 B minimum grain).
         const requested_bytes = @as(usize, @intCast(number_of_pages)) * page_size;
         // Phase stamps (compiled out unless profiling): mmap costs 407 us a
@@ -280,7 +351,7 @@ pub const ProcessMemoryPool = struct {
                         const e_start = @intFromPtr(e.address.ptr);
                         const e_end = e_start + e.address.len;
                         if (run_start < e_end and e_start < run_end) {
-                            perf.trace("overlap pid={d} run=0x{x}..0x{x} owner_pid={d} live=0x{x}..0x{x}", .{
+                            log.err("overlap pid={d} run=0x{x}..0x{x} owner_pid={d} live=0x{x}..0x{x}", .{
                                 pid, run_start, run_end, e.pid, e_start, e_end,
                             });
                             break :outer;
@@ -291,6 +362,9 @@ pub const ProcessMemoryPool = struct {
             mark_used(region, slot_start, end_index);
             if (region.used_pages > region.peak_used) {
                 region.peak_used = region.used_pages;
+            }
+            if (region.used_pages > region.watermark_used) {
+                region.watermark_used = region.used_pages;
             }
             const t_book = if (perf.enabled) perf.read_cycles() else 0;
             perf.pool_record(.mark, t_book -% t_mark);
@@ -317,33 +391,19 @@ pub const ProcessMemoryPool = struct {
             };
             list.value_ptr.append(&entity.node);
             log.debug("Allocating {d} pages for {d} at 0x{x}", .{ number_of_pages, pid, @intFromPtr(entity.address.ptr) });
-            // Pages are recycled between processes, so they must be cleared
-            // before handout or one process's memory leaks into the next. Note
-            // this guarantee reaches only callers of allocate_pages directly
-            // (the mmap path): a caller going through std.mem.Allocator gets its
-            // fresh allocation overwritten with `undefined` on the way out
-            // (Allocator.allocBytesWithAlignment), which is 0xAA in a
-            // safety-enabled build. Anything downstream of the Allocator
-            // interface — the dynamic loader's image block, notably — cannot
-            // skip its own zeroing on the strength of this memset.
-            const t_clear = if (perf.enabled) perf.read_cycles() else 0;
-            perf.pool_record(.book, t_clear -% t_book);
-            // A board may know a cheaper route to zeroed pages than a plain
-            // memset -- on the rp2350 the PSRAM tier is cached write-allocate,
-            // so the obvious one moves twice the bytes it needs to and evicts
-            // the running process's code doing it. Boards that do not say
-            // otherwise get the memset, resolved at compile time.
-            memory.zero_pages(entity.address);
-            if (perf.enabled) {
-                perf.pool_clear(tier, perf.read_cycles() -% t_clear, entity.address.len);
-                perf.pool_alloc(region_pages_usize, entity.address.len, tier);
-            }
-            return entity.address;
+            if (perf.enabled) perf.pool_record(.book, perf.read_cycles() -% t_book);
+            return .{
+                .address = entity.address,
+                .tier = tier,
+                .region_pages = region_pages_usize,
+            };
         }
         return null;
     }
 
     pub fn release_pages_for(self: *ProcessMemoryPool, pid: c.pid_t) void {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
         log.debug("release_pages_for: pid={d} pages_before={d}", .{ pid, self.get_used_size() / page_size });
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
@@ -380,6 +440,8 @@ pub const ProcessMemoryPool = struct {
     }
 
     pub fn free_pages(self: *ProcessMemoryPool, address: *anyopaque, number_of_pages: i32, pid: c.pid_t) void {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
         log.debug("Releasing pages {d} at 0x{x} for pid: {d}", .{ number_of_pages, @intFromPtr(address), pid });
         const region = self.region_for_addr(@intFromPtr(address)) orelse return;
         const maybe_mapping = self.memory_map.getEntry(pid);
@@ -413,11 +475,11 @@ pub const ProcessMemoryPool = struct {
             if (validate_frees) {
                 const asked_bytes = @as(usize, @intCast(number_of_pages)) * page_size;
                 if (!found) {
-                    perf.trace("badfree pid={d} addr=0x{x} bytes={d} reason=unowned", .{
+                    log.err("badfree pid={d} addr=0x{x} bytes={d} reason=unowned", .{
                         pid, @intFromPtr(address), asked_bytes,
                     });
                 } else if (asked_bytes > matched_bytes) {
-                    perf.trace("badfree pid={d} addr=0x{x} bytes={d} owned={d} reason=oversized", .{
+                    log.err("badfree pid={d} addr=0x{x} bytes={d} owned={d} reason=oversized", .{
                         pid, @intFromPtr(address), asked_bytes, matched_bytes,
                     });
                 }
@@ -435,6 +497,21 @@ pub const ProcessMemoryPool = struct {
         }
     }
 
+    /// True if `pid` still owns pool memory.
+    ///
+    /// A pid handed to a new process must own none. `memory_map` is keyed by pid
+    /// alone, so a leftover mapping means two processes share one entry and the
+    /// older one's `release_pages_for` marks the younger one's live runs free --
+    /// silent corruption that only surfaces once those pages are handed out
+    /// again. Checked where a process takes ownership of a pid, so the ordering
+    /// bug that produces it (see `reap_terminated`) reports itself instead.
+    pub fn has_live_mapping(self: *const ProcessMemoryPool, pid: c.pid_t) bool {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        const mapping = self.memory_map.getPtr(pid) orelse return false;
+        return mapping.first != null;
+    }
+
     /// True if `address` is the base of a live mapping of at least `bytes`
     /// belonging to `pid`.
     ///
@@ -445,6 +522,8 @@ pub const ProcessMemoryPool = struct {
     /// intact. free_pages tolerates such an address by ignoring it; the cache
     /// must reject it.
     pub fn owns_mapping(self: *const ProcessMemoryPool, pid: c.pid_t, address: *const anyopaque, bytes: usize) bool {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
         const mapping = self.memory_map.getPtr(pid) orelse return false;
         var next = mapping.first;
         while (next) |entity_node| {
@@ -468,7 +547,26 @@ pub const ProcessMemoryPool = struct {
     /// Reset every region's peak-used high-water mark (perf diagnostics). Call at
     /// exec so a process's run window starts from a clean peak.
     pub fn reset_peaks(self: *ProcessMemoryPool) void {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
         for (self.regions) |*region| region.peak_used = 0;
+    }
+
+    /// Sample the observer-controlled high-water mark, in bytes, and clear it.
+    /// Read-and-clear, like the XIP counters: a high-water mark only means
+    /// something relative to when it was last zeroed.
+    ///
+    /// The total is a sum of per-tier marks, so it is an upper bound -- two
+    /// tiers need not have peaked at the same instant.
+    pub fn sample_and_clear_watermark(self: *ProcessMemoryPool) usize {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        var total: usize = 0;
+        for (self.regions) |*region| {
+            total += region.watermark_used * region.page_size;
+            region.watermark_used = region.used_pages;
+        }
+        return total;
     }
 
     /// Peak used pages in a tier since the last reset_peaks (0=fast SRAM, 1=PSRAM).
@@ -489,6 +587,8 @@ pub const ProcessMemoryPool = struct {
     /// enforce a per-image heap cap (the YAFF heap_size profile): exec records a
     /// baseline after the image+stack are resident, then bounds further growth.
     pub fn used_pages_for(self: *const ProcessMemoryPool, pid: c.pid_t) usize {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
         const mapping = self.memory_map.get(pid) orelse return 0;
         var pages: usize = 0;
         var next = mapping.first;
@@ -517,6 +617,8 @@ pub const ProcessMemoryPool = struct {
     /// per live process. Pages are 4 KiB. Correlate pid with the `load`/`base`
     /// lines (which carry the executable path).
     pub fn dump_usage_by_pid(self: *const ProcessMemoryPool) void {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
         var it = self.memory_map.iterator();
         while (it.next()) |entry| {
             var sram: usize = 0;
@@ -568,6 +670,8 @@ pub const ProcessMemoryPool = struct {
     /// immediately after it. Returns the new total slice on success, null on failure.
     /// Extension never crosses a region boundary.
     pub fn try_extend_pages(self: *ProcessMemoryPool, address: *anyopaque, old_pages: i32, new_pages: i32, pid: c.pid_t) ?[]u8 {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
         if (new_pages <= old_pages) return null;
         const addr_int = @intFromPtr(address);
         const region = self.region_for_addr(addr_int) orelse return null;
@@ -589,6 +693,9 @@ pub const ProcessMemoryPool = struct {
         mark_used(region, old_end, new_end);
         if (region.used_pages > region.peak_used) {
             region.peak_used = region.used_pages;
+        }
+        if (region.used_pages > region.watermark_used) {
+            region.watermark_used = region.used_pages;
         }
 
         // Update the entity in the memory map to reflect new size

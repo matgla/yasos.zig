@@ -1,5 +1,6 @@
 .{
     .name = .yasld,
+    .fingerprint = 0x645ab226162cecd7,
     .version = "0.0.1",
     .dependencies = .{},
     .paths = .{

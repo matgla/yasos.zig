@@ -36,7 +36,9 @@ is entirely via environment variables so no test code needs to change:
     YASOS_QEMU_CPU           -cpu value             (default: cortex-m33)
     YASOS_QEMU_EXTRA_ARGS    extra args, shell-split and appended to the cmdline
     YASOS_QEMU_BOOT_TIMEOUT  seconds to wait for the PTY to appear (default: 20)
-    YASOS_QEMU_LOG_DIR       where to write qemu stdout/stderr (default: ./logs)
+    YASOS_QEMU_LOG_DIR       where to write qemu stdout/stderr (default: the
+                             run's log directory, i.e. YASOS_SMOKE_LOG_DIR or
+                             ./logs)
 
 File-backed guest RAM (how the source corpus gets onto the device without being
 transferred, see scripts/build_smoke_fatdisk.py):
@@ -61,6 +63,8 @@ import time
 from pathlib import Path
 
 import serial
+
+from .paths import smoke_log_dir
 
 # Matches QEMU's "char device redirected to /dev/pts/N (label serial0)" line.
 _PTY_RE = re.compile(r"char device redirected to (\S+)")
@@ -95,7 +99,8 @@ class QemuTarget:
         self.cpu = os.environ.get("YASOS_QEMU_CPU", "cortex-m33").strip()
         self.boot_timeout = float(os.environ.get("YASOS_QEMU_BOOT_TIMEOUT", "20"))
         self.extra_args = shlex.split(os.environ.get("YASOS_QEMU_EXTRA_ARGS", ""))
-        self.log_dir = Path(os.environ.get("YASOS_QEMU_LOG_DIR", "logs"))
+        qemu_log_dir = os.environ.get("YASOS_QEMU_LOG_DIR", "").strip()
+        self.log_dir = Path(qemu_log_dir) if qemu_log_dir else smoke_log_dir()
         self.label = f"qemu:{self.machine}"
 
         # File-backed guest RAM. When enabled, the board's fatdisk window is a
@@ -127,6 +132,9 @@ class QemuTarget:
         self.serial: serial.Serial | None = None
         self.pty: str | None = None
         self._logf = None
+        # Peak resident memory of the qemu processes this target has run, in KiB.
+        # See tests/smoke/heavy_tests.txt.
+        self.peak_rss_kb = 0
 
     def _seed_ram_backing(self) -> None:
         """Create the backing file and lay the pristine FAT image into it.
@@ -238,8 +246,67 @@ class QemuTarget:
         self._launch_qemu()
         return self._open_serial()
 
+    def _record_peak_rss(self) -> None:
+        """Take the qemu process's high-water memory mark before it exits.
+
+        VmHWM rather than a sampler: the kernel already tracks the peak, so one
+        read at teardown catches a spike that polling would step over. Kept as a
+        running max because a test that relaunches the target (Session.reset)
+        runs more than one qemu, and the interesting number is the worst of them.
+
+        Guest RAM is a shared file-backed mapping, so the pages the guest has
+        touched are exactly what shows up here -- which is the quantity that
+        decides whether N of these fit in host memory at once.
+        """
+        if self.proc is None:
+            return
+        try:
+            with open(f"/proc/{self.proc.pid}/status", encoding="ascii") as status:
+                for line in status:
+                    if line.startswith("VmHWM:"):
+                        self.peak_rss_kb = max(self.peak_rss_kb, int(line.split()[1]))
+                        return
+        except (OSError, ValueError, IndexError):
+            # Diagnostics only; a process that has already gone, or a platform
+            # without VmHWM, must never turn into a test failure.
+            pass
+
+    def peak_rss(self) -> int:
+        """Peak resident KiB across the qemu processes run since the last reset.
+
+        Folds in the live process first, because the usual caller is a test
+        teardown that runs while qemu is still up.
+        """
+        self._record_peak_rss()
+        return self.peak_rss_kb
+
+    def reset_peak_rss(self) -> None:
+        """Start a new measurement window.
+
+        The target outlives individual tests -- a healthy qemu is reused by the
+        next test rather than relaunched -- and VmHWM only ever grows for a live
+        process. Clearing the local max is therefore not enough: without also
+        resetting the kernel's high-water mark, every test after the first big
+        one in a worker inherits its peak and the report says they are all
+        equally heavy (which is exactly what the first run of this showed).
+        `clear_refs` type 5 resets VmHWM down to the current VmRSS.
+        """
+        self.peak_rss_kb = 0
+        if self.proc is None:
+            return
+        try:
+            with open(f"/proc/{self.proc.pid}/clear_refs", "w", encoding="ascii") as clear:
+                clear.write("5")
+        except OSError:
+            # Older kernels have no peak-reset. The numbers then read as
+            # "worst test so far in this worker", which is still ordered
+            # correctly for picking out the big ones, just less precise.
+            pass
+
     def stop(self) -> None:
         """Tear down the serial connection and the qemu process."""
+        # Before terminate(), or /proc/<pid>/status is gone and the peak with it.
+        self._record_peak_rss()
         if self.serial is not None:
             try:
                 self.serial.close()

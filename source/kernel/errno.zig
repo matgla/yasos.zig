@@ -51,6 +51,7 @@ pub const ErrnoSet = error{
     MathArgumentOutOfDomain,
     MathResultNotRepresentable,
     TooManySymbolicLinks,
+    NameTooLong,
     Invalid,
     NotImplemented,
 };
@@ -92,6 +93,7 @@ pub fn from_errno(rc: u16) anyerror {
         c.EDOM => ErrnoSet.MathArgumentOutOfDomain,
         c.ERANGE => ErrnoSet.MathResultNotRepresentable,
         c.ELOOP => ErrnoSet.TooManySymbolicLinks,
+        c.ENAMETOOLONG => ErrnoSet.NameTooLong,
         c.ENOSYS => ErrnoSet.NotImplemented,
         else => ErrnoSet.Invalid,
     };
@@ -134,6 +136,7 @@ pub fn to_errno(err: anyerror) u16 {
         ErrnoSet.MathArgumentOutOfDomain => c.EDOM,
         ErrnoSet.MathResultNotRepresentable => c.ERANGE,
         ErrnoSet.TooManySymbolicLinks => c.ELOOP,
+        ErrnoSet.NameTooLong => c.ENAMETOOLONG,
         ErrnoSet.NotImplemented => c.ENOSYS,
         else => c.EINVAL,
     };

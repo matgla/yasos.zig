@@ -14,12 +14,18 @@ Two kinds of check, because a card is not a constant:
   * **absolute floors**, deliberately loose (roughly half the slowest run
     observed), to catch a wholesale collapse — a bus that came up 1-bit wide, a
     lost high-speed negotiation, a misconfigured clock;
-  * **multi-block speedup ratios**, which are what actually pin the CMD25 path.
-    A card's absolute speed varies by part and by wear; the ratio between a
-    32 KiB write and a 512-byte one does not, because both run on the same
-    silicon in the same session seconds apart. The regression this gate is named
-    for shows up here as 9.3x collapsing to 1.1x, which no plausible card swap
-    can imitate.
+  * **a floor on the sequential 512-byte rate**, which is what now pins the
+    batched path. Since 2026-08-10 the block layer combines contiguous
+    single-sector writes into one multi-block request, so a 512-byte sequential
+    pass reaches the card as 4 KiB runs and measures like one. Losing either
+    the combining or CMD25 drops it back to one command per sector -- 2695
+    KiB/s to ~376 -- which no plausible card swap can imitate.
+
+    This replaced a set of speedup *ratios* (32 KiB against 512 B, and so on).
+    They were card-independent and good at their job, but combining lifts the
+    512-byte denominator to the same speed as the numerator, so every ratio
+    collapsed to ~1.0 on a change that made writes 7x faster. A check that
+    fails on an improvement is worse than no check.
 
 Reference numbers are the rig's card, measured across three rounds of work on
 this path (docs/remote_smoke_speedup_plan.md, "2.9 SD path tuning"):
@@ -55,13 +61,10 @@ are set at roughly half the *slowest* run of the CMD25 era, which keeps them
 2x or more clear of the pre-CMD25 numbers they exist to separate from, and
 leaves headroom for a different card on a different rig. A gate pinned to the
 best figure ever measured fails on the first slow card and teaches everyone to
-ignore it. The ratio checks below are what actually detect a lost batching
-path, and they are card-independent.
-
-Note the ratios *rose* in that run (8.73x, 14.38x): a depressed 512-byte
-denominator can only inflate them, so a card stall cannot fake a batching
-failure. The opposite would need the 512-byte pass to roughly double, which no
-card does.
+ignore it. The 512-byte combined-rate floor below is what actually detects a
+lost batching path, and it is set the same way: far enough above the broken
+value and below the observed one that neither a slow card nor a real
+regression lands near it.
 
 The environment knobs below are for local runs and for bringing a different
 board up. They do **not** reach the rig: `scripts/remote_smoke_tui.py` generates
@@ -122,13 +125,18 @@ SEQ_WRITE_FLOORS = (
 RAND_WRITE_FLOOR = 180
 RAND_WRITE_REFERENCE = 368
 
-# (block size, minimum speedup over the 512-byte pass, reference speedup). These
-# are the real regression detectors: roughly half the lowest ratio observed, and
-# more than double the 1.1x a per-sector command loop produces.
-BATCHING_FLOORS = (
-    (4096, 2.5, 5.7),
-    (32768, 4.0, 9.3),
-)
+# Sequential 512-byte writes must reach multi-block speed. An absolute floor
+# rather than a speedup ratio against larger writes: the block layer combines
+# contiguous single-sector writes (`write_combined` in fatfs.zig), so every size
+# now measures about the same and the ratios collapsed to ~1.0.
+#
+# If either the combining or the CMD25 path broke, small sequential writes would
+# fall back to one command per sector, measuring ~376 KiB/s against the ~2700
+# observed. The floor sits 2.7x above the broken value and 2.7x below the
+# observed one, so it neither fires on a slower card nor passes a regression.
+SEQ_WRITE_512_COMBINED_FLOOR = 1000
+SEQ_WRITE_512_COMBINED_REFERENCE = 2695
+SEQ_WRITE_512_PER_COMMAND_RATE = 376
 
 
 def _target_is_sd_backed(session):
@@ -187,15 +195,15 @@ def _format_report(results):
 
     baseline = results.get(("seq_write", 512))
     if baseline and baseline["kib_s"] > 0:
-        for bs, floor, reference in BATCHING_FLOORS:
-            measured = results.get(("seq_write", bs))
-            if measured is None:
-                continue
-            ratio = measured["kib_s"] / baseline["kib_s"]
-            rows.append(
-                f"multi-block speedup {bs:>6} B/512 B = {ratio:5.2f}x"
-                f"  (floor {floor:.2f}x, ref {reference:.1f}x)"
-            )
+        # Sizes converge once the block layer combines contiguous sectors, so
+        # the interesting number is how far the 512-byte pass sits above the
+        # one-command-per-sector rate rather than below the larger passes.
+        rows.append(
+            f"seq 512 B = {baseline['kib_s']} KiB/s"
+            f"  (floor {SEQ_WRITE_512_COMBINED_FLOOR},"
+            f" ref {SEQ_WRITE_512_COMBINED_REFERENCE},"
+            f" per-command {SEQ_WRITE_512_PER_COMMAND_RATE})"
+        )
     return "\n".join(rows)
 
 
@@ -243,19 +251,16 @@ def _collect_failures(results):
 
     baseline = results.get(("seq_write", 512))
     if baseline is not None and baseline["kib_s"] > 0:
-        for bs, floor, reference in BATCHING_FLOORS:
-            measured = results.get(("seq_write", bs))
-            if measured is None:
-                continue
-            ratio = measured["kib_s"] / baseline["kib_s"]
-            if ratio < floor:
-                failures.append(
-                    f"multi-block batching lost at bs={bs}: {ratio:.2f}x the"
-                    f" 512-byte rate, floor {floor:.2f}x (reference"
-                    f" {reference:.1f}x). A per-sector command loop measures"
-                    f" ~1.1x -- check that sdio_write still issues CMD25 for"
-                    f" multi-sector requests."
-                )
+        if baseline["kib_s"] < SEQ_WRITE_512_COMBINED_FLOOR:
+            failures.append(
+                f"sequential 512-byte writes are not being combined:"
+                f" {baseline['kib_s']} KiB/s, floor"
+                f" {SEQ_WRITE_512_COMBINED_FLOOR} (reference"
+                f" {SEQ_WRITE_512_COMBINED_REFERENCE}). One command per sector"
+                f" measures ~{SEQ_WRITE_512_PER_COMMAND_RATE} -- check that"
+                f" write_combined still merges contiguous sectors and that"
+                f" sdio_write still issues CMD25 for the merged request."
+            )
 
     return failures
 

@@ -36,7 +36,21 @@ MEMORY
    * mibench_rijndael -- so those now go to the SD card instead of RAM. Watch
    * MemTmpPeak: if it pins at the ceiling, this went too far. */
   temp_ram(rxw)     : ORIGIN = 0x20013000, LENGTH = 32K
-  process_ram(rxw)  : ORIGIN = 0x2001B000, LENGTH = 396K
+  process_ram(rxw)  : ORIGIN = 0x2001B000, LENGTH = 388K
+  /* Core 1's MSP stack. MSP is banked per core; the memory behind it is not, so
+   * a second core needs a stack of its own. Placed below `scratch` rather than
+   * carved out of it, which keeps core 0's stack unchanged to the byte.
+   *
+   * 8 KB, because core 1 schedules processes and therefore takes their faults:
+   * the hardfault module-map dump alone is a 4 KB stack buffer
+   * (source/kernel/modules.zig), and 4 KB hit MSPLIM partway through a
+   * postmortem. The extra comes off process_ram, whose working set leaves
+   * ~80 KB spare.
+   *
+   * __stack_bottom__ (core 0's MSPLIM) is exactly __stack_top_core1__, so an
+   * overflow on either side faults on the limit instead of silently eating the
+   * other's stack. The ASSERT below holds that. */
+  core1_stack(rw)   : ORIGIN = 0x2007C000, LENGTH = 8K
   /* Kernel MSP stack: 16 KB ending at the top of SRAM (0x20082000). The top
    * 8 KB (0x20080000..0x20082000) is the two 4 KB scratch banks merged (single-
    * core: core1's stack bank is unused) — non-striped SRAM, used first since the
@@ -174,6 +188,12 @@ SECTIONS
 
   __stack_top__ = ORIGIN(scratch) + LENGTH(scratch);
   __stack_bottom__ = ORIGIN(scratch);
+
+  /* Core 1's MSP, set by the bootrom launch handshake (cpu.zig `start_core`)
+   * rather than by a reset vector, and its MSPLIM, set by `_start_core1`. */
+  __stack_top_core1__ = ORIGIN(core1_stack) + LENGTH(core1_stack);
+  __stack_bottom_core1__ = ORIGIN(core1_stack);
+  ASSERT(__stack_top_core1__ == __stack_bottom__, "core 1's stack must butt up against core 0's MSPLIM")
 
   __flash_start__ = ORIGIN(flash);
   __flash_end__ = ORIGIN(flash) + LENGTH(flash);

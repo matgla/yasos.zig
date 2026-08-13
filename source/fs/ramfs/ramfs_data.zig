@@ -33,6 +33,7 @@ const kernel = @import("kernel");
 const log = kernel.log;
 
 const Tier = @import("ramfs_tier.zig").Tier;
+const refcount = kernel.sync.refcount;
 
 pub const RamFsDataError = error{
     FileNameTooLong,
@@ -81,18 +82,19 @@ pub const RamFsData = struct {
             .refcounter = try allocator.create(i16),
             .inode = inode_counter,
         };
-        obj.refcounter.* = 1;
+        refcount.init(obj.refcounter);
         return obj;
     }
 
     pub fn share(self: *RamFsData) *RamFsData {
-        self.refcounter.* += 1;
+        refcount.acquire(self.refcounter);
         return self;
     }
 
     pub fn deinit(self: *RamFsData) bool {
-        self.refcounter.* -= 1;
-        if (self.refcounter.* == 0) {
+        // Fused decrement-and-test: read back separately, two contexts dropping
+        // the last two references can both see zero and both free the body.
+        if (refcount.release(self.refcounter)) {
             switch (self.storage) {
                 .ram => |*list| list.deinit(self._allocator),
                 .spilled => |*body| {

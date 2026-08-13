@@ -19,81 +19,23 @@ full suite run neither pays for them nor can be failed by them:
         "tests/smoke/io_profile_test.py -m measure -s"
 """
 
-import re
 import time
-from pathlib import Path
 
 import pytest
 
 from .conftest import session_key
+from .kernel_profile import (
+    DISKPROF_RE,
+    OPENPROF_RE,
+    POOLCLEAR_RE,
+    POOLPROF_RE,
+    RUN_RE,
+    SYSPROF_RE,
+    syscall_name,
+)
 
 
 pytestmark = pytest.mark.measure
-
-
-# Kernel-side per-process totals, emitted by sys_exit (syscall_handlers.zig).
-# read/write are `bytes/us`.
-SYSPROF_RE = re.compile(
-    r"sysprof pid=(?P<pid>\d+) calls=(?P<calls>\d+) us=(?P<us>\d+)"
-    r" handler_us=(?P<handler_us>\d+) load_us=(?P<load_us>\d+)"
-    r" read=(?P<read_bytes>\d+)/(?P<read_us>\d+)"
-    r" write=(?P<write_bytes>\d+)/(?P<write_us>\d+)"
-    r" dropped=(?P<dropped>\d+) top=(?P<top>[\d:/,]+)"
-)
-RUN_RE = re.compile(r"run pid=(?P<pid>\d+) us=(?P<us>\d+) code=(?P<code>-?\d+)")
-# Page-pool attribution: which part of allocate_pages/free_pages the mmap and
-# munmap time is actually in.
-POOLPROF_RE = re.compile(
-    r"poolprof pid=(?P<pid>\d+) allocs=(?P<allocs>\d+) frees=(?P<frees>\d+)"
-    r" pages=(?P<pages>\d+) cleared=(?P<cleared>\d+) max=(?P<max>\d+)"
-    r" hits=(?P<hits>\d+) misses=(?P<misses>\d+)"
-    r" sram=(?P<sram>\d+) psram=(?P<psram>\d+)"
-    r" scan_us=(?P<scan_us>\d+) mark_us=(?P<mark_us>\d+) book_us=(?P<book_us>\d+)"
-    r" clear_us=(?P<clear_us>\d+) flookup_us=(?P<flookup_us>\d+) fmark_us=(?P<fmark_us>\d+)"
-)
-OPENPROF_RE = re.compile(
-    r"openprof pid=(?P<pid>\d+) calls=(?P<calls>\d+) misses=(?P<misses>\d+)"
-    r" resolve_us=(?P<resolve_us>\d+) lookup_us=(?P<lookup_us>\d+) attach_us=(?P<attach_us>\d+)"
-)
-POOLCLEAR_RE = re.compile(
-    r"poolclear pid=(?P<pid>\d+) sram=(?P<sram_bytes>\d+)B/(?P<sram_us>\d+)us"
-    r" psram=(?P<psram_bytes>\d+)B/(?P<psram_us>\d+)us"
-)
-
-
-def _syscall_names():
-    """Map syscall id -> name by reading the enum the kernel numbers from.
-
-    The kernel line carries ids, not names: it has no name table and printing
-    one from the exit path would cost more serial than the measurement. The
-    enum in libc is the single source of those numbers, so parse it rather than
-    duplicating the list here, where it would rot the next time one is added.
-    """
-    header = Path(__file__).resolve().parents[2] / "libs" / "libc" / "sys" / "syscall.h"
-    names = {}
-    try:
-        text = header.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return names
-    body = re.search(r"typedef enum SystemCall \{(.*?)\}", text, re.S)
-    if body is None:
-        return names
-    value = 0
-    for entry in body.group(1).split(","):
-        entry = entry.split("//")[0].strip()
-        if not entry:
-            continue
-        assignment = re.match(r"(\w+)\s*=\s*(\d+)$", entry)
-        if assignment:
-            value = int(assignment.group(2))
-            names[value] = assignment.group(1).removeprefix("sys_")
-        elif re.match(r"^\w+$", entry):
-            value += 1
-            names[value] = entry.removeprefix("sys_")
-    return names
-
-
-SYSCALL_NAMES = _syscall_names()
 
 
 def _format_top(raw):
@@ -103,7 +45,7 @@ def _format_top(raw):
         calls, _, us = rest.partition("/")
         if not us or int(calls) == 0:
             continue
-        name = SYSCALL_NAMES.get(int(ids), f"syscall_{ids}")
+        name = syscall_name(ids)
         parts.append(f"{name}={calls} calls/{int(us) / 1000.0:.2f}ms")
     return "  ".join(parts) if parts else "(none)"
 
@@ -135,6 +77,7 @@ def _profile_since(session, offset):
     pool = None
     clear = None
     opens = None
+    disks = None
     for line in _lines_since(session, offset):
         match = SYSPROF_RE.search(line)
         if match:
@@ -151,6 +94,10 @@ def _profile_since(session, offset):
         match = OPENPROF_RE.search(line)
         if match:
             opens = match
+            continue
+        match = DISKPROF_RE.search(line)
+        if match:
+            disks = match
             continue
         match = RUN_RE.search(line)
         if match:
@@ -172,8 +119,15 @@ def _profile_since(session, offset):
         if clear is not None
         else None
     )
+    # The rf_* counters are an optional group: a kernel built before they
+    # existed still matches the line, and their fields come back None.
+    profile["disks"] = (
+        {key: int(value) for key, value in disks.groupdict().items()}
+        if disks is not None
+        else None
+    )
     profile["opens"] = (
-        {key: int(value) for key, value in opens.groupdict().items()}
+        {key: int(value) if value is not None else 0 for key, value in opens.groupdict().items()}
         if opens is not None
         else None
     )
@@ -203,6 +157,14 @@ def _report(label, profile):
         + (f"   dropped {profile['dropped']}" if profile["dropped"] else "")
     )
     print(f"  {'':<28}   top: {_format_top(profile['top'])}")
+    disks = profile.get("disks")
+    if disks and (disks["writes"] or disks["reads"]):
+        print(
+            f"  {'':<28}   disk: {disks['writes']} writes / {disks['write_blocks']} blk"
+            f" in {disks['write_us'] / 1000.0:.2f}ms (card wait {disks['card_wait_us'] / 1000.0:.2f}ms),"
+            f" {disks['reads']} reads / {disks['read_blocks']} blk"
+            f" in {disks['read_us'] / 1000.0:.2f}ms"
+        )
     opens = profile.get("opens")
     if opens:
         total_us = opens["resolve_us"] + opens["lookup_us"] + opens["attach_us"]
@@ -342,10 +304,26 @@ def test_profile_open_cost_by_directory(request):
             continue
         seen += 1
         total_us = opens["resolve_us"] + opens["lookup_us"] + opens["attach_us"]
+        # rf_* is romfs-only, so it is zero for the FAT rows; printing it only
+        # when non-zero keeps those rows readable and makes it obvious which
+        # filesystem answered.
+        heap = ""
+        if opens["kheap_calls"]:
+            heap = (
+                f"  [kernel heap: {opens['kheap_calls']} allocs, {opens['kheap_us']}us]"
+                f"  [vfs: mount {opens['mount_us']}us, fs.get {opens['fsget_us']}us"
+                f" = walk {opens['walk_us']}us + node {opens['node_us']}us]"
+            )
+        walk = ""
+        if opens["rf_hdrs"]:
+            walk = (
+                f"  [romfs walk: {opens['rf_hdrs']} entries, {opens['rf_reads']} reads, "
+                f"{opens['rf_allocs']} name allocs, {opens['rf_hdr_us']}us in entry reads]"
+            )
         print(
             f"  {label:<26} {opens['calls']} open(s)  {total_us / opens['calls']:7.0f}us each  "
             f"(resolve {opens['resolve_us']}us, vfs-lookup {opens['lookup_us']}us, "
-            f"attach {opens['attach_us']}us)"
+            f"attach {opens['attach_us']}us){walk}{heap}"
         )
 
     session.write_command(

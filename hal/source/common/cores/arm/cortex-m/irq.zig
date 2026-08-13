@@ -53,16 +53,4 @@ pub const Irq = struct {
             else => {},
         }
     }
-
-    pub fn enter_critical_section() void {
-        asm volatile (
-            \\ cpsid i
-        );
-    }
-
-    pub fn leave_critical_section() void {
-        asm volatile (
-            \\ cpsie i
-        );
-    }
 };

@@ -22,6 +22,7 @@ const std = @import("std");
 const kernel = @import("../kernel.zig");
 const hal = @import("hal");
 const arch = @import("arch");
+const kheap_lock = @import("../memory/heap/kheap_lock.zig");
 
 const c = @import("libc_imports").c;
 const fs = @import("../fs/vfs.zig");
@@ -226,8 +227,10 @@ pub fn process_sbrk(incr: usize) *allowzero anyopaque {
 // is half-updated.  The correct fix is a short interrupt-disabled critical
 // section.  It must be nesting-safe because newlib's realloc takes the lock and
 // then calls the (also-locking) _malloc_r / _free_r.
-var malloc_lock_depth: usize = 0;
-var malloc_lock_primask: usize = 0;
+//
+// The interrupt-disabled section is now a *ranked recursive spinlock* around the
+// same nesting counter -- see memory/heap/kheap_lock.zig. PRIMASK alone excludes
+// this core's own handlers and nothing on a second core.
 
 // On RP2350 the pico-sdk references malloc early, pulling newlib's strong mlock.o
 // into the link ahead of this Zig compilation unit -> a duplicate-symbol error.
@@ -236,21 +239,18 @@ var malloc_lock_primask: usize = 0;
 const provide_malloc_lock_in_zig = !std.mem.eql(u8, config.cpu.cpu, "rp2350");
 
 fn malloc_lock_impl(_: ?*anyopaque) callconv(.c) void {
-    const primask = arch.sync.save_and_disable_interrupts();
-    if (malloc_lock_depth == 0) {
-        malloc_lock_primask = primask;
-    }
-    malloc_lock_depth += 1;
+    kheap_lock.yasos_kheap_lock();
 }
 
 fn malloc_unlock_impl(_: ?*anyopaque) callconv(.c) void {
-    malloc_lock_depth -= 1;
-    if (malloc_lock_depth == 0) {
-        arch.sync.restore_interrupts(malloc_lock_primask);
-    }
+    kheap_lock.yasos_kheap_unlock();
 }
 
 comptime {
+    // Unconditional: on the rp2350 the Zig `__malloc_lock` export is compiled
+    // out (link order), but malloc_lock.c still forwards to the Zig lock, so
+    // the implementation has to be emitted regardless.
+    _ = kheap_lock;
     if (provide_malloc_lock_in_zig) {
         @export(&malloc_lock_impl, .{ .name = "__malloc_lock" });
         @export(&malloc_unlock_impl, .{ .name = "__malloc_unlock" });

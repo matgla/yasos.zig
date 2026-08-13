@@ -62,7 +62,7 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
 
         _pid: c.pid_t,
         _pool: *MemoryPoolType,
-        _cache: [page_cache_slots]CachedRun = [_]CachedRun{.{}} ** page_cache_slots,
+        _cache: [page_cache_slots]CachedRun = @splat(.{}),
         _cache_bytes: usize = 0,
         // Absolute ceiling on the total pages this process may own across all
         // tiers (image + stack + heap). maxInt = unlimited (the OS-default
@@ -73,6 +73,14 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
         pub const Self = @This();
 
         pub fn init(pid: c.pid_t, pool: *MemoryPoolType) Self {
+            // A process may only take a pid the pool has nothing left under: the
+            // map is keyed by pid, so an overlap here means the previous owner's
+            // teardown is still pending and will free this process's runs out
+            // from under it. Reported rather than fatal -- the corruption it
+            // announces is downstream, and a live target is what gets debugged.
+            if (pool.has_live_mapping(pid)) {
+                log.err("process pool: pid={d} taken while its previous owner still holds mappings", .{pid});
+            }
             return .{
                 ._pid = pid,
                 ._pool = pool,
@@ -196,11 +204,12 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
                 self.cache_flush();
                 if (self.would_exceed_limit(number_of_pages)) return null;
             }
-            // Tag this as user heap (malloc/mmap) so the profiler can separate
-            // it from loader-managed image/stack/thunk allocations.
-            self._pool.tag_next_heap = true;
+            // Tagged as user heap (malloc/mmap) so the profiler can separate it
+            // from loader-managed image/stack/thunk allocations. Passed as an
+            // argument rather than stashed on the pool first -- see
+            // `allocate_pages_from`.
             perf.pool_cache_miss();
-            return self._pool.allocate_pages(number_of_pages, self._pid);
+            return self._pool.allocate_pages_from(number_of_pages, self._pid, .heap);
         }
 
         pub fn release_pages(self: *Self, address: *anyopaque, number_of_pages: i32) void {

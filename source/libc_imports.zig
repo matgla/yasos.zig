@@ -13,18 +13,4 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-pub const c = @cImport({
-    @cInclude("stdarg.h");
-    @cInclude("libs/libc/sys/syscall.h");
-    @cInclude("libs/libc/unistd.h");
-    @cInclude("libs/libc/stdlib.h");
-    @cInclude("libs/libc/sys/ioctl.h");
-    @cInclude("libs/libc/termios.h");
-    @cInclude("libs/libc/dirent.h");
-    @cInclude("libs/libc/fcntl.h");
-    @cInclude("libs/libc/errno.h");
-    @cInclude("libs/libc/sys/stat.h");
-    @cInclude("libs/libc/sys/sysinfo.h");
-    @cInclude("libs/libc/sys/mman.h");
-    @cInclude("libs/libc/sys/resource.h");
-});
+pub const c = @import("c_headers");

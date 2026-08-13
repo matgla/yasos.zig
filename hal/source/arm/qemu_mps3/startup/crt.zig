@@ -51,16 +51,29 @@ fn initialize_bss() void {
 
 export fn _init() void {}
 
-export fn crt_init() void {
-    initialize_data();
-    initialize_bss();
-    __libc_init_array();
-
+fn enable_fpu() void {
     // Enable the FPU (full access to CP10/CP11) before any FP instruction.
+    // CPACR is banked per core, so every core has to do this for itself.
     if (config.has_fpu and config.use_fpu) {
         cpu.cpacr.cpacr.update(.{
             .cp10 = 0x3,
             .cp11 = 0x3,
         });
     }
+}
+
+export fn crt_init() void {
+    initialize_data();
+    initialize_bss();
+    __libc_init_array();
+
+    enable_fpu();
+}
+
+/// C runtime init for a secondary core (startup.S `_start_core1`). Everything
+/// `crt_init` does to memory is absent: .data, .bss and the constructors are all
+/// done by the time a secondary core is released, and repeating any of it would
+/// destroy state core 0 is using. What remains is the banked per-core CPU state.
+export fn crt_init_core1() void {
+    enable_fpu();
 }

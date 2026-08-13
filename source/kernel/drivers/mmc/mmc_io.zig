@@ -17,11 +17,24 @@ const std = @import("std");
 
 const kernel = @import("../../kernel.zig");
 
-const arch = @import("arch");
-
 const hal = @import("hal");
 
 const log = std.log.scoped(.@"mmc/driver");
+
+/// Exclusive access to the card controller, for one whole transfer. The
+/// `save_and_disable_interrupts()` this replaced is not a lock: it excludes this
+/// core's handlers and nothing on the other core, so two processes doing file
+/// I/O drove the controller through interleaved command sequences -- `DataCrc`
+/// on reads, `WriteFail` on writes.
+///
+/// A sleeping mutex, not a `spin_irq`: the section is a whole multi-block
+/// transfer, so a spinlock would mask for milliseconds on the holder and on the
+/// other core spinning for it, against a ~93 us RX-FIFO budget. See
+/// `dev_lock.zig`, which makes the same trade one layer up.
+///
+/// Blocking is safe because every path to the controller is thread context, and
+/// `init` runs before any process exists, which `RankedMutex` handles.
+var sdio_lock: kernel.sync.RankedMutex(.sdio) = .{};
 
 const card_parser = @import("card_parser.zig");
 
@@ -81,8 +94,12 @@ pub const MmcIo = struct {
     }
 
     pub fn init(self: *Self) anyerror!void {
-        const state = arch.sync.save_and_disable_interrupts();
-        defer arch.sync.restore_interrupts(state);
+        // Card bring-up is a long command sequence with timing requirements of
+        // its own, so it takes the controller for the whole of it. It runs
+        // before the second core schedules, but holding the lock costs nothing
+        // and stops that being load-bearing.
+        sdio_lock.lock();
+        defer sdio_lock.unlock();
         try self._mmc.init();
         const config = self._mmc.get_config();
         switch (config.mode) {
@@ -114,8 +131,15 @@ pub const MmcIo = struct {
     }
 
     pub fn read(self: *const Self, address: u64, buf: []u8) isize {
-        const state = arch.sync.save_and_disable_interrupts();
-        defer arch.sync.restore_interrupts(state);
+        // Held across the whole transfer -- command, response and data are one
+        // indivisible sequence on a single controller. The driver keeps its own
+        // fine-grained PRIMASK sections around the DMA poll loops, which is
+        // where masking is actually required and is bounded.
+        sdio_lock.lock();
+        defer sdio_lock.unlock();
+        const t_disk = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
+        defer if (kernel.perf.enabled)
+            kernel.perf.disk_read(kernel.perf.read_cycles() -% t_disk, @intCast(buf.len / 512));
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;
@@ -153,8 +177,14 @@ pub const MmcIo = struct {
     }
 
     pub fn write(self: *const Self, address: u64, buf: []const u8) isize {
-        const state = arch.sync.save_and_disable_interrupts();
-        defer arch.sync.restore_interrupts(state);
+        // See `read`: one transfer, one holder.
+        sdio_lock.lock();
+        defer sdio_lock.unlock();
+        // Block-layer attribution: whether a slow write() or close() is the
+        // card's time or the filesystem's bookkeeping above it.
+        const t_disk = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
+        defer if (kernel.perf.enabled)
+            kernel.perf.disk_write(kernel.perf.read_cycles() -% t_disk, @intCast(buf.len / 512));
         if (address % 512 != 0) {
             log.err("Address must be aligned to 512 bytes, got: {d}", .{address});
             return -1;
@@ -214,8 +244,8 @@ pub const MmcIo = struct {
     }
 
     fn read_response_r3(self: *const Self) u32 {
-        const wait: [4]u8 = [_]u8{0xff} ** 4;
-        var resp: [4]u8 = [_]u8{0xff} ** 4;
+        const wait: [4]u8 = @splat(0xff);
+        var resp: [4]u8 = @splat(0xff);
         self._mmc.transmit_blocking(wait[0..], resp[0..]);
         return std.mem.bigToNative(u32, std.mem.bytesAsValue(u32, &resp).*);
     }
@@ -312,7 +342,7 @@ pub const MmcIo = struct {
         self._mmc.receive_blocking(output);
         self._mmc.receive_blocking(buffer[0..2]);
         const crc = std.mem.bigToNative(u16, std.mem.bytesToValue(u16, &buffer));
-        const received_crc = std.hash.crc.Crc16Xmodem.hash(output);
+        const received_crc = std.hash.crc.@"CRC-16/XMODEM".hash(output);
         if (crc != received_crc) {
             log.debug("Incorrect crc, received: 0x{x}, calculated: 0x{x}", .{ crc, received_crc });
             return error.CrcVerificationFailure;
@@ -322,7 +352,7 @@ pub const MmcIo = struct {
     fn transmit_data_packet(self: *const Self, comptime cmd: u6, input: []const u8) !void {
         const token = try get_data_token(cmd);
         var buffer: [1]u8 = [_]u8{token};
-        const crc = std.hash.crc.Crc16Xmodem.hash(input);
+        const crc = std.hash.crc.@"CRC-16/XMODEM".hash(input);
         const native_crc = std.mem.nativeToBig(u16, crc);
         const crc_buffer = std.mem.toBytes(native_crc);
 
@@ -417,25 +447,25 @@ pub const MmcIo = struct {
     }
 
     fn read_cid(self: *Self) !card_parser.CID {
-        var buffer: [16]u8 = [_]u8{0x00} ** 16;
+        var buffer: [16]u8 = @splat(0x00);
         try self.block_read_impl(10, 0, buffer[0..]);
         log.info("Got CID: {any}", .{buffer});
         return std.mem.bytesToValue(card_parser.CID, &buffer);
     }
 
     fn read_csd(self: *Self) !card_parser.CSDv2 {
-        var buffer: [16]u8 = [_]u8{0x00} ** 16;
+        var buffer: [16]u8 = @splat(0x00);
         try self.block_read_impl(9, 0, buffer[0..]);
         return try card_parser.CardParser.parse_csdv2(buffer[0..]);
     }
 
     fn dump_struct(t: anytype) void {
         log.debug("{s}", .{@typeName(@TypeOf(t))});
-        inline for (std.meta.fields(@TypeOf(t))) |f| {
-            if (@FieldType(@TypeOf(t), f.name) == bool) {
-                log.debug("  {s}: {}", .{ f.name, @field(t, f.name) });
+        inline for (@typeInfo(@TypeOf(t)).@"struct".field_names) |f_name| {
+            if (@FieldType(@TypeOf(t), f_name) == bool) {
+                log.debug("  {s}: {}", .{ f_name, @field(t, f_name) });
             } else {
-                log.debug("  {s}: {x}", .{ f.name, @field(t, f.name) });
+                log.debug("  {s}: {x}", .{ f_name, @field(t, f_name) });
             }
         }
     }
@@ -639,7 +669,7 @@ pub const MmcIo = struct {
     }
 
     fn try_enable_sdio_high_speed(self: *Self, rca: u16) !bool {
-        var status: [64]u8 align(4) = [_]u8{0} ** 64;
+        var status: [64]u8 align(4) = @splat(0);
 
         const check_arg = build_sd_switch_arg(sd_switch_check, sd_switch_group_access, sd_switch_access_default);
         const check_resp = self._mmc.send_sdio_data_command(6, check_arg);
@@ -676,6 +706,8 @@ pub const MmcIo = struct {
     const sdio_io_retry_limit: usize = 6;
 
     fn wait_for_card_dat0(self: *const Self) void {
+        const t_wait = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
+        defer if (kernel.perf.enabled) kernel.perf.disk_wait(kernel.perf.read_cycles() -% t_wait);
         var timeout: u32 = 100_000;
         while (self._mmc.is_busy() and timeout > 0) : (timeout -= 1) {
             hal.time.sleep_us(10);
@@ -855,6 +887,12 @@ pub const MmcIo = struct {
                 _ = self._mmc.send_sdio_command(12, 0);
             }
 
+            // Wait for the card to finish programming before moving on.
+            //
+            // Deferring this to the next operation's leading wait_for_card_dat0
+            // was tried and reverted: writes are spaced far enough apart that
+            // the card is already idle by the next one, so it moved nothing and
+            // only made a flush mean "handed to the card".
             var timeout: u32 = 100_000;
             while (self._mmc.is_busy() and timeout > 0) : (timeout -= 1) {
                 hal.time.sleep_us(10);
@@ -919,7 +957,7 @@ pub const MmcIo = struct {
 
         if (self._card_type) |card_type| {
             log.info("Found card with type: {s}", .{@tagName(card_type)});
-            var change_buffer: [64]u8 = [_]u8{0x00} ** 64;
+            var change_buffer: [64]u8 = @splat(0x00);
             const resp = try self.block_read_impl(6, 0x80000001, change_buffer[0..]);
             _ = resp; // we don't care about the response here, just that it worked
         }
@@ -971,7 +1009,7 @@ test "MmcIo.ShouldInitializeInterface" {
     try mmc_stub.impl.set_receive_data(&R1_RESP);
     const TOKEN_READ: [1]u8 = [_]u8{0xfe};
     try mmc_stub.impl.set_receive_data(&TOKEN_READ);
-    try mmc_stub.impl.set_receive_data(&[_]u8{0x00} ** 16);
+    try mmc_stub.impl.set_receive_data(&@as([16]u8, @splat(0x00)));
     try mmc_stub.impl.set_receive_data(&[_]u8{ 0x00, 0x00 }); // crc
     try mmc_stub.impl.set_receive_data(&R1_RESP);
     try mmc_stub.impl.set_receive_data(&TOKEN_READ);
@@ -1032,7 +1070,7 @@ test "MmcIo.ShouldInitializeInterfaceWithSDV2Byte" {
     try mmc_stub.impl.set_receive_data(&R1_RESP);
     const TOKEN_READ: [1]u8 = [_]u8{0xfe};
     try mmc_stub.impl.set_receive_data(&TOKEN_READ);
-    try mmc_stub.impl.set_receive_data(&[_]u8{0x00} ** 16);
+    try mmc_stub.impl.set_receive_data(&@as([16]u8, @splat(0x00)));
     try mmc_stub.impl.set_receive_data(&[_]u8{ 0x00, 0x00 }); // crc
     try mmc_stub.impl.set_receive_data(&R1_RESP);
     try mmc_stub.impl.set_receive_data(&TOKEN_READ);

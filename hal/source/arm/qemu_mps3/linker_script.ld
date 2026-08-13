@@ -172,9 +172,23 @@ SECTIONS
 
   /* Kernel MSP stack lives in the dedicated high `kstack` region, ABOVE every
      process pool, so a vfork rescue block on the kernel stack is never below a
-     process PSPLIM. The kernel heap then reclaims all of kernel_ram. */
+     process PSPLIM. The kernel heap then reclaims all of kernel_ram.
+
+     The region is split so each core gets an MSP of its own -- MSP is banked
+     per core, but the memory behind it is not, and two cores pushing onto one
+     stack corrupt each other. Core 1 takes the bottom slice and core 0 keeps
+     the rest, so core 0's MSPLIM is exactly core 1's stack top: neither can
+     grow into the other, and MSPLIM turns an attempt into a fault rather than
+     silent corruption.
+
+     Core 1 only parks in an idle loop (phase 6 of docs/smp_plan.md) and its
+     deepest frames are a log line's formatting buffer, so 64K is generous;
+     size it up here when phase 7 starts scheduling processes on it. */
+  __core1_stack_size__ = 64K;
   __stack_top__ = ORIGIN(kstack) + LENGTH(kstack);
-  __stack_bottom__ = ORIGIN(kstack);
+  __stack_bottom__ = ORIGIN(kstack) + __core1_stack_size__;
+  __stack_top_core1__ = ORIGIN(kstack) + __core1_stack_size__;
+  __stack_bottom_core1__ = ORIGIN(kstack);
   __stack = __stack_top__;
   __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
   __HeapLimit = __heap_limit__;

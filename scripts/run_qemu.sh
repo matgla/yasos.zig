@@ -8,7 +8,7 @@
 #   sources, before booting zig-out/bin/yasos_kernel.
 #   Pass an explicit ELF path to skip the build and boot that image as-is.
 #
-#   The kernel is built -Doptimize=ReleaseFast by default (matches the smoke
+#   The kernel is built -Doptimize=ReleaseSafe by default (matches the smoke
 #   suite). Pass --debug as the first argument for a Debug build instead, or
 #   set YASOS_QEMU_OPTIMIZE to any zig optimize mode.
 #
@@ -29,9 +29,9 @@ set -eu
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEFCONFIG="${QEMU_DEFCONFIG:-configs/qemu_mps2_an505_defconfig}"
 
-# Kernel build optimize mode. Defaults to ReleaseFast so the QEMU run matches the
+# Kernel build optimize mode. Defaults to ReleaseSafe so the QEMU run matches the
 # smoke suite (scripts/run_qemu_smoke.sh); a leading --debug selects Debug.
-OPTIMIZE="${YASOS_QEMU_OPTIMIZE:-ReleaseFast}"
+OPTIMIZE="${YASOS_QEMU_OPTIMIZE:-ReleaseSafe}"
 if [ "${1:-}" = "--debug" ]; then
     OPTIMIZE="Debug"
     shift

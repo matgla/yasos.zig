@@ -37,3 +37,9 @@
 [submodule "libs/littlefs"]
 	path = libs/littlefs
 	url = https://github.com/littlefs-project/littlefs.git
+[submodule "libs/oop"]
+	path = libs/oop
+	url = git@github.com:matgla/oop.zig.git
+[submodule "libs/zfat"]
+	path = libs/zfat
+	url = git@github.com:matgla/zfat.git

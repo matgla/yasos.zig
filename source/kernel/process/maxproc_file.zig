@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const c = @import("libc_imports").c;
 const interface = @import("interface");
@@ -53,8 +54,7 @@ pub const MaxProcFile = interface.DeriveFromBase(MaxProcBufferedFile, struct {
 
     pub fn sync(self: *Self) i32 {
         const buffer = &interface.base(self)._buffer;
-        const buf = std.fmt.bufPrint(buffer, "{d}\n", .{config.process.max_pid_value}) catch
-            buffer;
+        const buf = vfmt.print(buffer, "{d}\n", .{config.process.max_pid_value});
         interface.base(self)._end = buf.len;
         return 0;
     }

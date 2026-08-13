@@ -50,7 +50,15 @@ const xn: u32 = 1 << 0; // execute-never
 // AP[2:1]: 0b01 = RW any privilege, 0b11 = RO any privilege.
 const ap_rw_any: u32 = 0b01 << 1;
 const ap_ro_any: u32 = 0b11 << 1;
-// SH[4:3] = 0b00 non-shareable (single core, no caches modelled).
+// SH[4:3] = 0b00 non-shareable.
+//
+// Safe only because `ACTLR.EXTEXCLALL` is set, which forces every exclusive
+// through the global monitor regardless of the region's shareability. The
+// pico-sdk sets it from `.preinit_array`, which `crt_init` runs. If it is ever
+// cleared -- the reason to would be wanting exclusives in PSRAM, which the
+// global monitor does not cover -- every region holding a lock word must become
+// SH = 0b11, or the spinlocks silently stop excluding between cores. See
+// source/kernel/sync/placement.zig.
 
 // MAIR attribute index 0 holds "Normal memory, Outer/Inner Non-cacheable".
 const attr_index_normal: u32 = 0;
@@ -67,22 +75,24 @@ fn encode_rlar(end_exclusive: usize, attr_index: u32) u32 {
     return last | (attr_index << 1) | 1; // EN = 1
 }
 
-var next_region: u32 = 0;
-
-fn program_region(start: usize, end_exclusive: usize, ap: u32, exec_never: u32) void {
+/// Programs one region and advances `cursor`. The cursor is a parameter, not a
+/// module global: the MPU is a per-core block, so each core programs its own
+/// from region 0, and a shared cursor would have the second core run off the end
+/// of the region file and silently drop its own mappings.
+fn program_region(cursor: *u32, start: usize, end_exclusive: usize, ap: u32, exec_never: u32) void {
     if (end_exclusive <= start) {
         return;
     }
     const mpu = Registers.mpu;
     const dregion: u32 = mpu.type.read().dregion;
-    if (next_region >= dregion) {
+    if (cursor.* >= dregion) {
         std.log.err("MPU: out of regions, cannot map 0x{x}-0x{x}", .{ start, end_exclusive });
         return;
     }
-    mpu.rnr.write_raw(next_region);
+    mpu.rnr.write_raw(cursor.*);
     mpu.rbar.write_raw(encode_rbar(start, ap, exec_never));
     mpu.rlar.write_raw(encode_rlar(end_exclusive, attr_index_normal));
-    next_region += 1;
+    cursor.* += 1;
 }
 
 pub fn enable_kernel_protection() void {
@@ -94,12 +104,12 @@ pub fn enable_kernel_protection() void {
     // Disable while reprogramming.
     mpu.ctrl.write_raw(0);
     mpu.mair0.write_raw(mair0_normal_noncacheable);
-    next_region = 0;
+    var next_region: u32 = 0;
 
     // Code + rodata (flash): read-only, executable, for both privilege levels.
-    program_region(@intFromPtr(&__flash_start__), @intFromPtr(&__flash_end__), ap_ro_any, 0);
+    program_region(&next_region, @intFromPtr(&__flash_start__), @intFromPtr(&__flash_end__), ap_ro_any, 0);
     // romfs image (XIP-executed user binaries): read-only, executable.
-    program_region(@intFromPtr(&__romfs_start__), @intFromPtr(&__romfs_end__), ap_ro_any, 0);
+    program_region(&next_region, @intFromPtr(&__romfs_start__), @intFromPtr(&__romfs_end__), ap_ro_any, 0);
 
     // User RAM pools (process RAM + psram): read/write, executable (loaded,
     // non-XIP user code runs from here). Kernel RAM is owned by the kernel and is
@@ -108,7 +118,7 @@ pub fn enable_kernel_protection() void {
         if (region.owner != .User or region.size == 0) {
             continue;
         }
-        program_region(region.start_address, region.start_address + region.size, ap_rw_any, 0);
+        program_region(&next_region, region.start_address, region.start_address + region.size, ap_rw_any, 0);
     }
 
     // Enable with the privileged default background map so kernel code keeps full

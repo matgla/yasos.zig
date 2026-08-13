@@ -24,18 +24,41 @@ pub fn is_valid_stack_ptr(addr: usize) bool {
     return addr != 0;
 }
 
-pub fn dump_stack_trace(log: anytype, address: usize) void {
-    var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
+const max_trace_depth: usize = 32;
 
-    while (stack.next()) |return_address| : (index += 1) {
+pub const StackWalker = struct {
+    addresses: [max_trace_depth]usize = undefined,
+    len: usize = 0,
+    index: usize = 0,
+
+    pub fn init(first_address: usize) StackWalker {
+        var self: StackWalker = .{};
+        const trace = std.debug.captureCurrentStackTrace(
+            .{ .first_address = if (first_address != 0) first_address else null },
+            &self.addresses,
+        );
+        self.len = trace.return_addresses.len;
+        return self;
+    }
+
+    pub fn next(self: *StackWalker) ?usize {
+        if (self.index >= self.len) return null;
+        defer self.index += 1;
+        return self.addresses[self.index];
+    }
+};
+
+pub fn dump_stack_trace(log: anytype, address: usize) void {
+    var walker: StackWalker = .init(address);
+    var index: usize = 0;
+    while (walker.next()) |return_address| : (index += 1) {
         log.err("  {d: >3}: 0x{X:0>8}", .{ index, if (return_address > 0) return_address - 1 else return_address });
     }
 }
 
 pub fn get_stack_trace_depth(address: usize) usize {
+    var walker: StackWalker = .init(address);
     var index: usize = 0;
-    var stack = std.debug.StackIterator.init(address, @frameAddress());
-    while (stack.next()) |_| : (index += 1) {}
+    while (walker.next()) |_| : (index += 1) {}
     return index;
 }

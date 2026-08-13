@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const vfmt = @import("../vfmt.zig");
 
 const interface = @import("interface");
 
@@ -37,6 +38,12 @@ pub const Stats = struct {
     framing_errors: u32 = 0,
     max_overrun_gap_us: u32 = 0,
     max_late_gap_us: u32 = 0,
+    /// How often a core skipped a FIFO drain because another was already doing
+    /// it. Not a loss counter -- the bytes stay in the FIFO for the holder.
+    /// Skips rising while `overruns` and `dropped` stay flat is the receive
+    /// serialisation working; rising with them means a core is in the drain far
+    /// too long.
+    drain_skips: u32 = 0,
 };
 
 /// Set by whoever owns the console UART. Kept as a function pointer rather than
@@ -52,7 +59,7 @@ pub fn clear_provider() void {
     provider = null;
 }
 
-// Seven counters, each up to ten digits with its label: 256 clears the worst
+// Eight counters, each up to ten digits with its label: 256 clears the worst
 // case with room for another field.
 const BufferSize = 256;
 const UartStatBufferedFile = kernel.fs.BufferedFile(BufferSize);
@@ -77,17 +84,18 @@ pub const UartStatFile = interface.DeriveFromBase(UartStatBufferedFile, struct {
     pub fn sync(self: *Self) i32 {
         const stats = if (provider) |source| source() else Stats{};
         const buffer = &interface.base(self)._buffer;
-        const buf = std.fmt.bufPrint(
+        const buf = vfmt.print(
             buffer,
             "rx_bytes {d}\nrx_overruns {d}\nrx_dropped {d}\nrx_fifo_full {d}\n" ++
-                "rx_framing_errors {d}\nmax_overrun_gap_us {d}\nmax_late_gap_us {d}\n",
+                "rx_framing_errors {d}\nmax_overrun_gap_us {d}\nmax_late_gap_us {d}\n" ++
+                "rx_drain_skips {d}\n",
             .{
-                stats.bytes,        stats.overruns,
-                stats.dropped,      stats.fifo_full,
+                stats.bytes,          stats.overruns,
+                stats.dropped,        stats.fifo_full,
                 stats.framing_errors, stats.max_overrun_gap_us,
-                stats.max_late_gap_us,
+                stats.max_late_gap_us, stats.drain_skips,
             },
-        ) catch buffer;
+        );
         interface.base(self)._end = buf.len;
         return 0;
     }
@@ -117,7 +125,8 @@ test "UartStatFile.ShouldReportZerosWithoutAProvider" {
     const readed = sut.interface.read(&buffer);
     try std.testing.expectEqualStrings(
         "rx_bytes 0\nrx_overruns 0\nrx_dropped 0\nrx_fifo_full 0\n" ++
-            "rx_framing_errors 0\nmax_overrun_gap_us 0\nmax_late_gap_us 0\n",
+            "rx_framing_errors 0\nmax_overrun_gap_us 0\nmax_late_gap_us 0\n" ++
+            "rx_drain_skips 0\n",
         buffer[0..@intCast(readed)],
     );
 }
@@ -133,6 +142,7 @@ test "UartStatFile.ShouldReportTheProvidersCounters" {
                 .framing_errors = 2,
                 .max_overrun_gap_us = 812,
                 .max_late_gap_us = 940,
+                .drain_skips = 57,
             };
         }
     };
@@ -148,7 +158,8 @@ test "UartStatFile.ShouldReportTheProvidersCounters" {
     const readed = sut.interface.read(&buffer);
     try std.testing.expectEqualStrings(
         "rx_bytes 4096\nrx_overruns 7\nrx_dropped 3\nrx_fifo_full 11\n" ++
-            "rx_framing_errors 2\nmax_overrun_gap_us 812\nmax_late_gap_us 940\n",
+            "rx_framing_errors 2\nmax_overrun_gap_us 812\nmax_late_gap_us 940\n" ++
+            "rx_drain_skips 57\n",
         buffer[0..@intCast(readed)],
     );
 }

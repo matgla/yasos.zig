@@ -5,14 +5,20 @@ on:
   pull_request:
 
 jobs:
-  # Gate: run the full smoke suite under QEMU in the cloud (no hardware) before
-  # the physical board is touched. Builds the mps2-an505 kernel and runs every
-  # suite at -O0/-O1/-O2 incl. gcc-torture (run_qemu_smoke.sh defaults). A
-  # failure here blocks build_hw + hardware_smoke.
+  # Run the full smoke suite under QEMU in the cloud (no hardware). Builds the
+  # mps3-an524 kernel and runs every suite at -O0/-O1/-O2 incl. gcc-torture
+  # (run_qemu_smoke.sh defaults).
+  #
+  # This used to gate build_hw, so a run cost qemu (~20 min) + build + hardware
+  # (~45 min) in series. It no longer does: the hardware chain starts at the
+  # same time, so the run is now max(qemu, build + hardware) -- roughly the
+  # hardware leg alone. The cost of dropping the gate is that a QEMU-visible
+  # break still burns a board run; the board is a single self-hosted runner, so
+  # that is board time, not cloud money.
   qemu_gate:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.18
+      image: ghcr.io/matgla/yasos.zig:v0.19
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -20,15 +26,35 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: 'recursive'
-      # The -O levels are spelled out here rather than left to the script
-      # default: dropping a level is a coverage cut, and it should be a
-      # reviewable line in the diff, not a default someone changed elsewhere.
-      - name: Run QEMU smoke gate (-O0/-O1/-O2, incl. gcc-torture)
+      # The -O levels and the kernel optimize mode are spelled out here rather
+      # than left to the script defaults: dropping a level, or dropping the
+      # safety checks, is a coverage cut, and it should be a reviewable line in
+      # the diff, not a default someone changed elsewhere.
+      #
+      # --safe keeps Zig's safety checks (bounds, overflow, null-unwrap) on. It
+      # is what catches the class of bug ReleaseFast lets through silently -- an
+      # interface double-release corrupted newlib's kernel free list at boot and
+      # only ReleaseSafe's heap layout turned it into a visible fault.
+      - name: Run QEMU smoke gate (ReleaseSafe, -O0/-O1/-O2, incl. gcc-torture)
         shell: bash
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           mkdir -p tests/smoke/logs
-          ./scripts/run_qemu_smoke.sh --opt-levels '-O0 -O1 -O2'
+          ./scripts/run_qemu_smoke.sh --safe --opt-levels '-O0 -O1 -O2'
+      # A 64-bit atomic on an M33 does not fail to build, it becomes a lock-taking
+      # __atomic_* libcall -- so the only place that failure is visible is the
+      # linked binary. Cheap, and it also proves the atomics we do have lowered
+      # to real exclusives rather than being folded away.
+      # phase 3's completion test: `block_context_switch` is not a lock and must
+      # not come back. See docs/smp_plan.md.
+      - name: No block_context_switch call sites
+        if: always()
+        shell: bash
+        run: ./scripts/verify_no_block_context_switch.sh
+      - name: Atomics lowering gate
+        if: always()
+        shell: bash
+        run: ./scripts/verify_atomics.sh zig-out/bin/yasos_kernel
       # Guards against silent .text drift: the device tcc grew 2.17 -> 2.42 MiB
       # over six weeks with nothing noticing. The budget is a literal here on
       # purpose -- raising it has to show up as a reviewable line in the diff.
@@ -77,11 +103,15 @@ jobs:
   # Build the hardware image once in the cloud and publish it as an artifact so
   # the board runner never recompiles. Package = kernel + rootfs.img + flash
   # cfgs + run_hw_smoke.sh (build_image.sh).
+  #
+  # Deliberately has no `needs:` -- it starts alongside qemu_gate so the board
+  # can begin its ~45 min run instead of waiting out the ~20 min QEMU suite
+  # first. Different runner, different board (RP2350 vs mps3-an524), so the two
+  # builds do not share a workspace or a cache.
   build_hw:
-    needs: qemu_gate
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.18
+      image: ghcr.io/matgla/yasos.zig:v0.19
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -89,8 +119,12 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: 'recursive'
-      - name: Build hardware smoke package (kernel + rootfs + run script)
+      # ReleaseSafe for the same reason as the QEMU gate, and stated explicitly
+      # so the two legs are visibly building the same kernel configuration.
+      - name: Build hardware smoke package (ReleaseSafe kernel + rootfs + run script)
         shell: bash
+        env:
+          YASOS_KERNEL_OPTIMIZE: ReleaseSafe
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ./build_image.sh pimoroni_pico_plus2_and_vga_defconfig
@@ -103,6 +137,10 @@ jobs:
   # Flash the prebuilt package onto the real RP2350 and run the on-device suite
   # at -O0/-O1/-O2 incl. gcc-torture. No host build happens here — the kernel +
   # rootfs come straight from the build_hw artifact.
+  #
+  # Runs concurrently with qemu_gate (it needs only the build), so a red QEMU
+  # suite no longer stops this from starting; check both jobs' results, not
+  # just the one that finished first.
   hardware_smoke:
     needs: build_hw
     runs-on: [self-hosted, pimoroni_pico_plus2]

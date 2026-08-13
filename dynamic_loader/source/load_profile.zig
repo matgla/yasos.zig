@@ -43,7 +43,7 @@ pub const Phase = enum(usize) {
     copy_relocations,
 };
 
-pub var phase_us: [@typeInfo(Phase).@"enum".fields.len]u64 = @splat(0);
+pub var phase_us: [@typeInfo(Phase).@"enum".field_names.len]u64 = @splat(0);
 
 pub inline fn now_us() u64 {
     return if (time_us_hook) |f| f() else 0;

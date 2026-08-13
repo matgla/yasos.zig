@@ -43,6 +43,8 @@ const LeakStartFile = @import("leakdetect_file.zig").LeakStartFile;
 const LeakDumpFile = @import("leakdetect_file.zig").LeakDumpFile;
 const UartStatFile = @import("uartstat_file.zig").UartStatFile;
 const XipStatFile = @import("xipstat_file.zig").XipStatFile;
+const CpusFile = @import("cpus_file.zig").CpusFile;
+const MemPeakFile = @import("mempeak_file.zig").MemPeakFile;
 
 const ProcFsDirectory = @import("procfs_directory.zig").ProcFsDirectory;
 
@@ -99,6 +101,10 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try root_directory.data().append(uartstat);
         const xipstat = try XipStatFile.InstanceType.create_node(allocator);
         try root_directory.data().append(xipstat);
+        const cpus = try CpusFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(cpus);
+        const mempeak = try MemPeakFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(mempeak);
         return procfs;
     }
 
@@ -133,7 +139,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
         const resolved_path = try std.fs.path.resolve(self._allocator, &.{path});
         defer self._allocator.free(resolved_path);
-        var it = try std.fs.path.componentIterator(resolved_path);
+        var it = std.fs.path.componentIterator(resolved_path);
         var current_directory = self._root;
         var node_to_remove: ?kernel.fs.Node = null;
         while (it.next()) |component| {
@@ -151,6 +157,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
                     if (node_to_remove) |*node| {
                         node.delete();
                     }
+                    node_to_remove = null;
                     return kernel.errno.ErrnoSet.NotADirectory;
                 }
 

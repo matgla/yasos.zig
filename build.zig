@@ -36,7 +36,7 @@ fn configure_kconfig(b: *std.Build, target: []const u8, module: []const u8) *std
     const argv = [_][]const u8{ "./yasos_venv/bin/python", "-m", module };
     const command = b.addSystemCommand(&argv);
     const config_dir = b.pathJoin(&.{ "config", target });
-    std.fs.cwd().makePath(config_dir) catch |err| {
+    std.Io.Dir.cwd().createDirPath(b.graph.io, config_dir) catch |err| {
         std.debug.print("Failed to create config directory: {s}\n", .{@errorName(err)});
         return command;
     };
@@ -65,12 +65,12 @@ const Config = struct {
 };
 
 fn load_config(b: *std.Build, config_file: []const u8) !Config {
-    const file = try std.fs.cwd().openFile(config_file, .{ .mode = .read_only });
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(b.graph.io, config_file, .{ .mode = .read_only });
+    defer file.close(b.graph.io);
 
-    const endPosition = try file.getEndPos();
+    const endPosition = try file.length(b.graph.io);
     const buffer = b.allocator.alloc(u8, endPosition) catch return error.OutOfMemory;
-    const readed = try file.read(buffer);
+    const readed = try file.readPositionalAll(b.graph.io, buffer, 0);
     const parsed = try std.json.parseFromSlice(
         Config,
         b.allocator,
@@ -82,18 +82,14 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
     return parsed.value;
 }
 
+/// How many FAT volumes may be mounted at once. Must match
+/// `source/fs/fatfs/fatfs.zig`'s `max_volumes`.
+const fat_volume_count: u5 = 4;
+
 pub fn build(b: *std.Build) !void {
     const test_filters = b.option([]const []const u8, "test-filter", "comma separated list of test name filters") orelse &[0][]const u8{};
-    const clean_step = b.step("clean", "Clean build artifacts");
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
     const run_tests_step = b.step("test", "Run Yasos tests");
-    if (@import("builtin").os.tag != .windows) {
-        clean_step.dependOn(&b.addRemoveDirTree(b.path("zig-cache")).step);
-        clean_step.dependOn(&b.addRemoveDirTree(b.path("config")).step);
-        clean_step.dependOn(&b.addRemoveDirTree(b.path("zig-out")).step);
-        clean_step.dependOn(&b.addRemoveDirTree(b.path("yasos_venv")).step);
-    }
-
     const venv = prepare_venv(b);
     const configure = configure_kconfig(b, "target", "menuconfig");
     const configure_defconfig = configure_kconfig(b, "target", "defconfig");
@@ -112,16 +108,15 @@ pub fn build(b: *std.Build) !void {
     if (defconfig_file) |file| {
         configure_defconfig.addArg(file);
     }
-    const cwd = std.fs.cwd();
     var has_config = true;
-    var maybe_config_directory: ?std.fs.Dir = cwd.openDir("config/target", .{}) catch blk: {
+    var maybe_config_directory: ?std.Io.Dir = std.Io.Dir.cwd().openDir(b.graph.io, "config/target", .{}) catch blk: {
         has_config = false;
         break :blk null;
     };
 
-    var maybe_config_exists: ?std.fs.File.Stat = null;
+    var maybe_config_exists: ?std.Io.File.Stat = null;
     if (maybe_config_directory) |config_directory| {
-        maybe_config_exists = config_directory.statFile("config.json") catch blk: {
+        maybe_config_exists = config_directory.statFile(b.graph.io, "config.json", .{}) catch blk: {
             has_config = false;
             break :blk null;
         };
@@ -184,6 +179,26 @@ pub fn build(b: *std.Build) !void {
     });
     fs_tests.root_module.addImport("kernel", kernel_module_for_tests);
 
+    // The board-independent half of the HAL. Self-contained (`std` only), so it
+    // needs none of the scaffolding the three above do, and it holds the UART
+    // receive ring whose SMP ordering is only testable on real cores.
+    const hal_utils_tests_module = b.addModule("hal_utils_tests_module", .{
+        .root_source_file = b.path("hal/source/common/utils/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const hal_tests = b.addTest(.{
+        .name = "hal_tests",
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+        .root_module = hal_utils_tests_module,
+        .use_llvm = true,
+        .filters = test_filters,
+    });
+
+    const install_hal_tests = b.addInstallBinFile(hal_tests.getEmittedBin(), "hal_tests");
+    run_tests_step.dependOn(&install_hal_tests.step);
+
     const yasld_stub = b.addModule("yasld_stub", .{
         .root_source_file = b.path("dynamic_loader/stub/yasld.zig"),
         .target = target,
@@ -191,6 +206,10 @@ pub fn build(b: *std.Build) !void {
     });
 
     kernel_tests.root_module.addImport("yasld", yasld_stub);
+    // fs_tests needs it too now: the FatFs lock is a *sleeping* mutex, so it
+    // reaches the process manager to block and wake a caller, and that pulls in
+    // the syscall handlers behind it. The cost of a lock that can yield.
+    kernel_module_for_tests.addImport("yasld", yasld_stub);
 
     const c_for_tests = b.addModule("c_for_tests", .{
         .root_source_file = b.path("source/cimports.zig"),
@@ -199,6 +218,13 @@ pub fn build(b: *std.Build) !void {
     });
     kernel_tests.root_module.addImport("c", c_for_tests);
     c_for_tests.addIncludePath(b.path("libs/libc"));
+    const stdlib_headers_for_tests = b.addTranslateC(.{
+        .root_source_file = b.path("libs/libc/stdlib.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    stdlib_headers_for_tests.addIncludePath(b.path("libs/libc"));
+    c_for_tests.addImport("c_headers", stdlib_headers_for_tests.createModule());
 
     const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
     generate_defconfig_for_tests.step.dependOn(&venv.step);
@@ -213,9 +239,7 @@ pub fn build(b: *std.Build) !void {
     run_tests_step.dependOn(&install_arch_tests.step);
     run_tests_step.dependOn(&install_fs_tests.step);
     run_tests_step.dependOn(&install_kernel_tests.step);
-    kernel_tests.linkLibC();
-    // fs_tests.linkLibC();
-    // arch_tests.linkLibC();
+    kernel_tests.root_module.link_libc = true;
 
     const test_config_module = b.addModule("test_config", .{
         .root_source_file = b.path("config/tests/config.zig"),
@@ -242,6 +266,14 @@ pub fn build(b: *std.Build) !void {
     kernel_tests.root_module.addImport("hal", hal_for_tests);
     kernel_tests.root_module.addImport("arch", arch_for_tests);
 
+    // `kernel.perf` reads the instrumentation Kconfig and the CPU frequency, so
+    // the module needs both imports even where profiling compiles out.
+    kernel_module_for_tests.addImport("config", test_config_module);
+    kernel_module_for_tests.addImport("hal", hal_for_tests);
+    // fs_tests reaches `kernel.sync` (ramfs refcounts), which asks the arch
+    // layer how wide a lock-free atomic is and how to mask interrupts.
+    kernel_module_for_tests.addImport("arch", arch_for_tests);
+
     // Forward optimize, for the same reason as the MCU dependency in
     // hal/build.zig: without it this builds Debug inside a release kernel, and
     // `interface` is the vtable machinery every filesystem, driver and file
@@ -260,6 +292,15 @@ pub fn build(b: *std.Build) !void {
     libc_imports_for_tests.addIncludePath(b.path("."));
     libc_imports_for_tests.addIncludePath(b.path("libs/libc"));
 
+    const libc_headers_for_tests = b.addTranslateC(.{
+        .root_source_file = b.path("source/libc_imports.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    libc_headers_for_tests.addIncludePath(b.path("."));
+    libc_headers_for_tests.addIncludePath(b.path("libs/libc"));
+    libc_imports_for_tests.addImport("c_headers", libc_headers_for_tests.createModule());
+
     kernel_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
     fs_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
     arch_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
@@ -267,10 +308,12 @@ pub fn build(b: *std.Build) !void {
     const run_kernel_tests = b.addRunArtifact(kernel_tests);
     const run_fs_tests = b.addRunArtifact(fs_tests);
     const run_arch_tests = b.addRunArtifact(arch_tests);
+    const run_hal_tests = b.addRunArtifact(hal_tests);
 
     run_tests_step.dependOn(&run_kernel_tests.step);
     run_tests_step.dependOn(&run_fs_tests.step);
     run_tests_step.dependOn(&run_arch_tests.step);
+    run_tests_step.dependOn(&run_hal_tests.step);
 
     kernel_tests.root_module.addIncludePath(b.path("."));
     kernel_tests.root_module.addIncludePath(b.path("libs/libc"));
@@ -281,6 +324,10 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .mkfs = true,
         .relative_path_api = .enabled_with_getcwd,
+        // More than one FAT volume. Costs a pointer per slot in FatFs's
+        // `FatFs[]` and in zfat's `disks[]`; buys an SD rootfs and a flash
+        // /mnt on the same board, which a single volume made impossible.
+        .@"volume-count" = @as(u5, fat_volume_count),
     });
     const zfat_host_module = zfat_host.module("zfat");
 
@@ -297,20 +344,23 @@ pub fn build(b: *std.Build) !void {
         "kcov",
         "--clean",
         "--include-path=source/",
-        b.pathJoin(&.{ b.install_path, "coverage_kernel" }),
     });
+    run_kernel_tests_coverage.addDirectoryArg(b.graph.path(.install_prefix, "kernel_tests"));
+
     const run_arch_tests_coverage = b.addSystemCommand(&.{
         "kcov",
         "--clean",
         "--include-path=source/",
-        b.pathJoin(&.{ b.install_path, "coverage_arch" }),
     });
+    run_arch_tests_coverage.addDirectoryArg(b.graph.path(.install_prefix, "arch_tests"));
+
     const run_fs_tests_coverage = b.addSystemCommand(&.{
         "kcov",
         "--clean",
         "--include-path=source/",
-        b.pathJoin(&.{ b.install_path, "coverage_fs" }),
     });
+    run_fs_tests_coverage.addDirectoryArg(b.graph.path(.install_prefix, "fs_tests"));
+
     run_kernel_tests_coverage.addArtifactArg(kernel_tests);
     run_arch_tests_coverage.addArtifactArg(fs_tests);
     run_fs_tests_coverage.addArtifactArg(arch_tests);
@@ -320,11 +370,12 @@ pub fn build(b: *std.Build) !void {
         "--exclude-path=source/fs/romfs/tests,source/fs/fatfs/tests,source/arch/ut",
         "--exclude-pattern=tests.zig,stub.zig,osthread.zig",
         "--merge",
-        b.pathJoin(&.{ b.install_path, "coverage_report" }),
-        b.pathJoin(&.{ b.install_path, "coverage_kernel" }),
-        b.pathJoin(&.{ b.install_path, "coverage_arch" }),
-        b.pathJoin(&.{ b.install_path, "coverage_fs" }),
     });
+    run_coverage.addDirectoryArg(b.graph.path(.install_prefix, "coverage_report"));
+    run_coverage.addDirectoryArg(b.graph.path(.install_prefix, "coverage_kernel"));
+    run_coverage.addDirectoryArg(b.graph.path(.install_prefix, "coverage_arch"));
+    run_coverage.addDirectoryArg(b.graph.path(.install_prefix, "coverage_fs"));
+
     run_coverage.step.dependOn(&run_kernel_tests_coverage.step);
     run_coverage.step.dependOn(&run_arch_tests_coverage.step);
     run_coverage.step.dependOn(&run_fs_tests_coverage.step);
@@ -338,22 +389,21 @@ pub fn build(b: *std.Build) !void {
 
     if (maybe_config_exists) |config_exists| {
         if (config_exists.kind == .file) {
-            const config_path = try maybe_config_directory.?.realpathAlloc(b.allocator, "config.json");
+            const config_path = try maybe_config_directory.?.realPathFileAlloc(b.graph.io, "config.json", b.allocator);
             std.debug.print("Using configuration file: {s}\n", .{config_path});
             const config = try load_config(b, config_path);
             const boardDep = b.dependency("yasos_hal", .{
                 .board = @as([]const u8, config.board),
-                .root_file = @as([]const u8, b.pathFromRoot("source/main.zig")),
+                .root_file = b.path("source/main.zig"),
                 .optimize = optimize,
                 .name = @as([]const u8, "yasos_kernel"),
                 .config_file = @as([]const u8, config_path),
             });
             b.installArtifact(boardDep.artifact("yasos_kernel"));
             const kernel_exec = boardDep.artifact("yasos_kernel");
-            kernel_exec.addIncludePath(b.path("source/sys/include"));
-            kernel_exec.addIncludePath(b.path("."));
-            kernel_exec.addIncludePath(b.path("libs/littlefs"));
-            // kernel_exec.addIncludePath(b.path("rootfs/usr/include"));
+            kernel_exec.root_module.addIncludePath(b.path("source/sys/include"));
+            kernel_exec.root_module.addIncludePath(b.path("."));
+            kernel_exec.root_module.addIncludePath(b.path("libs/littlefs"));
 
             const yasld = b.dependency("yasld", .{
                 .optimize = optimize,
@@ -382,6 +432,28 @@ pub fn build(b: *std.Build) !void {
             });
 
             cimports_module.include_dirs = try kernel_exec.root_module.include_dirs.clone(b.allocator);
+
+            const kernel_target = kernel_exec.root_module.resolved_target.?;
+            const libc_headers = b.addTranslateC(.{
+                .root_source_file = b.path("source/libc_imports.h"),
+                .target = kernel_target,
+                .optimize = optimize,
+                .link_libc = false,
+            });
+            libc_headers.addIncludePath(b.path("."));
+            libc_headers.addIncludePath(b.path("libs/libc"));
+            libc_headers.addIncludePath(b.path("rootfs/usr/include"));
+            libc_imports_module.addImport("c_headers", libc_headers.createModule());
+
+            const stdlib_headers = b.addTranslateC(.{
+                .root_source_file = b.path("libs/libc/stdlib.h"),
+                .target = kernel_target,
+                .optimize = optimize,
+                .link_libc = false,
+            });
+            stdlib_headers.addIncludePath(b.path("."));
+            stdlib_headers.addIncludePath(b.path("libs/libc"));
+            cimports_module.addImport("c_headers", stdlib_headers.createModule());
 
             kernel_module.addImport("libc_imports", libc_imports_module);
             kernel_module.addImport("c", cimports_module);
@@ -442,7 +514,7 @@ pub fn build(b: *std.Build) !void {
             for (kernel_exec.root_module.include_dirs.items) |include_dir| {
                 switch (include_dir) {
                     .path_system => |path| {
-                        littlefs_lib.addSystemIncludePath(path);
+                        littlefs_lib.root_module.addSystemIncludePath(path);
                     },
 
                     else => {},
@@ -450,6 +522,16 @@ pub fn build(b: *std.Build) !void {
             }
             kernel_module.addIncludePath(b.path("libs/littlefs"));
             kernel_module.linkLibrary(littlefs_lib);
+            const littlefs_headers = b.addTranslateC(.{
+                .root_source_file = b.path("libs/littlefs/lfs.h"),
+                .target = kernel_target,
+                .optimize = optimize,
+                .link_libc = false,
+            });
+            littlefs_headers.addIncludePath(b.path("libs/littlefs"));
+            littlefs_headers.addIncludePath(b.path("libs/libc"));
+            littlefs_headers.addIncludePath(b.path("."));
+            kernel_module.addImport("littlefs_headers", littlefs_headers.createModule());
 
             const date_data = "2025-10-10";
 
@@ -461,6 +543,7 @@ pub fn build(b: *std.Build) !void {
                 .@"static-rtc" = date[0..],
                 .mkfs = true,
                 .relative_path_api = .enabled_with_getcwd,
+                .@"volume-count" = @as(u5, fat_volume_count),
             });
             _ = try zfat.builder.addUserInputOption("no-libc", "true");
             const zfat_module = zfat.module("zfat");
