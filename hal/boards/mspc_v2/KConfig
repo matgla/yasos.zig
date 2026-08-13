@@ -41,10 +41,74 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
   config FLASH_MEMORY_SIZE
     default "16MB"
 
-  config CONFIG_PSRAM_CS_PIN 
+  config CONFIG_PSRAM_CS_PIN
     default 0
 
-  config CONFIG_BUILD_USE_NEWLIB 
+  # The QMI timing below is not optional: crt.zig reads
+  # config.flash.xip_max_frequency_hz and external_memory.zig reads every
+  # config.psram.* field unconditionally, and the generator emits a field only
+  # for a symbol that has a value. A board that names none of them does not
+  # build -- which is what happened to this one when the XIP/PSRAM knobs were
+  # added for pimoroni_pico_plus2.
+  #
+  # These are the spec-safe values for the parts an RP2350 board of this shape
+  # carries, not tuned ones: nothing here has been measured on MSPC v2. The
+  # pimoroni_pico_plus2 KConfig has the tuned counterparts (and the reasoning
+  # behind each), so it is the place to look when this board is on a bench.
+
+  config CONFIG_FLASH_XIP_MAX_FREQUENCY_HZ
+    # The rating of the QSPI parts in this class (W25Q128JV: 133 MHz). SCK is
+    # clk_sys/N for an integer N = ceil(clk_sys/this), so at the 150 MHz
+    # default clk_sys it is 75 MHz and this ceiling is not reached at all; it
+    # only starts to matter if the board is overclocked.
+    default 133000000
+
+  config CONFIG_FLASH_XIP_MAX_SELECT_US
+    default 8
+
+  # CONFIG_FLASH_XIP_DESELECT_NS and CONFIG_FLASH_XIP_CONTINUOUS_READ are
+  # deliberately left unset: the first falls back to a 50 ns CS-high time
+  # (tSHSL2, safe for any part) and the second to sending the read opcode every
+  # transaction. Both are per-part speedups worth taking once the flash on this
+  # board is identified -- see pimoroni_pico_plus2, which runs 12 ns and
+  # continuous read on a W25Q128JV.
+
+  config CONFIG_PSRAM_MAX_FREQUENCY_HZ
+    # APS6404L-class ceiling. Same divider arithmetic as the flash above, so at
+    # 150 MHz clk_sys the PSRAM SCK is 75 MHz either way.
+    default 133000000
+
+  config CONFIG_PSRAM_CE_MAX_LOW_US
+    default 8
+
+  config CONFIG_PSRAM_CE_MIN_DESELECT_NS
+    # 50 ns is the conservative figure every board here used before the timing
+    # was sized per part. pimoroni_pico_plus2 now runs 22 ns from the APS6404L
+    # tCPH row, which is worth 14 of the 25 system clocks a heap line fill
+    # waits out there at 532 MHz, but that part has a history of intermittent
+    # corruption on that board, so it is not a number to inherit onto untested
+    # hardware.
+    default 50
+
+  config CONFIG_PSRAM_RXDELAY_LO
+    # Only the seed: external_memory.zig sweeps rxdelay at boot and parks it in
+    # the centre of the widest window that reads back cleanly. These values are
+    # what a failed sweep degrades to.
+    default 2
+
+  config CONFIG_PSRAM_RXDELAY_HI
+    default 3
+
+  config CONFIG_PSRAM_RXDELAY_HI_FREQ_THRESHOLD_HZ
+    default 90000000
+
+  choice CONFIG_MMC_BUS_MODE
+    # mspc_v2.zig wires the card as 1-bit SPI on GP32/33/34 and does not read
+    # this symbol, so SDIO would be selectable but ignored.
+    default CONFIG_MMC_BUS_MODE_SPI
+  endchoice
+
+  config CONFIG_BUILD_USE_NEWLIB
     default y
 
 endif
