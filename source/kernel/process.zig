@@ -1028,6 +1028,16 @@ const ProcessMemoryPoolForTests = struct {
         self.release_pid = pid;
     }
 
+    /// Asked when a process takes ownership of a pid. This stub keeps no
+    /// per-pid map at all, so no pid can carry a leftover mapping into a new
+    /// owner -- always false, which is what the real pool reports for the fresh
+    /// pids these tests hand out.
+    pub fn has_live_mapping(self: *const Self, pid: c.pid_t) bool {
+        _ = self;
+        _ = pid;
+        return false;
+    }
+
     /// The reuse cache asks before parking a run. These tests assert what the
     /// process forwarded to the pool, so nothing may be swallowed by the cache
     /// on the way -- refusing every run keeps free_pages observable.

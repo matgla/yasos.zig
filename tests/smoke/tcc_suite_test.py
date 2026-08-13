@@ -341,12 +341,18 @@ COMPILE_TIMEOUT_TESTS = {
     # ir_tests / tests2
     "mibench_rijndael.c": 60,
     "95_bitfields.c": 30,
-    # The two densest fuzz cases: ~2x the compile work of the next-slowest
+    # The densest fuzz cases: ~2x the compile work of the next-slowest
     # ir_test at -O2, which puts them just past the 5 s default on the board.
     # Both compiles finish and exit 0 -- the harness only stopped listening
     # first, which surfaces as "Prompt not found" and reads like a miscompile.
     "219_fuzz_strd_spill_dryrun_offset.c": 30,
     "337_fuzz_genopif_double_round.c": 30,
+    # Measured 5046 ms at -O2 on the 532 MHz rig -- essentially exactly the 5 s
+    # default, so it passes on hardware (where the clock scaling widens the
+    # window to 5.8 s) and trips under QEMU, whose defconfig carries no
+    # cpu_clock_frequency_mhz and so gets the unscaled 5 s while one QEMU per
+    # xdist worker oversubscribes the host.
+    "252_fuzz_knownbits_imm_subword_sext.c": 30,
 }
 
 
