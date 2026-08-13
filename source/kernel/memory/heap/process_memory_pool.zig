@@ -45,6 +45,13 @@ const log = std.log.scoped(.@"kernel/memory_pool");
 /// free while another owner is still using them, which surfaces much later as
 /// one process finding another's data in its memory. Cheap (it reuses the walk
 /// free_pages already does) but it does emit serial output, so it is opt-in.
+///
+/// The overlap arm is NOT cheap: it walks every live mapping of every process on
+/// every allocation, with `pagepool_lock` held and interrupts masked. Turn it on
+/// for a diagnostic run, not for a timing one -- it perturbs exactly the
+/// windows this kind of bug hides in. It reports through `log.err` rather than
+/// `perf.trace` so it works on a build without profiling enabled, which is every
+/// board build.
 const validate_frees = false;
 
 pub const ProcessMemoryPool = struct {
@@ -344,7 +351,7 @@ pub const ProcessMemoryPool = struct {
                         const e_start = @intFromPtr(e.address.ptr);
                         const e_end = e_start + e.address.len;
                         if (run_start < e_end and e_start < run_end) {
-                            perf.trace("overlap pid={d} run=0x{x}..0x{x} owner_pid={d} live=0x{x}..0x{x}", .{
+                            log.err("overlap pid={d} run=0x{x}..0x{x} owner_pid={d} live=0x{x}..0x{x}", .{
                                 pid, run_start, run_end, e.pid, e_start, e_end,
                             });
                             break :outer;
@@ -468,11 +475,11 @@ pub const ProcessMemoryPool = struct {
             if (validate_frees) {
                 const asked_bytes = @as(usize, @intCast(number_of_pages)) * page_size;
                 if (!found) {
-                    perf.trace("badfree pid={d} addr=0x{x} bytes={d} reason=unowned", .{
+                    log.err("badfree pid={d} addr=0x{x} bytes={d} reason=unowned", .{
                         pid, @intFromPtr(address), asked_bytes,
                     });
                 } else if (asked_bytes > matched_bytes) {
-                    perf.trace("badfree pid={d} addr=0x{x} bytes={d} owned={d} reason=oversized", .{
+                    log.err("badfree pid={d} addr=0x{x} bytes={d} owned={d} reason=oversized", .{
                         pid, @intFromPtr(address), asked_bytes, matched_bytes,
                     });
                 }
@@ -488,6 +495,21 @@ pub const ProcessMemoryPool = struct {
                 perf.pool_free();
             }
         }
+    }
+
+    /// True if `pid` still owns pool memory.
+    ///
+    /// A pid handed to a new process must own none. `memory_map` is keyed by pid
+    /// alone, so a leftover mapping means two processes share one entry and the
+    /// older one's `release_pages_for` marks the younger one's live runs free --
+    /// silent corruption that only surfaces once those pages are handed out
+    /// again. Checked where a process takes ownership of a pid, so the ordering
+    /// bug that produces it (see `reap_terminated`) reports itself instead.
+    pub fn has_live_mapping(self: *const ProcessMemoryPool, pid: c.pid_t) bool {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        const mapping = self.memory_map.getPtr(pid) orelse return false;
+        return mapping.first != null;
     }
 
     /// True if `address` is the base of a live mapping of at least `bytes`

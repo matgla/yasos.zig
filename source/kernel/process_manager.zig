@@ -320,11 +320,32 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 // Outside the lock: it is off both lists and no core is on it,
                 // so nothing can reach it, and the frees below are the long part.
                 const pool = self.get_process_memory_pool();
-                log.info("reap: pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
-                ctx_trace(.reap, p.pid, @intFromPtr(p.get_stack_bottom()), @intFromPtr(p.get_stack_top()));
-                self.release_pid(p.pid);
+                // `deinit` destroys the process, so the pid it is keyed by has to
+                // be read out first -- the trailing log line used to read it back
+                // out of the freed struct.
+                const dead_pid = p.pid;
+                log.info("reap: pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ dead_pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
+                ctx_trace(.reap, dead_pid, @intFromPtr(p.get_stack_bottom()), @intFromPtr(p.get_stack_top()));
+                // Teardown first, pid second. Everything `deinit` still has to
+                // give back -- the stack, and every page-pool run through
+                // `release_pages_for` -- is keyed by pid alone, and the pid map
+                // hands out the lowest free pid, so releasing it first publishes
+                // this pid while its mappings are still in the pool.
+                //
+                // The other core is normally running the shell right here (this
+                // runs in the idle process, and the shell was just woken by the
+                // exit), so it spawns the next command into the pid this reap is
+                // still unwinding. Both processes then share one `memory_map`
+                // entry, and `release_pages_for` marks the *new* process's live
+                // runs free and destroys their records: its modules get handed
+                // out again a few allocations later, which is one process
+                // finding another's data inside its own .data. It went unseen
+                // with 32 KiB stacks and became reproducible at `ulimit -s 1024`
+                // (tests2/119_random_stuff), where freeing and re-zeroing a 1 MiB
+                // PSRAM stack stretches both sides of the window by ~40 ms each.
                 p.deinit();
-                log.info("reap: reaped pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ p.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
+                self.release_pid(dead_pid);
+                log.info("reap: reaped pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ dead_pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
             }
         }
 

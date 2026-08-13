@@ -73,6 +73,14 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
         pub const Self = @This();
 
         pub fn init(pid: c.pid_t, pool: *MemoryPoolType) Self {
+            // A process may only take a pid the pool has nothing left under: the
+            // map is keyed by pid, so an overlap here means the previous owner's
+            // teardown is still pending and will free this process's runs out
+            // from under it. Reported rather than fatal -- the corruption it
+            // announces is downstream, and a live target is what gets debugged.
+            if (pool.has_live_mapping(pid)) {
+                log.err("process pool: pid={d} taken while its previous owner still holds mappings", .{pid});
+            }
             return .{
                 ._pid = pid,
                 ._pool = pool,
