@@ -25,6 +25,7 @@ import contextlib
 import datetime
 import subprocess
 import re
+import termios
 import time
 import logging
 
@@ -37,6 +38,20 @@ current_dir = os.path.dirname(os.path.abspath(__file__)) + "/.."
 logger = logging.getLogger(__name__)
 LOG_PREFIXES = ("[DBG]", "[ERR]", "[INF]", "[WRN]")
 
+# Every "the serial handle may have died under us" except clause.
+#
+# termios.error must be in it: pyserial's POSIX backend calls termios directly
+# for the buffer flushes (tcflush), the drain (tcdrain) and every timeout change
+# (tcsetattr, via _reconfigure_port) without wrapping them, and termios.error
+# derives straight from Exception -- not from OSError, and so not from
+# SerialException either. When the /dev node dies under an open handle (the
+# probe re-enumerates, the hub glitches) the EIO therefore surfaces as a bare
+# termios.error and sails through `except (OSError, serial.SerialException)`.
+# That is what took out a whole CI run: the first stale-handle flush aborted
+# Session.__init__ inside the recovery ladder, and because a dead handle still
+# reports is_open, every remaining test errored at setup the same way.
+SERIAL_ERRORS = (OSError, serial.SerialException, termios.error)
+
 # The device's interactive shell echoes normal typing one character at a time,
 # but draws its prompt with ANSI escapes (CR, "$ ", erase-to-EOL \x1b[K, cursor
 # move \x1b[<n>C) and redraws the whole line for editing keys (cursor moves,
@@ -48,6 +63,40 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]')
 
 def _strip_ansi(text):
     return _ANSI_RE.sub('', text).replace('\r', '')
+
+
+def _restore_timeout(port, value):
+    """Put a serial read timeout back, tolerating a handle that died meanwhile.
+
+    Assigning ``timeout`` reconfigures the port (tcsetattr), so it fails on a
+    /dev node that has gone away -- and every caller restores from a ``finally``,
+    where that would replace the real error with a confusing termios one.
+    """
+    try:
+        port.timeout = value
+    except SERIAL_ERRORS:
+        pass
+
+
+def _open_serial_port(port, deadline=None):
+    """Open *port*, retrying until *deadline* while a fresh node settles.
+
+    A re-enumerated /dev node exists a little before it is usable: the open can
+    fail with ENOENT (udev has not caught up) or EBUSY, and because pyserial
+    configures the line immediately after open() it can also come back as a bare
+    termios error. Returns None when it never opens.
+    """
+    last = None
+    while True:
+        try:
+            return serial.Serial(port, CONSOLE_BAUDRATE, timeout=SERIAL_TIMEOUT)
+        except SERIAL_ERRORS as exc:
+            last = exc
+        if deadline is None or time.monotonic() >= deadline:
+            logger.warning("could not open serial port %s: %s", port, last)
+            return None
+        time.sleep(0.5)
+
 
 # Serial read timeout (seconds). Deliberately short so genuine hangs fail
 # fast; individual call sites that legitimately need longer (boot, compile,
@@ -137,7 +186,18 @@ class Session:
             if Session.serial_port is None:
                 raise RuntimeError("No serial port found for the debug probe.")
             if Session.serial is None or not Session.serial.is_open:
-                Session.serial = serial.Serial(Session.serial_port, CONSOLE_BAUDRATE, timeout=SERIAL_TIMEOUT)
+                # The node can still be re-enumerating from a previous test's
+                # reset, so give it the boot window to settle instead of
+                # erroring this test out at setup on a transient ENOENT/EIO.
+                port = Session.serial_port
+                Session.serial = _open_serial_port(
+                    port, time.monotonic() + BOOT_TIMEOUT)
+                if Session.serial is None:
+                    # Forget the port too: it may come back under another name,
+                    # and the next session then re-detects the probe.
+                    Session.serial_port = None
+                    raise RuntimeError(
+                        f"Could not open the debug-probe serial port {port}")
                 Session.target_needs_reset = True
             self.serial = Session.serial
         logs_dir = smoke_log_dir()
@@ -234,7 +294,7 @@ class Session:
         try:
             yield
         finally:
-            self.serial.timeout = old_timeout
+            _restore_timeout(self.serial, old_timeout)
 
     def _read_until(self, marker, timeout=None):
         # Idle (silence) timeout rather than a total deadline: keep reading as
@@ -285,7 +345,7 @@ class Session:
                 elif time.monotonic() >= deadline:
                     break
         finally:
-            self.serial.timeout = old_timeout
+            _restore_timeout(self.serial, old_timeout)
 
         self._record_serial_output(buf[recorded:].decode('utf-8', 'ignore'))
         return buf.decode('utf-8', 'ignore')
@@ -312,7 +372,7 @@ class Session:
         if not needs_reset:
             try:
                 needs_reset = not self._try_recover_prompt()
-            except (OSError, serial.SerialException):
+            except SERIAL_ERRORS:
                 # Dead PTY / unplugged probe: every serial op raises EIO, so
                 # only a full target reset can bring the session back.
                 needs_reset = True
@@ -327,10 +387,7 @@ class Session:
         self.wait_for_prompt_except_logs()
 
     def _reset_and_wait_for_prompt(self):
-        try:
-            self.serial.reset_input_buffer()
-        except (OSError, serial.SerialException):
-            pass  # serial already dead; reset_target replaces/revives it
+        self._flush_input()
         # Escalating recovery ladder. Each rung first applies a stronger remedy
         # (none -> USB power-cycle -> reflash), then resets and waits for a
         # prompt; we stop at the first rung that yields one. A rung whose remedy
@@ -343,23 +400,43 @@ class Session:
             if remedy is not None and not remedy():
                 break
             self.reset_target()
-            try:
-                self.serial.reset_input_buffer()
-            except (OSError, serial.SerialException):
-                pass
+            self._flush_input()
             try:
                 self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
-            except RuntimeError as exc:
+            except (RuntimeError,) + SERIAL_ERRORS as exc:
+                # Serial errors escalate like a missing prompt does: a handle
+                # that EIOs is exactly what the next rung's reopen fixes, and
+                # letting it out here would fail the test without ever trying.
                 last_exc = exc
                 continue
-            while self.serial.in_waiting > 0:
-                self.wait_for_prompt_except_logs()
+            try:
+                while self.serial.in_waiting > 0:
+                    self.wait_for_prompt_except_logs()
+            except SERIAL_ERRORS as exc:
+                last_exc = exc
+                continue
             Session.target_needs_reset = False
             Session.target_crashed = False
             return
         raise last_exc if last_exc is not None else RuntimeError(
             "Prompt not found on serial port: '$ '"
         )
+
+    def _flush_input(self):
+        """Drop pending input, reopening the port if the handle has gone stale.
+
+        The flush is a tcflush straight on the fd, so it is the first thing to
+        fail once the /dev node dies -- and not noticing leaves the rest of the
+        run talking to a dead descriptor. Returns True when the port is usable
+        afterwards.
+        """
+        try:
+            self.serial.reset_input_buffer()
+            return True
+        except SERIAL_ERRORS as exc:
+            self.file.write(f"Serial flush failed ({exc}); the handle is stale.\n")
+            self.file.flush()
+            return self._reopen_serial(required=False)
 
     def power_reset_target(self):
         """Power-cycle the USB hub the debug probe sits on, to recover a board
@@ -395,43 +472,81 @@ class Session:
         self._reopen_serial()
         return True
 
-    def _reopen_serial(self):
-        """Reopen the debug-probe serial port after a power cycle re-enumerated
-        it. The /dev node can change, so prefer the pinned SERIAL_DEVICE when it
-        reappears and otherwise re-detect the probe. Raises if it never returns.
+    def _reopen_serial(self, required=True):
+        """Reopen the debug-probe serial port after it re-enumerated.
+
+        Called both after a deliberate power cycle and whenever a serial op dies
+        with EIO because the /dev node went away under an open handle. pyserial
+        keeps reporting ``is_open`` for such a handle, so nothing reopens it
+        unless we do -- and the handle is shared by every Session, so one stale
+        descriptor otherwise fails the whole rest of the run at setup.
+
+        The /dev node can change, so prefer the pinned SERIAL_DEVICE when it
+        reappears and otherwise re-detect the probe. With *required* set, never
+        getting the port back raises; otherwise it returns False and the caller
+        escalates. Returns True when the port is open again.
         """
+        if Session.backend is not None:
+            return False  # QEMU: the PTY is the backend's to recreate
         try:
             if Session.serial is not None and Session.serial.is_open:
                 Session.serial.close()
-        except (OSError, serial.SerialException):
+        except SERIAL_ERRORS:
             pass
         Session.serial = None
 
+        previous = Session.serial_port
+        port = self._wait_for_serial_port(time.monotonic() + BOOT_TIMEOUT, previous)
+        # A fresh window for the open: the node appearing and the node working
+        # are separate waits, and spending the first on the second's budget is
+        # how a reopen fails a second before it would have succeeded.
+        handle = None if port is None else _open_serial_port(
+            port, time.monotonic() + BOOT_TIMEOUT)
+        if handle is None:
+            # Forget the port as well: it may come back under a different name,
+            # and the next session then re-detects the probe. self.serial keeps
+            # pointing at the closed handle rather than None, so the callers
+            # that carry on get a SerialException they already handle instead of
+            # an AttributeError.
+            Session.serial_port = None
+            if required:
+                raise RuntimeError("serial port did not re-enumerate")
+            self.file.write("Serial port did not come back; escalating reset.\n")
+            self.file.flush()
+            return False
+
+        Session.serial_port = port
+        Session.serial = handle
+        self.serial = handle
+        self.file.write(f"Reopened serial on {port}.\n")
+        self.file.flush()
+        return True
+
+    def _wait_for_serial_port(self, deadline, previous=None):
+        """Wait for the probe's /dev node to (re)appear; None if it never does.
+
+        Prefers the pinned SERIAL_DEVICE, then a live probe detection, then the
+        port this run was already on. That last fallback is for the CI
+        container: the node is handed in with ``--device`` at start, so it stays
+        present (and usable again, same major:minor) across a re-enumeration
+        that the udev-based detection cannot see from inside. Returning a node
+        that exists but is not working yet is fine -- the open retries.
+        """
         configured = (os.environ.get("SERIAL_DEVICE") or "").strip()
-        port = None
-        deadline = time.monotonic() + BOOT_TIMEOUT
-        while time.monotonic() < deadline:
+        while True:
             if configured and os.path.exists(configured):
-                port = configured
-                break
+                return configured
             try:
                 detected = detect_probe_serial_port()
             except Exception:
                 detected = None
             if detected:
-                port = detected
-                break
+                return detected
+            if previous and os.path.exists(previous):
+                return previous
+            if time.monotonic() >= deadline:
+                return None
             time.sleep(0.5)
-
-        if port is None:
-            Session.serial_port = None
-            raise RuntimeError("serial port did not re-enumerate after power cycle")
-
-        Session.serial_port = port
-        Session.serial = serial.Serial(port, CONSOLE_BAUDRATE, timeout=SERIAL_TIMEOUT)
-        self.serial = Session.serial
-        self.file.write(f"Reopened serial on {port} after power cycle.\n")
-        self.file.flush()
 
     def reflash_target(self):
         """Reflash the board (rootfs + kernel) as the final reset escalation,
@@ -511,10 +626,10 @@ class Session:
                     last_data = time.monotonic()
                 elif time.monotonic() - last_data >= Session.CRASH_DUMP_QUIET_S:
                     break
-        except (OSError, serial.SerialException) as exc:
+        except SERIAL_ERRORS as exc:
             self.file.write(f"\n(crash-dump drain stopped: {exc})\n")
         finally:
-            self.serial.timeout = old_timeout
+            _restore_timeout(self.serial, old_timeout)
             Session._collecting = was_collecting
             self.file.flush()
 
@@ -534,7 +649,7 @@ class Session:
         self.file.flush()
         try:
             self._reset_and_wait_for_prompt()
-        except (OSError, serial.SerialException, RuntimeError) as exc:
+        except SERIAL_ERRORS + (RuntimeError,) as exc:
             self.file.write(f"crash-log collection: target reset failed: {exc}\n")
             self.file.flush()
             return
@@ -547,7 +662,7 @@ class Session:
                 try:
                     self.write_command(f"cat {path}")
                     self.wait_for_prompt_except_logs(timeout=BOOT_TIMEOUT)
-                except (OSError, serial.SerialException, RuntimeError, AssertionError) as exc:
+                except SERIAL_ERRORS + (RuntimeError, AssertionError) as exc:
                     self.file.write(f"(could not read {path}: {exc})\n")
                     self.file.flush()
         finally:
@@ -633,7 +748,7 @@ class Session:
                     return filtered_lines, False
         finally:
             if timeout is not None:
-                self.serial.timeout = old_timeout
+                _restore_timeout(self.serial, old_timeout)
 
     def wait_for_data(self, data, timeout=None):
         line = self._read_until(data, timeout=timeout)
@@ -650,9 +765,10 @@ class Session:
     def read_raw(self, size, timeout=3):
         old_timeout = self.serial.timeout
         self.serial.timeout = timeout
-        data = self.serial.read(size)
-        self.serial.timeout = old_timeout
-        return data
+        try:
+            return self.serial.read(size)
+        finally:
+            _restore_timeout(self.serial, old_timeout)
 
     def read_until_prompt(self):
         return self.read_until("$")
@@ -714,7 +830,7 @@ class Session:
                 elif time.monotonic() >= deadline:
                     break
         finally:
-            self.serial.timeout = old_timeout
+            _restore_timeout(self.serial, old_timeout)
         self._record_serial_output(buf[recorded:].decode('utf-8', 'ignore'))
         return seen
 
@@ -766,7 +882,7 @@ class Session:
             try:
                 if self._try_recover_prompt():
                     return
-            except (OSError, serial.SerialException):
+            except SERIAL_ERRORS:
                 break
 
     def read_line(self):
@@ -873,7 +989,10 @@ class Session:
             session.shutdown_target()
         finally:
             session.file.close()
-            cls.serial.close()
+            if cls.serial is not None:
+                # A recovery inside shutdown_target may already have dropped it.
+                with contextlib.suppress(*SERIAL_ERRORS):
+                    cls.serial.close()
             cls.serial = None
             cls.target_needs_reset = True
             cls.target_crashed = False
