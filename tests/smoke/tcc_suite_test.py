@@ -347,6 +347,16 @@ COMPILE_TIMEOUT_TESTS = {
     # first, which surfaces as "Prompt not found" and reads like a miscompile.
     "219_fuzz_strd_spill_dryrun_offset.c": 30,
     "337_fuzz_genopif_double_round.c": 30,
+    # Same family, same measurement, and they were missed when the two above
+    # were listed: 5052 ms (187) and 5182 ms (338) at -O2 on the 532 MHz rig,
+    # i.e. ~87% of that clock's 5.81 s scaled default. They clear it on
+    # hardware and lose it on the QEMU leg, which gets the unscaled 5 s (its
+    # defconfig carries no cpu_clock_frequency_mhz) while one QEMU per xdist
+    # worker oversubscribes the runner. 338 is the direct sibling of the 337
+    # above -- the second constant-division boundary of the same repro -- so
+    # it should have carried the same budget from the start.
+    "187_fuzz_loop_carried_scratch.c": 30,
+    "338_fuzz_genopif_double_round2.c": 30,
     # Measured 5046 ms at -O2 on the 532 MHz rig -- essentially exactly the 5 s
     # default, so it passes on hardware (where the clock scaling widens the
     # window to 5.8 s) and trips under QEMU, whose defconfig carries no
@@ -361,7 +371,16 @@ COMPILE_TIMEOUT_TESTS = {
     # QEMU run rather than only under contention (-O0 1533 ms, -O1 2729 ms there
     # for scale).  The compile exits 0 and the binary is written; the host
     # ir_tests suite runs it green at all four levels.
-    "448_shift64_lowering.c": 30,
+    #
+    # 30 s was enough when those numbers were taken and is not any more: the
+    # -O2 compile now measures 38378 ms on that same 532 MHz rig, so it blew
+    # the budget by ~28% and failed with "Prompt not found" on hardware, not
+    # just under QEMU.  That is compile-time growth in the optimizer, not a
+    # harness problem -- raising the number here keeps the suite honest about
+    # what it is testing, but the growth itself is worth watching.  120 s is
+    # ~3x the measured time, in line with the margins above (bitops: 84 s
+    # measured, 160 s budgeted).
+    "448_shift64_lowering.c": 120,
 }
 
 
