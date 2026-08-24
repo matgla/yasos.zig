@@ -353,6 +353,15 @@ COMPILE_TIMEOUT_TESTS = {
     # cpu_clock_frequency_mhz and so gets the unscaled 5 s while one QEMU per
     # xdist worker oversubscribes the host.
     "252_fuzz_knownbits_imm_subword_sext.c": 30,
+    # 64-bit shift lowering over every shift/type combination.  Slow at every
+    # level, and at -O2 it is not a close call: 5907 ms at -O0 on the 532 MHz
+    # rig against that clock's 5.81 s scaled deadline (trips by ~100 ms), but
+    # 6486 ms at -O2 on QEMU with the rest of the suite deselected -- i.e. past
+    # the unscaled 5 s with no xdist load at all, so that variant fails on every
+    # QEMU run rather than only under contention (-O0 1533 ms, -O1 2729 ms there
+    # for scale).  The compile exits 0 and the binary is written; the host
+    # ir_tests suite runs it green at all four levels.
+    "448_shift64_lowering.c": 30,
 }
 
 

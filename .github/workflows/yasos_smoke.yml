@@ -181,8 +181,25 @@ jobs:
       # because make hands the command to run_container.sh, which expands it
       # unquoted -- a space-separated value would word-split before it reached
       # run_hw_smoke.sh.
+      #
+      # The Pi hosting this runner also hosts matgla/tinycc's metrics runner, and
+      # that job flashes the SAME RP2350 over the SAME CMSIS-DAP probe. GitHub's
+      # `concurrency:` groups are repo-scoped, so neither repo can serialize
+      # against the other -- on 2026-08-24 a tinycc perf run landed inside this
+      # job's window and all six of its arms came back with no usable data. Both
+      # repos take this host lock around every board-touching step; fd 9 stays
+      # open for the rest of the step, so the lock covers the container run and is
+      # released when the step's shell exits. -w bounds the wait so a stale holder
+      # fails the job with a clear reason instead of hanging until the job timeout.
       - name: Run hardware smoke (-O0/-O1/-O2, incl. gcc-torture, no rebuild)
-        run: make run_smoke_tests_packaged SMOKE_OPT_LEVELS=-O0,-O1,-O2
+        run: |
+          exec 9>/var/lock/rp2350-board.lock
+          flock -w 7200 9 || {
+            echo "::error::RP2350 board lock still held after 2h --" \
+                 "another run (likely matgla/tinycc metrics on this Pi) owns the probe"
+            exit 1
+          }
+          make run_smoke_tests_packaged SMOKE_OPT_LEVELS=-O0,-O1,-O2
       - name: Stage decode bundle if failed (firmware + rootfs + symbol ELFs)
         if: failure()
         run: |
