@@ -13,6 +13,10 @@
 # Options:
 #   --no-build         Skip configure/build; use the existing kernel ELF.
 #   --rebuild-rootfs   Regenerate rootfs.img (needed when userspace changed).
+#                      A rootfs built for a different CPU's FP mode -- e.g. the
+#                      board's, after `defconfig` switched the tree here -- is
+#                      detected and rebuilt without this flag; it is for source
+#                      changes, which nothing stamps.
 #   --fast             Build the kernel -Doptimize=ReleaseFast instead of the
 #                      default ReleaseSafe (which keeps safety checks on).
 #   --safe             Build -Doptimize=ReleaseSafe (the default; explicit form).
@@ -174,6 +178,33 @@ if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
     PYTEST_ARGS=(cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py tcc_test.py tcc_suite_test.py)
 fi
 
+# The FP mode rootfs.img must match, and the mode it was actually built with.
+# Used by the rootfs check below (and by the --no-build warning after it); see
+# the long comment there for why a mismatch has to be caught here.
+ROOTFS_FP_STAMP="$REPO_ROOT/libs/tinycc/.yasos-build/fp-mode"
+
+# What the currently configured target asks for. Deliberately the same rule as
+# build_rootfs.sh's FP_MODE block -- a mode it would rebuild for must not look
+# like a match here either.
+rootfs_fp_wanted() {
+    python3 - "$REPO_ROOT/config/target/config.json" <<'PYEOF'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    print("soft")
+    sys.exit(0)
+print("soft" if not cfg.get("build_userspace_hardware_fp")
+      else (cfg.get("build_userspace_fp_mfpu") or "soft"))
+PYEOF
+}
+
+# What the last build_rootfs.sh run produced; empty when there is no stamp to
+# read, which means the image is unverifiable rather than known-good.
+rootfs_fp_built() {
+    [ -f "$ROOTFS_FP_STAMP" ] && cat "$ROOTFS_FP_STAMP" || true
+}
+
 if [ "$DO_BUILD" -eq 1 ]; then
     echo ">> Configuring: $DEFCONFIG"
     zig build defconfig -Ddefconfig_file="$DEFCONFIG"
@@ -184,20 +215,67 @@ if [ "$DO_BUILD" -eq 1 ]; then
     # cleaned after the image was produced keeps rootfs.img but loses the staging
     # dir, so check for a staged binary too rather than just the image.
     ROOTFS_DONOR="$REPO_ROOT/rootfs/usr/bin/hello"
-    if [ ! -f "$REPO_ROOT/rootfs.img" ] || [ ! -f "$ROOTFS_DONOR" ] || [ "$REBUILD_ROOTFS" -eq 1 ]; then
-        if [ -f "$REPO_ROOT/rootfs.img" ] && [ ! -f "$ROOTFS_DONOR" ] && [ "$REBUILD_ROOTFS" -eq 0 ]; then
-            echo ">> rootfs.img exists but the rootfs/ staging tree is missing; rebuilding both"
-        fi
-        echo ">> Building rootfs.img"
+
+    # Nor is "an image exists" enough: the userspace in it is built for one CPU's
+    # FP feature set and the loader enforces that. The defconfig applied just
+    # above switches the tree to the QEMU target, so an image left over from a
+    # board build is the common case -- and a board rootfs (fpu 'rp2350', which
+    # needs the RP2350 DCP) is refused here by yasld with
+    #   image needs fpu-sp+dcp ..., this machine provides fpu-sp -- missing dcp
+    #   Refusing to load module: UnsupportedCpuFeatures
+    # so /bin/sh never starts and the harness reports "Target crashed while
+    # waiting for prompt" for every single test, which reads like a kernel bug.
+    # build_rootfs.sh records the mode it built in libs/tinycc/.yasos-build/fp-mode
+    # (see its FP_MODE block); compare that against what the current config asks
+    # for and rebuild when they disagree. No stamp means the image predates it or
+    # was built some other way -- unverifiable, so rebuild rather than boot into
+    # that failure.
+    WANT_FP_MODE=$(rootfs_fp_wanted)
+    HAVE_FP_MODE=$(rootfs_fp_built)
+
+    # One reason string rather than a chain of ifs, so the log always says which
+    # of these fired -- a rebuild that just announces itself is indistinguishable
+    # from the script ignoring --rebuild-rootfs.
+    ROOTFS_REASON=""
+    if [ "$REBUILD_ROOTFS" -eq 1 ]; then
+        ROOTFS_REASON="--rebuild-rootfs"
+    elif [ ! -f "$REPO_ROOT/rootfs.img" ]; then
+        ROOTFS_REASON="no rootfs.img"
+    elif [ ! -f "$ROOTFS_DONOR" ]; then
+        ROOTFS_REASON="rootfs.img exists but the rootfs/ staging tree is missing"
+    elif [ -z "$HAVE_FP_MODE" ]; then
+        ROOTFS_REASON="cannot tell which FP mode rootfs.img was built for (no ${ROOTFS_FP_STAMP#"$REPO_ROOT"/})"
+    elif [ "$HAVE_FP_MODE" != "$WANT_FP_MODE" ]; then
+        ROOTFS_REASON="rootfs.img was built for fpu '$HAVE_FP_MODE', $(basename "$DEFCONFIG") needs '$WANT_FP_MODE'"
+    fi
+
+    if [ -n "$ROOTFS_REASON" ]; then
+        echo ">> Building rootfs.img ($ROOTFS_REASON)"
         # --no-kernel: this script runs its own `zig build` below, so skip
         # build_rootfs's built-in kernel rebuild to avoid a redundant build.
         ./build_rootfs.sh -c -o rootfs.img --no-kernel
     else
-        echo ">> Reusing existing rootfs.img (pass --rebuild-rootfs to regenerate)"
+        echo ">> Reusing existing rootfs.img (fpu '$HAVE_FP_MODE'; pass --rebuild-rootfs to regenerate)"
     fi
 
     echo ">> Building kernel: -Doptimize=$OPTIMIZE"
     zig build -Doptimize="$OPTIMIZE"
+fi
+
+# --no-build skips the rootfs check above along with the build, and a stale
+# rootfs is exactly what a --no-build run started after a board build walks
+# into. Not an error -- the flag means "use whatever is in the tree" -- but say
+# so up front, because the alternative is discovering it as every single test
+# failing with "Target crashed while waiting for prompt".
+if [ "$DO_BUILD" -eq 0 ]; then
+    _want_fp=$(rootfs_fp_wanted)
+    _have_fp=$(rootfs_fp_built)
+    if [ -n "$_have_fp" ] && [ "$_have_fp" != "$_want_fp" ]; then
+        echo "warning: rootfs.img was built for fpu '$_have_fp' but this tree is" >&2
+        echo "         configured for '$_want_fp'; the loader will refuse /bin/sh" >&2
+        echo "         (UnsupportedCpuFeatures) and every test will fail at boot." >&2
+        echo "         Drop --no-build, or rerun with --rebuild-rootfs." >&2
+    fi
 fi
 
 if [ ! -f "$KERNEL" ]; then

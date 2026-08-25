@@ -744,12 +744,13 @@ cd ..
 # logic in tccpp.c ensures the stored paths match the target filesystem.
 #
 # The set of predefined macros depends on the optimization level
-# (-O1 and up define __OPTIMIZE__, while -O0/-Os do not), and the PCH
+# (-O1 and up define __OPTIMIZE__, while -O0 does not), and the PCH
 # loader rejects a header whose predefine state differs from the current
 # compile.  So we emit one PCH per predefine state: an unoptimized variant
-# (foo.pch, matches -O0/-Os) and an optimized variant (foo.opt.pch, matches
-# -O1/-O2/-O3).  Both are listed in auto.index against the same header; the
-# loader silently picks whichever matches the current invocation.
+# (foo.pch, matches -O0) and an optimized variant (foo.opt.pch, matches
+# -O1/-O2/-O3, and -Os/-Oz, which alias -O2).  Both are listed in
+# auto.index against the same header; the loader silently picks whichever
+# matches the current invocation.
 PCH_DIR="$SCRIPT_DIR/rootfs/usr/lib/tcc/pch/armv8m"
 if ! $GENERATE_PCH; then
   # Disabled to save flash on rp2350. Remove any stale PCH left in the tree by a
