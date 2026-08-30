@@ -196,7 +196,17 @@ _start:
   blx r1
   ldr r1, =main
   blx r1
-  bkpt #0
+  /* main() returns when the kernel halts -- the root process exited and main
+   * unwound, tearing down the process manager and the loader on its way out.
+   *
+   * This used to be a plain BKPT #0, which is only a halt when a debugger is
+   * attached. On a bare board it escalates to a HardFault (HFSR.DEBUGEVT), and
+   * the fault handler then prints a full postmortem for a fault that never
+   * happened -- over state main has already freed. The QEMU targets solved the
+   * same problem with a semihosting exit; hardware has nowhere to exit to, so
+   * it idles. Interrupts are masked first: a SysTick that still scheduled would
+   * walk the process table that is no longer there. */
+  cpsid i
 _loop:
   wfi
   b _loop

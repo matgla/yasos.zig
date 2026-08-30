@@ -146,4 +146,10 @@ _start:
   ldr r1, =crt_init
   blx r1
   ldr r1, =main 
-  blx r1 
+  blx r1
+  /* See the rp2350 startup: main() returns at shutdown, and without this the
+   * CPU ran off the end of the section into whatever followed. */
+  cpsid i
+_loop:
+  wfi
+  b _loop 

@@ -186,6 +186,15 @@ const ExecutableHandle = struct {
 var modules_list: std.AutoHashMap(c.pid_t, ExecutableHandle) = undefined;
 var libraries_list: std.AutoHashMap(c.pid_t, std.DoublyLinkedList) = undefined;
 
+/// Whether the two lists above hold a map at all. They are `undefined` before
+/// `init` and again after `deinit` -- `HashMap.deinit` leaves them that way --
+/// and a hash lookup on `undefined` reads a garbage metadata pointer, which
+/// `@alignCast` turns into a panic. Nothing on the normal paths can observe
+/// that, but `dump_fault_maps` runs from the hardfault handler, which is exactly
+/// where an early-boot fault or the breakpoint at the end of `main` lands. There
+/// the panic replaces the fault report with a bogus "incorrect alignment".
+var lists_live: bool = false;
+
 /// What this build of yasos can execute, handed to the loader so it can refuse
 /// images built for a different part. Everything here comes from KConfig, the
 /// same source the rootfs toolchain is configured from, so an image that
@@ -252,9 +261,11 @@ pub fn init(allocator: std.mem.Allocator) void {
     resolver_cache = std.StringHashMap(*const anyopaque).init(allocator);
     vfork_snapshots = std.AutoHashMap(c.pid_t, *VForkSnapshot).init(allocator);
     kernel_allocator = allocator;
+    lists_live = true;
 }
 
 pub fn deinit() void {
+    lists_live = false;
     var it = modules_list.iterator();
     while (it.next()) |item| {
         if (item.value_ptr.memory) |mem| {
@@ -461,6 +472,10 @@ export fn dump_fault_maps(pid: c.pid_t) void {
     var buffer: [4096]u8 = undefined;
     const n = format_maps(pid, buffer[0..]);
     log.err("maps for pid={d}:", .{pid});
+    // Says so out loud rather than printing a bare header: an empty map means
+    // the loader is not up (see `lists_live`), which is itself a fact about
+    // where the fault happened.
+    if (n == 0) log.err("  <none>", .{});
     var it = std.mem.splitScalar(u8, buffer[0..n], '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
@@ -473,6 +488,9 @@ export fn dump_fault_maps(pid: c.pid_t) void {
 /// number of bytes written. Used by /proc/<pid>/maps so module load addresses
 /// can be retrieved on demand instead of scraped from log output.
 pub fn format_maps(pid: c.pid_t, buffer: []u8) usize {
+    // The fault handler reaches here at times the loader is not up; see
+    // `lists_live`. "No map" is the honest answer, and the caller prints it.
+    if (!lists_live) return 0;
     var written: usize = 0;
     if (modules_list.getPtr(pid)) |entry| {
         if (entry.executable) |*executable| {
