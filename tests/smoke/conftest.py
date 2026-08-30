@@ -37,6 +37,7 @@ from .progress import ANNOUNCE_AFTER_SECONDS
 from .progress import ANNOUNCE_EVERY_SECONDS
 from .progress import RunningTestAnnouncer
 from .progress import format_duration
+from . import stream_report
 
 session_key = pytest.StashKey()
 test_command_hooks_key = pytest.StashKey()
@@ -69,9 +70,15 @@ def pytest_configure(config):
     )
 
     global _running_announcer
-    _running_announcer = RunningTestAnnouncer(
-        config, ANNOUNCE_AFTER_SECONDS, ANNOUNCE_EVERY_SECONDS
-    )
+    if stream_report.STREAM:
+        # Streaming prints the case name up front and the target's transcript
+        # under it; a RUNNING line from a background thread would land in the
+        # middle of that transcript, and the legacy arm has no such line.
+        _running_announcer = None
+    else:
+        _running_announcer = RunningTestAnnouncer(
+            config, ANNOUNCE_AFTER_SECONDS, ANNOUNCE_EVERY_SECONDS
+        )
 
 
 def pytest_unconfigure(config):
@@ -83,6 +90,10 @@ def pytest_unconfigure(config):
 
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_logstart(nodeid, location):
+    if stream_report.STREAM:
+        # The name goes up FIRST so the target transcript that follows is
+        # visibly attributed to it; the verdict line repeats it below.
+        stream_report.logstart(nodeid, _test_progress_total)
     if _running_announcer is not None:
         _running_announcer.start(nodeid)
 
@@ -141,10 +152,23 @@ def pytest_runtest_logreport(report):
             move_failed_target_logs(logs_dir, test_log_paths_by_nodeid.get(nodeid, []))
             write_failed_pytest_log(logs_dir, nodeid, [report])
             _failed_nodeids_handled.add(nodeid)
+    if stream_report.STREAM:
+        stream_report.logreport(report)
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_report_teststatus(report, config):
+    if stream_report.STREAM:
+        # stream_report has already printed this case's line; returning empty
+        # words suppresses pytest's dot / verbose word without disturbing the
+        # counts it keeps per category.
+        if report.when == "call":
+            return report.outcome, "", ""
+        if report.failed:
+            return "error", "", ""
+        if report.skipped:
+            return "skipped", "", ""
+        return "", "", ""
     if report.when == "call" and _test_progress_total > 0:
         progress = f" [{_test_progress_current}/{_test_progress_total}]"
         # setup + call, i.e. the wall time from the nodeid appearing to the
@@ -157,6 +181,21 @@ def pytest_report_teststatus(report, config):
             return "failed", "F", f"FAILED{suffix}"
         if report.skipped:
             return "skipped", "s", f"SKIPPED{suffix}"
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Attach any target fault seen during this case to its report.
+
+    The panic lines are [ERR]-prefixed, so the harness's log-filtered readers
+    drop them and the case merely fails with a serial timeout. Reading them off
+    the session here is what lets the case's own line say KERNEL PANIC.
+    """
+    report = yield
+    if stream_report.STREAM and report.when == "call":
+        session = item.stash.get(session_key, None)
+        report.target_fault = session.fault_summary() if session is not None else ""
+    return report
 
 
 def _load_target_test_command_hooks():
@@ -329,6 +368,10 @@ def _run_target_commands(session, commands):
 @pytest.hookimpl
 def pytest_runtest_setup(item):
     session = Session(item.name)
+    # After construction: the reset and boot are done, so the stream starts at
+    # the first command the test itself sends.
+    if stream_report.STREAM:
+        session.stream(True)
     item.stash[session_key] = session
     log_path = getattr(session, "log_path", "")
     if log_path:
@@ -396,6 +439,10 @@ def pytest_runtest_teardown(item):
     session = item.stash.get(session_key, None)
     if session is None:
         return
+    if stream_report.STREAM:
+        # Shutdown chatter and crash-log collection belong in the log file, not
+        # under the case's transcript.
+        session.stream(False)
     # Read while qemu is still up: stop() would take the process, and VmHWM
     # with it.
     _record_peak_memory(item)
@@ -420,6 +467,9 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.hookimpl
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    if stream_report.STREAM:
+        stream_report.terminal_summary(terminalreporter)
+
     failed_reports_by_nodeid: dict[str, list[object]] = {}
     for report in terminalreporter.stats.get("failed", []):
         nodeid = getattr(report, "nodeid", "")

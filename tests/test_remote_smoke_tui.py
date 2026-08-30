@@ -1,6 +1,9 @@
 from argparse import Namespace
+import ast
 import importlib.util
 import os
+import re
+import subprocess
 from pathlib import Path
 import sys
 
@@ -418,3 +421,55 @@ def test_collect_smoke_tests_exports_selected_smoke_opt_level(monkeypatch):
     assert captured["cwd"] == remote_smoke_tui.REPO_ROOT
     assert captured["env"]["YASOS_SMOKE_ENABLE_GCC_TORTURE"] == "1"
     assert captured["env"]["YASOS_SMOKE_TCC_OPT_LEVELS"] == "-O1"
+
+def _shell_script_literals():
+    """Every embedded shell script in remote_smoke_tui.py, as AST nodes."""
+    source = MODULE_PATH.read_text()
+    tree = ast.parse(source)
+    # A Constant inside an f-string is one piece of it, not a literal of its own.
+    nested = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            nested.update(id(child) for child in ast.walk(node) if child is not node)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Constant, ast.JoinedStr)) and id(node) not in nested:
+            segment = ast.get_source_segment(source, node) or ""
+            if "set -euo pipefail" in segment:
+                yield node.lineno, segment
+
+
+def test_embedded_shell_scripts_are_raw_strings():
+    """Shell text must reach bash exactly as written.
+
+    A plain Python literal expands its own escapes first, so a `\\n` written
+    inside a shell comment becomes a real newline and splits the comment: the
+    tail lands in the script as a command, and `set -e` then kills the script.
+    Raw literals hand `\\` straight to the shell, where printf and line
+    continuations want it anyway.
+    """
+    literals = list(_shell_script_literals())
+    assert literals, "no shell scripts found -- has the marker line changed?"
+    plain = [line for line, segment in literals
+             if "r" not in re.match(r"[rRfFbB]*", segment).group(0).lower()]
+    assert plain == [], f"non-raw shell script literals at lines {plain}"
+
+
+def test_remote_connect_script_survives_bash():
+    """The connect script's comments stay comments, and it reaches miniterm."""
+    captured = {}
+    original = remote_smoke_tui.run_remote_tty_script
+    try:
+        remote_smoke_tui.run_remote_tty_script = lambda config, script: captured.setdefault("script", script)
+        remote_smoke_tui.run_remote_connect({"serial_device": "/dev/ttyACM0"})
+    finally:
+        remote_smoke_tui.run_remote_tty_script = original
+
+    script = captured["script"]
+    assert r"command + '\n'" in script, "the comment's \\n was expanded by Python"
+
+    # Run it for real, with the one line that would take over the terminal stubbed.
+    probe = script.replace("exec python3 -m serial.tools.miniterm", "echo REACHED #")
+    completed = subprocess.run(["bash", "-lc", probe], text=True, capture_output=True)
+    assert completed.returncode == 0, completed.stderr
+    assert "REACHED" in completed.stdout
+    assert "command not found" not in completed.stderr

@@ -748,7 +748,7 @@ def capture_command(cmd: list[str], cwd: Path | None = None, input_text: str | N
 
 
 def detect_remote_debug_tools(config: dict[str, Any]) -> str:
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 
 if ! command -v openocd >/dev/null 2>&1; then
     echo "missing: openocd" >&2
@@ -778,7 +778,7 @@ def require_local_rsync() -> None:
 
 
 def verify_remote_rsync(config: dict[str, Any]) -> None:
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 remote_repo=$1
 
 if ! command -v rsync >/dev/null 2>&1; then
@@ -895,7 +895,7 @@ def sync_debug_artifacts(config: dict[str, Any]) -> str:
 def select_remote_gdb_kernel(config: dict[str, Any], fallback_remote_kernel: str) -> tuple[str, bool]:
     remote_work_dir = prepare_remote_work_dir(config)
     flashed_remote_kernel = f"{remote_work_dir.rstrip('/')}/yasos_kernel"
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 flashed_remote_kernel=$1
 fallback_remote_kernel=$2
 
@@ -1010,7 +1010,7 @@ def safe_path_component(value: str) -> str:
 
 
 def remote_directory_exists(config: dict[str, Any], remote_path: str) -> bool:
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 remote_path=$1
 
 [[ -d "$remote_path" ]]
@@ -1050,7 +1050,7 @@ def allocate_remote_run_id(config: dict[str, Any]) -> int:
     is what lets a run be followed live without confusing it with the previous
     run's transcripts.
     """
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 runs_root=$1
 
 mkdir -p "$runs_root"
@@ -1203,9 +1203,11 @@ class _LogTailer:
         logs_dir: Path,
         stream_after: float = LOG_STREAM_AFTER_SECONDS,
         clock: Any = time.monotonic,
+        announce: bool = True,
     ):
         self._logs_dir = logs_dir
         self._stream_after = stream_after
+        self._announce = announce
         self._clock = clock
         self._sizes: dict[Path, int] = {}
         # Announcing is tracked apart from the byte offsets: the in-flight log
@@ -1282,7 +1284,7 @@ class _LogTailer:
         for path in [p for p in self._sizes if p not in present]:
             del self._sizes[path]
 
-        if new_files:
+        if new_files and self._announce:
             total = sum(1 for _ in self._logs_dir.rglob("*.txt"))
             _emit(f"[log sync] {new_files} new log(s) fetched ({total} total in {self._logs_dir})")
 
@@ -1383,7 +1385,7 @@ def prepare_remote_repo_path(config: dict[str, Any]) -> str:
     requested = str(config["remote_repo_path"]).strip()
     if not requested:
         raise RunnerError("Remote repository path is required")
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 path=$1
 work_dir_name=$2
 
@@ -1557,10 +1559,11 @@ def run_remote_smoke(
     test_retries = int(config.get("test_retries", 0))
     pytest_args = shlex.split(str(config["pytest_args"]).strip() or "tests/smoke")
     keep_runs = int(config.get("keep_runs", DEFAULT_CONFIG["keep_runs"]))
+    stream = bool(config.get("stream", False))
     # A flash-only run never reaches the pytest phase, so it neither needs nor
     # should consume a run number.
     run_id = 0 if flash_only else allocate_remote_run_id(config)
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 remote_repo=$1
 remote_work_dir=$2
 interface_cfg=$3
@@ -1588,7 +1591,8 @@ seed_source_manifest=${24}
 tcc_env_prefix=${25}
 run_id=${26}
 keep_runs=${27}
-shift 27
+stream=${28}
+shift 28
 
 detect_uhubctl_device() {
     # Find a USB device by vendor ID in sysfs and return its hub location
@@ -2114,7 +2118,21 @@ export YASOS_SMOKE_OPENOCD_INTERFACE_CFG="${interface_cfg}"
 export YASOS_SMOKE_OPENOCD_TARGET_CFG="${target_cfg}"
 export YASOS_SMOKE_OPENOCD_ADAPTER_SPEED="${adapter_speed}"
 
-pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -sv)
+# --stream: the suite prints its own per-case block -- the case name, the
+# target's transcript under it, a verdict line -- the way the legacy comparison
+# harness in yasos-legacy-tcc does, so the two arms can be filmed side by side.
+# See tests/smoke/stream_report.py.
+pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -s)
+if [[ "$stream" == "1" ]]; then
+    export YASOS_SMOKE_STREAM=1
+    # This pytest's stdout is an ssh pipe, so colour cannot auto-detect; a
+    # recorded run is captured rather than watched on the rig.
+    export YASOS_SMOKE_COLOR=1
+    # No -v: it would print the nodeid before every (now suppressed) status
+    # word, naming each case twice above its own transcript.
+else
+    pytest_cmd+=(-v)
+fi
 if (( test_retries > 0 )); then
     pytest_cmd+=(--reruns "$test_retries" --reruns-delay 1)
 fi
@@ -2160,6 +2178,7 @@ exit "$pytest_status"
         str(config.get("tcc_env_prefix", "")),
         str(run_id),
         str(keep_runs),
+        "1" if stream else "0",
         *pytest_args,
     ]
     cmd = ssh_base(config) + [
@@ -2181,7 +2200,11 @@ exit "$pytest_status"
         )
         tailer = _LogTailer(
             local_run_dir,
-            stream_after=float(config.get("log_stream_after", LOG_STREAM_AFTER_SECONDS)),
+            stream_after=0.0 if stream else float(
+                config.get("log_stream_after", LOG_STREAM_AFTER_SECONDS)),
+            # The per-case transcript is already coming back inline; "[log sync]"
+            # lines interleaved with it would be noise in a recording.
+            announce=not stream,
         )
         sync_thread = threading.Thread(
             target=_background_log_sync,
@@ -2236,7 +2259,7 @@ exit "$pytest_status"
 def run_remote_reset(config: dict[str, Any]) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 remote_repo=$1
 interface_cfg=$2
 target_cfg=$3
@@ -2274,7 +2297,7 @@ def run_remote_rescue(config: dict[str, Any]) -> None:
     BOTH kernel and rootfs, so reflash both afterwards.
     """
     board = BOARD_PROFILES[config["board"]]
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 remote_repo=$1
 interface_cfg=$2
 target_cfg=$3
@@ -2315,7 +2338,7 @@ def run_remote_connect(config: dict[str, Any]) -> None:
     """
     serial_device = str(config.get("serial_device", "")).strip()
     baud = str(CONSOLE_BAUDRATE)
-    script = f"""set -euo pipefail
+    script = rf"""set -euo pipefail
 serial_device={shlex.quote(serial_device)}
 baud={shlex.quote(baud)}
 if [[ -z "$serial_device" ]]; then
@@ -2331,7 +2354,15 @@ if [[ -z "$serial_device" ]]; then
     exit 1
 fi
 echo "Connecting to $serial_device @ ${{baud}} baud. Exit with Ctrl-]" >&2
-exec python3 -m serial.tools.miniterm --raw "$serial_device" "$baud"
+# One line terminator per Enter. miniterm defaults to --eol CRLF, and the
+# target's shell ends a line on either half, so every command came back with a
+# second, empty prompt. LF is what the shell wants -- it is what the suite
+# sends (framework/session.py writes command + '\n'). `stty icrnl` keeps that
+# true whatever terminal modes ssh copied from the client: miniterm's raw setup
+# clears ICANON/ECHO/ISIG only, so it is the pty that turns the typed CR into
+# the LF miniterm forwards.
+stty icrnl 2>/dev/null || true
+exec python3 -m serial.tools.miniterm --raw --eol LF "$serial_device" "$baud"
 """
     run_remote_tty_script(config, script)
 
@@ -2342,7 +2373,7 @@ def run_remote_power_reset(config: dict[str, Any]) -> None:
     if not uhubctl_hub:
         # Default to auto-detect when no hub is configured
         uhubctl_hub = "auto"
-    remote_script = """set -euo pipefail
+    remote_script = r"""set -euo pipefail
 uhubctl_hub=$1
 uhubctl_port=$2
 
@@ -2506,7 +2537,7 @@ def run_remote_gdb(config: dict[str, Any], remote_kernel: str, gdb_bin: str, res
     openocd_init = 'openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init"'
     if reset_before_connect:
         openocd_init += ' -c "reset halt"'
-    remote_script = f"""set -euo pipefail
+    remote_script = rf"""set -euo pipefail
 remote_repo={shlex.quote(str(config["remote_repo_path"]))}
 local_repo={shlex.quote(local_repo_path)}
 interface_cfg={shlex.quote(board.interface_cfg)}
@@ -2646,7 +2677,7 @@ while True:
 '''
     serial_script_b64 = base64.b64encode(serial_live_py.encode()).decode()
 
-    remote_script = f"""set -euo pipefail
+    remote_script = rf"""set -euo pipefail
 remote_repo={shlex.quote(str(config["remote_repo_path"]))}
 local_repo={shlex.quote(local_repo_path)}
 interface_cfg={shlex.quote(board.interface_cfg)}
@@ -2696,14 +2727,14 @@ echo "Target command (sent after GDB continues): $target_command"
 echo "{serial_script_b64}" | base64 -d > "$SERIAL_PY"
 
 # -- Rescue DP reset to clear any overclock/fault state from a prior crash --
-openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \\
+openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \
     -c "adapter speed 5000" -c "init" -c "exit" >/tmp/yasos-openocd-rescue.log 2>&1 || true
 sleep 1
 
 # -- reset HALT with the GDB server left running (target stopped at reset) --
-openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \\
-    -c "adapter speed $adapter_speed" \\
-    -c "init" \\
+openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \
+    -c "adapter speed $adapter_speed" \
+    -c "init" \
     -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
 openocd_pid=$!
 
@@ -2931,7 +2962,7 @@ print(f"\nSerial log saved to {log_path} ({len(all_output)} bytes)", file=sys.st
     import base64
     serial_script_b64 = base64.b64encode(serial_capture_py.encode()).decode()
 
-    remote_script = f"""set -euo pipefail
+    remote_script = rf"""set -euo pipefail
 remote_repo={shlex.quote(str(config["remote_repo_path"]))}
 local_repo={shlex.quote(local_repo_path)}
 interface_cfg={shlex.quote(board.interface_cfg)}
@@ -2995,17 +3026,17 @@ echo "Phase 2: Resetting target (halt) and starting GDB..."
 if [[ "${{YASOS_GDB_POSTMORTEM:-0}}" == "1" ]]; then
   # Post-mortem: halt the still-running (panic-looping) board WITHOUT reset, so
   # PSRAM (heap/stack) stays valid for inspection.
-  openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \\
-      -c "adapter speed $adapter_speed" \\
-      -c "init" \\
+  openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \
+      -c "adapter speed $adapter_speed" \
+      -c "init" \
       -c "halt" >/tmp/yasos-openocd.log 2>&1 &
 else
-  openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \\
+  openocd -f "$interface_cfg" -f "target/rp2350-rescue.cfg" \
       -c "adapter speed 5000" -c "init" -c "exit" >/tmp/yasos-openocd-rescue.log 2>&1 || true
   sleep 1
-  openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \\
-      -c "adapter speed $adapter_speed" \\
-      -c "init" \\
+  openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" \
+      -c "adapter speed $adapter_speed" \
+      -c "init" \
       -c "reset halt" >/tmp/yasos-openocd.log 2>&1 &
 fi
 openocd_pid=$!
@@ -3148,6 +3179,11 @@ def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namesp
     if getattr(args, "profile", False):
         runtime_config["profile"] = True
 
+    # Runtime-only (never cached): how a run is printed is a property of that
+    # run, and a sticky --stream would silently change how every later run reads.
+    if getattr(args, "stream", False):
+        runtime_config["stream"] = True
+
     if getattr(args, "extra_tcc_cflags", None):
         runtime_config["extra_tcc_cflags"] = args.extra_tcc_cflags
 
@@ -3276,6 +3312,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cmd", help="Target command to execute over serial before GDB attach (used with --gdb-debug). Example: --cmd 'tcc 15_recursion.c'")
     parser.add_argument("--gdb-script", help="Path to a GDB script file to source after connecting and loading symbols (used with --gdb-debug).")
     parser.add_argument("--gdb-live", action="store_true", help="Live variant of --gdb-debug: attach GDB to a reset-HALTED target FIRST so the --gdb-script can arm HW breakpoints / DWT watchpoints before user code runs, then a background serial sender types --cmd after the script issues `continue`. Catches faults at the corruptor's own PC. Requires --gdb-debug, --cmd and --gdb-script.")
+    parser.add_argument("--stream", action="store_true", help="Print the target's own transcript under each case -- the command sent, the compiler's output, the program's output -- with the case name coloured by result, the way the legacy comparison harness does. Suppresses pytest's per-test line and the RUNNING announcements so the transcript stands alone. This is the mode to record.")
     parser.add_argument("--log-cli-level", help="Set pytest --log-cli-level for this run (e.g. INFO, DEBUG, WARNING). Passed through to the remote pytest invocation.")
     parser.add_argument("--profile", action="store_true", help="Enable TCC performance profiling. Captures per-phase bench breakdown and per-syscall cycle counts from the kernel. Results are saved alongside the timing report.")
     parser.add_argument("--force-flash", action="store_true", help="Upload and flash existing kernel/rootfs artifacts without rebuilding. Forces reflash even if remote hashes match.")

@@ -160,6 +160,145 @@ class Session:
         "kernel has halted.",
     )
 
+    # LEGACY COMPARISON (YASOS_SMOKE_STREAM=1): echo the target's own transcript
+    # to the console as it arrives -- the command we sent, the compiler's
+    # output, the program's output. Ported from the December harness kept in
+    # yasos-legacy-tcc so both arms of the tinycc comparison put the same thing
+    # on screen; scripts/remote_smoke_tui.py --stream turns it on. Recording a
+    # run is much more legible when the audience can see what the board is
+    # actually doing rather than a progress counter. Costs nothing when off.
+    STREAM = os.environ.get("YASOS_SMOKE_STREAM", "") == "1"
+
+    # Loader and kernel chatter is filtered out of the stream; it is per-process
+    # noise that would bury the two lines a viewer cares about. It stays in the
+    # session log, and faults are surfaced separately -- which is why the
+    # hardfault chatter is deliberately NOT dropped here even though it shares
+    # the [ERR] prefix with the rest.
+    STREAM_DROP_PREFIXES = ("[INF]", "[WRN]", "[DBG]",
+                            "[ERR][yasld]", "[ERR][default]")
+
+    # Bookkeeping the harness needs but a viewer does not: staging the source,
+    # checking it arrived, raising a limit, tidying up. What is worth showing is
+    # the compile and the run. Everything still goes to the session log.
+    STREAM_QUIET_COMMANDS = ("mkdir", "cd ", "ls ", "rm ", "rz", "sz", "cp ",
+                             "cat ", "sha256sum", "ulimit", "export ", "echo ",
+                             "exit")
+
+    # Harness plumbing the target prints back: the exit-status probes the suite
+    # appends to every compile and run.
+    STREAM_SKIP_PREFIXES = ("__EXIT_STATUS__", "__COMPILE_STATUS__", "__C__:")
+
+    # The per-case verdict line names the fault that killed a test. crash_markers
+    # above is the set that flags the target for a reset; this is the wider set
+    # the summary reads, and it is only collected while streaming.
+    FAULT_MARKERS = ("KERNEL PANIC", "[ERR][hardfault]", "Hard fault occured",
+                     "hardfault diagnostics:", "kernel has halted.",
+                     "clearing lockup after double fault")
+
+    def stream(self, on):
+        """Turn the console echo on for the test body only.
+
+        Setup resets the board and waits for a boot, and teardown shuts it down;
+        streaming those would bury each case in reset chatter and a banner. The
+        interesting transcript is the compile and the run.
+        """
+        self._stream_on = on
+
+    @staticmethod
+    def _stream_display(command):
+        """The one clause of a shell command a viewer cares about.
+
+        The suite wraps what it runs in plumbing -- a stack limit raised and put
+        back, a status captured into a variable, an exit-status echo -- so the
+        command as sent is not the command as meant. Skip the clauses that are
+        only plumbing and show the first real one: `tcc ... -o /tmp/x` out of a
+        compile, `/tmp/x` out of a run.
+        """
+        for clause in command.split(";"):
+            clause = clause.strip()
+            if not clause:
+                continue
+            head, _, rest = clause.partition(" ")
+            if "=" in head and not rest.strip():
+                continue                      # compile_status=$?
+            if clause.startswith(("ulimit ", "if ", "then ", "else", "fi")):
+                continue
+            return clause
+        return command.strip()
+
+    def stream_command(self, command):
+        """Announce a command we are about to send, unless it is bookkeeping."""
+        if not getattr(self, "_stream_on", False):
+            return
+        self._stream_last_cmd = command
+        shown = self._stream_display(command)
+        if shown.startswith(self.STREAM_QUIET_COMMANDS):
+            self._stream_quiet = True
+            return
+        self._stream_quiet = False
+        print(f"       \033[36m$\033[0m {shown}", flush=True)
+
+    def _stream_skip(self, line):
+        if getattr(self, "_stream_quiet", False):
+            return True
+        last = getattr(self, "_stream_last_cmd", None)
+        if last is not None and (line == last or line.endswith(last)):
+            # The target echoing what we just sent. endswith as well as ==,
+            # because a resync can leave an extra prompt in front of the echo.
+            return True
+        if line.startswith(self.STREAM_SKIP_PREFIXES):
+            return True          # harness plumbing
+        if len(line) == 64 and all(c in "0123456789abcdef" for c in line):
+            return True          # a sha256 probe answer
+        return False
+
+    def _stream_out(self, text):
+        """Echo complete lines of target output, dimmed, as they arrive."""
+        if not getattr(self, "_stream_on", False):
+            return
+        self._stream_buf = getattr(self, "_stream_buf", "") + text
+        while "\n" in self._stream_buf:
+            line, self._stream_buf = self._stream_buf.split("\n", 1)
+            line = _strip_ansi(line).replace("\r", "").rstrip()
+            if not line or line == "$":
+                continue
+            if any(line.startswith(p) for p in self.STREAM_DROP_PREFIXES):
+                continue
+            # The target echoes what we typed, so a line that still carries the
+            # shell prompt is our command going out; everything else came back.
+            if line.startswith("$ "):
+                line = line[2:].strip()
+                if not line:
+                    continue
+            if self._stream_skip(line):
+                continue
+            print(f"         \033[2m{line}\033[0m", flush=True)
+
+    def _note_faults(self, text):
+        """Remember fault lines so the case's verdict line can name them."""
+        # detached() builds a session without __init__, so the list is created
+        # on first use rather than assumed.
+        faults = self.__dict__.setdefault("faults", [])
+        for line in text.splitlines():
+            if any(marker in line for marker in self.FAULT_MARKERS):
+                faults.append(line.strip())
+
+    def take_faults(self):
+        """Faults seen since the last call, in the order they arrived."""
+        seen = self.__dict__.get("faults", [])
+        self.faults = []
+        return seen
+
+    def fault_summary(self):
+        """One short line naming the fault and its most diagnostic detail."""
+        faults = self.take_faults()
+        if not faults:
+            return ""
+        kind = "KERNEL PANIC" if any("PANIC" in f for f in faults) else "HARDFAULT"
+        detail = next((f for f in faults if "CFSR=" in f or "stacked_pc=" in f), "")
+        detail = detail.split("]", 1)[-1].strip() if detail else ""
+        return f"{kind}{(' — ' + detail) if detail else ''}"
+
     def __init__(self, name):
         if qemu.qemu_kernel() is not None:
             # QEMU mode: a relaunchable qemu process replaces the debug probe.
@@ -241,6 +380,9 @@ class Session:
             return
         self.file.write(text)
         self.file.flush()
+        if Session.STREAM:
+            self._stream_out(text)
+            self._note_faults(text)
         if Session._collecting:
             return
         normalized = text.lower()
@@ -847,6 +989,8 @@ class Session:
         that stream data immediately afterwards -- e.g. the zmodem ``rz``
         handshake -- are unaffected.
         """
+        if Session.STREAM:
+            self.stream_command(command)
         last_error = None
         for attempt in range(retries + 1):
             self.serial.write((command + '\n').encode('utf-8'))
