@@ -38,6 +38,15 @@ var sdio_lock: kernel.sync.RankedMutex(.sdio) = .{};
 
 const card_parser = @import("card_parser.zig");
 
+/// Stands in for R1 when the card never drove a response byte.  0xff is the
+/// idle MISO level and can never be a valid R1, since bit 7 is always clear in
+/// a real response.
+const no_response: u8 = 0xff;
+
+/// NCR allows the card up to 8 bytes to answer; poll well past that so a slow
+/// card on the 250 kHz init clock is not given up on early.
+const max_response_polls: i32 = 64;
+
 const CardType = enum(u2) {
     MMCv3,
     SDv1,
@@ -48,9 +57,12 @@ const CardType = enum(u2) {
 const R1 = struct {
     r1: u8,
 
+    /// Seeded with no_response, not 0: seeding 0 made a silent card
+    /// indistinguishable from one answering 0x00 -- "ready, not idle" -- which
+    /// is a meaningful status, so callers were handed a fabricated result.
     pub fn init() R1 {
         return .{
-            .r1 = 0,
+            .r1 = no_response,
         };
     }
 };
@@ -60,7 +72,7 @@ const R3 = struct {
 
     pub fn init() R3 {
         return .{
-            .r1 = 0,
+            .r1 = no_response,
             .ocr = 0,
         };
     }
@@ -131,6 +143,16 @@ pub const MmcIo = struct {
     }
 
     pub fn read(self: *const Self, address: u64, buf: []u8) isize {
+        // Refuse I/O on a card that never initialized.  The layers above ask
+        // for block 0 regardless of whether bring-up succeeded, and issuing a
+        // read to a card that is not in a known state can leave it mid-transfer
+        // -- driving data and ignoring commands -- which survives a board reset
+        // and takes a host power cycle to clear.  Failing here keeps a failed
+        // bring-up from turning into a wedged card.
+        if (!self._initialized) {
+            log.err("refusing read on an uninitialized card", .{});
+            return -1;
+        }
         // Held across the whole transfer -- command, response and data are one
         // indivisible sequence on a single controller. The driver keeps its own
         // fine-grained PRIMASK sections around the DMA poll loops, which is
@@ -177,6 +199,16 @@ pub const MmcIo = struct {
     }
 
     pub fn write(self: *const Self, address: u64, buf: []const u8) isize {
+        // Refuse I/O on a card that never initialized.  The layers above ask
+        // for block 0 regardless of whether bring-up succeeded, and issuing a
+        // read to a card that is not in a known state can leave it mid-transfer
+        // -- driving data and ignoring commands -- which survives a board reset
+        // and takes a host power cycle to clear.  Failing here keeps a failed
+        // bring-up from turning into a wedged card.
+        if (!self._initialized) {
+            log.err("refusing write on an uninitialized card", .{});
+            return -1;
+        }
         // See `read`: one transfer, one holder.
         sdio_lock.lock();
         defer sdio_lock.unlock();
@@ -230,10 +262,68 @@ pub const MmcIo = struct {
         return self._initialized;
     }
 
+    /// Clock the bus with CS deasserted, which is how a card that is not yet in
+    /// SPI mode is given the chance to notice it.  The HAL does this once at
+    /// init; repeating it between CMD0 attempts recovers a card left mid-state
+    /// by a previous driver.
+    /// Clock the bus with CS deasserted for progressively longer, to walk a
+    /// card out of a transfer it never finished.
+    /// Deselect the card and clock 8 more cycles.  An SD card in SPI mode needs
+    /// those clocks after CS goes high to finish the transaction and release
+    /// MISO; without them the *next* command is sampled while the card still
+    /// owns the bus, which is why CMD0 and CMD55 answered correctly here while
+    /// the command right after each one came back garbled (0x7f) or silent.
+    fn spi_release(self: *const Self) void {
+        self._mmc.chip_select(false);
+        const idle: [1]u8 = [_]u8{0xff};
+        self._mmc.transmit_blocking(idle[0..], null);
+    }
+
+    fn spi_flush_clocks(self: *const Self, rounds: u32) void {
+        self._mmc.chip_select(false);
+        const clocks: [16]u8 = @splat(0xff);
+        var i: u32 = 0;
+        while (i < rounds * 4) : (i += 1) {
+            self._mmc.transmit_blocking(clocks[0..], null);
+        }
+    }
+
+    fn spi_native_preamble(self: *const Self) void {
+        self._mmc.chip_select(false);
+        const clocks: [10]u8 = @splat(0xff);
+        self._mmc.transmit_blocking(clocks[0..], null);
+    }
+
     fn reset(self: *const Self) error{MMCResetFailure}!void {
         log.info("resetting", .{});
-        const response = self.send_command(0, 0, R1, true);
-        if (response.r1 != 0x1) return error.MMCResetFailure;
+        // A single CMD0 is not enough.  The SD supply is not cycled by a board
+        // reset, so the card keeps whatever state the previous driver left it
+        // in and can answer the first GO_IDLE with nothing at all.  Re-clocking
+        // the bus and re-issuing CMD0 walks it back to idle -- the same
+        // retry-from-CMD0 shape the SDIO bring-up uses, for the same reason.
+        const max_attempts: u32 = 10;
+        var attempt: u32 = 0;
+        while (attempt < max_attempts) : (attempt += 1) {
+            if (attempt > 0) {
+                // Escalate: a card left mid-transfer by a previous run keeps
+                // driving data and ignores CMD0 until it is clocked out of it.
+                // Each round gives it more idle clocks, and CMD12 asks a stuck
+                // multi-block read to stop.
+                self.spi_flush_clocks(attempt);
+                _ = self.send_command(12, 0, R1, true);
+                self.spi_native_preamble();
+                hal.time.sleep_ms(2);
+            }
+            const response = self.send_command(0, 0, R1, true);
+            if (response.r1 == 0x1) {
+                if (attempt > 0) {
+                    log.info("card entered idle state on CMD0 attempt {d}", .{attempt + 1});
+                }
+                return;
+            }
+            log.warn("CMD0 attempt {d}/{d} answered 0x{x}", .{ attempt + 1, max_attempts, response.r1 });
+        }
+        return error.MMCResetFailure;
     }
 
     fn wait_for_response_r1(self: *const Self) u8 {
@@ -262,24 +352,32 @@ pub const MmcIo = struct {
         self._mmc.transmit_blocking(command[0..], null);
         var repeat: i32 = 0;
         var resp: RespType = RespType.init();
+        var answered = false;
 
-        while (repeat < 20) {
+        // A response byte is the first one with bit 7 clear -- R1's start bit.
+        // This used to test bit 3, the CRC-error flag: that works by accident
+        // against the 0xff idle level, but it would accept a garbage byte as a
+        // response and reject a genuine R1 that is reporting a CRC error.
+        while (repeat < max_response_polls) : (repeat += 1) {
             const r = self.wait_for_response_r1();
-            if ((r & 0x8) == 0) {
+            if ((r & 0x80) == 0) {
                 resp.r1 = r;
+                answered = true;
                 if (RespType == R1) {
-                    if (deselect) self._mmc.chip_select(false);
+                    if (deselect) self.spi_release();
                     return resp;
                 }
                 break;
             }
-            repeat += 1;
         }
 
-        if (RespType == R3) {
+        // Only read the trailing payload when the card actually answered.
+        // Otherwise those bytes are just more idle bus, and reading them hands
+        // the caller a fabricated OCR.
+        if (RespType == R3 and answered) {
             resp.ocr = self.read_response_r3();
         }
-        if (deselect) self._mmc.chip_select(false);
+        if (deselect) self.spi_release();
         return resp;
     }
 
@@ -300,12 +398,12 @@ pub const MmcIo = struct {
                     hal.time.sleep_ms(50);
                 },
                 else => {
-                    log.debug("Incorrect initialization response received ({x})", .{acmd41_resp.r1});
+                    log.warn("ACMD41 unexpected response: cmd55 r1=0x{x}, acmd41 r1=0x{x}", .{ cmd55_resp.r1, acmd41_resp.r1 });
                     return null;
                 },
             }
         }
-        log.debug("Card didn't respond to ACMD41 after {d} retries", .{max_retries});
+        log.warn("Card didn't respond to ACMD41 after {d} retries", .{max_retries});
         return null;
     }
 
@@ -912,10 +1010,10 @@ pub const MmcIo = struct {
     fn initialize_spi_mmc(self: *Self) anyerror!void {
         log.info("initializing MMC using SPI mode", .{});
         self.reset() catch return error.CardInitializationFailure;
-        log.debug("sending CMD8", .{});
+        log.info("sending CMD8", .{});
         const cmd8_resp = self.send_command(8, 0x1aa, R7, true);
         if (cmd8_resp.r1 != 0x1) {
-            log.debug("CMD8 was rejected with response code: 0x{x}, trying ACMD41", .{cmd8_resp.r1});
+            log.warn("CMD8 rejected: r1=0x{x} ocr=0x{x}; falling back to ACMD41", .{ cmd8_resp.r1, cmd8_resp.ocr });
             self._card_type = try self.initiate_intitialization_process(0);
             if (self._card_type == null) {
                 var retries: i32 = 0;
@@ -988,6 +1086,40 @@ fn consume_frame(maybe_expected: ?[]const u8) !void {
     }
 }
 
+// The three transmit shapes the SPI bring-up produces.  A command frame is
+// never alone on the bus: the R1 poll, any trailing payload read and the
+// release clocks are all separate `transmit_blocking` calls, so the stub
+// records one frame each.
+
+/// A command answered with R1 and deselected: the command, the R1 poll, then
+/// the 8 idle clocks `spi_release` drives with CS high.  Those clocks are what
+/// lets the card finish the transaction and let go of MISO -- without them the
+/// *next* command is sampled while the card still owns the bus.
+fn consume_command_r1(expected: []const u8) !void {
+    try consume_frame(expected);
+    try consume_frame(null); // R1 poll
+    try consume_frame(null); // spi_release
+}
+
+/// Same, for a command whose response carries a 4-byte payload (R3/R7): the
+/// payload is read as one more frame before the release clocks.
+fn consume_command_r3(expected: []const u8) !void {
+    try consume_frame(expected);
+    try consume_frame(null); // R1 poll
+    try consume_frame(null); // OCR / voltage-check payload
+    try consume_frame(null); // spi_release
+}
+
+/// A block read holds CS asserted across the data packet, so it does not go
+/// through `spi_release`; it ends with the single dummy byte `block_read_impl`
+/// clocks out after dropping CS itself.  The data packet is read with
+/// `receive_blocking`, which records no transmit frames.
+fn consume_block_read(expected: []const u8) !void {
+    try consume_frame(expected);
+    try consume_frame(null); // R1 poll
+    try consume_frame(null); // trailing dummy byte after CS release
+}
+
 test "MmcIo.ShouldInitializeInterface" {
     var sut = MmcIo.create(&mmc_stub);
     mmc_stub.impl.reset();
@@ -1023,24 +1155,13 @@ test "MmcIo.ShouldInitializeInterface" {
 
     try sut.init();
 
-    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x69, 0x40, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x7a, 0x00, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
+    try consume_command_r1(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 }); // CMD0
+    try consume_command_r3(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 }); // CMD8
+    try consume_command_r1(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 }); // CMD55
+    try consume_command_r1(&[_]u8{ 0x69, 0x40, 0, 0, 0, 0x95 }); // ACMD41
+    try consume_command_r3(&[_]u8{ 0x7a, 0x00, 0, 0, 0, 0x95 }); // CMD58
+    try consume_block_read(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 }); // CMD6
+    try consume_block_read(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 }); // CMD9
 
     try mmc_stub.impl.verify();
     try std.testing.expect(sut.initialized());
@@ -1084,24 +1205,13 @@ test "MmcIo.ShouldInitializeInterfaceWithSDV2Byte" {
 
     try sut.init();
 
-    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x69, 0x40, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x7a, 0x00, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
+    try consume_command_r1(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 }); // CMD0
+    try consume_command_r3(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 }); // CMD8
+    try consume_command_r1(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 }); // CMD55
+    try consume_command_r1(&[_]u8{ 0x69, 0x40, 0, 0, 0, 0x95 }); // ACMD41
+    try consume_command_r3(&[_]u8{ 0x7a, 0x00, 0, 0, 0, 0x95 }); // CMD58
+    try consume_block_read(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 }); // CMD6
+    try consume_block_read(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 }); // CMD9
 
     try mmc_stub.impl.verify();
     try std.testing.expect(sut.initialized());
@@ -1125,11 +1235,8 @@ test "MmcIo.ShouldHandleIncorrectCMD8Response" {
 
     try std.testing.expectEqual(error.UnknownCard, sut.init());
 
-    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
+    try consume_command_r1(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 }); // CMD0
+    try consume_command_r3(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 }); // CMD8
 
     try mmc_stub.impl.verify();
     try std.testing.expect(!sut.initialized());
@@ -1167,21 +1274,12 @@ test "MmcIo.ShouldInitializeWithACMD41" {
 
     try sut.init();
 
-    try consume_frame(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x69, 0x00, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
-    try consume_frame(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 });
-    try consume_frame(null);
-    try consume_frame(null);
+    try consume_command_r1(&[_]u8{ 0x40, 0, 0, 0, 0, 0x95 }); // CMD0
+    try consume_command_r3(&[_]u8{ 0x48, 0, 0, 1, 0xaa, 0x95 }); // CMD8
+    try consume_command_r1(&[_]u8{ 0x77, 0, 0, 0, 0, 0x95 }); // CMD55
+    try consume_command_r1(&[_]u8{ 0x69, 0x00, 0, 0, 0, 0x95 }); // ACMD41
+    try consume_block_read(&[_]u8{ 0x46, 0x80, 0, 0, 0x1, 0x95 }); // CMD6
+    try consume_block_read(&[_]u8{ 0x49, 0, 0, 0, 0, 0x95 }); // CMD9
 
     try mmc_stub.impl.verify();
     try std.testing.expect(sut.initialized());
