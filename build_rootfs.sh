@@ -632,7 +632,6 @@ build_zork_makefile()
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  mv $PREFIX/games/zork $PREFIX/games/hmm
   cd ..
 }
 
