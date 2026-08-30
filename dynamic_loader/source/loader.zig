@@ -50,9 +50,8 @@ const log = std.log.scoped(.yasld);
 ///
 /// Nothing is lost by default. The same bases are dumped on a fault
 /// (`dump_fault_maps`, source/kernel/modules.zig) and readable on demand from
-/// /proc/<pid>/maps; the per-section debug lines below still carry them at debug
-/// level. The kernel turns this back on for a profiling build, where the line is
-/// wanted inline with the `load kind=` timings.
+/// /proc/<pid>/maps. The kernel turns this back on for a profiling build, where
+/// the line is wanted inline with the `load kind=` timings.
 var emit_load_map: bool = false;
 
 /// Called by the kernel at loader init (source/kernel/modules.zig) with whatever
@@ -284,19 +283,13 @@ pub const Loader = struct {
             }
         }
 
-        // const suppress_log = if (module.name) |name|
-        //     std.mem.eql(u8, name, "libc.so") or
-        //         std.mem.eql(u8, name, "libm.so") or
-        //         std.mem.eql(u8, name, "libpthread.so") or
-        //         std.mem.eql(u8, name, "libdl.so") or
-        //         std.mem.eql(u8, name, "toybox")
-        // else
-        //     false;
-
-        // Section load addresses are available on-demand via /proc/<pid>/maps
-        // (see source/kernel/process/maps_file.zig). Keep them at debug level so
-        // they don't pollute the UART — in particular so they cannot corrupt the
-        // binary zmodem stream used for serial file uploads during testing.
+        // There is deliberately no per-section ".text/.plt/.data/.bss/.got
+        // loaded at 0x…" line here any more. Those addresses are available
+        // on-demand from /proc/<pid>/maps (source/kernel/process/maps_file.zig),
+        // which is what scripts/yasld_gdb.py reads; printing five lines per
+        // module on every spawn cost two blocking UART writes each, could
+        // corrupt the binary zmodem stream used for serial file uploads, and
+        // showed up in screen recordings of the console.
         // Concise one-line load summary: the runtime base map that symbolizes
         // fault PCs against the on-disk ELFs (module .text/.data/.got bases).
         // Correlate with the adjacent "yasld-bench ... pid=N" line in
@@ -311,11 +304,6 @@ pub const Loader = struct {
                 @intFromPtr(module.get_got().ptr),
             });
         }
-        log.debug(".text loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_text().ptr), module.get_text().len, module.name.? });
-        log.debug(".plt  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_plt().ptr), module.get_plt().len, module.name.? });
-        log.debug(".data loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_data().ptr), module.get_data().len, module.name.? });
-        log.debug(".bss  loaded at 0x{x}, size: {x} for: {s}", .{ @intFromPtr(module.get_bss().ptr), module.get_bss().len, module.name.? });
-        log.debug(".got  loaded at 0x{x}, entr: {x} for: {s}", .{ @intFromPtr(module.get_got().ptr), module.get_got().len, module.name.? });
 
         // Dump GOT entries and .data words for debugging function pointer resolution
         // {
