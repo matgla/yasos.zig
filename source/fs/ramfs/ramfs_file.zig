@@ -26,6 +26,8 @@ const kernel = @import("kernel");
 const IFile = kernel.fs.IFile;
 const FileName = kernel.fs.FileName;
 const FileType = kernel.fs.FileType;
+const PollMask = kernel.fs.PollMask;
+const poll_always_ready = kernel.fs.poll_always_ready;
 const IoctlCommonCommands = kernel.fs.IoctlCommonCommands;
 const FileMemoryMapAttributes = kernel.fs.FileMemoryMapAttributes;
 
@@ -194,6 +196,13 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     pub fn fcntl(self: *Self, _: i32, _: ?*anyopaque) i32 {
         _ = self;
         return 0;
+    }
+
+    /// Nothing here ever makes the caller wait, so every requested read/write
+    /// bit is ready -- what POSIX specifies for a regular file.
+    pub fn poll(self: *Self, events: PollMask) PollMask {
+        _ = self;
+        return poll_always_ready(events);
     }
 
     pub fn filetype(self: *const Self) FileType {

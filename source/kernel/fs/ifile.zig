@@ -48,6 +48,24 @@ pub const FileMemoryMapAttributes = extern struct {
     mapped_address_w: ?*anyopaque,
 };
 
+/// Readiness mask for `IFile.poll`, in <poll.h> bits. Kept as the `short` the
+/// C `struct pollfd` carries so the value crosses the syscall boundary and lands
+/// in `revents` unchanged.
+pub const PollMask = i16;
+
+/// The read- and write-readiness bits a file may report. POLLERR/POLLHUP/POLLNVAL
+/// are deliberately absent: POSIX has those reported whether or not the caller
+/// asked for them, so an implementation ORs them in outside this mask.
+pub const poll_readable: PollMask = c.POLLIN | c.POLLRDNORM;
+pub const poll_writable: PollMask = c.POLLOUT | c.POLLWRNORM;
+
+/// Readiness of a file that never blocks. POSIX says a regular file is always
+/// both readable and writable, so it reports back exactly what was asked for;
+/// every file type with no readiness state of its own answers with this.
+pub fn poll_always_ready(events: PollMask) PollMask {
+    return events & (poll_readable | poll_writable);
+}
+
 pub const FileName = struct {
     _name: []const u8,
     _allocator: ?std.mem.Allocator,
@@ -102,6 +120,15 @@ pub const IFile = interface.ConstructCountingInterface(struct {
         return interface.CountingInterfaceVirtualCall(self, "ioctl", .{ cmd, arg }, i32);
     }
 
+    /// Which of `events` this file could service right now, without blocking.
+    /// Must not block itself -- `sys_poll` calls it once per pass over the
+    /// caller's fd set, and a file that waits here stalls every other fd in the
+    /// set. A file with no readiness state of its own answers with
+    /// `poll_always_ready(events)`.
+    pub fn poll(self: *Self, events: PollMask) PollMask {
+        return interface.CountingInterfaceVirtualCall(self, "poll", .{events}, PollMask);
+    }
+
     pub fn fcntl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
         return interface.CountingInterfaceVirtualCall(self, "fcntl", .{ cmd, arg }, i32);
     }
@@ -142,6 +169,11 @@ pub const ReadOnlyFile = interface.DeriveFromBase(IFile, struct {
         _ = length;
         return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
     }
+
+    pub fn poll(self: *Self, events: PollMask) PollMask {
+        _ = self;
+        return poll_always_ready(events);
+    }
 });
 
 pub const IDirectory = interface.DeriveFromBase(IFile, struct {
@@ -162,5 +194,10 @@ pub const IDirectory = interface.DeriveFromBase(IFile, struct {
         _ = self;
         _ = length;
         return kernel.errno.ErrnoSet.IsADirectory;
+    }
+
+    pub fn poll(self: *Self, events: PollMask) PollMask {
+        _ = self;
+        return poll_always_ready(events);
     }
 });

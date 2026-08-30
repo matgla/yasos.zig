@@ -573,6 +573,87 @@ pub fn sys_read(arg: *const anyopaque) !i32 {
     }
     return 0;
 }
+/// Upper bound on the descriptor set one `poll` may carry. The scan below is
+/// linear and runs once per slice of the wait, so an unbounded `nfds` is a way
+/// for a process to make the kernel walk an arbitrarily long user array with
+/// preemption disabled nowhere but at its own mercy. 64 is well past what any
+/// tool in this rootfs asks for.
+const max_poll_fds: usize = 64;
+
+/// How long the wait sleeps between readiness passes. `sleep_for_us` hands the
+/// core back once the remaining time reaches a tick (1 ms), so two ticks is the
+/// smallest slice that reliably yields rather than spinning out the tail.
+const poll_slice_us: u64 = 2000;
+
+/// POSIX `poll`. Readiness itself comes from `IFile.poll`, which every file type
+/// answers without blocking; the waiting is here, so one sleeping process covers
+/// the whole descriptor set instead of one wait per descriptor.
+///
+/// `timeout` is in milliseconds: negative waits indefinitely, 0 makes this a
+/// pure readiness probe, positive bounds the wait. Between passes it sleeps
+/// rather than parking on a wait queue -- no file type in this kernel has one a
+/// poller could join, and `sleep_for_us` yields the core, so the cost of an idle
+/// wait is a context switch per slice rather than a spin.
+///
+/// `revents` is written back through the caller's array in place, the same shape
+/// `sys_read` uses for its buffer.
+pub fn sys_poll(arg: *const anyopaque) !i32 {
+    const context: *const c.poll_context = @ptrCast(@alignCast(arg));
+    if (context.nfds > max_poll_fds) return ErrnoSet.InvalidArgument;
+    const count: usize = @intCast(context.nfds);
+
+    // `poll(NULL, 0, timeout)` is a legal sleep, so an empty set skips the
+    // pointer check that would reject the null it is allowed to pass.
+    var fds: []c.struct_pollfd = &.{};
+    if (count != 0) {
+        const bytes = try user_out_slice(@ptrCast(context.fds), count * @sizeOf(c.struct_pollfd));
+        fds = @as([*]c.struct_pollfd, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+    }
+
+    // Saturating, and read once: `get_time_us` on the qemu boards accumulates a
+    // 32-bit timer non-atomically and can step backwards, so the deadline has to
+    // be an absolute stamp rather than a running subtraction. See `sleep_for_us`.
+    const deadline: ?u64 = if (context.timeout < 0)
+        null
+    else
+        hal.time.get_time_us() +| (@as(u64, @intCast(context.timeout)) * 1000);
+
+    while (true) {
+        var ready: i32 = 0;
+        for (fds) |*entry| {
+            entry.revents = 0;
+            // POSIX: a negative fd is skipped, and is not an error.
+            if (entry.fd < 0) continue;
+            if (entry.fd > std.math.maxInt(u16)) {
+                entry.revents = c.POLLNVAL;
+                ready += 1;
+                continue;
+            }
+            var file = get_file_from_process(@intCast(entry.fd)) catch {
+                // A descriptor the process does not hold counts towards the
+                // return value; it is reported, not an error for the whole call.
+                entry.revents = c.POLLNVAL;
+                ready += 1;
+                continue;
+            };
+            const revents = file.interface.poll(entry.events);
+            if (revents != 0) {
+                entry.revents = revents;
+                ready += 1;
+            }
+        }
+        if (ready != 0) return ready;
+
+        var slice = poll_slice_us;
+        if (deadline) |d| {
+            const now = hal.time.get_time_us();
+            if (now >= d) return 0;
+            slice = @min(slice, d - now);
+        }
+        time.sleep_us(@intCast(slice));
+    }
+}
+
 pub fn sys_kill(arg: *const anyopaque) !i32 {
     _ = arg;
     // Same hand-off as `sys_exit`; closed by `delete_process`.

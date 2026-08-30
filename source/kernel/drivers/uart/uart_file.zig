@@ -28,6 +28,9 @@ const kernel = @import("../../kernel.zig");
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
+const PollMask = @import("../../fs/ifile.zig").PollMask;
+const poll_readable = @import("../../fs/ifile.zig").poll_readable;
+const poll_writable = @import("../../fs/ifile.zig").poll_writable;
 
 const interface = @import("interface");
 
@@ -418,6 +421,17 @@ pub fn UartFile(comptime UartType: anytype) type {
                 _ = self;
                 _ = length;
                 return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            /// Readable exactly when the driver already holds bytes -- `read` below
+            /// spins on `is_readable` otherwise, which is the wait `poll` exists to
+            /// let the caller avoid. Always writable: `write` drains to the FIFO
+            /// under the console lock and never reports back-pressure.
+            pub fn poll(self: *Self, events: PollMask) PollMask {
+                _ = self;
+                var revents: PollMask = events & poll_writable;
+                if (uart.bytes_to_read() > 0) revents |= events & poll_readable;
+                return revents;
             }
 
             pub fn filetype(self: *const Self) FileType {

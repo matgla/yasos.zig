@@ -41,6 +41,9 @@ const preempt = @import("../sync/preempt.zig");
 
 const IFile = @import("ifile.zig").IFile;
 const FileType = @import("ifile.zig").FileType;
+const PollMask = @import("ifile.zig").PollMask;
+const poll_readable = @import("ifile.zig").poll_readable;
+const poll_writable = @import("ifile.zig").poll_writable;
 const FileMemoryMapAttributes = @import("ifile.zig").FileMemoryMapAttributes;
 const IoctlCommonCommands = @import("ifile.zig").IoctlCommonCommands;
 const Node = @import("node.zig").Node;
@@ -102,6 +105,24 @@ pub const Pipe = struct {
 
     fn free_space(self: *const Pipe) usize {
         return capacity - self._length;
+    }
+
+    /// Readiness of one end, for `poll`. POLLHUP and POLLERR are reported
+    /// whether or not the caller asked for them, as POSIX requires: a reader
+    /// whose last writer is gone is at EOF, and a writer whose last reader is
+    /// gone can only ever get EPIPE.
+    pub fn poll(self: *Pipe, writable: bool, events: PollMask) PollMask {
+        const flags = pipe_lock.lock_irqsave();
+        defer pipe_lock.unlock_irqrestore(flags);
+        var revents: PollMask = 0;
+        if (writable) {
+            if (self.free_space() > 0) revents |= events & poll_writable;
+            if (self._readers == 0) revents |= c.POLLERR;
+        } else {
+            if (self._length > 0) revents |= events & poll_readable;
+            if (self._writers == 0) revents |= c.POLLHUP;
+        }
+        return revents;
     }
 
     /// Copy out of the ring, caller holds `pipe_lock`. Returns bytes taken.
@@ -330,6 +351,10 @@ pub const PipeFile = interface.DeriveFromBase(IFile, struct {
         return self._pipe._length;
     }
 
+    pub fn poll(self: *Self, events: PollMask) PollMask {
+        return self._pipe.poll(self._writable, events);
+    }
+
     pub fn truncate(self: *Self, length: u64) anyerror!void {
         _ = self;
         _ = length;
@@ -457,6 +482,69 @@ test "Pipe.ShouldFailAWriteWithNoReaderLeft" {
     ends.read.delete();
 
     try testing.expectEqual(@as(isize, -1), write_end.interface.write("nobody is listening"));
+}
+
+test "Pipe.PollShouldReportReadableOnlyOnceThereIsSomethingToRead" {
+    var ends = try create_pair(testing.allocator, false);
+    defer ends.read.delete();
+    defer ends.write.delete();
+
+    var read_end = ends.read.instance.file;
+    var write_end = ends.write.instance.file;
+
+    const want: PollMask = c.POLLIN | c.POLLOUT;
+    // An empty pipe with both ends open: the reader would block, the writer
+    // would not.
+    try testing.expectEqual(@as(PollMask, 0), read_end.interface.poll(want));
+    try testing.expectEqual(@as(PollMask, c.POLLOUT), write_end.interface.poll(want));
+
+    _ = write_end.interface.write("data");
+    try testing.expectEqual(@as(PollMask, c.POLLIN), read_end.interface.poll(want));
+}
+
+test "Pipe.PollShouldReportHangupToAReaderWhoseWriterIsGone" {
+    var ends = try create_pair(testing.allocator, false);
+    defer ends.read.delete();
+
+    var read_end = ends.read.instance.file;
+    _ = ends.write.instance.file.interface.write("last words");
+    ends.write.delete();
+
+    // Both at once, and POLLHUP even though it was never asked for: the pending
+    // bytes are still readable, and end-of-stream follows them.
+    try testing.expectEqual(
+        @as(PollMask, c.POLLIN | c.POLLHUP),
+        read_end.interface.poll(c.POLLIN),
+    );
+}
+
+test "Pipe.PollShouldReportErrorToAWriterWithNoReaderLeft" {
+    var ends = try create_pair(testing.allocator, false);
+    defer ends.write.delete();
+
+    var write_end = ends.write.instance.file;
+    ends.read.delete();
+
+    // Still has room, so it is writable -- but every write from here can only
+    // fail, which is what POLLERR says. Reported unasked, as POSIX requires.
+    try testing.expectEqual(
+        @as(PollMask, c.POLLOUT | c.POLLERR),
+        write_end.interface.poll(c.POLLOUT),
+    );
+}
+
+test "Pipe.PollShouldStopReportingWritableOnceTheRingIsFull" {
+    var ends = try create_pair(testing.allocator, true);
+    defer ends.read.delete();
+    defer ends.write.delete();
+
+    var write_end = ends.write.instance.file;
+    // Non-blocking, and `write` moves at most one chunk per call, so fill it in
+    // chunk-sized steps until the pipe stops accepting.
+    const block: [Pipe.capacity]u8 = @splat('x');
+    while (write_end.interface.write(&block) > 0) {}
+
+    try testing.expectEqual(@as(PollMask, 0), write_end.interface.poll(c.POLLOUT));
 }
 
 test "Pipe.ShouldRefuseTheWrongDirectionOnEachEnd" {

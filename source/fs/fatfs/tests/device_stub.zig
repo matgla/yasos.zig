@@ -136,6 +136,13 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
         return 0;
     }
 
+    /// Nothing here ever makes the caller wait, so every requested read/write
+    /// bit is ready -- what POSIX specifies for a regular file.
+    pub fn poll(self: *Self, events: kernel.fs.PollMask) kernel.fs.PollMask {
+        _ = self;
+        return kernel.fs.poll_always_ready(events);
+    }
+
     pub fn filetype(self: *const Self) kernel.fs.FileType {
         _ = self;
         return kernel.fs.FileType.BlockDevice;

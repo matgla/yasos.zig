@@ -156,6 +156,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_ftruncate => return handlers.sys_ftruncate,
             c.sys_perf_dump => return handlers.sys_perf_dump,
             c.sys_pipe => return handlers.sys_pipe,
+            c.sys_poll => return handlers.sys_poll,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -250,6 +251,7 @@ fn syscall_arg_bytes(comptime index: usize) ?usize {
         c.sys_access => @sizeOf(c.access_context),
         c.sys_klog_ctl => @sizeOf(c.klog_ctl_context),
         c.sys_ftruncate => @sizeOf(c.ftruncate_context),
+        c.sys_poll => @sizeOf(c.poll_context),
         else => null,
     };
 }
@@ -514,6 +516,17 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_access, syscall_lookup_table[c.sys_access]);
     try std.testing.expectEqual(handlers.sys_prlimit, syscall_lookup_table[c.sys_prlimit]);
     try std.testing.expectEqual(handlers.sys_perf_dump, syscall_lookup_table[c.sys_perf_dump]);
+    try std.testing.expectEqual(handlers.sys_poll, syscall_lookup_table[c.sys_poll]);
+}
+
+test "SystemCall.PollIsNotAFastSyscall" {
+    // `sys_poll` sleeps until a descriptor is ready. Running it in the SVCall
+    // handler would block at SVCall priority, which is the deadlock the
+    // `is_fast_syscall` comment warns about.
+    try std.testing.expect(!fast_syscall_table[c.sys_poll]);
+    // ...and its context has to be copied in, or the handler would re-read
+    // `nfds` from user memory after having bounds-checked it.
+    try std.testing.expectEqual(@as(?usize, @sizeOf(c.poll_context)), syscall_arg_size_table[c.sys_poll]);
 }
 
 test "SystemCall.ReservedProtocolIdsAreNotSyscalls" {

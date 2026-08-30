@@ -27,6 +27,8 @@ const c = @import("libc_imports").c;
 const IFile = @import("../../fs/ifile.zig").IFile;
 const FileName = @import("../../fs/ifile.zig").FileName;
 const FileType = @import("../../fs/ifile.zig").FileType;
+const PollMask = @import("../../fs/ifile.zig").PollMask;
+const poll_always_ready = @import("../../fs/ifile.zig").poll_always_ready;
 const IoctlCommonCommands = @import("../../fs/ifile.zig").IoctlCommonCommands;
 const FileMemoryMapAttributes = @import("../../fs/ifile.zig").FileMemoryMapAttributes;
 
@@ -129,6 +131,13 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 _ = self;
                 _ = length;
                 return kernel.errno.ErrnoSet.InvalidArgument;
+            }
+
+            /// Nothing here ever makes the caller wait, so every requested read/write
+            /// bit is ready -- what POSIX specifies for a regular file.
+            pub fn poll(self: *Self, events: PollMask) PollMask {
+                _ = self;
+                return poll_always_ready(events);
             }
 
             pub fn filetype(self: *const Self) FileType {
