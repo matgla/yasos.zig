@@ -747,8 +747,10 @@ def capture_command(cmd: list[str], cwd: Path | None = None, input_text: str | N
     return lines[-1]
 
 
-def detect_remote_debug_tools(config: dict[str, Any]) -> str:
+def detect_remote_debug_tools(config: dict[str, Any], *, require_python: bool = False) -> str:
     remote_script = r"""set -euo pipefail
+
+require_python=${1:-0}
 
 if ! command -v openocd >/dev/null 2>&1; then
     echo "missing: openocd" >&2
@@ -759,17 +761,37 @@ if ! command -v uhubctl >/dev/null 2>&1; then
     echo "warning: uhubctl not found, USB power-cycle reset unavailable" >&2
 fi
 
+fallback=""
 for candidate in arm-none-eabi-gdb gdb-multiarch gdb; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        printf '%s\n' "$candidate"
-        exit 0
+    if ! command -v "$candidate" >/dev/null 2>&1; then
+        continue
     fi
+    if [[ -z "$fallback" ]]; then
+        fallback="$candidate"
+    fi
+    # gdb-dashboard is a Python extension, so when it is wanted the first
+    # Python-capable gdb wins over the first gdb: a gdb built without Python
+    # loads it as a wall of errors instead of a dashboard.
+    if [[ "$require_python" == "1" ]] && ! "$candidate" --batch -nx -ex "python pass" >/dev/null 2>&1; then
+        continue
+    fi
+    printf '%s\n' "$candidate"
+    exit 0
 done
+
+if [[ -n "$fallback" ]]; then
+    echo "warning: no gdb with Python support found; gdb-dashboard cannot load in $fallback" >&2
+    printf '%s\n' "$fallback"
+    exit 0
+fi
 
 echo "missing: gdb" >&2
 exit 1
 """
-    return capture_command(ssh_base(config) + ["bash", "-s"], input_text=remote_script)
+    return capture_command(
+        ssh_base(config) + ["bash", "-s", "--", "1" if require_python else "0"],
+        input_text=remote_script,
+    )
 
 
 def require_local_rsync() -> None:
@@ -2530,10 +2552,73 @@ fi
     run_command(cmd, input_text=remote_script)
 
 
-def run_remote_gdb(config: dict[str, Any], remote_kernel: str, gdb_bin: str, reset_before_connect: bool) -> None:
+# gdb-dashboard (https://github.com/cyrus-and/gdb-dashboard) installs itself as
+# a .gdbinit, and every remote GDB below is started with -nx -- so a dashboard
+# sitting on the board host never loaded, which is the whole of why it "did not
+# work on the rig".  --gdb-dashboard opts that one file back in explicitly, with
+# -x, so the session stays as reproducible as -nx makes it: no other init file
+# is read, and the dashboard is sourced before the target is attached so the
+# first stop already renders.
+GDB_DASHBOARD_CANDIDATES = (
+    "$HOME/.gdbinit",
+    "$HOME/.gdb-dashboard",
+    "$HOME/.config/gdb/gdbinit",
+    "/usr/share/gdb-dashboard/.gdbinit",
+)
+
+
+def gdb_dashboard_setup(dashboard: str | None) -> str:
+    """Bash that leaves the dashboard init file in $dashboard_init, or empty.
+
+    A missing dashboard is a warning, never a failure: the point of the session
+    is the target, and a plain GDB still debugs it.
+    """
+    if not dashboard:
+        return 'dashboard_init=""'
+
+    if dashboard != "auto":
+        return f"""dashboard_init={shlex.quote(dashboard)}
+if [[ ! -f "$dashboard_init" ]]; then
+    echo "warning: --gdb-dashboard: $dashboard_init not found on the board host" >&2
+    dashboard_init=""
+fi"""
+
+    candidates = " ".join(f'"{candidate}"' for candidate in GDB_DASHBOARD_CANDIDATES)
+    # The same list again for the warning, where the quoting would nest.
+    looked_in = " ".join(candidate.replace("$HOME", "~") for candidate in GDB_DASHBOARD_CANDIDATES)
+    return f"""dashboard_init=""
+for candidate in {candidates}; do
+    if [[ -f "$candidate" ]] && grep -q "GDB dashboard" "$candidate"; then
+        dashboard_init="$candidate"
+        break
+    fi
+done
+if [[ -z "$dashboard_init" ]]; then
+    echo "warning: --gdb-dashboard: no gdb-dashboard on the board host (looked in {looked_in})" >&2
+    echo "warning: install it there with: wget -P ~ https://github.com/cyrus-and/gdb-dashboard/raw/master/.gdbinit" >&2
+fi"""
+
+
+def gdb_dashboard_args() -> str:
+    """Bash that puts the dashboard in front of everything else GDB is told."""
+    return """if [[ -n "$dashboard_init" ]]; then
+    echo "GDB dashboard: $dashboard_init"
+    gdb_args+=( -x "$dashboard_init" )
+fi"""
+
+
+def run_remote_gdb(
+    config: dict[str, Any],
+    remote_kernel: str,
+    gdb_bin: str,
+    reset_before_connect: bool,
+    dashboard: str | None = None,
+) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
     local_repo_path = REPO_ROOT.as_posix()
+    dashboard_setup = gdb_dashboard_setup(dashboard)
+    dashboard_args = gdb_dashboard_args()
     openocd_init = 'openocd -c "set USE_CORE 0" -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init"'
     if reset_before_connect:
         openocd_init += ' -c "reset halt"'
@@ -2593,8 +2678,13 @@ if [[ "$ready" != "1" ]]; then
     exit 1
 fi
 
-gdb_args=(
-    "$gdb_bin" -nx "$remote_kernel"
+{dashboard_setup}
+
+gdb_args=( "$gdb_bin" -nx "$remote_kernel" )
+
+{dashboard_args}
+
+gdb_args+=(
     -ex "source scripts/yasld_gdb.py"
     -ex "directory $remote_repo"
 )
@@ -2620,6 +2710,7 @@ def run_remote_gdb_live(
     adapter_speed: str,
     serial_device: str,
     local_repo_path: str,
+    dashboard: str | None = None,
 ) -> None:
     """Live GDB attach: arm breakpoints/watchpoints BEFORE user code runs.
 
@@ -2635,6 +2726,9 @@ def run_remote_gdb_live(
          own PC.
     """
     import base64
+
+    dashboard_setup = gdb_dashboard_setup(dashboard)
+    dashboard_args = gdb_dashboard_args()
 
     # Serial sender for live mode: NO target reset (GDB/OpenOCD own the core);
     # just wait for the prompt — which appears only after GDB continues — then
@@ -2779,8 +2873,13 @@ serial_pid=$!
 echo 'Starting GDB (live attach). The script arms breakpoints, then continue.'
 echo "After a hit, run: yasld-load $UART_LOG   to symbolize."
 
-gdb_args=(
-    "$gdb_bin" -nx "$remote_kernel"
+{dashboard_setup}
+
+gdb_args=( "$gdb_bin" -nx "$remote_kernel" )
+
+{dashboard_args}
+
+gdb_args+=(
     -ex "source scripts/yasld_gdb.py"
     -ex "directory $remote_repo"
     -ex "target extended-remote :3333"
@@ -2806,6 +2905,7 @@ def run_remote_gdb_debug(
     target_command: str,
     gdb_script: str | None = None,
     live: bool = False,
+    dashboard: str | None = None,
 ) -> None:
     """Automated GDB debug workflow:
 
@@ -2833,6 +2933,8 @@ def run_remote_gdb_debug(
     adapter_speed = str(config["openocd_adapter_speed"])
     serial_device = str(config.get("serial_device", "")).strip()
     local_repo_path = REPO_ROOT.as_posix()
+    dashboard_setup = gdb_dashboard_setup(dashboard)
+    dashboard_args = gdb_dashboard_args()
 
     gdb_script_arg = ""
     if gdb_script:
@@ -2845,6 +2947,7 @@ def run_remote_gdb_debug(
             gdb_bin,
             target_command=target_command,
             gdb_script_arg=gdb_script_arg,
+            dashboard=dashboard,
             board=board,
             adapter_speed=adapter_speed,
             serial_device=serial_device,
@@ -3078,8 +3181,13 @@ echo "OpenOCD ready. Starting GDB with symbol loading..."
 echo "UART log: $UART_LOG"
 
 # Build GDB command with yasld-load from captured log
-gdb_args=(
-    "$gdb_bin" -nx "$remote_kernel"
+{dashboard_setup}
+
+gdb_args=( "$gdb_bin" -nx "$remote_kernel" )
+
+{dashboard_args}
+
+gdb_args+=(
     -ex "source scripts/yasld_gdb.py"
     -ex "directory $remote_repo"
     -ex "target extended-remote :3333"
@@ -3310,6 +3418,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-k", dest="keyword", metavar="EXPRESSION", help="Pytest -k keyword expression to filter tests for this run, like run_qemu_smoke.sh. Appended to the effective pytest args, so it composes with --tests and --pytest-args. Example: -k 00_assignment.")
     parser.add_argument("--gdb-debug", action="store_true", help="Automated GDB debug: reset target, run a command via serial, capture yasld log, reset-halt, start GDB with symbols loaded. Requires --cmd.")
     parser.add_argument("--cmd", help="Target command to execute over serial before GDB attach (used with --gdb-debug). Example: --cmd 'tcc 15_recursion.c'")
+    parser.add_argument("--gdb-dashboard", nargs="?", const="auto", default=None, metavar="PATH", help="Load gdb-dashboard (https://github.com/cyrus-and/gdb-dashboard) in the remote GDB session. The remote GDB is started with -nx, so an installed dashboard is not picked up on its own; this sources it explicitly and prefers a Python-capable GDB. Pass a PATH to point at a specific dashboard file, or nothing to search ~/.gdbinit, ~/.gdb-dashboard, ~/.config/gdb/gdbinit and /usr/share/gdb-dashboard/.gdbinit on the board host. Used with --gdb or --gdb-debug.")
     parser.add_argument("--gdb-script", help="Path to a GDB script file to source after connecting and loading symbols (used with --gdb-debug).")
     parser.add_argument("--gdb-live", action="store_true", help="Live variant of --gdb-debug: attach GDB to a reset-HALTED target FIRST so the --gdb-script can arm HW breakpoints / DWT watchpoints before user code runs, then a background serial sender types --cmd after the script issues `continue`. Catches faults at the corruptor's own PC. Requires --gdb-debug, --cmd and --gdb-script.")
     parser.add_argument("--stream", action="store_true", help="Print the target's own transcript under each case -- the command sent, the compiler's output, the program's output -- with the case name coloured by result, the way the legacy comparison harness does. Suppresses pytest's per-test line and the RUNNING announcements so the transcript stands alone. This is the mode to record.")
@@ -3349,6 +3458,8 @@ def main() -> int:
             raise RunnerError("--gdb-live requires --gdb-debug")
         if args.gdb_live and not args.gdb_script:
             raise RunnerError("--gdb-live requires --gdb-script (the script that arms the watchpoint)")
+        if args.gdb_dashboard and not (args.gdb or args.gdb_debug):
+            raise RunnerError("--gdb-dashboard applies to a GDB session: combine it with --gdb or --gdb-debug")
 
         if args.reconfigure or not cache_exists:
             initial_config = cached if cache_exists else dict(DEFAULT_CONFIG)
@@ -3457,7 +3568,7 @@ def main() -> int:
 
         if args.gdb_debug:
             print("Detecting remote debug tools.")
-            gdb_bin = detect_remote_debug_tools(runtime_config)
+            gdb_bin = detect_remote_debug_tools(runtime_config, require_python=bool(args.gdb_dashboard))
             print(f"Using remote GDB binary: {gdb_bin}")
             print(f"Target command: {args.cmd}")
             if args.gdb_script:
@@ -3485,13 +3596,14 @@ def main() -> int:
                 target_command=args.cmd,
                 gdb_script=args.gdb_script,
                 live=args.gdb_live,
+                dashboard=args.gdb_dashboard,
             )
             print("Remote GDB debug session finished.")
             return 0
 
         if args.gdb:
             print("Detecting remote debug tools.")
-            gdb_bin = detect_remote_debug_tools(runtime_config)
+            gdb_bin = detect_remote_debug_tools(runtime_config, require_python=bool(args.gdb_dashboard))
             print(f"Using remote GDB binary: {gdb_bin}")
             if args.reset:
                 print("Running remote GDB attach workflow with reset-before-connect.")
@@ -3513,7 +3625,13 @@ def main() -> int:
                 print(f"Using flashed remote kernel symbol file: {remote_kernel}")
             else:
                 print(f"Using synced remote kernel symbol file: {remote_kernel}")
-            run_remote_gdb(runtime_config, remote_kernel, gdb_bin, reset_before_connect=args.reset)
+            run_remote_gdb(
+                runtime_config,
+                remote_kernel,
+                gdb_bin,
+                reset_before_connect=args.reset,
+                dashboard=args.gdb_dashboard,
+            )
             print("Remote GDB session finished.")
             return 0
 

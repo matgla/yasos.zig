@@ -75,8 +75,80 @@ Treat the old TCC / GCC / TCC -O2 cue as visual annotation only; keep it to a si
 
 ---
 
+<!-- scriptforge:scene 33ed2c8f-bad1-43f1-9291-84863cdeea93 -->
+SCENE 02 · 2:45 · WRY, CANDID, PRACTICAL
+
+# The Rig: A Workstation as a Dumb Terminal
+
+## Voiceover
+
+A confession about that second board before anything else, because every number in this video was measured on it and not on MSPC. It is a Pimoroni Pico Plus 2 with the VGA base under it, and it is not on my desk.
+
+The chain is four machines long. I build here — kernel, root filesystem, cross compiler — and it rsyncs over SSH to a Raspberry Pi 5 on a shelf. On the Pi, a USB hub; on the hub, a debug probe; out of the probe, two wires into the Pico: SWD to flash it and halt it, UART for the console. OpenOCD writes the image, pytest drives the serial line, the transcript comes back to my terminal.
+
+Which is a joke I noticed only after building it. The usual shape of this is a weak terminal in front of you and something powerful at the far end. Mine is backwards: sixteen cores and sixty-four gigabytes, reduced to a dumb terminal, so it can talk to two Cortex-M33s at five hundred and thirty-two megahertz. The mainframe at the end of the wire is a microcontroller.
+
+Why not MSPC? Nothing clever. Same chip, same PSRAM, same flash — but somebody else's board, so a failing test is one thing to debug instead of two, and it lives on the Pi instead of on my desk. The day I need the one thing only MSPC has, its expansion bus, I hit that wall and it comes back. Until then this is the cheaper board to be wrong on.
+
+And it is one command. Remote smoke builds, syncs, flashes, runs the suite and streams the target's own transcript back, with a flag for every way I have been stuck: a serial console over SSH, a rescue mode for a wedged flash, and a GDB mode that attaches to a halted target and arms the breakpoints before user code runs — so a fault is caught at the instruction that caused it, not three frames later.
+
+One honest limit, because I checked. The power-cycle does not power-cycle the board. Write a word into SRAM, cut the USB port, bring it back: the word is still there. What the cut resets is the probe. A board wedged badly enough still needs someone to walk over and pull the cable — the only part of this that is not remote.
+
+## Scene Description
+
+The workflow scene, and the one that settles which board every later number came off. Opens on the host to camera for the confession, then hands the middle to two animated cards: the chain being built one machine at a time, then the same three machines ranked by cores, clock and memory so the inversion is visible rather than only said. Comes back to camera for the MSPC answer, over a top-down of the actual rig — Pi, hub, probe, Pico stack, four cables — and finishes on the terminal: one command running the whole loop, and the one rung of it that does not work.
+
+## A-Rolls
+
+| Description | Timing | Source |
+| --- | --- | --- |
+| Talking head — the confession, direct to camera: every number came off a board that is not MSPC | 0:00-0:15 | Session A |
+| Back to camera for the MSPC answer's button — "the cheaper board to be wrong on" | 1:28-1:41 | Session A |
+| Closing line to camera — the only part of this that is not remote | 2:30-2:36 | Session A |
+
+## B-Rolls
+
+| Description | Timing | Source |
+| --- | --- | --- |
+| Four machines, one wire: three machine boxes built one at a time — this desk → Raspberry Pi 5 → Pico Plus 2 + VGA — with the links named (`rsync`, `usb`), then the fourth machine underneath as the wire itself: the probe (`2e8a:000c`, a Pico running CMSIS-DAP, behind a `1a40:0101` hub) and the two things that come out of it, SWD writing the rootfs at `0x10100000` and UART carrying `/dev/ttyACM*`. Closes by lighting the UART box for the return path | 0:15-0:45 | motion/s01b_b0_four-machines-one-wire.py |
+| The terminal is the fast one: the same three machines as a table — cores 16/4/2, clock 6.0 GHz/2.4 GHz/532 MHz, memory 64 GB/8 GB/8 MB — every row falling left to right, then a role under each column: the terminal, the wire, the mainframe | 0:46-1:12 | motion/s01b_b1_the-terminal-is-the-fast-one.py |
+| Top-down macro of the rig as it actually is: Pi 5, the four-port hub, the Raspberry Pi debug probe, the Pico Plus 2 stacked on the VGA base, and the SWD/UART flying leads between the last two. Shot on the shelf where it lives, not staged on the desk — the point of the shot is that it is not on the desk | 1:13-1:28 | to record |
+| Screen capture, played by `scripts/rig_shot.sh rig_full` rather than typed: one command builds here, rsyncs to the Pi and flashes over SWD, then resets the target, attaches gdb, breaks in the kernel and prints a backtrace. Same cadence every take, and the take fails itself if a step did not really run | 1:41-2:12 | scripted take |
+| Screen capture: the SRAM proof, in three commands — `mww 0x20010000 0xdeadbeef`, `uhubctl -l 1 -p 2 -a off` then `on`, `mdw 0x20010000` still reading `deadbeef` — then cut to a hand physically unplugging the board | 2:12-2:30 | screen capture + insert |
+
+## C-Rolls
+
+## D-Rolls
+
+## Notes
+
+**Placement.** This scene is the answer to `changes.md` G4 ("benchmarks implicitly MSPCv2 → measured on Pico Plus 2"), and it is second because that is the cheapest place to answer it: the intro has just named both boards, so the viewer is told which one the video is about *once*, before a single figure is quoted, instead of being corrected ten scenes later. Everything after this can then say "the board" and mean something. It also puts the loop — build here, flash there, read the transcript back — in front of every scene that shows a run, which is most of them.
+
+**The rig, verified live 2026-09-01.** Workstation: AMD Ryzen 9 9950X3D, 16 cores / 32 threads, 64 GB, max 6.0 GHz (`/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq`). Remote host: `mateusz@192.168.0.113`, Raspberry Pi 5 Model B Rev 1.1, 4 cores, 8 GB, 2.4 GHz. USB tree on the Pi, from `lsusb`: root hub → `1a40:0101` Terminus 4-port hub → `2e8a:000c` Raspberry Pi Debugprobe (CMSIS-DAP). Target: `pimoroni_pico_plus2_and_vga` — RP2350, 2× Cortex-M33 at 532 MHz, 8 MB PSRAM, 16 MB flash; rootfs at `0x10100000`, OpenOCD `interface/cmsis-dap.cfg` + `target/rp2350.cfg` (`scripts/remote_smoke_tui.py:161-178`). Remote repo `~/yasos_remote_smoke` (`DEFAULT_CONFIG`, same file).
+
+**Say "sixteen cores", not "thirty-two threads".** Both are true and sixteen is the one that survives a viewer checking it. The memory figures are the honest contrast anyway: 64 GB → 8 GB → 8 MB, three machines, each an order of magnitude down, in the direction of the thing that matters.
+
+**The MSPC answer is not a technical claim and must not be delivered as one.** It is the same RP2350, the same PSRAM part, the same flash — `diff configs/mspc_defconfig configs/pimoroni_pico_plus2_and_vga_defconfig` is board pins, clock, MMC bus mode and SMP, not silicon. The reasons are that the Pico stack is somebody else's PCB (one variable instead of two when a test fails) and that it lives on the Pi rather than on the desk. The expansion bus is the stated wall: the day the project needs it, MSPC comes back. Do not let this read as "MSPC is worse".
+
+**MSPC's defconfig is currently behind the Pico's** — 150 MHz, SPI MMC, `PROCESS_SMP` unset, no XIP continuous-read — which is `recording-plan.md` §0's first blocking item. If that item is done before the shoot, this scene's claim ("same chip, same PSRAM") stays true and the *configs* stop disagreeing; if it is not, do not put the two defconfigs on screen side by side.
+
+**The scripts, by what they are for** (`scripts/remote_smoke_tui.py`, flags verified at `:3286-3315`): `--connect` (serial console over SSH), `--gdb` / `--gdb-debug` / `--gdb-live` (the last attaches to a reset-halted target so a `--gdb-script` can arm hardware breakpoints and DWT watchpoints *before* user code runs), `--power-reset`, `--rescue` (rescue debug port + mass-erase for a board whose QSPI keeps re-wedging it), `--rerun-failed`, `--flash-only`, `--stream`. Same door for `libs/tinycc/tests/benchmarks/run_benchmark.py`, `run_width_demo.py` and `scripts/demo_shot.py`. Name three in the voiceover, not seven — the list is the notes' job.
+
+**The honest limit is measured, not a guess.** Confirmed 2026-08-24: `mww 0x20010000 0xdeadbeef` over OpenOCD, `uhubctl -l 1 -p 2 -a off` for 8 s, then `on`, then `mdw 0x20010000` still reads `deadbeef`. SRAM survives, so the Pico Plus 2 keeps its own power and the cut drops only the probe — which re-enumerates with a new device number and recreates `/dev/ttyACM*`, and *that* is what makes the rung look green. This supersedes the older note that the board was powered off the probe. A green power-cycle is not evidence the probe recovered either: a probe wedged at the USB layer (`error submitting USB read` → `CMD_INFO failed`) needed a physical restart.
+
+**What is deliberately left out.** The Pi also runs two GitHub self-hosted runners that share this one board through `flock /var/lock/rp2350-board.lock`, and manual runs bypass the lock. It is a good fact and it belongs to the Grafana/CI scene, not to two and a half minutes about a cable.
+
+**Numbering:** the motion prefix is `s01b_` because the intro owns `s01_` and the GCC suite owns `s02_` — the same device as `s13b_` and `s06_dsl_`. Reconcile with the drift noted in `recording-plan.md` before the edit.
+
+VERIFY: whole scene is unrecorded. The two motion cards are rendered; the three A-rolls, the rig macro and the two screen captures are not. The `--stream` capture wants the same 100-column terminal as scene 16's (the width demo).
+
+## Change Request
+
+
+---
+
 <!-- scriptforge:scene db43021b-3094-4c06-8921-7f3e8cc6dbb1 -->
-SCENE 02 · 1:15 · URGENT, TECHNICAL
+SCENE 03 · 1:15 · URGENT, TECHNICAL
 
 # GCC Test Suite
 
@@ -143,7 +215,7 @@ Two B-roll rows (0:30-0:45 and 0:32-0:48) describe the same '25% after one hour,
 ---
 
 <!-- scriptforge:scene b8afcb96-12bb-4513-81a5-6e847c7e2ea7 -->
-SCENE 03 · 1:40 · TECHNICAL, ANALYTICAL
+SCENE 04 · 1:40 · TECHNICAL, ANALYTICAL
 
 # From Single-Pass to Multi-Pass: Introducing IR
 
@@ -221,7 +293,7 @@ Code on screen, added 2026-08-26: `s03_b0` already shows *what* a record is (the
 ---
 
 <!-- scriptforge:scene c1e244cb-e49a-4ff0-86cc-dd7cfab8601e -->
-SCENE 04 · 3:30 · CALM, EXPLANATORY, SLIGHTLY PROUD
+SCENE 05 · 3:30 · CALM, EXPLANATORY, SLIGHTLY PROUD
 
 # Global Register Allocation: Linear Scan
 
@@ -279,7 +351,7 @@ TAC in this scene means the three-address-code IR, not TinyCC.
 ---
 
 <!-- scriptforge:scene 56f710e1-43dd-498a-bb7b-b4eccb08ebdc -->
-SCENE 05 · 3:30 · ENTHUSIASTIC, TECHNICAL, EXPLANATORY
+SCENE 06 · 3:30 · ENTHUSIASTIC, TECHNICAL, EXPLANATORY
 
 # SSA: The Missing Piece Between IR and Optimization
 
@@ -386,7 +458,7 @@ Cover the 1:15-3:30 tail with talking head and before/after disassembly so the r
 ---
 
 <!-- scriptforge:scene 8ad6f5fa-9855-49d6-8948-9fc665d5c51c -->
-SCENE 06 · 2:00 · PRACTICAL, TECHNICAL, SLIGHTLY WRY
+SCENE 07 · 2:00 · PRACTICAL, TECHNICAL, SLIGHTLY WRY
 
 # Writing a Pass: One Optimization, Two Ways
 
@@ -448,7 +520,7 @@ The DSL is compile-checked in CI: `make opt-dsl-check` builds `source/opt/framew
 ---
 
 <!-- scriptforge:scene fc69ed8a-5414-4c38-b2d7-2ad047f17b8d -->
-SCENE 07 · 3:00 · PRACTICAL, TECHNICAL, SLIGHTLY EXCITED
+SCENE 08 · 3:00 · PRACTICAL, TECHNICAL, SLIGHTLY EXCITED
 
 # Floating Point: Inline VFP, AEABI, SoftFP, and RP2350 DCP
 
@@ -492,23 +564,23 @@ And the GCC torture suite gave me a lot of floating-point tests to verify it. Of
 | Three ways to add two doubles: the same C under two -mfpu settings, three panels of real objdump — `b.w __aeabi_dadd`, `b.w __aeabi_dmul`, and the six-instruction DCP sequence (stcl/cdp/ldcl) — with what each costs under it, then the two right-hand panels revealed as one object file and `.has_dadd = 1` / `.has_dmul = 0` out of rp2350-dcp.c as the bit that separates them | 0:25-0:45 | motion/s06_b1_three-fp-modes.py |
 | One name, four runtimes: `__aeabi_dmul` alone at the top, four muted wires fanning to libsoftfp / libvfpv4sp / libvfpv5dp / librp2350fp with the -mfpu that selects each and what each gives (pure C, VADD.F32, VADD.F64, DCP on CP4), then the rp2350 wire lit and the other three drained, closing on `__aeabi_dmul → /usr/lib/librp2350fp.so` and the 48 names all four define | 0:45-1:05 | motion/s06_b2_fp-library-selection.py |
 | Three bits, three rows: the image's arch section (arch/fpu/float_abi) over `required` 1·0·1, `provided` 1·0·1 and `missing` = required & ~provided, empty, so it execs — then the same binary on a Cortex-M33 with no DCP, two bits flip, one bit is left over and the loader answers ENOEXEC | 1:05-1:25 | motion/s06_b3_feature-bitmask-gate.py |
-| GCC torture suite terminal on the board running floating point tests, followed by a short Scorecard-style callout: doubles 1.64x GCC, ~1.00x from -O0 to -O2. | 1:25-1:45 | to record |
+| GCC torture suite terminal on the board running floating point tests, followed by a short Scorecard-style callout: doubles 1.64x GCC, 1.80x from -O0 to -O2. | 1:25-1:45 | to record |
 
 ## Notes
 
-Insert after Scene 11 or before the Roadmap. Use a split screen or overlay to show the three FP modes: inline VFP, AEABI calls, and softfp. Mention RP2350 DCP as a target-specific acceleration path without over-explaining it unless confirmed.
+Insert after the QEMU scene or before the Roadmap. Use a split screen or overlay to show the three FP modes: inline VFP, AEABI calls, and softfp. Mention RP2350 DCP as a target-specific acceleration path without over-explaining it unless confirmed.
 
 Confirmed 2026-08-20: all four runtimes named in the voiceover exist and are built — `lib/fp/libsoftfp.a`, `libvfpv4sp.a`, `libvfpv5dp.a`, `librp2350fp.a`.
 
 VERIFIED 2026-08-24 against `source/backend/arch/fpu/arm/rp2350-dcp.c` (`arm_rp2350_dcp_fpu_config`) and confirmed by disassembling a probe with `armv8m-tcc -mfpu=rp2350 -mfloat-abi=softfp`: the inlined set on RP2350 is **float add, sub, mul, div** (FPv5-SP) and **double add, sub, compare** (DCP) — exactly the claim that could not be checked on 2026-08-20. Everything else, `dmul` and `ddiv` included, lowers to a `librp2350fp` call; `.has_ddiv` is documented as deliberately never inline (~35 instructions, five scratch registers). `lib/fp/STATUS.md` remains an unreliable oracle — it still lists implemented files as "TODO: implement". Re-check the struct before recording if the backend has moved since.
 
-The doubles measurement in the Scorecard scene is worth knowing about here: on the RP2350, doubles cost 1.64x GCC and the optimizer gained them nothing (1.00x from -O0 to -O2). If this scene wants a forward hook, that is the honest one.
+The doubles measurement in the Scorecard scene is worth knowing about here: on the RP2350, doubles cost 1.64x GCC, and the optimizer moves them 1.80x against 2.48x on everything else — they start further behind (2.95x GCC at -O0 against 2.67x) and finish further behind. If this scene wants a forward hook, that is the honest one. Note the earlier "the optimizer gained them nothing (1.00x)" was a measurement artifact, corrected 2026-08-30.
 
 The inline-operation list is now verified (above), so the VO may name float add/sub/mul/div and double add/sub/compare directly. `s06_b1` puts the table's own field names on screen.
 
 Position note: if this scene is placed before the Scorecard, keep the scorecard reference as a forward hook; if placed after it, the same line works as a summary.
 
-If the Scorecard callout remains in B-roll, it can stay visual; no VO change is needed unless this scene is moved after Scene 13.
+If the Scorecard callout remains in B-roll, it can stay visual; no VO change is needed unless this scene is moved after the Scorecard scene.
 
 ## Change Request
 
@@ -516,7 +588,7 @@ If the Scorecard callout remains in B-roll, it can stay visual; no VO change is 
 ---
 
 <!-- scriptforge:scene 32f806f3-a760-4ee7-86c2-0a5ba5b36a2b -->
-SCENE 08 · 2:00 · CALM, ANALYTICAL, SLIGHTLY RELIEVED
+SCENE 09 · 2:00 · CALM, ANALYTICAL, SLIGHTLY RELIEVED
 
 # Grafana: Watching TinyCC Not Regress
 
@@ -541,7 +613,7 @@ For TinyCC, Grafana is basically a regression guard. It just tells me, honestly,
 
 | Description | Timing | Source |
 | --- | --- | --- |
-| What one commit did to 20,794 functions: one bar cut where the compiler cut it — 10,024 smaller (-118,180 instructions), 6,994 larger (+74,573), 3,776 identical — then the whole thing collapsing to 600,443/644,050 = 0.93x, and the median per function saying 1.00x. Two honest summaries of the same commit that disagree | 0:10-0:30 | motion/s07_b0_one-number-hides-it.py |
+| What one commit did to 20,797 functions: one bar cut where the compiler cut it — 10,023 smaller (-117,728 instructions), 6,997 larger (+72,810), 3,777 identical — then the whole thing collapsing to 599,397/644,315 = 0.93x, and the median per function saying 1.00x, the middle of that same 20,797. Two honest summaries of the same commit that disagree | 0:10-0:30 | motion/s07_b0_one-number-hides-it.py |
 | Where the numbers come from: the `codesize` job on ubuntu-latest handing a scratch db to the `metrics` job on the self-hosted Pi, the four tables a push actually fills (codesize_rollup, codesize_func, compile_time, perf), both funnelling into metrics.db, and Grafana reading it one-way because it is bind-mounted :ro — closing on counted-vs-measured | 0:30-0:48 | motion/s07_b1_metrics-pipeline.py |
 | Blurred private Grafana dashboard, with a trend line dropping over several weeks | 0:48-0:58 | to record |
 | One red spike on a commit, then a green trend after a follow-up fix | 1:22-1:32 | to record |
@@ -551,7 +623,7 @@ For TinyCC, Grafana is basically a regression guard. It just tells me, honestly,
 
 Use a private Grafana dashboard overlay. Avoid showing hostnames, credentials, or sensitive project details. Show a trend line with commit markers; highlight one red regression spike and one green improvement after a fix. Keep the dashboard visually generic enough to remain private.
 
-VERIFY before recording — "We had huge gap to gcc in cycle count, over 30 times slower. After commit with fixes gap is almost closed." Checked 2026-08-24 against the repo and this number could not be reproduced or located. Nothing in `tests/benchmarks/`, `docs/`, the git log or the recorded scorecard shows a 30x cycle gap: the measured extremes are tcc -O0 at 2.35x gcc -O2 whole-suite, `binary_search` at 1.93x before its fix, and doubles at 1.64x. (`strcpy` reads 15,055x from -O0 to -O2, but that is dead-code elimination inside tcc, not a gap against gcc.) If the 30x came off a dashboard panel, screenshot it and name the benchmark; otherwise quote a number that can be re-derived, or the line will be the one thing in the episode a viewer can falsify.
+VERIFY before recording — "We had huge gap to gcc in cycle count, over 30 times slower. After commit with fixes gap is almost closed." Checked 2026-08-24 against the repo and this number could not be reproduced or located. Nothing in `tests/benchmarks/`, `docs/`, the git log or the recorded scorecard shows a 30x cycle gap: the measured extremes are tcc -O0 at 2.70x gcc -O2 whole-suite, `binary_search` at 1.93x before its fix, and doubles at 1.64x. (`strcpy` reads 15,055x from -O0 to -O2, but that is dead-code elimination inside tcc, not a gap against gcc.) If the 30x came off a dashboard panel, screenshot it and name the benchmark; otherwise quote a number that can be re-derived, or the line will be the one thing in the episode a viewer can falsify.
 
 VO accuracy, checked 2026-08-24 against `.github/workflows/ci.yml` and `metrics/schema.sql`: what a push actually pushes to Grafana is code size (tcc vs gcc **instruction** counts per suite and opt, plus per-function rows to a separate detail db), compile time, and RP2350 cycles per iteration. "Pass and fail totals" is the `correctness` table, which CI deliberately skips — `record.py` runs with `--no-correctness` because the O1/O2 fuzz sweep is expensive and run by hand. Per-test QEMU instruction counts exist (`qemu_cycles`) but are **not** on the dashboard path either: `record_one`'s `do_cycles` defaults to False and only `metrics/compare_worktree.py --cycles` ever turns it on. Consider saying "code size against gcc, compile time, and cycles on the board" rather than "instruction counts, pass and fail totals, and per-test timing".
 
@@ -563,7 +635,7 @@ VO accuracy, checked 2026-08-24 against `.github/workflows/ci.yml` and `metrics/
 ---
 
 <!-- scriptforge:scene 18094da8-e9fb-4694-a74e-98b570130a43 -->
-SCENE 09 · 2:30 · SERIOUS, HARDWARE-FOCUSED
+SCENE 10 · 2:30 · SERIOUS, HARDWARE-FOCUSED
 
 # XIP Bottleneck: Why 532MHz Is the Ceiling
 
@@ -618,7 +690,7 @@ I cannot capture the >600 MHz corruption on an oscilloscope; use a terminal/log 
 ---
 
 <!-- scriptforge:scene f74992ff-ae01-4d4f-8426-b984a7552737 -->
-SCENE 10 · 0:40 · HONEST, REFLECTIVE
+SCENE 11 · 0:40 · HONEST, REFLECTIVE
 
 # The SMP Experiment vs. XIP Reality
 
@@ -668,7 +740,7 @@ VERIFY: "tcc's text is 1.4 megabytes". The on-device binary is 1,654,488 bytes t
 ---
 
 <!-- scriptforge:scene 6a8304cf-e2d2-4b20-8627-524ee630511f -->
-SCENE 11 · 1:45 · CALM, TECHNICAL, WITH A HINT OF RELIEF
+SCENE 12 · 1:45 · CALM, TECHNICAL, WITH A HINT OF RELIEF
 
 # QEMU Support for Faster Development and TinyCC Linker Scripts
 
@@ -712,7 +784,7 @@ When saying no separate build, show the same yasos.zig binary name on both the Q
 ---
 
 <!-- scriptforge:scene 37ed7794-13b0-490e-96f2-7dc13928c017 -->
-SCENE 12 · 1:50 · TRIUMPHANT, TECHNICAL
+SCENE 13 · 1:50 · TRIUMPHANT, TECHNICAL
 
 # Live Demo: Compiler & Test Suite in Action
 
@@ -782,7 +854,7 @@ VERIFY: state the pass count as a number, not "all passing" — e.g. "four thous
 ---
 
 <!-- scriptforge:scene 89e56275-745f-4a6b-a9ce-db82f989f85c -->
-SCENE 13 · 1:30 · REFLECTIVE, CANDID
+SCENE 14 · 1:30 · REFLECTIVE, CANDID
 
 # AI as Co-Developer: Architect vs Coder
 
@@ -810,7 +882,7 @@ Talking head close-up against RGB backlit desk. Periodic cutaways to a screen ca
 
 | Description | Timing | Source |
 | --- | --- | --- |
-| A real commit instead of a chat window: `e6a09f0f` in `source/frontend/gen/builtin/call.c`, six lines of condition, with `!inline_body_has_loops(...)` moving out of one arm of an ` |  | ` in place — then what it cost, from the commit's own message (`the device compiler: "memory full" at -O2`; `the same file on the host: 423 MB / 0.48 s, against 45 MB / 0.03 s`) |
+| A real commit instead of a chat window: `e6a09f0f` in `source/frontend/gen/builtin/call.c`, six lines of condition, with `!inline_body_has_loops(...)` moving out of one arm of an ` |  | ` in place — then what it cost, from the commit's own message (`the device compiler: "memory full" at -O2`; `the same file on the host: 423 MB / 427 ms, against 54 MB / 36 ms`) |
 | Brief close-up of the creator's hands at the keyboard while talking about not handing over the wheel | 0:38-0:42 | to record |
 
 ## Notes
@@ -829,8 +901,8 @@ changes, which is what makes it a morph rather than two slides.
 What it cost is the commit's own message, not an estimate: the device compiler
 died with **"memory full"** at -O2 on `gcc-torture/execute/builtin-bitops-1`
 (~220 const-argument calls into 32/64-iteration bit helpers out of one `TEST()`
-macro), and on the host the same file cost **423 MB / 0.48 s** against **45 MB /
-0.03 s** with auto-inline off. It read as correct, it compiled, and it passed —
+macro), and on the host the same file cost **423 MB / 427 ms** against **54 MB /
+36 ms** with auto-inline off. It read as correct, it compiled, and it passed —
 which is the segment's argument in one commit.
 
 The listing is verbatim from `git show e6a09f0f -- source/frontend/gen/builtin/call.c`,
@@ -849,7 +921,7 @@ Keep pace steady and reflective — this is the honest-workflow beat between the
 ---
 
 <!-- scriptforge:scene b8ecb683-7d18-40d9-92b2-ca42305d2d92 -->
-SCENE 14 · 3:25 · HONEST, ANALYTICAL
+SCENE 15 · 3:25 · HONEST, ANALYTICAL
 
 # The Scorecard: How Far Off GCC Is It?
 
@@ -859,13 +931,13 @@ Alright. The uncomfortable question. It's an optimizing compiler now — but is 
 
 Three numbers, measured on the actual chip. Twenty-nine benchmarks on the RP2350, every one checked against its expected result before I timed anything, and the whole run reproducible to the cycle.
 
-Where I started — TinyCC at minus O0, no optimizer — a hundred and thirteen million cycles. TinyCC today, at minus O2: fifty million. GCC at minus O2, same benchmarks, same board: forty-four million.
+Where I started — TinyCC at minus O0, no optimizer — a hundred and twenty million cycles. TinyCC today, at minus O2: fifty million. GCC at minus O2, same benchmarks, same board: forty-four million.
 
-So the optimizer bought a factor of two. Two point two three, to be exact. And against GCC I went from two point five five times slower to one point one four. Fourteen percent off GCC, on real silicon, from a compiler that runs on the microcontroller it's compiling for.
+So the optimizer bought a factor of two. Two point three seven, to be exact. And against GCC I went from two point seven times slower to one point one four. Fourteen percent off GCC, on real silicon, from a compiler that runs on the microcontroller it's compiling for.
 
 Now let me take that fourteen percent apart, because it is not spread evenly.
 
-Doubles are one point six four. And here is the damning part — at minus O0 they were already there. The optimizer bought them nothing. One point zero zero. Every pass I wrote sails straight past double arithmetic.
+Doubles are one point six four — and not because my passes skip them. The optimizer buys double arithmetic one point eight times over. The problem is where they start: at minus O0, doubles are two point nine five times GCC, and everything else is two point six seven. A bigger hole, and less of it closed.
 
 Take the doubles out, and the rest of the suite is one point zero eight. Eight percent off GCC — and the optimizer bought that side two point four eight times over.
 
@@ -873,7 +945,7 @@ The two biggest real workloads in there, dijkstra and qsort, come in at one poin
 
 So the honest headline isn't "fourteen percent slower". It's level with GCC on integer and pointer code, and losing badly on doubles.
 
-There's one number I have to be straight about, because it flatters me and I nearly put it on a card. Count instructions instead of cycles, across the whole four-thousand-test corpus, and I come out at zero point nine three — seven percent *fewer* instructions than GCC. That is meaningless. Five files in that corpus are machine-generated, two thousand near-identical functions apiece, and between them they are half of every function I measure. I expand that one idiom tighter than GCC, and it drags the whole average under one. Pull those five files out and it's one point one four. The median function is exactly one point zero zero.
+There's one number I have to be straight about, because it flatters me and I nearly put it on a card. Count instructions instead of cycles, across the whole four-thousand-test corpus, and I come out at zero point nine three — seven percent *fewer* instructions than GCC. That is meaningless. Five files in that corpus are machine-generated, two thousand near-identical functions apiece, and between them they are half of every function I measure. I expand that one idiom tighter than GCC, and it drags the whole average under one. Pull those five files out and it's one point one four. And the median moves with them — one point zero zero across the whole corpus, one point one zero once those five are gone.
 
 Cycles on hardware are the number. Instruction counts over a corpus are a trap I set for myself.
 
@@ -903,17 +975,17 @@ Encoding width was never the gap. And the reason it was never the gap is that it
 
 ## Scene Description
 
-Clean data scene, no talking head until the last beat. Opens on a three-bar card — tcc -O0, tcc -O2, gcc -O2 — the first bar towering over the other two, so the optimizer's 2.23x and the remaining 1.14x read in one picture. Then the decomposition: doubles pulled out as their own pair of bars against everything-else, with the O0 column showing the doubles bar barely moving. Then dijkstra and qsort called out at parity. Then the instruction-count card, presented as a trap and dismissed, with the five generated files shown eating half the corpus. Then the encoding-width card, dismissed — and then, instead of moving on, three cards that say what it was dismissing: what actually forces a wide encoding, four real objdump pairs at a time; one function compiled by both compilers side by side with the byte column kept, where TCC uses no wide encoding at all and is still four bytes bigger; and the multiplication that closes it, width times count, where the rate TCC wins turns into the byte total it loses. Close on the Grafana dashboard scrubbing through six months.
+Clean data scene, no talking head until the last beat. Opens on a three-bar card — tcc -O0, tcc -O2, gcc -O2 — the first bar towering over the other two, so the optimizer's 2.37x and the remaining 1.14x read in one picture. Then the decomposition: doubles pulled out as their own pair of bars against everything-else, with the O0 column showing the doubles starting further back and closing less of the distance. Then dijkstra and qsort called out at parity. Then the instruction-count card, presented as a trap and dismissed, with the five generated files shown eating half the corpus. Then the encoding-width card, dismissed — and then, instead of moving on, three cards that say what it was dismissing: what actually forces a wide encoding, four real objdump pairs at a time; one function compiled by both compilers side by side with the byte column kept, where TCC uses no wide encoding at all and is still four bytes bigger; and the multiplication that closes it, width times count, where the rate TCC wins turns into the byte total it loses. Close on the Grafana dashboard scrubbing through six months.
 
 ## B-Rolls
 
 | Description | Timing | Source |
 | --- | --- | --- |
-| Three-bar hero card: `tcc -O0 112,880,275` · `tcc -O2 50,512,675` · `gcc -O2 44,288,006` cycles, with `2.23x` bracketing the first two and `1.14x` the last two | 0:10-0:40 | motion/s13_b0_three-bar-cycle-comparison.py |
-| Gap-closing card: `tcc -O0 was 2.55x GCC` → `tcc -O2 is 1.14x GCC` | 0:40-0:55 | motion/s13_b1_gap-closing.py |
-| Split bars, doubles vs everything-else: `doubles 1.64x, optimizer gained 1.01x` against `rest 1.08x, optimizer gained 2.48x` | 0:55-1:25 | motion/s13_b2_doubles-vs-everything-else.py |
+| Three-bar hero card: `tcc -O0 119,507,836` · `tcc -O2 50,512,675` · `gcc -O2 44,288,006` cycles, with `2.37x` bracketing the first two and `1.14x` the last two | 0:10-0:40 | motion/s13_b0_three-bar-cycle-comparison.py |
+| Gap-closing card: `tcc -O0 was 2.70x GCC` → `tcc -O2 is 1.14x GCC` | 0:40-0:55 | motion/s13_b1_gap-closing.py |
+| Split bars, doubles vs everything-else: `doubles 1.64x, optimizer gained 1.80x` against `rest 1.08x, optimizer gained 2.48x` | 0:55-1:25 | motion/s13_b2_doubles-vs-everything-else.py |
 | Parity callout: `mibench_dijkstra 1.01x` and `mibench_qsort 1.00x` next to a GCC reference line | 1:25-1:40 | motion/s13_b3_parity-dijkstra-qsort.py |
-| Instruction-count trap card: `0.93x` struck through, then `5 generated files = 10,245 of 20,797 functions`, resolving to `1.14x · median function 1.00x` | 1:40-2:05 | motion/s13_b4_instruction-count-trap.py |
+| Instruction-count trap card: `0.93x` struck through, then `5 generated files = 10,245 of 20,797 functions`, resolving to `1.14x` and to both medians with their corpora named — `1.00x over all 20,797 · 1.10x with those five out` | 1:40-2:05 | motion/s13_b4_instruction-count-trap.py |
 | Encoding-width card `TCC 29.0% vs GCC 34.2% wide` stamped "not the gap" | 2:05-2:15 | motion/s13_b5_encoding-width.py |
 | What forces a wide encoding: four real objdump pairs — a constant (`movs r0, #1` → `mov.w r0, #32768`), a folded shift (`adds` → `add.w …, lsl #31`), a register above r7 (`str` → `str.w lr`), an offset past five bits (`ldrb` → `ldrb.w …, #65`) — closing on "no 16-bit form at all: sdiv, clz, ubfx, and every bl" and "not a slower instruction, a bigger one" | 2:15-2:30 | motion/s13_b6_what-makes-it-wide.py |
 | One function, both ways: `std_eqn` out of `divconst-2.c`, TCC's nine instructions against GCC's five with objdump's byte column kept, three spans marked as byte-for-byte even (4 ↔ 4, 8 ↔ 8, 2 ↔ 2) and one that pairs with nothing, resolving to `0% wide · 18 bytes` against `40% wide · 14 bytes` | 2:30-2:52 | motion/s13_b7_one-function-both-ways.py |
@@ -924,22 +996,26 @@ Clean data scene, no talking head until the last beat. Opens on a three-bar card
 
 **All figures re-measured 2026-08-20** on branch `loop-opts-iv-ptr-walk` (tinycc `7262c810`). The previous draft's numbers (1.08x instructions, 696,942 / 648,284, `main` at 47%, wide encodings 33.9% vs 31.6%) are superseded — they came from `docs/plans/o2_size_and_speed_levers.md` §2, measured months ago at `bc0e02ce`.
 
-Cycles — `tests/benchmarks/run_benchmark.py 192.168.0.113 -O all`, real RP2350 silicon, 29 benchmarks, 26 verified against expected results and 3 with no expected value. Re-measured 2026-08-25 at tinycc `803a2f25`, run twice with all 87 measurements identical. Totals: tcc -O0 112,880,275 / tcc -O2 50,512,675 / gcc -O2 44,288,006. Optimizer 2.23x; tcc -O0 vs gcc -O2 2.55x; tcc -O2 vs gcc -O2 1.14x. Median per-benchmark 1.28x. Doubles 1.64x (optimizer gain 1.01x); everything else 1.08x (optimizer gain 2.48x). `.text` 98,240 → 87,256 for TCC, GCC 72,856 (1.20x). Supersedes the 2026-08-20 figures at `7262c810` (tcc -O0 103,978,975, optimizer 2.06x, -O0 vs gcc 2.35x): `3fee660e` stopped -O0 running const-prop, which cost -O0 8.6%. The gcc arm and the 1.14x headline are unchanged.
+Cycles — `tests/benchmarks/run_benchmark.py 192.168.0.113 -O all`, real RP2350 silicon, 29 benchmarks, 26 verified against expected results and 3 with no expected value. **-O2 and gcc arms measured 2026-08-25 at tinycc `803a2f25`; the -O0 arm re-measured 2026-08-30 at the same commit** (see the paragraph below for why). Totals: tcc -O0 119,507,836 / tcc -O2 50,512,675 / gcc -O2 44,288,006. Optimizer 2.37x; tcc -O0 vs gcc -O2 2.70x; tcc -O2 vs gcc -O2 1.14x. Median per-benchmark 1.28x. Doubles 1.64x (optimizer gain 1.80x); everything else 1.08x (optimizer gain 2.48x). At -O0, doubles are 2.95x gcc and everything else 2.67x — doubles start further back and finish further back. `.text` 101,380 (-O0) → 87,256 (-O2) for TCC, GCC 72,856 (1.20x). Supersedes the 2026-08-20 figures at `7262c810` (tcc -O0 103,978,975, optimizer 2.06x, -O0 vs gcc 2.35x): `3fee660e` stopped -O0 running const-prop, which cost -O0 8.6%. The gcc arm and the 1.14x headline have never moved.
 
-Two things make those cycle numbers trustworthy, and both are worth knowing before anyone challenges them. The run was repeated and came back **identical on all 58 measurements** (29 benchmarks × 2 compilers). And the double comparison is genuinely compiler-vs-compiler: `BENCH_GCC_FP_FROM_SOURCE` defaults ON, so both arms compile the *same* `lib/fp/soft` C sources at -O2 — GCC is not being handed its hand-written `ieee754-df.S`. With libgcc's assembly instead, double_add reads 4.12x, which would be an unfair number to quote.
+**Why the -O0 column was re-measured on 2026-08-30, and what it invalidated.** The 08-25 collection read the doubles' optimizer gain as **1.01x** and this scene called it damning — "every pass sails straight past double arithmetic". That was the harness, not the compiler. `-O${BENCHMARK_OPT_LEVEL}` reaches only the benchmark's own sources (`tests/benchmarks/CMakeLists.txt:137`); the soft-float runtime is linked as a prebuilt `lib/fp/libsoftfp.a` (`:95`) that `lib/fp/soft/Makefile:14` always builds at -O2, deliberately, so that the GCC arm can be held to the same sources at the same level (`:220-224`). Every `double_*` kernel is a loop of `bl __aeabi_d*`, so ~99% of the doubles' cycles in the -O0 image were executing -O2 code; the lane could not have read anything but ~1.00x whatever the optimizer did. Rebuilt at -O0 (`lib/fp/soft/Makefile` -O2→-O0, `make -C lib clean-fp-libs CROSS_TARGET=armv8m`, delete `lib/fp/build/.armv8m-fp-libs.{stamp,checksum.saved}`, `make fp-libs`, `rm -rf tests/benchmarks/build_pico_tcc_O0`) the doubles read **15,098,554 → 8,390,567 = 1.80x**, per kernel add 1.83x, mul 1.73x, div 1.62x, cmp 2.35x, mixed 1.84x. The same run reproduced the 08-25 as-shipped arms **to the cycle** (8,459,166 / 8,390,567 / 5,118,257 / 44,288,006), so it is the same rig and the same compiler.
 
-The image-size artifact in tcc-rig-image-size-confounds-benchmarks does not apply here: the two arms' `.text` differ by 14,048 bytes, which is an exact multiple of 16, so the code-to-data displacement is unchanged. The doubles are placement-insensitive anyway, and they are where the gap lives.
+Two things make those cycle numbers trustworthy, and both are worth knowing before anyone challenges them. The run has been repeated across three collections and every figure that should not move has come back **identical to the cycle** — gcc -O2 44,288,006 three times running, tcc -O2 50,512,675, doubles 1.6393x, dijkstra 1.0113x. And the double comparison is genuinely compiler-vs-compiler: `BENCH_GCC_FP_FROM_SOURCE` defaults ON, so both arms compile the *same* `lib/fp/soft` C sources at -O2 — GCC is not being handed its hand-written `ieee754-df.S`. With libgcc's assembly instead, double_add reads 4.12x, which would be an unfair number to quote.
 
-Five benchmarks (`function_calls`, `conditionals`, `switch_stmt`, `strcpy`, `strcmp`) collapse to ~35 cycles at -O2 under both compilers — the body is optimized away. Excluding them moves the aggregate by nothing (2.23x → 2.22x, 1.14x unchanged), so the headline is not resting on them. Do **not** put the raw `strcpy` O0/O2 ratio (15,116x) on screen; it is dead-code elimination, not a speedup.
+The image-size artifact in tcc-rig-image-size-confounds-benchmarks does not apply here, and this time it is measured rather than argued: the 24 non-double benchmarks link identical code in both -O0 images and moved **-0.01%** in total between them (worst single, `strlen_scan`, -0.44%) across a +3,140 B change in `.text`. Placement is not in play at this size, and the doubles' 1.80x is entirely real.
 
-Instructions — **re-measured 2026-08-25 at `803a2f25`**, superseding the 2026-08-20 figures at `7262c810` (4,253 tests, 20,794 functions, 600,443 / 644,050). `./scripts/regression_disasm.py --suite all -j24 --csv`: 4,363 tests, 20,797 functions, TCC 599,397 / GCC 644,315 = **0.93x**. The five generated files (`memclr`, `memcpy-a1`, `-a2`, `-a4`, `-a8`) carry 2,049 functions each = 10,245 of 20,797 (49.3% of the functions, 55.2% of the instructions). Excluding them: TCC 296,374 / GCC 260,475 = **1.14x**. Median per-function ratio **1.00x**. Better on 10,023 functions (−117,728 instructions), worse on 6,997 (+72,810), identical 3,777; `main` is 47.2% of the gross excess across 1,331 `main`s. Every claim the voiceover makes about this corpus reproduces at HEAD.
+Five benchmarks (`function_calls`, `conditionals`, `switch_stmt`, `strcpy`, `strcmp`) collapse to ~35 cycles at -O2 under both compilers — the body is optimized away. Excluding them moves the aggregate by nothing (2.37x → 2.35x, 1.14x unchanged), so the headline is not resting on them. Do **not** put the raw `strcpy` O0/O2 ratio (15,116x) on screen; it is dead-code elimination, not a speedup.
+
+Instructions — **re-measured 2026-08-25 at `803a2f25`**, superseding the 2026-08-20 figures at `7262c810` (4,253 tests, 20,794 functions, 600,443 / 644,050). `./scripts/regression_disasm.py --suite all -j24 --csv`: 4,363 tests submitted, 4,261 of them compiling to at least one function (102 have none), 20,797 functions, TCC 599,397 / GCC 644,315 = **0.93x**. **Re-run in full 2026-08-30** from a fresh worktree at the same commit — every figure in this paragraph came back to the instruction. The five generated files (`memclr`, `memcpy-a1`, `-a2`, `-a4`, `-a8`) carry 2,049 functions each = 10,245 of 20,797 (49.3% of the functions, 55.2% of the instructions). Excluding them: TCC 296,374 / GCC 260,475 = **1.14x**. Median per-function ratio **1.00x over the whole corpus** — and that 1.00x is manufactured by the same five files: their own median is **0.81x** (tcc shorter on 8,111 of their 10,245), and with them out the median is **1.10x** (tcc longer on 5,767 of the 10,552 hand-written functions, shorter on 1,912, level on 2,873). The median is the same trap as the aggregate, one line further down, so never quote it without the cut it came from. Better on 10,023 functions (−117,728 instructions), worse on 6,997 (+72,810), identical 3,777; `main` is 47.2% of the gross excess across 1,331 `main`s. Every number the voiceover quotes reproduces at HEAD, the corrected median line included; `motion/s13_b4_instruction-count-trap.py` puts both medians on screen with their corpora named.
 
 Encoding width — **re-measured 2026-08-25**, and the sample matters more than the previous note allowed. Counting each instruction's encoded length from objdump's byte column over the `gcc-execute` dumps (`--suite gcc-execute --dump-dir`), and excluding the same five generated files: **TCC 29.0% wide vs GCC 34.2%**, over 1,788 tests (TCC 169,285 instructions, GCC 143,438). Left in, those five alone read 9.6% wide for TCC against 41.9% for GCC and drag the whole-suite figure to TCC 16.4% vs GCC 39.8% — the same contamination as the instruction ratio, and much stronger, so quote the excluded-five number. Over the *first 250* execute tests only — the cut the 2026-08-20 collection used — it reads TCC 29.7% vs GCC 31.7%, close to but not identical with the 29.6%/32.6% that collection recorded; the exact 250 could not be reproduced. **The direction is the same in every cut and TCC is the narrower of the two**, which is all the line claims.
 
 **Encoding width, part two — the three cards added 2026-08-26** (`s13_b6`,
 `s13_b7`, `s13_b8`), which turn the dismissal into an explanation. Same sweep,
-same exclusion, re-run and reproduced *exactly* — 169,285 / 49,137 for TCC and
-143,438 / 49,085 for GCC, to the instruction — from a fresh build of `803a2f25`
+same exclusion. Re-derived again 2026-08-30 and it lands within 0.03% —
+169,333 / 49,158 for TCC and 143,456 / 49,085 for GCC against the 169,285 /
+49,137 and 143,438 / 49,085 on the cards; every ratio on screen (29.0%, 34.2%,
+2.58, 2.68, 1.135x) is unchanged — from a fresh build of `803a2f25`
 in a throwaway worktree, because the in-tree `libs/tinycc/armv8m-tcc` is an ARM
 binary under the self-host configure and will not exec (see
 `tinycc-two-configures-test-vs-rootfs`):
@@ -1004,7 +1080,7 @@ charged for — by the flash the image has to fit in, and by the 16 KiB XIP cach
 scene 8 already drew.
 
 **VOICEOVER MISMATCHES introduced by the 2026-08-25 re-measurement** — two, both small, neither changing a point being made:
-1. The narration says the optimizer bought doubles "one point zero zero". Measured, it is **1.01x** (8,459,166 → 8,390,567, a 0.82% gain). The animated card says 1.01x. Either re-record the word or accept the card reading one hundredth higher than the line.
+1. **The doubles beat was rewritten on 2026-08-30 and is unrecorded.** The old take says "at minus O0 they were already there. The optimizer bought them nothing. One point zero zero." That was a measurement artifact (above) and the line must not ship. The replacement — the optimizer buys doubles 1.80x, they start at 2.95x GCC against everything else's 2.67x — needs a take, and so do the two totals in the opening beat ("a hundred and twenty million", "two point three seven", "two point seven times slower").
 2. ~~The narration says wide encodings are "twenty-nine point six percent … GCC, thirty-two point six".~~ **Resolved 2026-08-26**: that sentence was replaced outright when the encoding segment was extended, and the new passage says twenty-nine and thirty-four. The whole block from "And encoding width" to "it was the wrong ratio" is unrecorded and needs a take.
 
 CI measures cycles on real silicon via a self-hosted Raspberry Pi 5 runner with a board attached, not in an emulator. `metrics/gate.py` compares a run against its parent and can fail the build.
@@ -1018,8 +1094,109 @@ VERIFY: the correctness beat was cut from this draft rather than left stale. The
 
 ---
 
+<!-- scriptforge:scene 5bfdd813-d607-434f-a51f-3a5c96d42866 -->
+SCENE 16 · 2:15 · PRECISE, EXPERIMENTAL, SELF-CORRECTING
+
+# Shorter Isn't Faster: Four Pairs on Real Silicon
+
+## Voiceover
+
+I just told you a wide instruction that replaces two narrow ones is free. That is a claim about this chip, and I had been repeating it for months on the strength of a hand-wave. So I went and measured it.
+
+Eight loops, hand-written in Thumb-2, in four pairs. Both halves of a pair read the same array and return the same checksum — the board checks that before it will print a single timing — and the only thing that differs between them is which instructions I picked. Code and data both in SRAM, so the cache is not in the room. Interrupts off. Best of nine. I flashed it twice and got bit-identical numbers.
+
+First pair: divide by ten. One arm is a `udiv` — ten bytes, three instructions. The other is the strength reduction every optimizing compiler reaches for: multiply by a magic constant and shift down. Twelve bytes, four instructions.
+
+The bigger one is two and a quarter times faster. Take the loop out of both and it is three point eight.
+
+And there is a trap sitting inside that. The divider on this core stops early when the operands are small. On values under a thousand `udiv` reads nine point six cycles an element; on full-range thirty-two-bit values, fifteen point two. The multiply is flat at six point eight either way. Which means a divide benchmark run on small numbers is a divide benchmark with the interesting part taken out.
+
+Second pair. Sum an array. One arm is a thirty-two-bit post-indexed load and a sixteen-bit add — two instructions, six bytes. The other is three sixteen-bit instructions: load, bump the pointer, add. Also six bytes.
+
+Dead heat. Same size, one more instruction, and not a cycle in it. Fourteen instructions an iteration finish in the same fifteen cycles as ten, because the loop is waiting on loads. The extra pointer bumps do not cost anything — they fill time that was already being spent.
+
+Third pair. The same load written two ways: a scaled index, which has no sixteen-bit form, against an unscaled one, which does. Three instructions each. Eight bytes against six.
+
+Exactly the same speed. The wide addressing mode is free — and that one cost me an old note. I had written down a cycle on this core and blamed the shift for it. Hold everything else still and drop only the shift, and nothing moves. The cycle was never the shift. It was the index register.
+
+Last pair. Multiply by forty-five — the textbook strength reduction, one multiply against two shifted adds. Eight bytes against fourteen.
+
+Two thousandths of a cycle apart. Six bytes and an extra instruction, for nothing. This core has a single-cycle multiplier; that trade is a win on a chip that does not, and this is not one.
+
+So: four pairs. Shorter and slower. Same size, more instructions, same speed. Wider and free. Bigger and pointless. Bytes, instructions, cycles — three rankings, and they disagree in every direction it is possible to disagree in.
+
+One honest limit, and it is the one that keeps this from contradicting the last scene. All of this runs out of SRAM, which is how I got the cache out of the measurement. Out of flash, size *does* buy you speed — and that is exactly the channel the thirteen and a half percent I just showed you rides on. Bytes are charged for. They are just not charged for by the pipeline.
+
+## Scene Description
+
+The controlled experiment that pays off the previous scene's corpus statistics. No talking head until the closing limit. Opens on the board's own serial output — the table it prints, with the MATCH column visible — then two animated cards. The first is the divide pair as two objdump listings with the byte column kept, in the same idiom as the `std_eqn` card, resolving into two cycle bars where the shorter listing's bar is more than twice as long, then into the small-versus-wide split that shows the divider's early termination. The second card puts the remaining three pairs in one table — bytes, instructions, cycles — and then flips the table three times, once per ranking, so that the three orders visibly disagree. Closes on the SRAM caveat as a plain line, delivered to camera.
+
+## A-Rolls
+
+| Description | Timing | Source |
+| --- | --- | --- |
+| Closing limit delivered to camera — "bytes are charged for, just not by the pipeline" | 1:58-2:15 | Session A |
+
+## B-Rolls
+
+| Description | Timing | Source |
+| --- | --- | --- |
+| Board serial capture: `run_width_demo.py` output — the header line naming SRAM / best-of-9 / irqs-off, then the four cases with their `sum=` columns and `verdict: MATCH`, ending on `WIDTH DEMO: PASS mismatches=0` | 0:12-0:30 | screen capture |
+| Shorter, and slower: the divide-by-ten pair as two listings with objdump's byte column — `udiv` at `10 B · 3 instr` against `umull`+`lsrs` at `12 B · 4 instr` — resolving to cycle bars `15.235` against `6.763` (`2.25x`, `3.8x` net of the loop), then to the operand-width split `9.614 → 15.235` against a flat `6.763` | 0:30-1:02 | motion/s13b_b1_shorter-and-slower.py |
+| Three rankings, three orders: the remaining three pairs as one table (equal bytes `6/6`, scaled `8` vs `6`, mul45 `8` vs `14`), then the table re-sorted by bytes, by instructions, and by cycles, the order changing each time; closes on the SRAM caveat | 1:02-1:58 | motion/s13b_b2_three-rankings.py |
+
+## C-Rolls
+
+## D-Rolls
+
+## Notes
+
+**All figures measured 2026-08-30** on the 192.168.0.113 rig, and reproduced bit-identically across two flash-and-run cycles. Source and harness are in the yasos tree at `libs/tinycc/tests/benchmarks/`: `width_kernels.S` (the eight kernels), `width_demo_main.c` (driver), `run_width_demo.py` (build, flash, run), CMake behind `-DBUILD_WIDTH_DEMO=ON`. Re-run with:
+
+    cd libs/tinycc/tests/benchmarks
+    PICO_SDK_PATH=$PWD/libs/pico-sdk ../../venv/bin/python \
+        ./run_width_demo.py 192.168.0.113 [--skip-build] [--disasm]
+
+(`paramiko` is only in `libs/tinycc/venv`; the other repo venvs do not have it and the run dies at the SSH step.)
+
+The board's table, verbatim, with the skeleton at **3.755 cyc/elem**:
+
+    case        arm                                    B  instr   small     wide
+    div by 10   udiv                                  10    3     9.614   15.235
+                umull + lsrs                          12    4     6.763    6.763
+    sum         ldr.w [r0],#4 + adds                   6    2     3.755    3.755
+                ldr [r0] + adds r0,#4 + adds           6    3     3.755    3.755
+    indexed     ldr.w [r0,r3,lsl #2]                   8    3     4.757    4.757
+                ldr [r0,r3]                            6    3     4.757    4.757
+    mul by 45   muls                                   8    3     5.757    5.757
+                add.w …lsl#2 + add.w …lsl#3           14    4     5.759    5.759
+
+**Why each control is there**, because all four will be asked about:
+
+- *copy_to_ram.* The XIP cache is deliberately excluded — that is the whole point of the closing caveat, and it is why this scene does not contradict the previous one's 1.135x. The two claims are about different channels.
+- *Interrupts off across each timed region.* A SysTick landing inside a ~10,000-cycle measurement is over 1% on differences that are sometimes smaller than that.
+- *Best of nine.* Same convention as `scripts/bench_tcc_suites.py`: noise only ever moves a measurement up.
+- *Two datasets.* Not decoration — it is what exposes the divider's early termination, and the three non-dividing pairs scoring identically on both is the harness checking itself.
+- *Loop tops `.balign 8`.* So a 32-bit instruction straddling a fetch boundary cannot be what separates two arms.
+
+**Byte counts on the cards are the assembler's, not mine.** Each kernel brackets one unrolled body with `.Lbs_`/`.Lbe_` labels and emits `.Lbe - .Lbs` as a word into a descriptor the firmware reads, so the number on screen is arithmetic over the encodings GNU as actually chose. Both clips re-derive the same totals from the encoding column at load time and assert them, so a wrong line in a listing is a crash rather than a card that quietly says something false.
+
+**The third pair corrects a note of my own, and the correction is in the voiceover on purpose.** `tcc-m33-addressing-mode-cycle-costs` recorded `[base,i,lsl#2]` at 8.012 against `ldr [p]` + pointer bump at 7.012 and attributed the cycle to the scaling. That comparison moves two things at once. Holding the register-offset form fixed and dropping only the scale gives an exact tie, so the cycle belongs to the index-register shape — the IV-strength-reduction conclusion is unchanged, but the prize is not "removing the shift". Say it as a correction, not as a discovery; it reads better and it is what happened.
+
+**The fourth pair closes a question that memo left open** ("nobody has measured `mul` → `lsl` on the rig"). It is now measured, and the answer is zero cycles for six bytes.
+
+**Do not let this scene be heard as "size does not matter".** It says size does not *rank* implementations by speed on this core's pipeline. The previous scene's byte total and this scene's cycle table are both true, and the closing paragraph is the join. If the edit has to lose a beat, lose one of the middle pairs — not the caveat.
+
+**Four hand-written loops are not a workload.** They show the rankings *can* disagree, not how often they do in real code. The corpus claim is the previous scene's job and is not restated here.
+
+**Numbering:** the motion prefix is `s13b_` rather than `s14_`, because the scorecard already owns `s13_` and the roadmap owns `s14_`. Same device as `s06_dsl_`, which shares `s06_` with the floating-point scene. Reconcile with the rest of the drift noted in `recording-plan.md` before the edit.
+
+VERIFY: the A-Roll is the only unshot piece and the whole voiceover is unrecorded. The board capture wants a terminal wide enough for the table's `sum=` column not to wrap — it is 100 columns, and the MATCH verdict is what makes the timings mean anything.
+
+---
+
 <!-- scriptforge:scene a15cfa6d-2a85-4cfd-94d1-8e73e9b348e6 -->
-SCENE 15 · 2:00 · FORWARD-LOOKING, ENGAGING
+SCENE 17 · 2:00 · FORWARD-LOOKING, ENGAGING
 
 # Roadmap: VGA, keyboard, Doom
 
@@ -1067,7 +1244,7 @@ Keep this scene forward-looking: do not re-explain the TinyCC optimizer, GCC tor
 ---
 
 <!-- scriptforge:scene 59ac4bbf-bef1-4229-b7a1-e7bca3e9c1ac -->
-SCENE 16 · 1:40 · WARM, CONVERSATIONAL
+SCENE 18 · 1:40 · WARM, CONVERSATIONAL
 
 # Outro & Community Engagement
 

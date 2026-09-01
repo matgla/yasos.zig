@@ -127,6 +127,21 @@ Pass `--pytest-args` to override the cached pytest argument string for one run w
 
 Pass `--gdb` to build the kernel locally, rsync the kernel ELF plus `scripts/yasld_gdb.py` and the locally-built app/library ELF outputs referenced by that helper into the remote repository, and open an interactive GDB attach session over SSH without flashing the target. When a previously uploaded kernel exists in the configured remote work directory, the GDB session prefers that flashed kernel ELF as the main symbol file so the symbols match what is already running on the board; otherwise it falls back to the freshly synced repository copy. The remote host is checked for `rsync`, `openocd`, and one of `arm-none-eabi-gdb`, `gdb-multiarch`, or `gdb` before the session starts. Combine `--reset --gdb` to reset-halt the target before GDB attaches.
 
+Pass `--gdb-dashboard` alongside `--gdb` or `--gdb-debug` to run the session under
+[gdb-dashboard](https://github.com/cyrus-and/gdb-dashboard). The remote GDB is started with `-nx`, so a
+dashboard installed on the board host is *not* picked up on its own; this flag sources it explicitly, before
+the target is attached, so the first stop already renders. With no value it looks for `~/.gdbinit`,
+`~/.gdb-dashboard`, `~/.config/gdb/gdbinit` and `/usr/share/gdb-dashboard/.gdbinit` on the board host, and
+takes a path if you pass one (`--gdb-dashboard ~/dashboards/rp2350.gdbinit`). It also makes tool detection
+prefer a Python-capable GDB, since the dashboard is a Python extension. A missing dashboard is a warning,
+not a failure. Note that the dashboard replaces GDB's `(gdb) ` prompt with `>>>`, which matters for anything
+scripted against the prompt (`scripts/demo_shot.py` waits on `(gdb) `), so the flag is opt-in.
+
+```bash
+python3 scripts/remote_smoke_tui.py --run-cached --reset --gdb --gdb-dashboard
+python3 scripts/remote_smoke_tui.py --run-cached --gdb-debug --cmd 'ls' --gdb-dashboard
+```
+
 The remote host is expected to have:
 
 - `openocd`

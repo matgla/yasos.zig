@@ -7,6 +7,7 @@
 #
 #     scripts/demo_shot.sh full
 #     scripts/demo_shot.sh vi --cps 20
+#     scripts/demo_shot.sh width          # the two-kernel timing beat
 #
 # The take's transcript comes back to $TAKES (default: the episode's recordings
 # directory) as <shot>-<stamp>.raw, next to the video; feed it to
@@ -22,6 +23,13 @@ shift || true
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 scp -q "$here/demo_shot.py" "$RIG:demo_shot.py"
+
+# demo/ goes with it, and under the same name: the `width` shot reads
+# demo/div10.c *at take time* -- that is what stops the listing on camera and
+# the listing that compiles from drifting apart -- and it looks for it beside
+# demo_shot.py.
+ssh "$RIG" "mkdir -p demo"
+scp -q "$here/demo/"*.c "$RIG:demo/"
 
 # A bare option (--list, --extract, --disasm) is not a take: pass it straight
 # through, with no transcript to name after it.

@@ -187,6 +187,9 @@ if $CLEAR; then
   rm -rf libs/yasos_curses/build
   rm -rf apps/textvaders/build
   rm -rf apps/hexdump/build
+  rm -rf apps/yaffdump/build
+  rm -rf apps/yaffdump/tests/build
+  rm -rf apps/time/build
   rm -rf libs/libm/build
   rm -rf apps/yasvi/build
   rm -rf apps/mkfs/build
@@ -721,6 +724,8 @@ build_makefile textvaders
 build_makefile hello_world
 build_makefile prun
 build_makefile hexdump
+build_makefile yaffdump
+build_makefile time
 build_makefile yasvi
 build_makefile mkfs
 build_makefile longjump_tester
