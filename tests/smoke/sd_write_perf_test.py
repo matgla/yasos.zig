@@ -56,14 +56,37 @@ garbage collection to land in, and every other pass in that same run was
 normal. So the single-sector floors are set low enough to ride out a stall --
 they check that the CMD24 path still works at all, they are not tuning gates.
 
-The floors are deliberately NOT re-tightened onto the right-hand column. They
-are set at roughly half the *slowest* run of the CMD25 era, which keeps them
-2x or more clear of the pre-CMD25 numbers they exist to separate from, and
-leaves headroom for a different card on a different rig. A gate pinned to the
-best figure ever measured fails on the first slow card and teaches everyone to
-ignore it. The 512-byte combined-rate floor below is what actually detects a
-lost batching path, and it is set the same way: far enough above the broken
-value and below the observed one that neither a slow card nor a real
+Three runs on 2026-09-01/02 say the same thing about the other single-sector
+pass, and are why the random floor moved from 180 to 80:
+
+    pass              09-01 19:46   09-02 07:45   09-02 (3rd)
+    seq_read 512 B    5418          5419          5512
+    seq_read 32 KiB   13367         13338         13366
+    seq_write 4 KiB   2686          2761          2705
+    seq_write 32 KiB  4286          4379          4234
+    seq_write 512 B   2629          1216          2656
+    rand_write 512 B  457           500           155
+
+Every read and both multi-block writes are flat to within 5% across all three,
+so the bus width, the clock and the high-speed negotiation are intact in each.
+What moves is one single-sector pass per run, and a different one each time: the
+middle run stalled `seq_write 512` to 45% of normal, the last stalled
+`rand_write` to 31%. In both, the pass that stalled and a pass that ran at
+reference speed hit the same scratch file on the same card seconds apart, which
+rules out fragmentation and a full card alongside the driver. 3216 us for a
+512-byte write is a read-modify-write of a whole erase block; 998 us, the run
+before, is the card's fast path for the same request.
+
+The floors are deliberately NOT re-tightened onto the right-hand column. The
+sequential ones are set at roughly half the *slowest* run of the CMD25 era,
+which keeps them 2x or more clear of the pre-CMD25 numbers they exist to
+separate from, and leaves headroom for a different card on a different rig.
+The random one is half the slowest run of the current era for the reason in its
+own comment: there are no pre-rework numbers below it to stay clear of. A gate
+pinned to the best figure ever measured fails on the first slow card and teaches
+everyone to ignore it. The 512-byte combined-rate floor below is what actually
+detects a lost batching path, and it is set the same way: far enough above the
+broken value and below the observed one that neither a slow card nor a real
 regression lands near it.
 
 The environment knobs below are for local runs and for bringing a different
@@ -121,9 +144,20 @@ SEQ_WRITE_FLOORS = (
 )
 
 # Scattered single-sector writes: the CMD24 path again, and the one the FAT
-# metadata updates take. Reference 368 KiB/s, unchanged by the CMD25 work.
-RAND_WRITE_FLOOR = 180
-RAND_WRITE_REFERENCE = 368
+# metadata updates take. 368 KiB/s in the CMD25 era; the multi-block DMA, memcpy
+# and HAL -O work lifted it to ~500, which the right-hand column above already
+# recorded and the reference here now names -- 457 and 500 on the two September
+# runs that did not stall.
+#
+# Half the slowest pass observed, that 155. Low, and it cannot be otherwise: this
+# is a collapse detector and there is no tuning gate available here to trade it
+# for. The pre-rework path this whole file exists to catch -- one CMD24 plus a
+# full program busy-wait per sector -- measured ~410 KiB/s, *above* the healthy
+# 457 and 500, so no floor separates a regression from health on this pass at any
+# value. It checks that scattered single-sector writes still complete at all.
+# SEQ_WRITE_512_COMBINED_FLOOR below is the one that detects lost batching.
+RAND_WRITE_FLOOR = 80
+RAND_WRITE_REFERENCE = 500
 
 # Sequential 512-byte writes must reach multi-block speed. An absolute floor
 # rather than a speedup ratio against larger writes: the block layer combines
