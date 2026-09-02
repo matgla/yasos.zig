@@ -1172,11 +1172,36 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return pid;
         }
 
-        /// The process running on this core. Unlocked: `core[]` is per-CPU,
-        /// written only by its own core's context switch, and a pointer-sized
-        /// aligned load cannot tear. Stable for the caller that matters -- a
-        /// syscall handler asking who it is *is* the current process.
+        /// The process running on this core. The slot needs no lock: `core[]`
+        /// is per-CPU, written only by its own core's context switch, and a
+        /// pointer-sized aligned load cannot tear.
+        ///
+        /// The *index* is the hazard. `coreid()` and the slot load are separate
+        /// instructions, and a PendSV between them migrates the caller -- so the
+        /// load reads the slot of the core it left, returning whatever process
+        /// is running there now instead of the caller. Slow-path syscalls run in
+        /// thread mode on PSP (`process_syscall_entry` exception-returns with
+        /// 0xfffffffd), so every `get_current_process` under one is preemptible
+        /// and migratable. The sleeping mutex is where this surfaces first,
+        /// because it is the only caller that keeps the answer across a
+        /// preemption point and compares it later: a torn read stores the wrong
+        /// `owner`, and the panic lands on whichever check gets there first --
+        /// "expected to be held by the caller here" or "released by a process
+        /// that does not hold it". Every other caller is worse and quieter: a
+        /// syscall handler that mis-reads this works on another process's fd
+        /// table.
+        ///
+        /// Masking makes the pair atomic against the switch. Nothing is needed
+        /// after it: a migration once the pointer is in hand is harmless,
+        /// because the answer is the same process on either core. Same fix, and
+        /// the same reason, as `locks.enter_rank`/`leave_rank`.
+        ///
+        /// Single-core builds fold the masking away -- with one schedulable core
+        /// the index is a constant and there is nothing to tear.
         pub fn get_current_process(self: *const Self) *Process {
+            if (comptime !kernel.sync.percpu.smp) return self.core[hal.cpu.coreid()];
+            const flags = arch.sync.save_and_disable_interrupts();
+            defer arch.sync.restore_interrupts(flags);
             return self.core[hal.cpu.coreid()];
         }
 

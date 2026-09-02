@@ -25,6 +25,7 @@ const arch = @import("arch");
 const hal = @import("hal");
 const spinlock = @import("spinlock.zig");
 const percpu = @import("percpu.zig");
+const preempt = @import("preempt.zig");
 
 const SpinLock = spinlock.SpinLock;
 const IrqState = spinlock.IrqState;
@@ -111,6 +112,28 @@ pub fn held_ranks() u16 {
 /// `rank`'s position in the held-set. Only ever set when `checked`.
 pub fn rank_bit(comptime rank: Rank) u16 {
     return comptime bit(rank);
+}
+
+/// The guarantee the `_no_irq` entry points below need and cannot provide for
+/// themselves. They record the rank -- and take a spinlock whose owner token is
+/// `coreid()` -- with interrupts on, so a PendSV that migrates the caller
+/// mid-acquire strands both on the core it left. Masking is what `lock_irqsave`
+/// does and is exactly what these cannot do, so the caller owes it instead:
+/// handler context, or preemption already disabled. `stdout.zig` pays it with
+/// `preempt_disable`, one line before the acquire -- which is easy to miss when
+/// reading the acquire alone, hence an assertion rather than a comment.
+fn assert_unpreemptible(comptime what: []const u8) void {
+    if (comptime !checked) return;
+    // A handler runs to completion on the core that took it.
+    if (arch.sync.in_handler_mode()) return;
+    if (preempt.preempt_disabled()) return;
+    // No `log.err` line first, unlike every other check in this file. This one
+    // can fire from inside the console's own section, where the console lock is
+    // already held -- logging would re-enter `console_acquire`, hit
+    // `SpinLock.lock` with this core's token already in it, and report
+    // "recursive acquisition" instead of the real problem. Everything the
+    // reader needs is comptime-known, so it all goes in the panic string.
+    @panic(what ++ " from preemptible thread context -- an unmasked acquire records the rank, and takes an owner token that is coreid(), only safely if the caller cannot migrate mid-acquire; disable preemption across it, as stdout.zig's console_acquire does");
 }
 
 /// Drop this core's held-set. Test support and core bring-up only.
@@ -235,7 +258,12 @@ pub fn Ranked(comptime rank: Rank) type {
         /// console (rank 95), held across a blocking per-byte UART write that
         /// would otherwise blow its own ~93 us RX-FIFO budget. Safe only for a
         /// lock no interrupt handler on this core ever waits on.
+        ///
+        /// The caller must additionally be unpreemptible -- see
+        /// `assert_unpreemptible`, which is why this is a checked precondition
+        /// and not just a comment.
         pub fn lock_no_irq(self: *Self) void {
+            assert_unpreemptible("lock_no_irq");
             // Rank recorded after the acquire, since this cannot mask first.
             // That gives up the pre-acquire order check, which costs nothing at
             // rank 95 -- the innermost leaf has nothing to invert against.
@@ -243,14 +271,19 @@ pub fn Ranked(comptime rank: Rank) type {
             if (comptime checked) held.current().* |= comptime bit(rank);
         }
 
+        /// Preemption must still be off here, not re-enabled first: the clear
+        /// and the spinlock release are exposed exactly as the acquire was.
         pub fn unlock_no_irq(self: *Self) void {
+            assert_unpreemptible("unlock_no_irq");
             leave(rank);
             self.inner.unlock();
         }
 
         /// `lock_no_irq` that gives up rather than waiting. Returns whether it
-        /// was acquired.
+        /// was acquired. Same caller contract: not waiting removes the deadlock,
+        /// not the migration window around the bookkeeping.
         pub fn try_lock_no_irq(self: *Self) bool {
+            assert_unpreemptible("try_lock_no_irq");
             if (!self.inner.try_lock()) return false;
             if (comptime checked) held.current().* |= comptime bit(rank);
             return true;
@@ -431,6 +464,33 @@ test "Sync.Locks.ASleepingRankTravelsToTheCoreTheHolderResumesOn" {
     // the next `leave` on it report a release with no matching acquire.
     Cpu.set_coreid(0);
     try testing.expectEqual(@as(u16, 0), held_ranks());
+}
+
+test "Sync.Locks.NoIrqAcquireNeedsAnUnpreemptibleCaller" {
+    reset();
+    defer reset();
+
+    var console = Ranked(.console){};
+
+    // The legal shape, and the only one in the tree: `stdout.zig` disables
+    // preemption, acquires, releases, then re-enables -- the clear lands before
+    // a switch can become possible again, which is why `console` is correctly
+    // absent from `migrating_ranks`. The illegal shape panics in
+    // `assert_unpreemptible` and a unit test cannot catch that; what this does
+    // catch is a future caller reordering the enable ahead of the release.
+    //
+    // Against the count on entry rather than zero: the shared test binary
+    // reaches here with a `preempt_disable` leaked by an earlier case, and the
+    // property wanted here is only that the pair below is balanced.
+    const refused_on_entry = preempt.preempt_disabled();
+
+    preempt.preempt_disable();
+    console.lock_no_irq();
+    try testing.expectEqual(if (checked) rank_bit(.console) else 0, held_ranks());
+    console.unlock_no_irq();
+    try testing.expectEqual(@as(u16, 0), held_ranks());
+    preempt.preempt_enable();
+    try testing.expectEqual(refused_on_entry, preempt.preempt_disabled());
 }
 
 test "Sync.Locks.TryLockSkipsTheOrderCheckButStillTracks" {

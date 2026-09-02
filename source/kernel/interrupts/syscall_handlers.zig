@@ -349,9 +349,11 @@ fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u
 
 // Preemptible. Each job the old `block_context_switch()` window did has a named
 // lock underneath it now: the kernel-heap allocations -> `kheap`, the VFS walk
-// and filesystem work -> `mount`/`fs`/`dev`, and `get_current_process()` is
-// per-CPU and cannot change under its own syscall. The fd table needs no lock
-// while there is one thread per process.
+// and filesystem work -> `mount`/`fs`/`dev`, and `get_current_process()` cannot
+// change under its own syscall -- it masks interrupts across the `coreid()` and
+// the per-CPU slot load, so a migration in that window cannot answer with the
+// process the core it left is running now. The fd table needs no lock while
+// there is one thread per process.
 //
 // Holding the window across filesystem I/O is also what made `fs_lock`
 // deadlockable on a single core: `sys_read` released its window before touching

@@ -24,6 +24,7 @@ const arch = @import("arch");
 const hal = @import("hal");
 
 const locks = @import("locks.zig");
+const percpu = @import("percpu.zig");
 const spinlock = @import("spinlock.zig");
 
 const preempt = @import("preempt.zig");
@@ -237,6 +238,88 @@ test "Sync.Mutex.BootContextTakesItWithoutAProcess" {
 }
 
 fn blocked_entry() void {}
+
+/// The first process in the table that is not `exclude`. The same traversal
+/// `wake_waiters` uses, for a test that needs two distinct process identities.
+fn other_than(exclude: *Process) *Process {
+    var next = process_manager.instance.processes.first;
+    while (next) |node| : (next = node.next) {
+        const process: *Process = @alignCast(@fieldParentPtr("node", node));
+        if (process != exclude) return process;
+    }
+    unreachable;
+}
+
+test "Sync.Mutex.OwnershipFollowsTheProcessAcrossACoreMigration" {
+    // The owner is a process, not a core: a holder that blocks and resumes on
+    // the other core still passes `assert_held` and is still the one allowed to
+    // release. What breaks that in practice is not the comparison but the read
+    // behind it -- `get_current_process()` is `core[coreid()]`, two separate
+    // instructions, and a PendSV between them answers with the process running
+    // on the core the caller just left. A wrong answer in `lock` stores the
+    // wrong `owner`; a wrong answer in `unlock` or `assert_held` fails against
+    // the right one; the board reports either as one of this file's two panics.
+    //
+    // `arch/ut` masking is a no-op and there is no PendSV to land in that
+    // window, so this pins the contract, not the race -- board smoke stays the
+    // gate for that. It does catch the wrong repair: keying ownership on the
+    // core id instead of the process.
+    if (comptime percpu.core_count < 2) return error.SkipZigTest;
+
+    const Cpu = hal.CpuStub;
+    const restore = Cpu.coreid();
+    defer Cpu.set_coreid(@intCast(restore));
+
+    for (0..percpu.core_count) |core| {
+        Cpu.set_coreid(@intCast(core));
+        locks.reset();
+    }
+    defer for (0..percpu.core_count) |core| {
+        Cpu.set_coreid(@intCast(core));
+        locks.reset();
+    };
+
+    Cpu.set_coreid(0);
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+    defer hal.irq.impl().clear();
+
+    var arg: usize = 0;
+    try process_manager.instance.create_process(1024, &blocked_entry, &arg, "holder");
+    try process_manager.instance.create_process(1024, &blocked_entry, &arg, "other");
+    _ = process_manager.instance.schedule_next();
+    _ = process_manager.process_set_next_task();
+
+    const holder = process_manager.instance.get_current_process();
+    const other = other_than(holder);
+
+    var mutex = TestMutex{};
+    mutex.lock();
+    try testing.expect(mutex.held_by_current());
+
+    // Switching away hands the rank to the process; the scheduler half of that
+    // is covered in locks.zig. Here it only has to be in place so the release
+    // on the other core has something to clear.
+    const carried = locks.take_migrating_ranks();
+
+    // Resumed on the other core: its slot names the same process, so nothing
+    // about the mutex has changed.
+    Cpu.set_coreid(1);
+    process_manager.instance.core[1] = holder;
+    locks.restore_migrating_ranks(carried);
+    try testing.expect(mutex.held_by_current());
+    mutex.assert_held();
+
+    // And it really is the process that decides. Put a different one in this
+    // core's slot -- which is exactly what a torn read returns -- and the mutex
+    // says it is not held by the caller, the answer behind both panics.
+    process_manager.instance.core[1] = other;
+    try testing.expect(!mutex.held_by_current());
+
+    process_manager.instance.core[1] = holder;
+    mutex.unlock();
+    try testing.expect(!mutex.is_locked());
+}
 
 test "Sync.Mutex.ContenderBlocksAndIsWokenByTheUnlock" {
     locks.reset();
