@@ -353,7 +353,19 @@ class Session:
         # reset makes this large and that is the point — it is the cost of the
         # recovery, not of the test.
         _prepare_start = time.monotonic()
-        self._prepare_target()
+        # Own the file handle from here on. `pytest_runtest_setup` only stashes
+        # the session once the constructor returns, so a failure in
+        # `_prepare_target` (a lost prompt, a reset that never came back) leaves
+        # nothing for teardown to close. The handle then survives until the
+        # interpreter collects it, and the ResourceWarning that fires on that
+        # collection is raised as an unraisable exception inside whichever
+        # *later* test happens to be running -- failing an innocent case with a
+        # traceback naming the log file of the one that really broke.
+        try:
+            self._prepare_target()
+        except BaseException:
+            self.file.close()
+            raise
         self.prepare_ms = (time.monotonic() - _prepare_start) * 1000.0
 
     # Bytes to accumulate before flushing mid-read to the session log (and thus

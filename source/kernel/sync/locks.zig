@@ -22,6 +22,7 @@
 const std = @import("std");
 
 const arch = @import("arch");
+const hal = @import("hal");
 const spinlock = @import("spinlock.zig");
 const percpu = @import("percpu.zig");
 
@@ -95,6 +96,8 @@ fn bits_at_or_above(comptime rank: Rank) u16 {
 /// Whether the hierarchy is checked at runtime. Debug and ReleaseSafe.
 pub const checked = std.debug.runtime_safety;
 
+const core_count = percpu.core_count;
+
 /// Ranks currently held, per core. Not atomic: a core only touches its own,
 /// always with interrupts masked by the lock it is taking.
 var held: percpu.PerCpu(u16) = .init(0);
@@ -140,19 +143,38 @@ pub fn restore_migrating_ranks(mask: u16) void {
 }
 
 /// `enter` for locks implemented outside this file (the sleeping mutex).
+///
+/// Masks interrupts across the update, which the spin ranks get for free from
+/// `Ranked.lock_irqsave`. A sleeping mutex records its rank with interrupts on,
+/// and the held-set is per-core: `enter` reads `coreid()`, derives the slot
+/// address, then read-modify-writes it. A PendSV anywhere in that window
+/// migrates the caller, and the store lands in the slot of the core it left --
+/// so the rank is stranded there while `leave` on the new core finds nothing
+/// held and panics "releasing <rank>, which this core does not hold". Masking
+/// makes the whole read-modify-write atomic against the switch, after which the
+/// bit is either fully recorded (and travels correctly via
+/// `take_migrating_ranks`) or not recorded at all.
 pub fn enter_rank(comptime rank: Rank) void {
+    if (comptime !checked) return;
+    const flags = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(flags);
     enter(rank);
 }
 
 /// Record a rank as held without checking the order -- for `try_lock`, which
-/// cannot deadlock because it never waits.
+/// cannot deadlock because it never waits. No masking of its own: the only
+/// caller runs under the mutex's guard spinlock, which already holds them off.
 pub fn enter_rank_untracked(comptime rank: Rank) void {
     if (comptime !checked) return;
     held.current().* |= comptime bit(rank);
 }
 
-/// `leave` for locks implemented outside this file.
+/// `leave` for locks implemented outside this file. Masked for the same reason
+/// as `enter_rank` -- the clear must not land on the core the caller left.
 pub fn leave_rank(comptime rank: Rank) void {
+    if (comptime !checked) return;
+    const flags = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(flags);
     leave(rank);
 }
 
@@ -363,6 +385,51 @@ test "Sync.Locks.HeldSetTracksAcquireAndRelease" {
     try testing.expect(pool.held_by_current());
     try testing.expectEqual(if (checked) rank_bit(.pagepool) else 0, held_ranks());
     pool.unlock_irqrestore(flags);
+    try testing.expectEqual(@as(u16, 0), held_ranks());
+}
+
+test "Sync.Locks.ASleepingRankTravelsToTheCoreTheHolderResumesOn" {
+    // The contract `enter_rank`/`leave_rank` mask interrupts to protect: a
+    // sleeping-mutex rank is recorded against a core, so the only way it may be
+    // released on a different one is the explicit hand-off through the process.
+    // Nothing else may move it -- least of all a half-finished update landing in
+    // the slot of the core the holder just left.
+    if (comptime core_count < 2) return error.SkipZigTest;
+    const Cpu = hal.CpuStub;
+    const restore = Cpu.coreid();
+    defer Cpu.set_coreid(@intCast(restore));
+
+    Cpu.set_coreid(0);
+    reset();
+    Cpu.set_coreid(1);
+    reset();
+    defer {
+        Cpu.set_coreid(0);
+        reset();
+        Cpu.set_coreid(1);
+        reset();
+    }
+
+    Cpu.set_coreid(0);
+    enter_rank(.mount);
+    try testing.expectEqual(if (checked) rank_bit(.mount) else 0, held_ranks());
+
+    // Switching away hands the rank to the process...
+    const carried = take_migrating_ranks();
+    try testing.expectEqual(if (checked) rank_bit(.mount) else 0, carried);
+    try testing.expectEqual(@as(u16, 0), held_ranks());
+
+    // ...which resumes on the other core, and only then may release it.
+    Cpu.set_coreid(1);
+    try testing.expectEqual(@as(u16, 0), held_ranks());
+    restore_migrating_ranks(carried);
+    try testing.expectEqual(if (checked) rank_bit(.mount) else 0, held_ranks());
+    leave_rank(.mount);
+    try testing.expectEqual(@as(u16, 0), held_ranks());
+
+    // The core it left keeps nothing behind: a bit stranded there is what makes
+    // the next `leave` on it report a release with no matching acquire.
+    Cpu.set_coreid(0);
     try testing.expectEqual(@as(u16, 0), held_ranks());
 }
 
