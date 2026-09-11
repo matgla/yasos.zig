@@ -14,10 +14,12 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // Where a lock or an atomic is allowed to live. On the RP2350 the global
-// exclusive monitor covers internal SRAM but not the PSRAM window at 0x11000000:
-// an exclusive there succeeds against the core's local monitor and guarantees
-// nothing against the other core, silently. The process memory pool's tier 1 is
-// PSRAM, so anything reachable from process-allocated memory is suspect.
+// exclusive monitor covers internal SRAM but not the PSRAM window at 0x11000000,
+// and `ACTLR.EXTEXCLALL` (source/arch/armv8-m/mpu.zig) routes every exclusive
+// through it. So an exclusive store to PSRAM never succeeds: any LDREX/STREX
+// retry loop there -- every `@atomicRmw` -- spins forever, with nothing
+// contending. The process memory pool's tier 1 is PSRAM, so anything reachable
+// from process-allocated memory is suspect.
 //
 // The check walks the board's memory layout, so it belongs at construction,
 // never on an acquire path.

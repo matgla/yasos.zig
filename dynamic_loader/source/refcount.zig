@@ -20,6 +20,10 @@
 // This makes each increment and decrement indivisible. It does not make
 // `Loader.get_shared_data` safe -- that is a check-then-act across a hash map
 // lookup and an insert, and needs `loader_lock`.
+//
+// Kernel-heap counters only. Memory from a `process_allocator` can be PSRAM,
+// where an exclusive never succeeds (source/kernel/sync/placement.zig) and
+// `release` spins forever -- which is how `ThunkHolderData` hung a process's exit.
 
 const std = @import("std");
 

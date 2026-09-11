@@ -30,7 +30,6 @@ const profile = @import("load_profile.zig");
 const get_loader = @import("loader.zig").get_loader;
 
 const log = std.log.scoped(.@"yasld/module");
-const refcount = @import("refcount.zig");
 
 pub const GotEntry = extern struct {
     symbol_offset: usize,
@@ -45,9 +44,14 @@ pub const SymbolEntry = struct {
 extern const indirect_call_thunk_template_size: usize;
 extern fn indirect_call_thunk_template_start() void;
 
+/// No reference count, deliberately. The block comes from the process pool,
+/// whose tier 1 is PSRAM, and an exclusive store there never succeeds (see
+/// source/kernel/sync/placement.zig): the `@atomicRmw` a count's release needs
+/// spun forever in `delete` once the block spilled out of SRAM, hanging the
+/// exiting process with its parent still waiting on it. Every holder is the one
+/// `LoadedUniqueData` that created it, so there is nothing to count.
 pub const ThunkHolderData = struct {
     data: []u8,
-    refcount: usize,
     generated: bool,
 
     pub fn create(allocator: std.mem.Allocator, size: usize) !*ThunkHolderData {
@@ -60,7 +64,6 @@ pub const ThunkHolderData = struct {
         const self: *ThunkHolderData = @ptrCast(@alignCast(block.ptr));
         self.* = .{
             .data = block[hdr..],
-            .refcount = 1,
             .generated = false,
         };
         // Zeroed so that a slot which never gets generated reads back as an
@@ -74,11 +77,9 @@ pub const ThunkHolderData = struct {
     }
 
     pub fn delete(self: *ThunkHolderData, allocator: std.mem.Allocator) void {
-        if (refcount.release(&self.refcount)) {
-            const hdr = @sizeOf(ThunkHolderData);
-            const base: [*]u8 = @ptrCast(self);
-            allocator.free(base[0 .. hdr + self.data.len]);
-        }
+        const hdr = @sizeOf(ThunkHolderData);
+        const base: [*]u8 = @ptrCast(self);
+        allocator.free(base[0 .. hdr + self.data.len]);
     }
 };
 
@@ -246,8 +247,8 @@ pub const LoadedUniqueData = struct {
     pub fn destroy(self: *LoadedUniqueData) void {
         // Free the regular thunks too — this was previously omitted (relying on
         // bulk process-pool teardown), which leaks on a library unload that does
-        // not tear the pool down. refcount is always 1 (retain_thunks is gone),
-        // so delete frees immediately.
+        // not tear the pool down. This is their only holder (retain_thunks is
+        // gone), so delete frees immediately.
         if (self.thunks) |thunks| {
             thunks.delete(self.process_allocator);
         }
