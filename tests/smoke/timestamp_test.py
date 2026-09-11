@@ -34,6 +34,7 @@ import time
 import pytest
 
 from .conftest import session_key
+from .framework import qemu
 
 TMPDIR = "/tmp/stamps"
 
@@ -225,10 +226,12 @@ def test_touch_on_the_read_only_rootfs_fails(request):
     assert "cannot set times" in out
 
 
-# The FAT volume the kernel mounts at /mnt (the tcc corpus disk in QEMU, the
-# SD card on the board).  An 8.3 upper-case name, because that is what FAT
-# short names are and the corpus is addressed that way everywhere else.
-FAT_FILE = "/mnt/FSTAMP.TXT"
+# A FAT volume, which is in a different place on each target (source/main.zig):
+# QEMU mounts the tcc corpus disk at /mnt, while the board mounts the SD card's
+# first partition at /root and leaves /mnt a read-only romfs directory.  An 8.3
+# upper-case name, because that is what FAT short names are and the corpus is
+# addressed that way everywhere else.
+FAT_FILE = ("/mnt" if qemu.qemu_kernel() else "/root") + "/FSTAMP.TXT"
 
 
 def test_fat_stamps_and_restamps_a_file(request):

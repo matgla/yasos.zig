@@ -50,12 +50,30 @@ pub fn UartFile(comptime UartType: anytype) type {
             _icanonical: bool,
             _echo: bool,
             _raw_mode: bool,
-            _onlcr: bool,
             _nonblock: bool,
             _allocator: std.mem.Allocator,
             _name: []const u8,
             _read_timeout: u8,
             _minimum_bytes_to_read: usize,
+
+            /// Output processing belongs to the tty, not to an open file: a
+            /// termios set through any fd governs every write to the device, as
+            /// on Linux. This matters because the files here are not shared --
+            /// stdin, stdout and stderr are each a `dupe` of the driver's node,
+            /// with their own copy of the fields above. `rz` switches raw mode
+            /// on with tcsetattr(STDIN_FILENO) and then writes binary ZMODEM
+            /// headers to stdout; with these flags per file, stdout stayed
+            /// cooked and every 0x0A in a header went out as CR LF. A header
+            /// whose offset field holds 0x0A (330464 = 0x50AE0) could then never
+            /// be acknowledged, and the upload died there on every retry.
+            ///
+            /// Only the output side is shared. The input side stays per file as
+            /// it always was.
+            const Output = struct {
+                opost: bool = true,
+                onlcr: bool = default_onlcr,
+            };
+            var output: Output = .{};
 
             pub fn delete(self: *Self) void {
                 _ = self;
@@ -81,16 +99,16 @@ pub fn UartFile(comptime UartType: anytype) type {
             /// ONLCR: map NL to CRLF on output, which every Linux tty does by
             /// default. Without it a program's "\n" is a bare line feed, and a
             /// terminal that takes bytes literally (minicom, screen, picocom
-            /// without --imap) walks each line down a staircase. Raw mode
-            /// (c_oflag == 0) switches all output processing off.
-            fn translates_nl(self: *const Self) bool {
-                return self._onlcr and !self._raw_mode;
+            /// without --imap) walks each line down a staircase. OPOST off (raw
+            /// mode, set through any fd) switches all output processing off.
+            fn translates_nl() bool {
+                return output.opost and output.onlcr;
             }
 
             /// Put `data` on the wire, NL expanded to CRLF when ONLCR is on.
             /// The caller holds the console lock.
-            fn write_locked(self: *const Self, data: []const u8) void {
-                if (!self.translates_nl()) {
+            fn write_locked(data: []const u8) void {
+                if (!translates_nl()) {
                     _ = uart.write_some(data) catch {};
                     return;
                 }
@@ -105,10 +123,10 @@ pub fn UartFile(comptime UartType: anytype) type {
 
             /// Echo typed input. Output processing applies to echo as it does on
             /// Linux, so Enter comes back as CRLF under ONLCR.
-            fn echo_input(self: *const Self, data: []const u8) void {
+            fn echo_input(data: []const u8) void {
                 const held = kernel.stdout.console_acquire();
                 defer kernel.stdout.console_release(held);
-                self.write_locked(data);
+                write_locked(data);
             }
 
             fn apply_termios(self: *Self, termios: *const c.termios) void {
@@ -121,18 +139,22 @@ pub fn UartFile(comptime UartType: anytype) type {
                 // whole word read that as cooked, and read() then waited for a
                 // full buffer -- the sh line editor never saw a key.
                 self._raw_mode = (termios.c_oflag & c.OPOST) == 0;
+                output.opost = !self._raw_mode;
                 // Kept while raw and only acted on under OPOST, as on Linux,
                 // so a tcgetattr taken in raw mode restores it intact.
-                self._onlcr = (termios.c_oflag & c.ONLCR) != 0;
+                output.onlcr = (termios.c_oflag & c.ONLCR) != 0;
             }
 
             pub fn create(allocator: std.mem.Allocator, filename: []const u8) UartFileImpl {
+                // Called once per device, from create_node at boot -- every
+                // open after that is a `dupe` -- so this is the tty's initial
+                // state, not something an open resets.
+                output = .{};
                 return UartFileImpl.init(.{
                     ._icanonical = true,
                     ._echo = true,
                     ._nonblock = false,
                     ._raw_mode = false,
-                    ._onlcr = default_onlcr,
                     ._allocator = allocator,
                     ._name = filename,
                     ._read_timeout = 0,
@@ -297,7 +319,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                             index += 1;
                             cursor_pos = index;
                             if (self._echo) {
-                                self.echo_input(ch[0..1]);
+                                echo_input(ch[0..1]);
                             }
                         } else {
                             // Insert in middle: shift buffer right
@@ -325,7 +347,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                     } else {
                         buffer[index] = ch[0];
                         if (self._echo) {
-                            self.echo_input(ch[0..1]);
+                            echo_input(ch[0..1]);
                         }
                         index += 1;
                         cursor_pos = index;
@@ -353,14 +375,15 @@ pub fn UartFile(comptime UartType: anytype) type {
             /// The hold is therefore as long as the caller's slice, ~3.4 ms per
             /// KiB at 3 Mbaud, and libc hands us line-sized buffers.
             pub fn write(self: *Self, data: []const u8) isize {
+                _ = self;
                 const held = kernel.stdout.console_acquire();
                 defer kernel.stdout.console_release(held);
-                if (!self.translates_nl()) {
+                if (!translates_nl()) {
                     const result = uart.write_some(data) catch return 0;
                     return @intCast(result);
                 }
                 // The count is of the caller's bytes, not the expanded ones.
-                self.write_locked(data);
+                write_locked(data);
                 return @intCast(data.len);
             }
 
@@ -409,10 +432,10 @@ pub fn UartFile(comptime UartType: anytype) type {
                             if (self._echo) {
                                 termios.c_lflag |= c.ECHO;
                             }
-                            if (!self._raw_mode) {
+                            if (output.opost) {
                                 termios.c_oflag |= c.OPOST;
                             }
-                            if (self._onlcr) {
+                            if (output.onlcr) {
                                 termios.c_oflag |= c.ONLCR;
                             }
                             return 0;
@@ -903,8 +926,26 @@ test "UartFile.Create.ShouldTakeOnlcrFromConfig" {
     MockUart.reset();
     defer MockUart.reset();
 
-    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-    try std.testing.expectEqual(default_onlcr, file.data()._onlcr);
+    _ = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    try std.testing.expectEqual(default_onlcr, TestUartFile.InstanceType.output.onlcr);
+}
+
+test "UartFile.Write.RawModeSetThroughAnotherFileStopsTranslation" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    // Two files on one UART, as stdin and stdout are: separate objects.
+    var stdin_file = TestUartFile.InstanceType.create(std.testing.allocator, "stdin");
+    var stdout_file = TestUartFile.InstanceType.create(std.testing.allocator, "stdout");
+    TestUartFile.InstanceType.output.onlcr = true;
+
+    // What rz does: raw mode on stdin, c_oflag = 0 ...
+    var raw: c.termios = std.mem.zeroes(c.termios);
+    try std.testing.expectEqual(@as(i32, 0), stdin_file.data().ioctl(c.TCSETS, @ptrCast(&raw)));
+
+    // ... then a binary ZMODEM header to stdout. 0x0A must stay one byte.
+    _ = stdout_file.data().write("\xe0\x0a\x05\x00");
+    try std.testing.expectEqualStrings("\xe0\x0a\x05\x00", MockUart.get_written_data());
 }
 
 test "UartFile.Write.ShouldTranslateNewlineToCrLf" {
@@ -912,7 +953,7 @@ test "UartFile.Write.ShouldTranslateNewlineToCrLf" {
     defer MockUart.reset();
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-    file.data()._onlcr = true;
+    TestUartFile.InstanceType.output.onlcr = true;
     const written = file.data().write("a\nb\n\nc");
     try std.testing.expectEqual(@as(isize, 6), written);
     try std.testing.expectEqualStrings("a\r\nb\r\n\r\nc", MockUart.get_written_data());
@@ -948,7 +989,7 @@ test "UartFile.Ioctl.TCGETS.ShouldReportOnlcrAndRoundTrip" {
     defer MockUart.reset();
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-    file.data()._onlcr = true;
+    TestUartFile.InstanceType.output.onlcr = true;
     var termios: c.termios = undefined;
     try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCGETS, @ptrCast(&termios)));
     try std.testing.expect((termios.c_oflag & c.OPOST) != 0);
@@ -966,7 +1007,7 @@ test "UartFile.Ioctl.CfmakerawShouldEnterRawModeAndKeepOnlcr" {
     defer MockUart.reset();
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-    file.data()._onlcr = true;
+    TestUartFile.InstanceType.output.onlcr = true;
     var cooked: c.termios = undefined;
     try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCGETS, @ptrCast(&cooked)));
 
@@ -998,7 +1039,7 @@ test "UartFile.Read.ShouldEchoEnterAsCrLf" {
     MockUart.set_read_data("ls\r");
 
     var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
-    file.data()._onlcr = true;
+    TestUartFile.InstanceType.output.onlcr = true;
     var buffer: [10]u8 = undefined;
 
     const bytes_read = file.data().read(&buffer);
