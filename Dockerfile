@@ -19,6 +19,9 @@ RUN apt-get install -y python3 python3-pip python3-venv
 RUN apt-get install -y wget
 RUN apt-get install -y gita
 RUN apt-get install -y qemu-system-arm
+# apps/make ships no generated ./configure; build_rootfs.sh runs its
+# ./bootstrap, which needs these.
+RUN apt-get install -y autoconf automake autopoint gettext texinfo
 
 RUN mkdir -p /opt/zig
 RUN mkdir -p /opt/arm-none-eabi-gcc

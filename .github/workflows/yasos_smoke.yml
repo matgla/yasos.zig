@@ -26,6 +26,13 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: 'recursive'
+      # build_rootfs.sh bootstraps apps/make, which needs these. The Dockerfile
+      # installs them too; this step is a no-op once the image is bumped past v0.19.
+      - name: Install GNU make bootstrap tools
+        shell: bash
+        run: |
+          command -v autopoint >/dev/null && command -v makeinfo >/dev/null ||
+            { apt-get update -y && apt-get install -y autoconf automake autopoint gettext texinfo; }
       # The -O levels and the kernel optimize mode are spelled out here rather
       # than left to the script defaults: dropping a level, or dropping the
       # safety checks, is a coverage cut, and it should be a reviewable line in
@@ -119,6 +126,11 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: 'recursive'
+      - name: Install GNU make bootstrap tools
+        shell: bash
+        run: |
+          command -v autopoint >/dev/null && command -v makeinfo >/dev/null ||
+            { apt-get update -y && apt-get install -y autoconf automake autopoint gettext texinfo; }
       # ReleaseSafe for the same reason as the QEMU gate, and stated explicitly
       # so the two legs are visibly building the same kernel configuration.
       - name: Build hardware smoke package (ReleaseSafe kernel + rootfs + run script)
