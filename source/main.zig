@@ -305,6 +305,20 @@ fn initialize_board() void {
             });
         }
 
+        // Publish the core regulator's in-regulation flag as /proc/vreg, sampled
+        // by the system tick. Registered only now that apply_overclock has moved
+        // the regulator to its final setpoint and let it settle, so the move
+        // itself is not counted as a sag.
+        const setpoint_mv: u16 = if (hal.cpu.vreg_vsel()) |vsel| DumpHardware.vselToMv(vsel) else 0;
+        kernel.process.vreg_stats.set_sampler(&hal.sensors.vreg_in_regulation, setpoint_mv);
+
+        // Publish the die temperature sensor as /proc/temp.
+        if (hal.sensors.enable_temperature_sensor()) {
+            kernel.process.temp_stats.set_provider(&hal.sensors.read_temperature_raw);
+        } else {
+            kernel.log.err("ADC did not come up; /proc/temp reports nothing", .{});
+        }
+
         if (hal.external_memory.enable()) {
             hal.external_memory.dump_configuration();
             if (hal.external_memory.perform_post()) {} else {

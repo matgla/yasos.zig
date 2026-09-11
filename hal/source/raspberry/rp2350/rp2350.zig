@@ -54,6 +54,9 @@ pub const mmio = struct {
 // through a provider hook rather than a call, so there is nothing for a stub
 // on another board to usefully return.
 pub const xip = @import("source/xip.zig");
+// The same reasoning covers the regulator status flag and the die temperature
+// sensor: both reach the kernel through provider hooks.
+pub const sensors = @import("source/sensors.zig");
 
 comptime {
     _ = @import("startup/boot2_rom.zig");

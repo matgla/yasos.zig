@@ -33,6 +33,8 @@ pub const process = struct {
     pub const ProcFs = @import("process/procfs.zig").ProcFs;
     pub const uart_stats = @import("process/uartstat_file.zig");
     pub const xip_stats = @import("process/xipstat_file.zig");
+    pub const vreg_stats = @import("process/vreg_file.zig");
+    pub const temp_stats = @import("process/temp_file.zig");
     pub const create_default_resource_limits = @import("process.zig").create_default_resource_limits;
 };
 
@@ -60,6 +62,8 @@ pub const sync = struct {
     pub const preempt = primitives.preempt;
     pub const init = primitives.init;
 };
+
+pub const time = @import("time.zig");
 
 pub const spawn = @import("spawn.zig");
 

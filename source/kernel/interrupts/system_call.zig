@@ -129,6 +129,9 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_getdents => return handlers.sys_getdents,
             c.sys_ioctl => return handlers.sys_ioctl,
             c.sys_gettimeofday => return handlers.sys_gettimeofday,
+            c.sys_settimeofday => return handlers.sys_settimeofday,
+            c.sys_utimensat => return handlers.sys_utimensat,
+            c.sys_readlink => return handlers.sys_readlink,
             c.sys_waitpid => return handlers.sys_waitpid,
             c.sys_execve => return handlers.sys_execve,
             c.sys_nanosleep => return handlers.sys_nanosleep,
@@ -231,6 +234,9 @@ fn syscall_arg_bytes(comptime index: usize) ?usize {
         c.sys_getdents => @sizeOf(c.getdents_context),
         c.sys_ioctl => @sizeOf(c.ioctl_context),
         c.sys_gettimeofday => @sizeOf(c.gettimeofday_context),
+        c.sys_settimeofday => @sizeOf(c.settimeofday_context),
+        c.sys_utimensat => @sizeOf(c.utimensat_context),
+        c.sys_readlink => @sizeOf(c.readlink_context),
         c.sys_waitpid => @sizeOf(c.waitpid_context),
         c.sys_execve => @sizeOf(c.execve_context),
         c.sys_nanosleep => @sizeOf(c.nanosleep_context),
@@ -493,6 +499,9 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_getdents, syscall_lookup_table[c.sys_getdents]);
     try std.testing.expectEqual(handlers.sys_ioctl, syscall_lookup_table[c.sys_ioctl]);
     try std.testing.expectEqual(handlers.sys_gettimeofday, syscall_lookup_table[c.sys_gettimeofday]);
+    try std.testing.expectEqual(handlers.sys_settimeofday, syscall_lookup_table[c.sys_settimeofday]);
+    try std.testing.expectEqual(handlers.sys_utimensat, syscall_lookup_table[c.sys_utimensat]);
+    try std.testing.expectEqual(handlers.sys_readlink, syscall_lookup_table[c.sys_readlink]);
     try std.testing.expectEqual(handlers.sys_waitpid, syscall_lookup_table[c.sys_waitpid]);
     try std.testing.expectEqual(handlers.sys_execve, syscall_lookup_table[c.sys_execve]);
     try std.testing.expectEqual(handlers.sys_nanosleep, syscall_lookup_table[c.sys_nanosleep]);

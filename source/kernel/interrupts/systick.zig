@@ -26,6 +26,7 @@ const arch = @import("arch");
 const process_manager = @import("../process_manager.zig");
 const smp = @import("../smp.zig");
 const xip_stats = @import("../process/xipstat_file.zig");
+const vreg_stats = @import("../process/vreg_file.zig");
 const kernel_sync = @import("../sync/sync.zig");
 
 /// Milliseconds since boot. Advanced by exactly one core (`timekeeper_core`),
@@ -57,6 +58,10 @@ pub export fn irq_systick() void {
     // one core; the XIP cache is chip-wide and already counts both cores.
     if (kernel_sync.percpu.current_core() == timekeeper_core) {
         xip_stats.accumulate();
+        // The regulator's VOUT_OK is live status, so a sag is seen only if it
+        // is still under way when a tick looks. Timekeeper-only for the same
+        // single-writer reason as above; the regulator is chip-wide.
+        vreg_stats.accumulate(ticks.load());
     }
 
     // Per-core tick count: what makes a core doing nothing else observably

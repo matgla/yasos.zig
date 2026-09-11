@@ -125,6 +125,8 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     base: ReadOnlyFileSystem,
     _allocator: std.mem.Allocator,
     _root: kernel.fs.IDirectory,
+    /// When this filesystem was mounted, on the monotonic clock. See `stat`.
+    _mount_uptime_us: u64,
 
     fn get_root_directory(self: *Self) *DriverDirectory.InstanceType {
         return self._root.as(DriverDirectory.InstanceType);
@@ -136,6 +138,7 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             .base = ReadOnlyFileSystem.init(.{}),
             ._allocator = allocator,
             ._root = try (try DriverDirectory.InstanceType.init(allocator)).interface.new(allocator),
+            ._mount_uptime_us = kernel.time.uptime_us(),
         });
     }
 
@@ -181,6 +184,16 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             data.st_size = @truncate(size);
             data.st_blocks = @intCast((size + 511) / 512);
         }
+        // Every node here appeared when its driver registered, which is boot;
+        // the mount is the closest instant this filesystem actually knows, and
+        // unlike /proc a device node is a fixed thing rather than one generated
+        // per read, so a stable date is the right answer. Recorded as an uptime
+        // and re-dated on the way out for the same reason romfs does it -- the
+        // mount happens long before anything sets the clock.
+        const stamp = kernel.time.timespec_of_uptime_us(self._mount_uptime_us);
+        data.st_atim = stamp;
+        data.st_mtim = stamp;
+        data.st_ctim = stamp;
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {

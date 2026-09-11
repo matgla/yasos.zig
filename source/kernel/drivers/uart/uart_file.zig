@@ -33,6 +33,14 @@ const poll_readable = @import("../../fs/ifile.zig").poll_readable;
 const poll_writable = @import("../../fs/ifile.zig").poll_writable;
 
 const interface = @import("interface");
+const config = @import("config");
+
+/// Boot-time ONLCR, from CONFIG_CONSOLE_ONLCR (menuconfig: Console). A config
+/// generated before the option existed gets it on, the Linux tty default.
+const default_onlcr: bool = if (@hasDecl(config, "console") and @hasDecl(config.console, "onlcr"))
+    config.console.onlcr
+else
+    true;
 
 pub fn UartFile(comptime UartType: anytype) type {
     const Internal = struct {
@@ -42,6 +50,7 @@ pub fn UartFile(comptime UartType: anytype) type {
             _icanonical: bool,
             _echo: bool,
             _raw_mode: bool,
+            _onlcr: bool,
             _nonblock: bool,
             _allocator: std.mem.Allocator,
             _name: []const u8,
@@ -69,12 +78,61 @@ pub fn UartFile(comptime UartType: anytype) type {
                 _ = uart.write_some(data) catch {};
             }
 
+            /// ONLCR: map NL to CRLF on output, which every Linux tty does by
+            /// default. Without it a program's "\n" is a bare line feed, and a
+            /// terminal that takes bytes literally (minicom, screen, picocom
+            /// without --imap) walks each line down a staircase. Raw mode
+            /// (c_oflag == 0) switches all output processing off.
+            fn translates_nl(self: *const Self) bool {
+                return self._onlcr and !self._raw_mode;
+            }
+
+            /// Put `data` on the wire, NL expanded to CRLF when ONLCR is on.
+            /// The caller holds the console lock.
+            fn write_locked(self: *const Self, data: []const u8) void {
+                if (!self.translates_nl()) {
+                    _ = uart.write_some(data) catch {};
+                    return;
+                }
+                var rest = data;
+                while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+                    _ = uart.write_some(rest[0..nl]) catch {};
+                    _ = uart.write_some("\r\n") catch {};
+                    rest = rest[nl + 1 ..];
+                }
+                _ = uart.write_some(rest) catch {};
+            }
+
+            /// Echo typed input. Output processing applies to echo as it does on
+            /// Linux, so Enter comes back as CRLF under ONLCR.
+            fn echo_input(self: *const Self, data: []const u8) void {
+                const held = kernel.stdout.console_acquire();
+                defer kernel.stdout.console_release(held);
+                self.write_locked(data);
+            }
+
+            fn apply_termios(self: *Self, termios: *const c.termios) void {
+                self._icanonical = (termios.c_lflag & c.ICANON) != 0;
+                self._echo = (termios.c_lflag & c.ECHO) != 0;
+                self._read_timeout = @intCast(termios.c_cc[c.VTIME]);
+                self._minimum_bytes_to_read = @intCast(termios.c_cc[c.VMIN]);
+                // Raw is "OPOST off", not "c_oflag == 0": cfmakeraw clears
+                // OPOST alone, so a raw tty still carries ONLCR. Testing the
+                // whole word read that as cooked, and read() then waited for a
+                // full buffer -- the sh line editor never saw a key.
+                self._raw_mode = (termios.c_oflag & c.OPOST) == 0;
+                // Kept while raw and only acted on under OPOST, as on Linux,
+                // so a tcgetattr taken in raw mode restores it intact.
+                self._onlcr = (termios.c_oflag & c.ONLCR) != 0;
+            }
+
             pub fn create(allocator: std.mem.Allocator, filename: []const u8) UartFileImpl {
                 return UartFileImpl.init(.{
                     ._icanonical = true,
                     ._echo = true,
                     ._nonblock = false,
                     ._raw_mode = false,
+                    ._onlcr = default_onlcr,
                     ._allocator = allocator,
                     ._name = filename,
                     ._read_timeout = 0,
@@ -239,7 +297,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                             index += 1;
                             cursor_pos = index;
                             if (self._echo) {
-                                echo(ch[0..1]);
+                                self.echo_input(ch[0..1]);
                             }
                         } else {
                             // Insert in middle: shift buffer right
@@ -267,7 +325,7 @@ pub fn UartFile(comptime UartType: anytype) type {
                     } else {
                         buffer[index] = ch[0];
                         if (self._echo) {
-                            echo(ch[0..1]);
+                            self.echo_input(ch[0..1]);
                         }
                         index += 1;
                         cursor_pos = index;
@@ -283,22 +341,27 @@ pub fn UartFile(comptime UartType: anytype) type {
             }
 
             /// Write to the console, serialised against the other core. One
-            /// `write_some` for the whole slice, deliberately not chunked:
-            /// `Uart.write` masks interrupts for its byte loop, so the console
-            /// lock is only ever held across a region that cannot be preempted.
-            /// Release it between chunks and PendSV can switch threads there,
-            /// after which the incoming thread's write sees `held_by_current`
-            /// -- which is per core, not per thread -- come back true and writes
-            /// ungoverned into the displaced thread's bytes.
+            /// console section for the whole slice, deliberately not released
+            /// between the chunks ONLCR splits it into: `Uart.write` masks
+            /// interrupts for its byte loop, so the console lock is only ever
+            /// held across a region that cannot be preempted. Release it between
+            /// chunks and PendSV can switch threads there, after which the
+            /// incoming thread's write sees `held_by_current` -- which is per
+            /// core, not per thread -- come back true and writes ungoverned into
+            /// the displaced thread's bytes.
             ///
             /// The hold is therefore as long as the caller's slice, ~3.4 ms per
             /// KiB at 3 Mbaud, and libc hands us line-sized buffers.
             pub fn write(self: *Self, data: []const u8) isize {
-                _ = self;
                 const held = kernel.stdout.console_acquire();
                 defer kernel.stdout.console_release(held);
-                const result = uart.write_some(data) catch return 0;
-                return @intCast(result);
+                if (!self.translates_nl()) {
+                    const result = uart.write_some(data) catch return 0;
+                    return @intCast(result);
+                }
+                // The count is of the caller's bytes, not the expanded ones.
+                self.write_locked(data);
+                return @intCast(data.len);
             }
 
             pub fn seek(self: *Self, _: i64, _: i32) anyerror!i64 {
@@ -324,28 +387,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                 if (arg) |termios_arg| {
                     const termios: *c.termios = @ptrCast(@alignCast(termios_arg));
                     switch (op) {
-                        c.TCSETS => {
-                            self._icanonical = (termios.c_lflag & c.ICANON) != 0;
-                            self._echo = (termios.c_lflag & c.ECHO) != 0;
-                            self._read_timeout = @intCast(termios.c_cc[c.VTIME]);
-                            self._minimum_bytes_to_read = @intCast(termios.c_cc[c.VMIN]);
-                            if (termios.c_oflag == 0) {
-                                self._raw_mode = true;
-                            } else {
-                                self._raw_mode = false;
-                            }
-                            return 0;
-                        },
-                        c.TCSETSW, c.TCSETSF => {
-                            self._icanonical = (termios.c_lflag & c.ICANON) != 0;
-                            self._echo = (termios.c_lflag & c.ECHO) != 0;
-                            self._read_timeout = @intCast(termios.c_cc[c.VTIME]);
-                            self._minimum_bytes_to_read = @intCast(termios.c_cc[c.VMIN]);
-                            if (termios.c_oflag == 0) {
-                                self._raw_mode = true;
-                            } else {
-                                self._raw_mode = false;
-                            }
+                        c.TCSETS, c.TCSETSW, c.TCSETSF => {
+                            self.apply_termios(termios);
                             return 0;
                         },
                         c.TCGETS => {
@@ -367,7 +410,10 @@ pub fn UartFile(comptime UartType: anytype) type {
                                 termios.c_lflag |= c.ECHO;
                             }
                             if (!self._raw_mode) {
-                                termios.c_oflag = c.OPOST;
+                                termios.c_oflag |= c.OPOST;
+                            }
+                            if (self._onlcr) {
+                                termios.c_oflag |= c.ONLCR;
                             }
                             return 0;
                         },
@@ -851,6 +897,113 @@ test "UartFile.Read.ShouldHandleMixedBackspaceAndDelete" {
     // "test" -> backspace removes 't' -> "tes" -> delete removes 's' -> "te" -> add "ok" -> "teok"
     try std.testing.expectEqual(@as(isize, 4), bytes_read);
     try std.testing.expectEqualStrings("teok", buffer[0..@intCast(bytes_read)]);
+}
+
+test "UartFile.Create.ShouldTakeOnlcrFromConfig" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    try std.testing.expectEqual(default_onlcr, file.data()._onlcr);
+}
+
+test "UartFile.Write.ShouldTranslateNewlineToCrLf" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._onlcr = true;
+    const written = file.data().write("a\nb\n\nc");
+    try std.testing.expectEqual(@as(isize, 6), written);
+    try std.testing.expectEqualStrings("a\r\nb\r\n\r\nc", MockUart.get_written_data());
+}
+
+test "UartFile.Write.RawModeShouldNotTranslateNewline" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = std.mem.zeroes(c.termios);
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCSETS, @ptrCast(&termios)));
+
+    _ = file.data().write("a\nb\n");
+    try std.testing.expectEqualStrings("a\nb\n", MockUart.get_written_data());
+}
+
+test "UartFile.Write.OpostWithoutOnlcrShouldNotTranslateNewline" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    var termios: c.termios = std.mem.zeroes(c.termios);
+    termios.c_oflag = c.OPOST;
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCSETS, @ptrCast(&termios)));
+
+    _ = file.data().write("a\nb\n");
+    try std.testing.expectEqualStrings("a\nb\n", MockUart.get_written_data());
+}
+
+test "UartFile.Ioctl.TCGETS.ShouldReportOnlcrAndRoundTrip" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._onlcr = true;
+    var termios: c.termios = undefined;
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCGETS, @ptrCast(&termios)));
+    try std.testing.expect((termios.c_oflag & c.OPOST) != 0);
+    try std.testing.expect((termios.c_oflag & c.ONLCR) != 0);
+
+    // tcgetattr / tweak lflag / tcsetattr must keep the translation on.
+    termios.c_lflag &= ~@as(c_uint, c.ECHO);
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCSETS, @ptrCast(&termios)));
+    _ = file.data().write("x\n");
+    try std.testing.expectEqualStrings("x\r\n", MockUart.get_written_data());
+}
+
+test "UartFile.Ioctl.CfmakerawShouldEnterRawModeAndKeepOnlcr" {
+    MockUart.reset();
+    defer MockUart.reset();
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._onlcr = true;
+    var cooked: c.termios = undefined;
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCGETS, @ptrCast(&cooked)));
+
+    // What toybox's set_terminal(raw) sends: cfmakeraw clears OPOST only.
+    var raw = cooked;
+    c.cfmakeraw(&raw);
+    try std.testing.expect(raw.c_oflag != 0);
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCSETS, @ptrCast(&raw)));
+    try std.testing.expect(file.data()._raw_mode);
+    _ = file.data().write("a\n");
+    try std.testing.expectEqualStrings("a\n", MockUart.get_written_data());
+
+    // A tcgetattr taken while raw still carries ONLCR.
+    var seen: c.termios = undefined;
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCGETS, @ptrCast(&seen)));
+    try std.testing.expect((seen.c_oflag & c.ONLCR) != 0);
+
+    // Restoring the cooked settings turns translation back on.
+    MockUart.reset();
+    try std.testing.expectEqual(@as(i32, 0), file.data().ioctl(c.TCSETS, @ptrCast(&cooked)));
+    try std.testing.expect(!file.data()._raw_mode);
+    _ = file.data().write("b\n");
+    try std.testing.expectEqualStrings("b\r\n", MockUart.get_written_data());
+}
+
+test "UartFile.Read.ShouldEchoEnterAsCrLf" {
+    MockUart.reset();
+    defer MockUart.reset();
+    MockUart.set_read_data("ls\r");
+
+    var file = TestUartFile.InstanceType.create(std.testing.allocator, "uart0");
+    file.data()._onlcr = true;
+    var buffer: [10]u8 = undefined;
+
+    const bytes_read = file.data().read(&buffer);
+    try std.testing.expectEqualStrings("ls\n", buffer[0..@intCast(bytes_read)]);
+    try std.testing.expectEqualStrings("ls\r\n", MockUart.get_written_data());
 }
 
 test "UartFile.Read.ShouldEchoBackspaceSequence" {

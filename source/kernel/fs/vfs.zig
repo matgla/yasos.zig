@@ -119,6 +119,15 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
+    fn raw_utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_symlinks: bool) anyerror!void {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            const trimmed_path = std.mem.trim(u8, node.left, "/ ");
+            return try node.point.filesystem.interface.utimens(trimmed_path, times, follow_symlinks);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
     fn raw_access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
@@ -298,6 +307,20 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
             if (maybe_resolved) |resolved| {
                 defer self.mount_points.allocator.free(resolved);
                 return self.raw_stat(resolved, data, follow_symlinks);
+            }
+            return err;
+        };
+    }
+
+    /// Same symlink fallback as `stat`: a path that only resolves through a
+    /// link (`/tmp/...` is one) has to be re-resolved before the owning
+    /// filesystem sees it.
+    pub fn utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_symlinks: bool) anyerror!void {
+        return self.raw_utimens(path, times, follow_symlinks) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_utimens(resolved, times, follow_symlinks);
             }
             return err;
         };

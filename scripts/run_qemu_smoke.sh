@@ -39,7 +39,7 @@
 # Any non-option arguments are passed through to pytest. With none, the default
 # set is the core target tests plus the tcc suites:
 #   cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py
-#   tcc_test.py tcc_suite_test.py
+#   timestamp_test.py make_test.py tcc_test.py tcc_suite_test.py
 # The tcc tests currently FAIL (known tinycc bug + a serial-upload corruption on
 # QEMU) and are enabled so they run as fixes land. Pass files to override, e.g.
 #   scripts/run_qemu_smoke.sh tcc_suite_test.py -k 00_assignment
@@ -175,7 +175,7 @@ if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
     # Core target tests plus the tcc suites. The tcc tests are expected to FAIL
     # for now (known tinycc miscompiles + a serial-upload corruption on QEMU);
     # they are enabled here so they run as fixes land. Override by passing files.
-    PYTEST_ARGS=(cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py tcc_test.py tcc_suite_test.py)
+    PYTEST_ARGS=(cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py timestamp_test.py make_test.py tcc_test.py tcc_suite_test.py)
 fi
 
 # The FP mode rootfs.img must match, and the mode it was actually built with.
@@ -185,17 +185,21 @@ ROOTFS_FP_STAMP="$REPO_ROOT/libs/tinycc/.yasos-build/fp-mode"
 
 # What the currently configured target asks for. Deliberately the same rule as
 # build_rootfs.sh's FP_MODE block -- a mode it would rebuild for must not look
-# like a match here either.
+# like a match here either, which is why the runtime linkage is part of the
+# string on both sides: switching between one shared __aeabi_ runtime and a
+# private copy per module relinks every image and changes no source file, so a
+# stamp that recorded only the -mfpu would call a stale image a match.
 rootfs_fp_wanted() {
     python3 - "$REPO_ROOT/config/target/config.json" <<'PYEOF'
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
 except Exception:
-    print("soft")
+    print("soft/static")
     sys.exit(0)
-print("soft" if not cfg.get("build_userspace_hardware_fp")
-      else (cfg.get("build_userspace_fp_mfpu") or "soft"))
+mode = ("soft" if not cfg.get("build_userspace_hardware_fp")
+        else (cfg.get("build_userspace_fp_mfpu") or "soft"))
+print("%s/%s" % (mode, "shared" if cfg.get("build_userspace_fp_shared") else "static"))
 PYEOF
 }
 

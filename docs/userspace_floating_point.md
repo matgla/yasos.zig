@@ -48,6 +48,62 @@ emitted inline; FP arguments and results stay in general-purpose registers
 the switch stay link-compatible, and a plugin compiled on the device against a
 soft-float image still loads.
 
+## Three ways to reach a double, and how to ask for each
+
+A double operation can be done three ways on this part, and they are not a
+spectrum of one thing — they differ in *where the arithmetic lives*:
+
+| | where the work happens | how it is reached | flags |
+|---|---|---|---|
+| **software** | `libsoftfp`, bit-exact IEEE-754 in C | `__aeabi_` call | `-mfpu=none` |
+| **hardware, behind a call** | `librp2350fp`: DCP sequences and FPv5-SP | `__aeabi_` call | `-mfp-inline=none` |
+| **hardware, inline** | the caller's own instruction stream | no call | *(default)* |
+
+The middle row used to have no way to say it. It could only be reached by
+pairing `-mfloat-abi=soft` with a hardware `-mfpu`, which meant "emit no FP
+instructions" and yet quietly linked a runtime full of them — and wrote a YAFF
+header that asked the loader for nothing while the image needed a DCP. Now
+`-mfloat-abi=soft` means what it says (no FP instructions *and* the software
+runtime), and **`-mfp-inline=none`** is the flag for "keep this board's FP
+hardware, put every operation behind a call".
+
+The third row is a mixture by construction, and honestly so: the backend inlines
+what has a short sequence — on RP2350 float add/sub/mul/div and double
+add/sub/compare — and calls the runtime for the rest. Double multiply, double
+divide and every conversion are library calls in all three rows, which makes
+them the control when comparing: a conversion that moves between two columns
+means the measurement moved, not the code.
+
+`apps/fpbench` builds one source four times along exactly these lines (the
+fourth is the middle row linked statically, so the dynamic linkage can be
+priced on its own) and prints the table.
+
+## One shared runtime, or a copy in every module
+
+**`CONFIG_BUILD_USERSPACE_FP_SHARED`** (on by default) decides whether the
+`__aeabi_` runtime is a shared library or is copied into each module out of an
+archive. It is delivered the same way as the `-mfpu` default above —
+`-DCONFIG_TCC_DEFAULT_FP_LIB=ARM_FP_LIB_SHARED` compiled into both tcc stages,
+because this is a *link* decision and no Makefile in the tree threads `LDFLAGS`
+— and `-mfp-lib=static|shared|auto` overrides it per invocation.
+
+Off, every shared object and every program carries its own copy, and one
+consequence is not obvious: **the copy that wins is libc's.** The loader
+resolves an import by walking the image's dependencies in order
+(`Module.find_symbol` over `children`, appended in import order), libc comes
+first in every link, and libc.so re-exports the fifteen double entry points it
+absorbed. So a program built with one `-mfpu` would run libc's implementation
+from another, and the flag it was compiled with decided nothing.
+
+On, there is one copy in the system, and an image's own choice sticks. tcc binds
+the FP runtime **ahead of libc** in the import table for exactly this reason.
+
+The cost is real: an `__aeabi_` call that was a local `bl` becomes a
+cross-module call through the GOT with the R9 save/restore that goes with it.
+Operations the backend inlines never became calls and do not pay; the ones that
+did — double multiply and divide above all — do. `apps/fpbench`'s `hwlib` and
+`hwstatic` arms differ in nothing else, so their difference is that price.
+
 ## Every image says which machine it needs
 
 An image compiled for the wrong part does not fail politely — inline
@@ -108,7 +164,11 @@ at timestamps — an incremental build would keep soft-float objects and link th
 against a hardware FP runtime. `build_rootfs.sh` records the active mode in
 `libs/tinycc/.yasos-build/fp-mode` and forces a clean rebuild when it changes, so
 just toggling the option and rebuilding is safe (and slow: it is a full
-bootstrap).
+bootstrap). The stamp records the runtime linkage too (`rp2350/shared`), because
+switching `CONFIG_BUILD_USERSPACE_FP_SHARED` relinks every image while changing
+no source file at all — the stale `.so` files would keep their absorbed copies
+and go on winning every lookup. `scripts/run_qemu_smoke.sh` compares the same
+string before deciding an image is fresh enough to boot.
 
 ## Two things to know about doubles on RP2350
 

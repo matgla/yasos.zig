@@ -45,6 +45,8 @@ const UartStatFile = @import("uartstat_file.zig").UartStatFile;
 const XipStatFile = @import("xipstat_file.zig").XipStatFile;
 const CpusFile = @import("cpus_file.zig").CpusFile;
 const MemPeakFile = @import("mempeak_file.zig").MemPeakFile;
+const VregFile = @import("vreg_file.zig").VregFile;
+const TempFile = @import("temp_file.zig").TempFile;
 
 const ProcFsDirectory = @import("procfs_directory.zig").ProcFsDirectory;
 
@@ -105,6 +107,10 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try root_directory.data().append(cpus);
         const mempeak = try MemPeakFile.InstanceType.create_node(allocator);
         try root_directory.data().append(mempeak);
+        const vreg = try VregFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(vreg);
+        const temp = try TempFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(temp);
         return procfs;
     }
 
@@ -192,6 +198,15 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         } else {
             data.st_mode = c.S_IFREG;
         }
+        // Now, on all three, and that is not a shrug: nothing here is stored.
+        // A /proc file's contents are produced by the read that asks for them,
+        // so the instant it was last modified *is* the instant you asked. Linux
+        // answers the same way, and it keeps `make` from ever treating a
+        // generated file as stale.
+        const current = kernel.time.now_timespec();
+        data.st_atim = current;
+        data.st_mtim = current;
+        data.st_ctim = current;
     }
 });
 

@@ -249,6 +249,46 @@ def test_send_files_reports_progress_per_file(receiver_binary, tmp_path):
     assert [entry[2] for entry in progress] == [1, 3, 6, 10]
 
 
+def test_send_files_reports_bytes_within_a_file(receiver_binary, tmp_path):
+    """A file too big for one sub-packet must move the caller's bar as it goes.
+
+    Per-file progress is enough for the smoke corpus, where nothing is much
+    over a kilobyte, but a batch carrying one multi-megabyte binary would sit
+    silent for minutes on a link this slow. The hook has to fire more than once
+    inside a single file for a bar to mean anything.
+    """
+    root = tmp_path / "target"
+    local = tmp_path / "big.bin"
+    payload = bytes((index * 7) & 0xff for index in range(8192))
+    local.write_bytes(payload)
+
+    offsets = []
+    host_to_target_r, host_to_target_w = os.pipe()
+    target_to_host_r, target_to_host_w = os.pipe()
+    process = subprocess.Popen(
+        [str(receiver_binary)],
+        stdin=host_to_target_r, stdout=target_to_host_w,
+        stderr=subprocess.PIPE, cwd=str(tmp_path),
+    )
+    os.close(host_to_target_r)
+    os.close(target_to_host_w)
+    session = _FakeSession(_PipeSerial(target_to_host_r, host_to_target_w))
+
+    file_transfer.send_files(
+        session, [(str(local), f"{root}/ci/big.bin")],
+        on_bytes=lambda offset, size: offsets.append((offset, size)),
+    )
+    process.wait(timeout=30)
+    os.close(target_to_host_r)
+    os.close(host_to_target_w)
+
+    assert (root / "ci" / "big.bin").read_bytes() == payload
+    assert len(offsets) > 1
+    assert {size for _, size in offsets} == {len(payload)}
+    assert [offset for offset, _ in offsets] == sorted(o for o, _ in offsets)
+    assert offsets[-1][0] == len(payload)
+
+
 def test_single_file_transfer_still_works(receiver_binary, tmp_path):
     """The one-file path shares the body helper with the batch; both must hold.
 

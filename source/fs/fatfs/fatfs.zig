@@ -37,6 +37,17 @@ const FatFsDirectory = @import("fatfs_directory.zig").FatFsDirectory;
 const FatFsIterator = @import("fatfs_directory.zig").FatFsIterator;
 
 const fatfs_error_to_errno = @import("errno_converter.zig").fatfs_error_to_errno;
+const fat_time = @import("fat_time.zig");
+
+/// What FatFs calls to stamp a directory entry it is writing.
+///
+/// FatFs asks through a context-free C callback, so the only way to hand it a
+/// clock is a global; zfat exposes `rtc_hook` for exactly that. Installed by
+/// `FatFs.init`, which means the first mount arms it and every later one
+/// re-arms it with the same function.
+fn fat_now_unix_seconds() i64 {
+    return @intCast(kernel.time.realtime_seconds());
+}
 
 fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
     data.* = std.mem.zeroes(c.struct_stat);
@@ -83,8 +94,15 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     /// rather than beside it and every path resolves against the wrong device.
     _volume: u8,
     _fs: fatfs.FileSystem,
+    /// When this volume was mounted, on the monotonic clock. Only the volume
+    /// root needs it -- every other path has a directory entry with a real date
+    /// in it. See `stat`.
+    _mount_uptime_us: u64,
 
     pub fn init(allocator: std.mem.Allocator, device: kernel.fs.IFile) !FatFs {
+        // Before anything can be written: FatFs stamps every directory entry it
+        // creates, and without this it stamps them all 1980.
+        fatfs.rtc_hook = &fat_now_unix_seconds;
         const volume = claim_volume() orelse return error.OutOfMemory;
         errdefer volume_in_use[volume] = false;
         var wrapper = DiskWrapper{ .device = try device.clone() };
@@ -97,6 +115,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             ._disk_wrapper = wrapper,
             ._volume = volume,
             ._fs = undefined,
+            ._mount_uptime_us = kernel.time.uptime_us(),
         });
     }
 
@@ -270,6 +289,15 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         if (std.mem.eql(u8, path, "/") or path.len == 0) {
             data.st_mode = c.S_IFDIR;
             data.st_blksize = 512;
+            // The volume root is not a directory entry anywhere on the disk, so
+            // there is no stored date to read -- FAT keeps timestamps in the
+            // entry, and the root has none. Mount time is what this filesystem
+            // knows about it. Without this the root reported 1970, which is
+            // what `ls -l /` showed for the whole mount point.
+            const stamp = kernel.time.timespec_of_uptime_us(self._mount_uptime_us);
+            data.st_atim = stamp;
+            data.st_mtim = stamp;
+            data.st_ctim = stamp;
             return;
         }
         var path_c = try std.fmt.allocPrintSentinel(self._allocator, "{c}:/{s} ", .{ '0' + self._volume, path }, 0);
@@ -294,6 +322,39 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         data.st_size = @intCast(finfo.size);
         data.st_mode = if (finfo.kind == .Directory) c.S_IFDIR else c.S_IFREG;
         data.st_blocks = @intCast((finfo.size + 511) / 512);
+        // FAT keeps one timestamp per entry -- the last write -- so all three
+        // report it. Claiming a separate access or change time here would be
+        // inventing data the volume does not carry.
+        const modified: c.struct_timespec = .{
+            .tv_sec = @intCast(fat_time.to_unix_seconds(finfo.date, finfo.time)),
+            .tv_nsec = 0,
+        };
+        data.st_atim = modified;
+        data.st_mtim = modified;
+        data.st_ctim = modified;
+    }
+
+    /// FAT has one timestamp per entry, so only `modified` can land anywhere;
+    /// a request that sets just the access time is accepted and does nothing,
+    /// which is what the format allows and better than refusing a `touch -a`
+    /// whose caller does not care.
+    pub fn utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_symlinks: bool) anyerror!void {
+        fs_lock.acquire();
+        defer fs_lock.release();
+        _ = follow_symlinks;
+        const modified = times.modified orelse return;
+        if (std.mem.eql(u8, path, "/") or path.len == 0) {
+            // The volume root is not a directory entry anywhere, so there is
+            // nothing to stamp.
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+        const path_c = try self.volume_path(path);
+        defer self._allocator.free(path_c);
+        const broken = fat_time.from_unix_seconds(@intCast(modified.tv_sec));
+        fatfs.utime(path_c, broken.date, broken.time) catch |err| {
+            log.err("Failed to set timestamp on {s}: {s}", .{ path, @errorName(err) });
+            return fatfs_error_to_errno(err);
+        };
     }
 
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
@@ -869,6 +930,82 @@ test "FatFs.ShouldStatRootDirectory" {
 
     try std.testing.expectEqual(@as(c_uint, c.S_IFDIR), stat_buf.st_mode);
     try std.testing.expectEqual(0, stat_buf.st_size);
+}
+
+test "FatFs.StampsANewFileFromTheWallClockAndReadsItBack" {
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+
+    // 2001-09-09T01:46:40Z. Set before the file is created, because FatFs asks
+    // `get_fattime` -- which `FatFs.init` has pointed at this clock -- while it
+    // is writing the directory entry.
+    const created_at: u64 = 1_000_000_000;
+    kernel.time.set_realtime_us(created_at * 1_000_000);
+
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    try fs.interface.create("/dated.txt", 0o644);
+
+    var stat_buf: c.struct_stat = undefined;
+    try fs.interface.stat("/dated.txt", &stat_buf, true);
+
+    // FAT stores seconds in units of two, so the stamp lands on the even
+    // second at or below the clock -- 01:46:40 is already even.
+    try std.testing.expectEqual(@as(i64, created_at), @as(i64, @intCast(stat_buf.st_mtim.tv_sec)));
+    // One timestamp per entry is all FAT has, so all three report it.
+    try std.testing.expectEqual(stat_buf.st_mtim.tv_sec, stat_buf.st_atim.tv_sec);
+    try std.testing.expectEqual(stat_buf.st_mtim.tv_sec, stat_buf.st_ctim.tv_sec);
+}
+
+test "FatFs.UtimensMovesTheEntryTimestamp" {
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+
+    kernel.time.set_realtime_us(1_000_000_000 * 1_000_000);
+
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    try fs.interface.create("/touched.txt", 0o644);
+
+    // 2010-01-01T00:00:00Z, well away from the creation stamp.
+    const wanted: i64 = 1_262_304_000;
+    try fs.interface.utimens("/touched.txt", .{
+        .accessed = null,
+        .modified = .{ .tv_sec = wanted, .tv_nsec = 0 },
+    }, true);
+
+    var stat_buf: c.struct_stat = undefined;
+    try fs.interface.stat("/touched.txt", &stat_buf, true);
+    try std.testing.expectEqual(wanted, @as(i64, @intCast(stat_buf.st_mtim.tv_sec)));
+}
+
+test "FatFs.UtimensWithNothingToStoreIsANoOpRatherThanAnError" {
+    // FAT keeps only a modification time, so a request that sets just the
+    // access time has nowhere to land. Refusing would fail a `touch -a` whose
+    // caller does not care; doing nothing is what the format allows.
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    try fs.interface.create("/access_only.txt", 0o644);
+    var before: c.struct_stat = undefined;
+    try fs.interface.stat("/access_only.txt", &before, true);
+
+    try fs.interface.utimens("/access_only.txt", .{
+        .accessed = .{ .tv_sec = 1_262_304_000, .tv_nsec = 0 },
+        .modified = null,
+    }, true);
+
+    var after: c.struct_stat = undefined;
+    try fs.interface.stat("/access_only.txt", &after, true);
+    try std.testing.expectEqual(before.st_mtim.tv_sec, after.st_mtim.tv_sec);
 }
 
 test "FatFs.ShouldStatFile" {

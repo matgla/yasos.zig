@@ -70,10 +70,24 @@ void yasos_sdio_errmsg(const char *txt, uint32_t arg1, uint32_t arg2);
 #define SDIO_DMAIRQ_IDX 1
 #define SDIO_DMAIRQ     DMA_IRQ_1
 
-/* GPIO pins */
-#define SDIO_CLK 5
-#define SDIO_CMD 18
-#define SDIO_D0  19
-#define SDIO_D1  20
-#define SDIO_D2  21
-#define SDIO_D3  22
+/* GPIO pins. Not fixed here: every board wires the card differently, so the
+ * pins are set at run time by rp2350_sdio_set_pins() from the board's
+ * MmcConfig.pins (mmc_sdio.zig), before the first rp2350_sdio_init(). The data
+ * lines must be consecutive -- D1..D3 follow D0. */
+extern uint8_t g_sdio_pin_clk;
+extern uint8_t g_sdio_pin_cmd;
+extern uint8_t g_sdio_pin_d0;
+void rp2350_sdio_set_pins(uint8_t clk, uint8_t cmd, uint8_t d0);
+
+#define SDIO_CLK g_sdio_pin_clk
+#define SDIO_CMD g_sdio_pin_cmd
+#define SDIO_D0  g_sdio_pin_d0
+#define SDIO_D1  (SDIO_D0 + 1)
+#define SDIO_D2  (SDIO_D0 + 2)
+#define SDIO_D3  (SDIO_D0 + 3)
+
+/* A PIO block sees 32 GPIOs from its base. Pins above 31 (RP2350B) need the
+ * base moved to 16, which also means all six pins must sit in 16..47. Defined
+ * here so sdio_rp2350.h's compile-time fallback (which compares SDIO_CLK in
+ * the preprocessor) is skipped. */
+#define SDIO_PIO_IOBASE ((SDIO_CLK > 31 || SDIO_CMD > 31 || SDIO_D3 > 31) ? 16 : 0)

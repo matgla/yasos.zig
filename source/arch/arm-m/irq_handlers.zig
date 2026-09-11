@@ -38,6 +38,7 @@ extern fn file_log_disable() void;
 extern fn klog_force_enable() void;
 extern fn dump_fault_maps(pid: c.pid_t) void;
 extern fn dump_ctx_ring() void;
+extern fn dump_vreg_status() void;
 extern fn _exit(code: c_int) void;
 
 const usage_fault_stkof_mask: u32 = 1 << 20;
@@ -257,6 +258,9 @@ export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callco
     log.err("  PSP=0x{X:0>8} MSP=0x{X:0>8} PSPLIM=0x{X:0>8} MSPLIM=0x{X:0>8}", .{ psp, msp, psplim, msplim });
     log.err("  CFSR=0x{X:0>8} HFSR=0x{X:0>8} MMFAR=0x{X:0>8} BFAR=0x{X:0>8}", .{ cfsr_raw, hfsr_raw, mmfar, bfar });
     log.err("  pid={d} FPCCR=0x{X:0>8} FPCAR=0x{X:0>8} (LSPACT={d})", .{ get_current_pid(), fpccr.*, fpcar.*, (fpccr.* >> 0) & 1 });
+    // Whether the core regulator sagged before this fault. Silent on boards
+    // that do not sample it.
+    dump_vreg_status();
 
     // Corruption heuristic: a user-process (PSP) fault should never carry a live
     // register that points into kernel SRAM. If one does, a context switch most

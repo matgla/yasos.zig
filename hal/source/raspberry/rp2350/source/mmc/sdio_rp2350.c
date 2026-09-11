@@ -1332,13 +1332,23 @@ rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode)
     return result;
 }
 
+uint8_t g_sdio_pin_clk;
+uint8_t g_sdio_pin_cmd;
+uint8_t g_sdio_pin_d0;
+
+void rp2350_sdio_set_pins(uint8_t clk, uint8_t cmd, uint8_t d0)
+{
+    g_sdio_pin_clk = clk;
+    g_sdio_pin_cmd = cmd;
+    g_sdio_pin_d0 = d0;
+}
+
 void rp2350_sdio_init(rp2350_sdio_timing_t timing)
 {
     SDIO_DBGMSG("SDIO init", timing.cmd_clk_divider, timing.data_clk_divider);
 
-    #if SDIO_PIO_IOBASE > 0
-        pio_set_gpio_base(SDIO_PIO, 16);
-    #endif
+    if (SDIO_PIO_IOBASE > 0)
+        pio_set_gpio_base(SDIO_PIO, SDIO_PIO_IOBASE);
 
     // Mark resources as being in use, unless it has been done already.
     static bool resources_claimed = false;

@@ -815,7 +815,12 @@ pub fn sys_ioctl(arg: *const anyopaque) !i32 {
 
 pub fn sys_gettimeofday(arg: *const anyopaque) !i32 {
     const context: *const c.gettimeofday_context = @ptrCast(@alignCast(arg));
-    const now_us = hal.time.get_time_us();
+    // The wall clock, not the boot counter: `gettimeofday` is what `date`, the
+    // filesystems and every timestamp in userspace read. It is still the boot
+    // counter underneath, just shifted by whatever `settimeofday` was told, so
+    // a caller timing a duration across two of these gets the same answer it
+    // always did.
+    const now_us = time.realtime_us();
 
     if (context.tv) |tv| {
         const out = try user_out(c.struct_timeval, tv);
@@ -830,6 +835,78 @@ pub fn sys_gettimeofday(arg: *const anyopaque) !i32 {
     }
 
     return 0;
+}
+
+/// Move the wall clock. `tz` is accepted and ignored, exactly as Linux does:
+/// there is no kernel timezone here, and userspace does its own conversion.
+///
+/// Unprivileged callers are allowed. There is no capability model to check
+/// against on this system, and the practical caller is the smoke harness
+/// handing the board the host's clock over a serial shell that does not run as
+/// root.
+pub fn sys_settimeofday(arg: *const anyopaque) !i32 {
+    const context: *const c.settimeofday_context = @ptrCast(@alignCast(arg));
+    const tv = context.tv orelse return ErrnoSet.InvalidArgument;
+    const in = try user_in(c.struct_timeval, tv);
+    if (in.tv_sec < 0 or in.tv_usec < 0 or in.tv_usec >= 1_000_000) {
+        return ErrnoSet.InvalidArgument;
+    }
+    const seconds: u64 = @intCast(in.tv_sec);
+    const micros: u64 = @intCast(in.tv_usec);
+    time.set_realtime_us(seconds * 1_000_000 + micros);
+    return 0;
+}
+
+/// Resolve one `utimensat` timespec against the current time.
+///
+/// UTIME_NOW and UTIME_OMIT live in `tv_nsec` and are resolved here rather than
+/// in each filesystem: they are a syscall-ABI detail, and a filesystem that had
+/// to know them would be one more place to get the sentinel comparison wrong.
+fn resolve_utimens_stamp(entry: c.struct_timespec, now: c.struct_timespec) !?c.struct_timespec {
+    if (entry.tv_nsec == c.UTIME_OMIT) return null;
+    if (entry.tv_nsec == c.UTIME_NOW) return now;
+    if (entry.tv_nsec < 0 or entry.tv_nsec >= 1_000_000_000) return ErrnoSet.InvalidArgument;
+    return entry;
+}
+
+    // Preemptible: see `sys_open`.
+pub fn sys_utimensat(arg: *const anyopaque) !i32 {
+    const context: *const c.utimensat_context = @ptrCast(@alignCast(arg));
+    const now = time.now_timespec();
+
+    // A null `times` means "both timestamps to now", which is plain `touch`.
+    var stamps = kernel.fs.TimeStamps.now(now);
+    if (context.times) |times| {
+        // Both entries are validated as one two-element read: they are adjacent
+        // in the caller's array, and checking them separately would let the
+        // second be swapped out between the check and the use.
+        const in = try user_in([2]c.struct_timespec, @ptrCast(@alignCast(times)));
+        stamps = .{
+            .accessed = try resolve_utimens_stamp(in[0], now),
+            .modified = try resolve_utimens_stamp(in[1], now),
+        };
+    }
+
+    // Even a request that omits both timestamps goes through the lookup: it
+    // still has to fail on a path that does not exist, and it still moves the
+    // change time, which is the one `utimens` can never be asked to leave.
+    const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
+    defer kernel_allocator.free(path);
+    try fs.get_ivfs().interface.utimens(path, stamps, (context.flags & c.AT_SYMLINK_NOFOLLOW) == 0);
+    return 0;
+}
+
+    // Preemptible: see `sys_open`.
+pub fn sys_readlink(arg: *const anyopaque) !i32 {
+    const context: *const c.readlink_context = @ptrCast(@alignCast(arg));
+    if (context.bufsiz == 0) return ErrnoSet.InvalidArgument;
+    const buffer = try user_out_slice(context.buf, context.bufsiz);
+    const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
+    defer kernel_allocator.free(path);
+    // No terminator and no error on truncation, which is readlink(2)'s contract:
+    // the caller sizes the buffer from `st_size` and terminates it itself.
+    const written = try fs.get_ivfs().interface.readlink(path, buffer);
+    return @intCast(written);
 }
 
 pub fn sys_waitpid(arg: *const anyopaque) !i32 {
@@ -1011,7 +1088,7 @@ pub fn sys_chdir(arg: *const anyopaque) !i32 {
 
 pub fn sys_time(arg: *const anyopaque) !i32 {
     const context: *const c.time_context = @ptrCast(@alignCast(arg));
-    const now_seconds: c.time_t = @intCast(hal.time.get_time());
+    const now_seconds: c.time_t = @intCast(time.realtime_seconds());
     if (context.timep) |timep| {
         (try user_out(c.time_t, timep)).* = now_seconds;
     }

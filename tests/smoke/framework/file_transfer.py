@@ -610,7 +610,8 @@ class _LinkAccounting:
         )
 
 
-def send_files(session, transfers, timeout: float = 30.0, on_progress=None) -> int:
+def send_files(session, transfers, timeout: float = 30.0, on_progress=None,
+               on_bytes=None) -> int:
     """Send many files to the target in ONE ``rz --batch`` session.
 
     *transfers* is an iterable of ``(local_path, remote_path)``. Each file
@@ -626,6 +627,13 @@ def send_files(session, transfers, timeout: float = 30.0, on_progress=None) -> i
     directories when the parent differs from the previous file's, so grouping
     a directory's files together turns thousands of mkdir syscalls into one
     per directory.
+
+    *on_progress* is called ``on_progress(files_done, file_count, sent_bytes)``
+    once per completed file; *on_bytes* is called
+    ``on_bytes(offset, file_size)`` as the current file is acknowledged. A
+    corpus of small sources only ever needs the first, but a batch holding one
+    multi-megabyte binary would otherwise show no movement for minutes, so a
+    caller drawing a bar wants both.
     """
     entries = sorted(
         ((str(local), str(remote)) for local, remote in transfers),
@@ -666,7 +674,7 @@ def send_files(session, transfers, timeout: float = 30.0, on_progress=None) -> i
             # The receiver answers each ZEOF with ZRINIT, which doubles as the
             # invitation for the next file.
             _send_one_file(ser, remote_path, file_data, _record_garbage,
-                           None, ZRINIT)
+                           on_bytes, ZRINIT)
             sent_bytes += len(file_data)
             if on_progress is not None:
                 on_progress(index + 1, len(entries), sent_bytes)

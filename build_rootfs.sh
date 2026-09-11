@@ -119,6 +119,7 @@ fi
 # objects and .so files built before and after the switch stay compatible.
 KERNEL_CONFIG_JSON="$SCRIPT_DIR/config/target/config.json"
 FP_MODE="soft"
+FP_LINKAGE="static"
 TCC_FP_DEFINE=""
 if [ -f "$KERNEL_CONFIG_JSON" ] && command -v python3 >/dev/null 2>&1; then
   FP_MODE=$(python3 - "$KERNEL_CONFIG_JSON" <<'PYEOF'
@@ -132,6 +133,16 @@ if not cfg.get("build_userspace_hardware_fp"):
     print("soft")
 else:
     print(cfg.get("build_userspace_fp_mfpu") or "soft")
+PYEOF
+)
+  FP_LINKAGE=$(python3 - "$KERNEL_CONFIG_JSON" <<'PYEOF'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    print("static")
+    sys.exit(0)
+print("shared" if cfg.get("build_userspace_fp_shared") else "static")
 PYEOF
 )
 fi
@@ -156,15 +167,32 @@ case "$FP_MODE" in
     exit 1
     ;;
 esac
-echo "Userspace floating point: $FP_MODE"
+
+# ---- One shared FP runtime (KConfig: CONFIG_BUILD_USERSPACE_FP_SHARED) ----
+#
+# Same delivery mechanism as the -mfpu default above, and for the same reason:
+# this is a *link* decision, and none of the per-library Makefiles thread
+# LDFLAGS. -DCONFIG_TCC_DEFAULT_FP_LIB makes both tcc stages bind
+# /usr/lib/lib<runtime>.so instead of copying fp/lib<runtime>.a into every
+# module, so the rootfs ends up with one copy of the __aeabi_ set and an image's
+# own -mfpu decides which implementation it runs.
+if [ "$FP_LINKAGE" = "shared" ]; then
+  TCC_FP_DEFINE="$TCC_FP_DEFINE -DCONFIG_TCC_DEFAULT_FP_LIB=ARM_FP_LIB_SHARED"
+fi
+echo "Userspace floating point: $FP_MODE (runtime linkage: $FP_LINKAGE)"
 
 # Switching FP mode changes code generation for every object, but make only
 # looks at timestamps -- an incremental build would silently keep soft-float
 # objects and link them against a hardware FP runtime. Force the full rebuild
 # the switch actually requires.
 FP_MODE_STAMP="$SCRIPT_DIR/libs/tinycc/.yasos-build/fp-mode"
-if [ -f "$FP_MODE_STAMP" ] && [ "$(cat "$FP_MODE_STAMP")" != "$FP_MODE" ]; then
-  echo "Userspace floating point changed ($(cat "$FP_MODE_STAMP") -> $FP_MODE): forcing a clean rebuild."
+# The stamp carries the linkage too: switching between one shared runtime and a
+# private copy per module changes every link line, and make sees no source
+# change at all -- the old .so files would keep their absorbed __aeabi_ copies
+# and go on winning every lookup.
+FP_MODE_STAMP_VALUE="$FP_MODE/$FP_LINKAGE"
+if [ -f "$FP_MODE_STAMP" ] && [ "$(cat "$FP_MODE_STAMP")" != "$FP_MODE_STAMP_VALUE" ]; then
+  echo "Userspace floating point changed ($(cat "$FP_MODE_STAMP") -> $FP_MODE_STAMP_VALUE): forcing a clean rebuild."
   CLEAR=true
 fi
 
@@ -187,6 +215,7 @@ if $CLEAR; then
   rm -rf libs/yasos_curses/build
   rm -rf apps/textvaders/build
   rm -rf apps/hexdump/build
+  rm -rf apps/ccat/build
   rm -rf apps/yaffdump/build
   rm -rf apps/yaffdump/tests/build
   rm -rf apps/time/build
@@ -196,6 +225,7 @@ if $CLEAR; then
   rm -rf apps/longjump_tester/build
   rm -rf apps/sdbench/build
   rm -rf apps/syscallbench/build
+  rm -rf apps/fpbench/build
 
   rm -rf libs/tinycc/bin
   rm -rf libs/tinycc/.yasos-build
@@ -288,6 +318,31 @@ tinycc_sources_newer_than()
     -path "$TINYCC_DIR/lib/fp/build" -prune -o \
     -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name 'Makefile' \) \
     -newer "$stamp_file" -print -quit | grep -q .
+}
+
+# Copy the four __aeabi_ runtimes into the rootfs.
+#
+# Called twice, and the early call is the load-bearing one: with
+# CONFIG_BUILD_USERSPACE_FP_SHARED the runtime is a *dependency* of libc.so
+# rather than something absorbed into it, and libc is the very first thing
+# stage 1 builds.  The cross compiler searches rootfs/usr/lib for it (see
+# YASOS_LIBPATHS below), so on a clean tree the link fails with
+# "library 'rp2350fp' not found" unless the .so is already sitting there.
+# Both the .so and the .a go in: the .a is what -mfp-lib=static links, which
+# apps/fpbench uses deliberately to price the dynamic path against.
+install_fp_libraries()
+{
+  local fplib
+  mkdir -p "$1"
+  for fplib in $SCRIPT_DIR/libs/tinycc/lib/fp/libsoftfp.{a,so} \
+               $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv4sp.{a,so} \
+               $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv5dp.{a,so} \
+               $SCRIPT_DIR/libs/tinycc/lib/fp/librp2350fp.{a,so}; do
+    if [ -f "$fplib" ]; then
+      cp "$fplib" "$1"
+      echo "Installed $(basename $fplib) to $1"
+    fi
+  done
 }
 
 build_cross_compiler()
@@ -550,49 +605,98 @@ build_c_compiler()
     fi
     mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
     cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
-    # Install FP libraries (shared .so for dynamic linking, .a for static)
-    for fplib in $SCRIPT_DIR/libs/tinycc/lib/fp/libsoftfp.{a,so} \
-                 $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv4sp.{a,so} \
-                 $SCRIPT_DIR/libs/tinycc/lib/fp/libvfpv5dp.{a,so} \
-                 $SCRIPT_DIR/libs/tinycc/lib/fp/librp2350fp.{a,so}; do
-      if [ -f "$fplib" ]; then
-        cp "$fplib" $PREFIX/lib/
-        echo "Installed $(basename $fplib) to $PREFIX/lib/"
-      fi
-    done
+    # Install FP libraries (shared .so for dynamic linking, .a for static).
+    # Also done right after the cross compiler is built, since libc needs them
+    # before this stage runs; repeated here so a rebuilt runtime reaches the
+    # rootfs even when only this stage ran.
+    install_fp_libraries "$PREFIX/lib"
     touch_stamp "$NATIVE_STAGE2_STAMP_FILE"
   fi
   cd ..
 }
 
+# GNU make, built from the autoconf tree in apps/make (a git submodule, so it
+# ships without a generated ./configure -- ./bootstrap pulls gnulib and runs
+# autoreconf, once).
+#
+# Two overrides go on every make command line.  Both come from maintMakefile,
+# which make's configure includes verbatim whenever it is present -- i.e. in
+# every git checkout, with no --disable switch to turn it off:
+#   MAKE_CFLAGS         -Wall -Wextra -Werror ... , a GCC-only warning set.
+#                       tcc reaches -Werror on warnings gcc does not emit
+#                       ("assignment discards qualifiers", src/ar.c:63), so the
+#                       build stops on the first object.
+#   MAKE_MAINTAINER_MODE  -DMAKE_MAINTAINER_MODE, which compiles make's internal
+#                       assertions in.  Not something to ship in the image.
+GNUMAKE_MAKE_ARGS="MAKE_CFLAGS= MAKE_MAINTAINER_MODE="
+
+# Per-image stack hint in the YaFF header (the loader reads module.stack_size).
+# make wants a deep stack: pattern_search alone builds a ~4.8 KB frame and then
+# alloca()s inside three of its loops, and it recurses through
+# try_implicit_rule.  It knows this -- main() raises RLIMIT_STACK to rlim_max at
+# startup -- but on yasos setrlimit only records the limit; the stack a process
+# runs on is fixed when exec() builds it, so the only lever that reaches make is
+# the header hint.  At the 32 KiB default it overflows (UsageFault STKOF, PSP ==
+# PSPLIM) on a Makefile as small as one rule with one prerequisite.
+GNUMAKE_STACK_SIZE=65536
+
 build_gnumake()
 {
   cd $1
+  if [ ! -x ./configure ]; then
+    # One-time, and the one step here that needs the network: bootstrap clones
+    # gnulib (~160 MB) into ./gnulib and runs autoreconf.  A submodule checkout
+    # ships no generated ./configure, so there is nothing to build until this
+    # has run once; it is skipped on every later build.
+    echo "Bootstrapping GNU make (clones gnulib, needs network + autoconf/automake)..."
+    ./bootstrap
+    if [ $? -ne 0 ]; then
+      echo "ERROR: apps/make/bootstrap failed -- GNU make cannot be built." >&2
+      echo "       It needs network access (to clone gnulib) plus autoconf," >&2
+      echo "       automake, autopoint and makeinfo on PATH." >&2
+      exit -1;
+    fi
+  fi
   if [ $CLEAR = true ]; then
-    make clean
+    make distclean 2>/dev/null || true
   fi
-  LDFLAGS="-Wl,-oformat=elf32-littlearm" CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" CC="$CC" ./configure --host=arm-none-eabi --prefix=$PREFIX
+  # configure is slow (~40 s) and its answers only depend on the compiler and
+  # the flags, so re-run it when the generated Makefile is missing or stale
+  # rather than on every rootfs build.
+  if [ ! -f Makefile ] || [ configure -nt Makefile ] || [ "$SCRIPT_DIR/build_rootfs.sh" -nt Makefile ]; then
+    CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" LDFLAGS="-stack-size=$GNUMAKE_STACK_SIZE" \
+      CC="$CC" ./configure --host=arm-none-eabi --prefix=$PREFIX
+    if [ $? -ne 0 ]; then
+      exit -1;
+    fi
+  fi
+  make -j8 $GNUMAKE_MAKE_ARGS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make
+  # Same objects, two links: make.elf is the copy host tools can read (nm,
+  # addr2line, objdump, and scripts/parse_yaff_syms.py's ELF oracle), while the
+  # default link emits the YaFF the loader wants.  Relinking is enough -- the
+  # earlier version of this reconfigured and rebuilt the whole tree twice.
+  mv make make.yaff
+  make $GNUMAKE_MAKE_ARGS LDFLAGS="-stack-size=$GNUMAKE_STACK_SIZE -Wl,-oformat=elf32-littlearm"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  cp make make.elf
-  CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" CC="$CC" ./configure --host=arm-none-eabi --prefix=$PREFIX
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
-  make
-  if [ $? -ne 0 ]; then
-    exit -1;
-  fi
+  mv make make.elf
+  mv make.yaff make
 
-  make install
+  # install-exec, not install: `make install` also drops doc/make.info* into
+  # the image -- 700 KB of texinfo on a 4.7 MB rootfs, with no reader on the
+  # device to open it.  The man page goes in because it is 12 KB and the rest
+  # of the image already carries one (zork installs its own); nothing on the
+  # device reads either yet.
+  make install-exec $GNUMAKE_MAKE_ARGS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
+  mkdir -p $PREFIX/share/man/man1
+  cp doc/make.1 $PREFIX/share/man/man1/
   cd ..
 }
 
@@ -640,6 +744,10 @@ build_zork_makefile()
 
 
 build_cross_compiler
+
+# The FP runtime has to be in the rootfs before anything links against it; see
+# install_fp_libraries().
+install_fp_libraries "$SCRIPT_DIR/rootfs/usr/lib"
 
 # ---- Stage 1: Build and install core libraries into rootfs ----
 # The cross-compiler (armv8m-tcc) is configured to look for headers in
@@ -724,6 +832,7 @@ build_makefile textvaders
 build_makefile hello_world
 build_makefile prun
 build_makefile hexdump
+build_makefile ccat
 build_makefile yaffdump
 build_makefile time
 build_makefile yasvi
@@ -734,7 +843,8 @@ build_makefile rzsz
 build_makefile sha
 build_makefile sdbench
 build_makefile syscallbench
-# build_gnumake make
+build_makefile fpbench
+build_gnumake make
 
 TOYBOX_EXTRA_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 if [ $? -ne 0 ]; then
@@ -869,4 +979,4 @@ fi
 # died half-way leaves the previous value and the next run still forces the
 # clean rebuild a mode change needs (see the FP_MODE block at the top).
 mkdir -p "$TINYCC_STAMP_DIR"
-echo "$FP_MODE" > "$FP_MODE_STAMP"
+echo "$FP_MODE_STAMP_VALUE" > "$FP_MODE_STAMP"

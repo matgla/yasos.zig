@@ -257,6 +257,19 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return error.NotSupported;
     }
 
+    /// littlefs keeps no timestamp of its own -- a date would have to be a
+    /// custom attribute written alongside every file (`lfs_setattr`), and
+    /// nothing in this tree mounts a littlefs volume yet. Refusing is the
+    /// honest answer: a `touch` told it worked, on a filesystem where the
+    /// timestamp never moves, misleads whatever asked.
+    pub fn utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = times;
+        _ = follow_links;
+        return error.NotSupported;
+    }
+
     pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
         _ = self;
         _ = target;

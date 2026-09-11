@@ -59,7 +59,7 @@ pub const DumpHardware = struct {
         }
     }
 
-    fn vselToMv(vsel: u8) u16 {
+    pub fn vselToMv(vsel: u8) u16 {
         // VSEL 0-15: 550 + 50*n mV (linear), above 15 non-linear
         const lut = [_]u16{
             550, 600, 650, 700, 750, 800, 850, 900, // 0-7

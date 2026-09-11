@@ -26,12 +26,15 @@ const UartFile = @import("uart_file.zig").UartFile;
 const kernel = @import("../../kernel.zig");
 
 const interface = @import("interface");
+const config = @import("config");
 
-/// Serial console line rate.
+/// Serial console line rate, from CONFIG_CONSOLE_BAUDRATE (menuconfig:
+/// Console). Boards may default it differently in their KConfig.
 ///
-/// Both ends have to agree, and the host end is set in three further places:
-/// `CONSOLE_BAUDRATE` in `scripts/remote_smoke_tui.py` (the runner and the
-/// remote scripts it generates) and in `tests/smoke/framework/session.py`. A
+/// Both ends have to agree, and the host end is set in two further places:
+/// the board's `console_baudrate` in `scripts/remote_smoke_tui.py` (the runner
+/// and the remote scripts it generates, which export it to the suite) and the
+/// `CONSOLE_BAUDRATE` fallback in `tests/smoke/framework/session.py`. A
 /// mismatch does not fail loudly, it just turns the console into garbage.
 ///
 /// 3 Mbaud is the PL011 ceiling here, not a round number picked for ambition:
@@ -57,7 +60,13 @@ const interface = @import("interface");
 /// too fast, the symptom is `ovr` climbing in /proc/uart with `max_overrun_gap_us`
 /// naming the critical section responsible; step down through 2000000,
 /// 1500000, 1000000 (all exact from 48 MHz).
-pub const console_baudrate = 3_000_000;
+///
+/// A config generated before CONFIG_CONSOLE_BAUDRATE existed has no `console`
+/// section; it gets the 3 Mbaud every board ran before the option was added.
+pub const console_baudrate: u32 = if (@hasDecl(config, "console"))
+    config.console.baudrate
+else
+    3_000_000;
 
 pub fn UartDriver(comptime UartType: anytype) type {
     const Internal = struct {

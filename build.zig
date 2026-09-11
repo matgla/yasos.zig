@@ -86,6 +86,17 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
 /// `source/fs/fatfs/fatfs.zig`'s `max_volumes`.
 const fat_volume_count: u5 = 4;
 
+/// `rootfs.img`'s modification time in seconds since the Unix epoch, or 0 when
+/// there is no image yet (a first build, or a tree that was cleaned). Zero
+/// means "no better idea than 1970", which is what the clock did before.
+fn rootfs_build_epoch(b: *std.Build) i64 {
+    const stat = std.Io.Dir.cwd().statFile(b.graph.io, "rootfs.img", .{}) catch return 0;
+    // `mtime` is an `Io.Timestamp`, whose nanoseconds are an i96 -- wide enough
+    // that the seconds always fit an i64 for any date this can hold.
+    const seconds: i64 = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_s));
+    return if (seconds > 0) seconds else 0;
+}
+
 pub fn build(b: *std.Build) !void {
     const test_filters = b.option([]const []const u8, "test-filter", "comma separated list of test name filters") orelse &[0][]const u8{};
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
@@ -130,6 +141,25 @@ pub fn build(b: *std.Build) !void {
 
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
+
+    // What the wall clock reads before anything sets it.
+    //
+    // There is no RTC on these boards, so the kernel's clock is the boot
+    // counter plus an offset -- and with no offset it starts at 1970, which is
+    // the date every file created before `settimeofday` then carries. The mount
+    // points are created at boot, so `/tmp` and `/root` were permanently dated
+    // 1970 no matter what the clock was set to afterwards.
+    //
+    // The image's own build time is a better zero: plausible, ordered before
+    // everything written since, and free. It is taken from `rootfs.img`'s mtime
+    // rather than from "now" deliberately -- "now" would change on every
+    // invocation and invalidate the build cache each time, where the image's
+    // timestamp only moves when the image does, which is exactly when the
+    // kernel is relinked anyway (it embeds the thing).
+    const build_info = b.addOptions();
+    build_info.addOption(i64, "default_epoch_seconds", rootfs_build_epoch(b));
+    const build_info_module = build_info.createModule();
+
     const kernel_module_for_tests = b.addModule("kernel_under_test", .{
         .root_source_file = b.path("source/kernel/kernel.zig"),
         .target = target,
@@ -245,6 +275,7 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("config/tests/config.zig"),
     });
     kernel_tests.root_module.addImport("config", test_config_module);
+    kernel_tests.root_module.addImport("build_info", build_info_module);
     fs_tests.root_module.addImport("config", test_config_module);
     arch_tests.root_module.addImport("config", test_config_module);
 
@@ -269,6 +300,7 @@ pub fn build(b: *std.Build) !void {
     // `kernel.perf` reads the instrumentation Kconfig and the CPU frequency, so
     // the module needs both imports even where profiling compiles out.
     kernel_module_for_tests.addImport("config", test_config_module);
+    kernel_module_for_tests.addImport("build_info", build_info_module);
     kernel_module_for_tests.addImport("hal", hal_for_tests);
     // fs_tests reaches `kernel.sync` (ramfs refcounts), which asks the arch
     // layer how wide a lock-free atomic is and how to mask interrupts.
@@ -323,6 +355,9 @@ pub fn build(b: *std.Build) !void {
     const zfat_host = b.dependency("modules/fatfs", .{
         .optimize = optimize,
         .mkfs = true,
+        // `f_utime`, which `FatFs.utimens` needs to stamp an entry. FatFs puts
+        // it behind the same switch as `f_chmod`.
+        .chmod = true,
         .relative_path_api = .enabled_with_getcwd,
         // More than one FAT volume. Costs a pointer per slot in FatFs's
         // `FatFs[]` and in zfat's `disks[]`; buys an SD rootfs and a flash
@@ -455,6 +490,7 @@ pub fn build(b: *std.Build) !void {
             stdlib_headers.addIncludePath(b.path("libs/libc"));
             cimports_module.addImport("c_headers", stdlib_headers.createModule());
 
+            kernel_module.addImport("build_info", build_info_module);
             kernel_module.addImport("libc_imports", libc_imports_module);
             kernel_module.addImport("c", cimports_module);
 
@@ -533,15 +569,19 @@ pub fn build(b: *std.Build) !void {
             littlefs_headers.addIncludePath(b.path("."));
             kernel_module.addImport("littlefs_headers", littlefs_headers.createModule());
 
-            const date_data = "2025-10-10";
-
-            var date: []const u8 = date_data[0..];
+            // No `static-rtc`: that would compile FatFs with FF_FS_NORTC and
+            // stamp every directory entry it ever writes with one fixed date,
+            // which is what made `make` on a FAT volume unable to tell a source
+            // from the object built out of it. The dynamic clock instead calls
+            // `get_fattime`, which `source/fs/fatfs/fatfs.zig` points at the
+            // kernel's wall clock at mount.
             const zfat = b.dependency("modules/fatfs", .{
                 .optimize = optimize,
                 .target = kernel_exec.root_module.resolved_target.?,
                 .@"no-libc" = true,
-                .@"static-rtc" = date[0..],
                 .mkfs = true,
+                // See the host dependency above: `f_utime` rides with chmod.
+                .chmod = true,
                 .relative_path_api = .enabled_with_getcwd,
                 .@"volume-count" = @as(u5, fat_volume_count),
             });

@@ -24,6 +24,12 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
   config CONFIG_BOARD
     def_string "mspc_v2"
 
+  # Without this every symbol under it (FLASH_MEMORY_*, CONFIG_FLASH_XIP_*) is
+  # invisible, and Kconfig silently drops the defconfig's values for them in
+  # favour of the defaults below.
+  config FIRMWARE_IN_FLASH
+    default y
+
   choice CHOICE_CPU
     default CPU_RP2350
   endchoice
@@ -44,6 +50,19 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
   config CONFIG_PSRAM_CS_PIN
     default 0
 
+  config CONFIG_CPU_CLOCK_FREQUENCY_MHZ
+    # Same clock pimoroni_pico_plus2 runs from its defconfig. The QMI divider
+    # is ceil(532/133) = 4, so flash and PSRAM SCK land on exactly 133 MHz,
+    # and crt.zig's requiredVregCode() puts the core at 1900 mV for it. Not
+    # yet measured on MSPC v2 -- drop back to 150 first on any instability.
+    default 532
+
+  config CONFIG_CONSOLE_BAUDRATE
+    # 115200 rather than the 3 Mbaud pimoroni_pico_plus2 runs: the board is
+    # being brought up and a slow, forgiving line takes the UART link out of
+    # the list of suspects. Raise it back once the board is known good.
+    default 115200
+
   # The QMI timing below is not optional: crt.zig reads
   # config.flash.xip_max_frequency_hz and external_memory.zig reads every
   # config.psram.* field unconditionally, and the generator emits a field only
@@ -58,9 +77,8 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
 
   config CONFIG_FLASH_XIP_MAX_FREQUENCY_HZ
     # The rating of the QSPI parts in this class (W25Q128JV: 133 MHz). SCK is
-    # clk_sys/N for an integer N = ceil(clk_sys/this), so at the 150 MHz
-    # default clk_sys it is 75 MHz and this ceiling is not reached at all; it
-    # only starts to matter if the board is overclocked.
+    # clk_sys/N for an integer N = ceil(clk_sys/this), so at the 532 MHz
+    # default clk_sys N is 4 and SCK sits exactly on this ceiling.
     default 133000000
 
   config CONFIG_FLASH_XIP_MAX_SELECT_US
@@ -75,7 +93,7 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
 
   config CONFIG_PSRAM_MAX_FREQUENCY_HZ
     # APS6404L-class ceiling. Same divider arithmetic as the flash above, so at
-    # 150 MHz clk_sys the PSRAM SCK is 75 MHz either way.
+    # 532 MHz clk_sys the PSRAM SCK is 133 MHz too.
     default 133000000
 
   config CONFIG_PSRAM_CE_MAX_LOW_US
@@ -103,8 +121,10 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
     default 90000000
 
   choice CONFIG_MMC_BUS_MODE
-    # mspc_v2.zig wires the card as 1-bit SPI on GP32/33/34 and does not read
-    # this symbol, so SDIO would be selectable but ignored.
+    # The slot is wired for both: CLK GP32, CMD GP33, DAT0..3 GP34..37 (DAT3
+    # doubles as the SPI chip select). SPI stays the default; SDIO (4-bit, PIO)
+    # is selectable. Only DAT1/DAT2 have board pull-ups, CMD/DAT0/DAT3 rely on
+    # the RP2350's internal ones, which the SDIO driver enables.
     default CONFIG_MMC_BUS_MODE_SPI
   endchoice
 

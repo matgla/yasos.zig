@@ -116,6 +116,39 @@ config CONFIG_PROCESS_MAX_PID_VALUE
 
 endmenu
 
+menu "Console"
+
+config CONFIG_CONSOLE_BAUDRATE
+  int "Serial console baud rate"
+  default 3000000
+  range 9600 3000000
+  help
+    Line rate of the serial console (uart0). The host has to be listening at
+    the same rate: scripts/remote_smoke_tui.py takes it from the board profile
+    and exports it to the smoke suite as YASOS_SMOKE_CONSOLE_BAUDRATE. A
+    mismatch does not fail loudly, it just turns the console into garbage.
+
+    3000000 is the RP2350 PL011 ceiling (48 MHz clk_peri / 16) and is exact.
+    Other rates exact from 48 MHz: 2000000, 1500000, 1000000. 115200 carries
+    about 0.08% error, well inside what any UART tolerates. Drop it when the
+    link itself is a suspect.
+
+config CONFIG_CONSOLE_ONLCR
+  bool "Translate NL to CRLF on console output (ONLCR)"
+  default y
+  help
+    Boot-time default of the console tty's ONLCR flag: every "\n" a program
+    writes goes out as "\r\n", as on a Linux tty. Without it a terminal that
+    takes bytes literally (minicom, screen, picocom without --imap) walks each
+    line down a staircase unless told to add the CR itself.
+
+    Only the default: programs still switch it with termios (stty -onlcr,
+    cfmakeraw), and raw mode (c_oflag == 0) never translates, so zmodem and
+    curses are unaffected either way. Say N only for a host that already
+    maps LF to CRLF and would otherwise see blank lines.
+
+endmenu
+
 menu "Logging & Instrumentation"
   config CONFIG_INSTRUMENTATION_ENABLE_MEMORY_LEAK_DETECTION
     prompt "Enable leak detection"

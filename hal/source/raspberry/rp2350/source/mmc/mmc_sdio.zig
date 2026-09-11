@@ -76,6 +76,9 @@ pub const MmcSdio = struct {
     }
 
     pub fn init(self: *MmcSdio) !void {
+        // The C driver has no pins of its own; it drives the board's.
+        const pins = self._config.pins;
+        sdio.rp2350_sdio_set_pins(@intCast(pins.clk), @intCast(pins.cmd), @intCast(pins.d0));
         self.apply_timing_profile(.init_300khz);
         self._initialized = true;
         log.info("SDIO interface initialized (init speed)", .{});

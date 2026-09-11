@@ -15,11 +15,14 @@
 #     scripts/rig_shot.sh rig_gdb          # reset, run a command, attach gdb
 #     scripts/rig_shot.sh rig_full         # both, in one take
 #     scripts/rig_shot.sh rig_dry          # the typist alone -- touches nothing
+#     scripts/rig_shot.sh crosstcc         # the cross compiler compiling tcc
 #
 # A rig take refuses to start while anything on the Pi already holds the board
 # (`pgrep` for pytest/openocd/gdb) -- manual runs take no flock, so this is the
-# only guard there is.  `rig_dry` skips that check because it never gets near
-# the board.
+# only guard there is.  Only `rig_dry` skips that check, because it is the one
+# take that touches nothing.  `crosstcc` used to skip it too, on the grounds
+# that it was a build on this desk; that stopped being true on 2026-09-08, when
+# it grew a `--connect` leg and started compiling a test on the board.
 #
 # NEVER interrupt a take that is mid-flash: OpenOCD holds the probe, and
 # killing it there is how the board ends up wedged.  Let it finish or let it
@@ -27,7 +30,11 @@
 
 set -euo pipefail
 
-TAKES=${YASOS_TAKES:-/run/media/mateusz/11B5C54B386D163A/Youtube/tinycc_closing_gap_to_gcc/tinycc-closing-gap-to-tcc-7/tinycc-closing-gap-to-tcc/recordings}
+# The drive root moved when the episode was split in two: one folder per
+# part, each with its own recordings/ (README-split.md there). The old
+# default pointed inside the pre-split tree, now _archive-2026-09-03.
+PART=${YASOS_PART:-part1-becoming-a-compiler}
+TAKES=${YASOS_TAKES:-/shared/data/Youtube/tinycc_closing_gap_to_gcc/$PART/recordings}
 SHOT=${1:?usage: rig_shot.sh <rig_flash|rig_gdb|rig_full|rig_dry> [demo_shot.py options]}
 shift || true
 
@@ -42,13 +49,27 @@ fi
 stamp=$(date +%Y%m%d-%H%M%S)
 name="$SHOT-$stamp"
 mkdir -p "$TAKES" 2>/dev/null || TAKES=$(mktemp -d)
+# The keylog is a working file, not a take: it goes in the hidden folder the
+# recorder keeps its own sidecars in (record-typist-demo.sh, $SIDEDIR) so that
+# a recordings directory lists takes and nothing else.
+SIDE=${YASOS_SIDEDIR:-$TAKES/.sidecars}
+mkdir -p "$SIDE"
 
 # --cwd so the prompt on camera is the repository, wherever this was invoked
 # from, and so the take's own `./scripts/...` lines are the ones a viewer could
 # retype.
+# The click track: the typist logs when each key was struck and
+# utilities/keyclack.py (video repo) synthesises a keyboard from it afterwards.
+# Nothing is played during the take -- the stage has no audio sink. Set
+# YASOS_KEYLOG to have the log land where the recorder's mux looks for it.
 status=0
 python3 "$here/demo_shot.py" "$SHOT" --cwd "$repo" \
-    --transcript "$TAKES/$name.raw" --report "$TAKES/$name.txt" "$@" || status=$?
+    --transcript "$TAKES/$name.raw" --report "$TAKES/$name.txt" \
+    --keylog "$SIDE/$name.keys" "$@" || status=$?
+
+if [ -n "${YASOS_KEYLOG:-}" ] && [ -s "$SIDE/$name.keys" ]; then
+    cp -f "$SIDE/$name.keys" "$YASOS_KEYLOG"
+fi
 
 echo "transcript: $TAKES/$name.raw" >&2
 exit $status

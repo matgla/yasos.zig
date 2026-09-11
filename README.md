@@ -50,7 +50,14 @@ To create rootfs image use:
 ```
 
 # Flashing
-After successful building of kernel and rootfs.img flashing can be done using openocd scripts
+After successful building of kernel and rootfs.img, flash the locally attached board with:
+```
+scripts/flash.sh                # rootfs.img + kernel
+scripts/flash.sh --kernel-only  # kernel only, rootfs left as it is
+```
+It runs `openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg` with the program commands, and on failure rescues the debug port and retries at lower adapter speeds; see `scripts/flash.sh --help` for the rest of the options (`--interface`/`--target` pick other configs).
+
+The plain openocd scripts still work too.
 
 Kernel only:
 ```

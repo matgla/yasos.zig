@@ -65,7 +65,19 @@ const path_scratch_bytes = 4 * 128;
 
 fn resolve_into(buffer: []u8, path: []const u8) ![]const u8 {
     var scratch = std.heap.FixedBufferAllocator.init(buffer);
-    return std.fs.path.resolve(scratch.allocator(), &.{path});
+    const resolved = try std.fs.path.resolve(scratch.allocator(), &.{path});
+    // `resolve` answers "." for anything that reduces to nothing -- the empty
+    // string, ".", "./" -- because it is written for a caller that has a
+    // working directory. This one does not: a path arrives here already
+    // relative to this mount, so "nothing left" means this filesystem's root.
+    //
+    // The empty string is not a corner case, it is what the VFS passes when the
+    // path *is* the mount point: `stat("/tmp")` reaches RamFs as `stat("")`.
+    // Left as ".", it became a lookup for an entry named "." in the root, which
+    // does not exist -- so /tmp could not be stat'd at all, and `ls -la /`
+    // printed a row of question marks in its place.
+    if (resolved.len == 0 or std.mem.eql(u8, resolved, ".")) return "/";
+    return resolved;
 }
 
 pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
@@ -249,15 +261,44 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         initialize_stat_identity(data, path);
         // Borrowed, because `rm` stats before it unlinks: a stat that allocates
         // makes a full /tmp unremovable even though the unlink itself would have
-        // worked. Nothing here needs a handle — only the file type is read.
-        const node = try self.borrow_node(path);
+        // worked. Nothing here needs a handle — the node is only read.
+        var node = try self.borrow_node(path);
         data.st_mode = switch (node.filetype()) {
             .File => c.S_IFREG,
             .Directory => c.S_IFDIR,
             .SymbolicLink => c.S_IFLNK,
             else => return,
         };
+        data.st_blksize = 1;
+        if (node.as_file()) |file| {
+            var handle = file;
+            const body = handle.as(RamFsFile).data()._data;
+            data.st_size = @intCast(body.len());
+            // The body's own number, not the path hash the identity default
+            // uses: two names for one body are one file, and `cp`, `mv` and
+            // `find` all decide that from dev/ino.
+            data.st_ino = body.inode;
+            body.times.write_into(data);
+        } else if (node.as_directory()) |directory| {
+            var handle = directory;
+            handle.as(RamFsDirectory).data().times().write_into(data);
+        }
         return;
+    }
+
+    pub fn utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_symlinks: bool) anyerror!void {
+        _ = follow_symlinks;
+        // Borrowed for the same reason `stat` borrows: `touch` on a full /tmp
+        // has to keep working, and it changes no allocation of its own.
+        var node = try self.borrow_node(path);
+        const current = kernel.time.now_timespec();
+        if (node.as_file()) |file| {
+            var handle = file;
+            handle.as(RamFsFile).data()._data.times.apply(times, current);
+        } else if (node.as_directory()) |directory| {
+            var handle = directory;
+            handle.as(RamFsDirectory).data().times().apply(times, current);
+        }
     }
 
     pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
@@ -858,6 +899,206 @@ test "RamFs.StatShouldWork" {
     try sut.interface.create("/test/file.txt", 0);
     try sut.interface.stat("/test/file.txt", &stat_data, true);
     try std.testing.expectEqual(c.S_IFREG, @as(c_int, @intCast(stat_data.st_mode)));
+}
+
+/// Pin the wall clock at `unix_seconds` for the duration of a test.
+///
+/// The stub's monotonic clock does not run unless a test moves it, so this
+/// holds until the next call: "time passes" in these tests means calling it
+/// again with a later value.
+fn set_test_clock(unix_seconds: u64) void {
+    kernel.time.set_realtime_us(unix_seconds * 1_000_000);
+}
+
+test "RamFs.StatReportsWhenAFileWasCreated" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    const created_at: u64 = 1_000_000_000; // 2001-09-09T01:46:40Z
+    set_test_clock(created_at);
+    try sut.interface.create("/file.txt", 0);
+
+    var info: c.struct_stat = undefined;
+    try sut.interface.stat("/file.txt", &info, true);
+    try std.testing.expectEqual(@as(i64, created_at), @as(i64, @intCast(info.st_mtim.tv_sec)));
+    try std.testing.expectEqual(@as(i64, created_at), @as(i64, @intCast(info.st_atim.tv_sec)));
+    try std.testing.expectEqual(@as(i64, created_at), @as(i64, @intCast(info.st_ctim.tv_sec)));
+}
+
+test "RamFs.StatReportsTheFileSize" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try sut.interface.create("/file.txt", 0);
+    var maybe_node = try sut.interface.get("/file.txt");
+    defer maybe_node.delete();
+    var file = maybe_node.as_file().?;
+    _ = file.interface.write("0123456789");
+
+    var info: c.struct_stat = undefined;
+    try sut.interface.stat("/file.txt", &info, true);
+    try std.testing.expectEqual(@as(usize, 10), @as(usize, @intCast(info.st_size)));
+}
+
+test "RamFs.WritingMovesTheModificationTimeAndLeavesTheAccessTime" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    const created_at: u64 = 1_000_000_000;
+    set_test_clock(created_at);
+    try sut.interface.create("/file.txt", 0);
+
+    const written_at: u64 = created_at + 3600;
+    set_test_clock(written_at);
+    var maybe_node = try sut.interface.get("/file.txt");
+    defer maybe_node.delete();
+    var file = maybe_node.as_file().?;
+    _ = file.interface.write("payload");
+
+    var info: c.struct_stat = undefined;
+    try sut.interface.stat("/file.txt", &info, true);
+    // This is the whole point of the exercise: the modification time moved,
+    // which is what lets anything comparing dates see the file as new.
+    try std.testing.expectEqual(@as(i64, written_at), @as(i64, @intCast(info.st_mtim.tv_sec)));
+    try std.testing.expectEqual(@as(i64, written_at), @as(i64, @intCast(info.st_ctim.tv_sec)));
+    // Writing is not reading, so the access time stayed where it was.
+    try std.testing.expectEqual(@as(i64, created_at), @as(i64, @intCast(info.st_atim.tv_sec)));
+
+    // And reading moves that one, and only that one.
+    const read_at: u64 = written_at + 60;
+    set_test_clock(read_at);
+    var buffer: [16]u8 = undefined;
+    _ = file.interface.seek(0, c.SEEK_SET) catch unreachable;
+    _ = file.interface.read(buffer[0..]);
+    try sut.interface.stat("/file.txt", &info, true);
+    try std.testing.expectEqual(@as(i64, read_at), @as(i64, @intCast(info.st_atim.tv_sec)));
+    try std.testing.expectEqual(@as(i64, written_at), @as(i64, @intCast(info.st_mtim.tv_sec)));
+}
+
+test "RamFs.UtimensSetsWhatItIsGivenAndOmitsTheRest" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    set_test_clock(1_000_000_000);
+    try sut.interface.create("/file.txt", 0);
+
+    const stamped_at: u64 = 1_500_000_000;
+    set_test_clock(stamped_at);
+    try sut.interface.utimens("/file.txt", .{
+        .accessed = null, // UTIME_OMIT, once the syscall layer has resolved it
+        .modified = .{ .tv_sec = 1_234_567_890, .tv_nsec = 500 },
+    }, true);
+
+    var info: c.struct_stat = undefined;
+    try sut.interface.stat("/file.txt", &info, true);
+    try std.testing.expectEqual(@as(i64, 1_234_567_890), @as(i64, @intCast(info.st_mtim.tv_sec)));
+    try std.testing.expectEqual(@as(i64, 500), @as(i64, @intCast(info.st_mtim.tv_nsec)));
+    // Omitted, so untouched.
+    try std.testing.expectEqual(@as(i64, 1_000_000_000), @as(i64, @intCast(info.st_atim.tv_sec)));
+    // The metadata did change, whichever halves were asked for.
+    try std.testing.expectEqual(@as(i64, stamped_at), @as(i64, @intCast(info.st_ctim.tv_sec)));
+}
+
+test "RamFs.UtimensWorksOnADirectoryToo" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    set_test_clock(1_000_000_000);
+    try sut.interface.mkdir("/dir", 0);
+
+    try sut.interface.utimens("/dir", .{
+        .accessed = .{ .tv_sec = 111, .tv_nsec = 0 },
+        .modified = .{ .tv_sec = 222, .tv_nsec = 0 },
+    }, true);
+
+    var info: c.struct_stat = undefined;
+    try sut.interface.stat("/dir", &info, true);
+    try std.testing.expectEqual(@as(i64, 111), @as(i64, @intCast(info.st_atim.tv_sec)));
+    try std.testing.expectEqual(@as(i64, 222), @as(i64, @intCast(info.st_mtim.tv_sec)));
+}
+
+test "RamFs.AddingAnEntryMovesTheDirectoryTimestamp" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    set_test_clock(1_000_000_000);
+    try sut.interface.mkdir("/dir", 0);
+    var before: c.struct_stat = undefined;
+    try sut.interface.stat("/dir", &before, true);
+
+    set_test_clock(1_000_003_600);
+    try sut.interface.create("/dir/file.txt", 0);
+    var after: c.struct_stat = undefined;
+    try sut.interface.stat("/dir", &after, true);
+
+    try std.testing.expect(after.st_mtim.tv_sec > before.st_mtim.tv_sec);
+}
+
+test "RamFs.StatsItsOwnRootUnderEverySpellingOfIt" {
+    // What the VFS hands a mount when the path *is* the mount point: it strips
+    // the prefix and passes the remainder, which for `/tmp` itself is the empty
+    // string. Getting this wrong is not subtle -- `ls -la /` renders the failed
+    // stat as a row of question marks where /tmp should be.
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    for ([_][]const u8{ "", "/", "." }) |spelling| {
+        var info: c.struct_stat = undefined;
+        sut.interface.stat(spelling, &info, true) catch |err| {
+            std.debug.print("stat({s}) failed: {s}\n", .{ spelling, @errorName(err) });
+            return err;
+        };
+        try std.testing.expectEqual(c.S_IFDIR, @as(c_int, @intCast(info.st_mode)));
+    }
+}
+
+test "RamFs.HardLinksShareOneInodeAndOneSetOfTimestamps" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    set_test_clock(1_000_000_000);
+    try sut.interface.create("/original.txt", 0);
+    try sut.interface.link("/original.txt", "/hardlink.txt");
+
+    var original: c.struct_stat = undefined;
+    var linked: c.struct_stat = undefined;
+    try sut.interface.stat("/original.txt", &original, true);
+    try sut.interface.stat("/hardlink.txt", &linked, true);
+    try std.testing.expectEqual(original.st_ino, linked.st_ino);
+
+    // And a different file is a different inode, which is the half that was
+    // broken while every body was handed the number 1.
+    try sut.interface.create("/other.txt", 0);
+    var other: c.struct_stat = undefined;
+    try sut.interface.stat("/other.txt", &other, true);
+    try std.testing.expect(other.st_ino != original.st_ino);
+
+    // One body, one set of timestamps: touching either name moves both.
+    try sut.interface.utimens("/hardlink.txt", .{
+        .accessed = null,
+        .modified = .{ .tv_sec = 1_234_567_890, .tv_nsec = 0 },
+    }, true);
+    try sut.interface.stat("/original.txt", &original, true);
+    try std.testing.expectEqual(@as(i64, 1_234_567_890), @as(i64, @intCast(original.st_mtim.tv_sec)));
+}
+
+test "RamFs.UtimensOnAMissingPathFails" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try std.testing.expectError(
+        kernel.errno.ErrnoSet.NoEntry,
+        sut.interface.utimens("/nonexisting", .{ .accessed = null, .modified = null }, true),
+    );
 }
 
 test "RamFs.AccessShouldWork" {

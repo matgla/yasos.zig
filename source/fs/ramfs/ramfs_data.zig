@@ -39,7 +39,18 @@ pub const RamFsDataError = error{
     FileNameTooLong,
 };
 
-var inode_counter: u32 = 1;
+/// Hands out `RamFsData.inode`. Atomic because nothing serialises two cores
+/// creating a file at once, and two bodies sharing an inode number is exactly
+/// what `st_ino` promises cannot happen -- `cp a b` reads a matching dev/ino
+/// pair as "these are the same file" and refuses.
+var inode_counter: kernel.sync.Atomic(u32) = .init(1);
+
+/// The next inode number. Skips 0, which `initialize_stat_identity` and the
+/// rest of this tree treat as "no inode".
+fn next_inode() u32 {
+    const claimed = inode_counter.fetchAdd(1, .monotonic);
+    return if (claimed == 0) inode_counter.fetchAdd(1, .monotonic) else claimed;
+}
 
 /// Bytes written per call while padding a spilled body out to a new length.
 const pad_chunk = 64;
@@ -69,6 +80,11 @@ pub const RamFsData = struct {
     tier: ?*Tier,
     refcounter: *i16,
     inode: u32,
+    /// The body's timestamps, and the body is the right place for them: hard
+    /// links share one of these, and POSIX puts timestamps on the inode rather
+    /// than on the name. A spill does not touch them -- the bytes moved house,
+    /// the file did not change.
+    times: kernel.fs.FileTimes,
 
     pub fn create(allocator: std.mem.Allocator) !RamFsData {
         return create_tiered(allocator, null);
@@ -80,7 +96,8 @@ pub const RamFsData = struct {
             .storage = .{ .ram = try std.ArrayListAligned(u8, .@"8").initCapacity(allocator, 0) },
             .tier = tier,
             .refcounter = try allocator.create(i16),
-            .inode = inode_counter,
+            .inode = next_inode(),
+            .times = kernel.fs.FileTimes.create(kernel.time.now_timespec()),
         };
         refcount.init(obj.refcounter);
         return obj;
@@ -130,6 +147,7 @@ pub const RamFsData = struct {
         if (count == 0) {
             return 0;
         }
+        self.times.record_read(kernel.time.now_timespec());
         switch (self.storage) {
             .ram => |*list| {
                 @memcpy(buffer[0..count], list.items[position .. position + count]);
@@ -154,6 +172,7 @@ pub const RamFsData = struct {
         if (bytes.len == 0) {
             return 0;
         }
+        self.times.record_write(kernel.time.now_timespec());
         if (self.is_in_memory()) {
             if (self.tier) |tier| {
                 const end = position + bytes.len;
@@ -182,6 +201,10 @@ pub const RamFsData = struct {
 
     /// Grow (padding with `fill`) or shrink the body to `length`.
     pub fn resize(self: *RamFsData, length: usize, fill: u8) !void {
+        // A truncate is a write even when it removes bytes -- `> file` is how
+        // most of userspace empties one, and a `make` target emptied but not
+        // restamped is a target that never rebuilds.
+        self.times.record_write(kernel.time.now_timespec());
         if (self.is_in_memory()) {
             if (self.tier) |tier| {
                 const grows = length > self.storage.ram.items.len;

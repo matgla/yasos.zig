@@ -19,6 +19,7 @@ comptime {
     _ = @import("errno_converter.zig");
     _ = @import("fatfs_directory.zig");
     _ = @import("fatfs.zig");
+    _ = @import("fat_time.zig");
     _ = @import("fatfs_file.zig");
 }
 

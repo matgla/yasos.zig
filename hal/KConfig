@@ -77,6 +77,36 @@ config CONFIG_BUILD_USERSPACE_FP_MFPU
       names silicon: "rp2350" (FPv5-SP + DCP) or "fpv5-sp-d16" (FPv5-SP only,
       e.g. the QEMU Cortex-M33 models, which have no CP4).
 
+config CONFIG_BUILD_USERSPACE_FP_SHARED
+    bool "One shared floating point runtime for the whole rootfs"
+    default y
+    help
+      Bind the __aeabi_* floating point runtime as a shared library
+      (/usr/lib/librp2350fp.so, libsoftfp.so, ...) instead of copying it out of
+      an archive into every module that uses it.
+
+      Without this, each shared object and each program links its own copy: at
+      the time this option was added libc.so, libm.so, libncurses.so and every
+      binary that touched a double each carried a private set, and libc.so's
+      copy won every lookup anyway -- the loader resolves an import by walking
+      the image's dependencies in order, so the -mfpu a program was built with
+      decided nothing once it went through libc. One shared copy makes the
+      choice per-image again, and is what lets a single rootfs hold programs
+      built for soft float, for the hardware runtime behind a call, and for
+      inline hardware, side by side.
+
+      The cost is real and worth knowing before turning it on: an __aeabi_ call
+      that used to be a local `bl` becomes a cross-module call through the GOT,
+      with the R9 save/restore that goes with it. Operations the backend inlines
+      (on RP2350: float add/sub/mul/div, double add/sub/compare) are untouched,
+      because they never became a call in the first place -- it is the remaining
+      library operations, double multiply and divide most of all, that pay.
+
+      Implemented as the tcc toolchain default (-mfp-lib=shared) rather than as
+      per-Makefile flags, for the same reason as the -mfpu default above: half
+      the Makefiles in this tree thread no flags of their own, and none thread
+      link flags.
+
 
 endmenu
 

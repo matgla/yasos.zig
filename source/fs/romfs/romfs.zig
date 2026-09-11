@@ -47,6 +47,22 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     root: FileSystemHeader,
     allocator: std.mem.Allocator,
     device_file: IFile,
+    /// When this image was mounted, on the *monotonic* clock.
+    ///
+    /// romfs has no timestamp field -- not per entry, not in the volume header
+    /// -- so there is nothing in the image to read a date out of, and the
+    /// contents cannot change while it is mounted anyway. Mount time is the
+    /// honest answer to "how old is this": it puts the whole rootfs before
+    /// anything written after boot, which is the ordering an on-device build
+    /// depends on, and it claims no precision the format does not have.
+    ///
+    /// Kept as an uptime rather than as a wall-clock instant because the mount
+    /// happens long before anything sets the clock. Stamped at mount, every
+    /// file in the rootfs would read 1970 forever, even after the board learned
+    /// the date; re-dated per `stat` against the current offset, it reads as a
+    /// real instant a few seconds into this boot, and still sorts before every
+    /// file written since.
+    mount_uptime_us: u64,
 
     pub fn name(self: *const Self) []const u8 {
         _ = self;
@@ -65,6 +81,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             .root = fs,
             .allocator = allocator,
             .device_file = device_file,
+            .mount_uptime_us = kernel.time.uptime_us(),
         });
     }
 
@@ -92,7 +109,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         var node = try self.get_file_header(path, follow_symlinks);
         defer node.deinit();
-        node.stat(data);
+        node.stat(data, kernel.time.timespec_of_uptime_us(self.mount_uptime_us));
     }
 
     pub fn supports_symlinks(self: *const Self) bool {
@@ -341,6 +358,59 @@ test "RomFs.ShouldStatFile" {
 
     try std.testing.expectEqual(@as(c_uint, c.S_IFREG), stat_buf.st_mode);
     try std.testing.expectEqual(34, stat_buf.st_size);
+}
+
+test "RomFs.StatDatesEveryEntryFromWhenTheImageWasMounted" {
+    // The format has no timestamp field, so the whole image reports one date:
+    // the instant it was mounted, re-dated against the clock as it stands when
+    // the stat is asked (RomFs.mount_uptime_us). The stub's monotonic clock
+    // does not run on its own, so mount and stat share an uptime here and the
+    // date is exactly the one set below.
+    kernel.time.set_realtime_us(1_000_000_000 * 1_000_000);
+
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+
+    var file_stat: c.struct_stat = undefined;
+    try ifs.interface.stat("/file.txt", &file_stat, true);
+    try std.testing.expectEqual(@as(i64, 1_000_000_000), @as(i64, @intCast(file_stat.st_mtim.tv_sec)));
+    try std.testing.expectEqual(file_stat.st_mtim.tv_sec, file_stat.st_atim.tv_sec);
+    try std.testing.expectEqual(file_stat.st_mtim.tv_sec, file_stat.st_ctim.tv_sec);
+
+    // Directories carry it too, and so does an entry reached through a walk.
+    var dir_stat: c.struct_stat = undefined;
+    try ifs.interface.stat("/subdir/dir/test.txt", &dir_stat, true);
+    try std.testing.expectEqual(file_stat.st_mtim.tv_sec, dir_stat.st_mtim.tv_sec);
+}
+
+test "RomFs.ReadlinkReturnsTheTargetAndNothingElse" {
+    // What `ls -l` prints after the arrow, and what its size field has to
+    // agree with: toybox sizes the buffer it reads a link into from st_size, so
+    // a `readlink` that writes more bytes than `stat` reported leaves the
+    // string unterminated and `ls` prints whatever follows it in memory.
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+
+    var info: c.struct_stat = undefined;
+    try ifs.interface.stat("/subdir/other_dir/dir", &info, false);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFLNK), info.st_mode);
+
+    var buffer: [64]u8 = undefined;
+    const written = try ifs.interface.readlink("/subdir/other_dir/dir", buffer[0..]);
+    try std.testing.expectEqual(@as(usize, @intCast(info.st_size)), written);
+}
+
+test "RomFs.RefusesToSetTimestamps" {
+    // Not "accepts and ignores": a `touch` reported as having worked, on a
+    // filesystem whose timestamps cannot move, leaves `make` believing a
+    // prerequisite is newer than it is.
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+
+    try std.testing.expectError(
+        kernel.errno.ErrnoSet.ReadOnlyFileSystem,
+        ifs.interface.utimens("/file.txt", .{ .accessed = null, .modified = null }, true),
+    );
 }
 
 test "RomFs.ShouldStatDirectory" {

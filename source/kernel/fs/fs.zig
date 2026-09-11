@@ -27,6 +27,8 @@ pub const get_ivfs = @import("vfs.zig").get_ivfs;
 pub const ReadOnlyFileSystem = @import("ifilesystem.zig").ReadOnlyFileSystem;
 pub const IDirectoryIterator = @import("idirectory.zig").IDirectoryIterator;
 pub const IFileSystem = @import("ifilesystem.zig").IFileSystem;
+pub const TimeStamps = @import("ifilesystem.zig").TimeStamps;
+pub const FileTimes = @import("ifilesystem.zig").FileTimes;
 
 pub const FileMemoryMapAttributes = @import("ifile.zig").FileMemoryMapAttributes;
 pub const FileName = @import("ifile.zig").FileName;

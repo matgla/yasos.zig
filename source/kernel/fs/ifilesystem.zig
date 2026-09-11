@@ -28,6 +28,67 @@ const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
 
+/// The two timestamps `utimens` can set. Null means "leave this one alone" --
+/// `utimensat`'s UTIME_OMIT, already resolved by the syscall layer, along with
+/// UTIME_NOW, so a filesystem never has to know those sentinels exist.
+///
+/// There is no `changed` field: POSIX gives no way to set st_ctime, and every
+/// filesystem here stamps it with the current time as a side effect of the
+/// metadata change `utimens` itself is.
+pub const TimeStamps = struct {
+    accessed: ?c.struct_timespec,
+    modified: ?c.struct_timespec,
+
+    /// Both timestamps set to `now`, which is what `touch` without a `-t`/`-r`
+    /// asks for and what a filesystem uses when it creates a file.
+    pub fn now(current: c.struct_timespec) TimeStamps {
+        return .{ .accessed = current, .modified = current };
+    }
+};
+
+/// The three timestamps a filesystem keeps for one file, in the storage form:
+/// concrete values, where `TimeStamps` above is the request form with holes in
+/// it. A filesystem that can hold timestamps at all owns one of these per
+/// inode, and `write_into` is how it answers a `stat`.
+pub const FileTimes = struct {
+    accessed: c.struct_timespec,
+    modified: c.struct_timespec,
+    /// Last metadata change. Not settable by `utimens` -- POSIX has no way to
+    /// ask for a particular ctime -- so it always says "when the change was".
+    changed: c.struct_timespec,
+
+    /// A file that has just come into existence: all three the same instant.
+    pub fn create(current: c.struct_timespec) FileTimes {
+        return .{ .accessed = current, .modified = current, .changed = current };
+    }
+
+    /// A write happened. Modification and change move; access does not, because
+    /// writing is not reading.
+    pub fn record_write(self: *FileTimes, current: c.struct_timespec) void {
+        self.modified = current;
+        self.changed = current;
+    }
+
+    /// A read happened.
+    pub fn record_read(self: *FileTimes, current: c.struct_timespec) void {
+        self.accessed = current;
+    }
+
+    /// Apply a `utimens` request. Whichever halves the caller left out stay as
+    /// they were; `changed` moves either way, because the metadata did change.
+    pub fn apply(self: *FileTimes, times: TimeStamps, current: c.struct_timespec) void {
+        if (times.accessed) |accessed| self.accessed = accessed;
+        if (times.modified) |modified| self.modified = modified;
+        self.changed = current;
+    }
+
+    pub fn write_into(self: *const FileTimes, data: *c.struct_stat) void {
+        data.st_atim = self.accessed;
+        data.st_mtim = self.modified;
+        data.st_ctim = self.changed;
+    }
+};
+
 pub const IFileSystem = interface.ConstructInterface(struct {
     pub const Self = @This();
 
@@ -77,6 +138,17 @@ pub const IFileSystem = interface.ConstructInterface(struct {
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         return interface.VirtualCall(self, "stat", .{ path, data, follow_links }, anyerror!void);
+    }
+
+    /// Set a path's access and/or modification timestamps.
+    ///
+    /// Filesystems with nowhere to keep a timestamp return
+    /// `ReadOnlyFileSystem` (romfs) or `NotSupported`; `touch` on such a path
+    /// is expected to fail rather than silently do nothing, because a `make`
+    /// that believes a timestamp moved when it did not is worse than one told
+    /// it cannot move.
+    pub fn utimens(self: *Self, path: []const u8, times: TimeStamps, follow_links: bool) anyerror!void {
+        return interface.VirtualCall(self, "utimens", .{ path, times, follow_links }, anyerror!void);
     }
 
     // Read a symbolic link's target into `buffer`, returning the number of bytes
@@ -152,6 +224,14 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     pub fn format(self: *Self) anyerror!void {
         _ = self;
         return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem cannot be formatted
+    }
+
+    pub fn utimens(self: *Self, path: []const u8, times: TimeStamps, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = times;
+        _ = follow_links;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // nowhere to write a timestamp
     }
 
     pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {

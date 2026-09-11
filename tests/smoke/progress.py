@@ -179,7 +179,10 @@ class RunningTestAnnouncer:
         # instead, so leave that output alone.
         if writer is None or not isinstance(prefix, str) or not prefix:
             return
-        # The prefix pytest wrote already ends with a space.
-        writer.write(f"RUNNING {format_duration(elapsed)}")
+        # The prefix pytest wrote already ends with a space.  cyan marks it
+        # apart from the green/red result words it sits between; the markup is
+        # a no-op unless pytest was given --color=yes (the remote runner passes
+        # it whenever its own colour is on).
+        writer.write(f"RUNNING {format_duration(elapsed)}", cyan=True)
         writer.line()
         writer.write(prefix, flush=True)

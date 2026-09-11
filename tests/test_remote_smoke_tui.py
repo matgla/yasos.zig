@@ -473,3 +473,79 @@ def test_remote_connect_script_survives_bash():
     assert completed.returncode == 0, completed.stderr
     assert "REACHED" in completed.stdout
     assert "command not found" not in completed.stderr
+
+
+@pytest.fixture
+def colour_off():
+    """Leave the module's colour flag as it was; every test here sets it."""
+    previous = remote_smoke_tui.colour_enabled()
+    yield
+    remote_smoke_tui.set_colour_mode("always" if previous else "never")
+
+
+def test_colour_mode_never_leaves_every_line_untouched(colour_off):
+    remote_smoke_tui.set_colour_mode("never")
+    assert remote_smoke_tui._step("[1/4] Building") == "[1/4] Building"
+    assert remote_smoke_tui.highlight_remote_line("ERROR: nope\n") == "ERROR: nope\n"
+    assert remote_smoke_tui.colour_enabled() is False
+
+
+def test_colour_mode_auto_honours_no_color(colour_off, monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    remote_smoke_tui.set_colour_mode("auto")
+    assert remote_smoke_tui.colour_enabled() is False
+
+
+def test_colour_mode_auto_honours_force_color(colour_off, monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    remote_smoke_tui.set_colour_mode("auto")
+    assert remote_smoke_tui.colour_enabled() is True
+
+
+def test_highlight_classifies_the_remote_lines_it_relays(colour_off):
+    remote_smoke_tui.set_colour_mode("always")
+    red = remote_smoke_tui.highlight_remote_line("ERROR: flashing failed after 4 attempts\n")
+    yellow = remote_smoke_tui.highlight_remote_line("WARNING: no debug probe\n")
+    green = remote_smoke_tui.highlight_remote_line("OK: flashed\n")
+    assert red.startswith("\033[1;31m") and red.endswith("\033[0m\n")
+    assert yellow.startswith("\033[33m")
+    assert green.startswith("\033[32m")
+    # A verdict word inside a sentence is not a verdict.
+    assert remote_smoke_tui.highlight_remote_line("NOT OK yet\n") == "NOT OK yet\n"
+
+
+def test_highlight_never_paints_over_output_that_coloured_itself(colour_off):
+    """pytest --color=yes and --stream both emit escapes; those lines pass through.
+
+    Wrapping them again would nest a reset inside the runner's own sequence and
+    turn the per-case block into a mess of half-terminated colours.
+    """
+    remote_smoke_tui.set_colour_mode("always")
+    line = "tests/smoke/shell_test.py::test_echo \033[32mPASSED\033[0m [1/9] 0.42s\n"
+    assert remote_smoke_tui.highlight_remote_line(line) == line
+
+
+def test_highlight_keeps_the_line_ending(colour_off):
+    """The reset goes before the newline, or every coloured line eats its break."""
+    remote_smoke_tui.set_colour_mode("always")
+    assert remote_smoke_tui.highlight_remote_line("ERROR: x\n").endswith("\033[0m\n")
+    assert remote_smoke_tui.highlight_remote_line("ERROR: x").endswith("\033[0m")
+    assert remote_smoke_tui.highlight_remote_line("\n") == "\n"
+
+
+def test_remote_script_reads_every_positional_it_is_given():
+    """The console baud rate is positional argument 30; the shift must match.
+
+    A mismatch here does not fail loudly -- the extra argument would silently
+    become the first pytest path and the run would collect the wrong tests.
+    """
+    source = MODULE_PATH.read_text()
+    assert "console_baudrate=${30}\nshift 30\n" in source
+    start = source.index("    remote_args = [")
+    end = source.index("    ]\n", start)
+    entries = [line.strip() for line in source[start:end].splitlines()[1:] if line.strip()]
+    assert entries[-1] == "*pytest_args,"
+    assert entries[-2] == "str(board.console_baudrate),"
+    assert len(entries) - 1 == 30

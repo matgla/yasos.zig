@@ -68,6 +68,119 @@ _ROOTFS_SOURCE_FILES = [
 _ROOTFS_SOURCE_EXTS = {".c", ".h", ".S", ".s", ".zig", ".sh", ".mk", ".ld"}
 
 
+# ---------------------------------------------------------------------------
+# Colour
+#
+# The runner's own narration -- step headers, the commands it shells out to,
+# rsync progress, warnings -- was monochrome, so on a monitor a run read as one
+# undifferentiated wall next to the (already coloured) per-case stream.  These
+# are the plain 16 ANSI colours on purpose: they resolve through the terminal's
+# own theme, so a recorded run matches whatever palette the shoot's terminal is
+# set to instead of fighting it.
+#
+# `set_colour_mode` is called once from main() with --color; until then the
+# default is auto-detection, which is what the module-level helpers below use if
+# something imports this file and prints without parsing arguments.
+# ---------------------------------------------------------------------------
+
+_COLOUR_ENABLED = False
+
+
+def _detect_colour() -> bool:
+    """auto: NO_COLOR wins, then FORCE_COLOR, then whether stdout is a terminal."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def set_colour_mode(mode: str) -> None:
+    global _COLOUR_ENABLED
+    if mode == "always":
+        _COLOUR_ENABLED = True
+    elif mode == "never":
+        _COLOUR_ENABLED = False
+    else:
+        _COLOUR_ENABLED = _detect_colour()
+
+
+def colour_enabled() -> bool:
+    return _COLOUR_ENABLED
+
+
+def _c(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _COLOUR_ENABLED else text
+
+
+# Semantic wrappers, so the call sites say what a line *is* rather than picking
+# a colour each time.
+def _step(text: str) -> str:
+    return _c("1;35", text)
+
+
+def _head(text: str) -> str:
+    return _c("1;36", text)
+
+
+def _ok(text: str) -> str:
+    return _c("1;32", text)
+
+
+def _warn(text: str) -> str:
+    return _c("33", text)
+
+
+def _err(text: str) -> str:
+    return _c("1;31", text)
+
+
+def _dim(text: str) -> str:
+    return _c("2", text)
+
+
+def _cmd(text: str) -> str:
+    return _c("34", text)
+
+
+# Highlighting for the remote's own output.
+#
+# The remote side is a generated bash script plus pytest, and its lines arrive
+# here already formed; rather than thread colour through every `echo` in the
+# heredoc, each line the runner relays is matched against these patterns.  A
+# line that already carries an escape sequence is left exactly as it is -- that
+# is pytest under --color=yes, and the --stream per-case block, both of which
+# colour themselves and must not be painted over.
+_REMOTE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^\s*(ERROR|error):"), "1;31"),
+    (re.compile(r"\bERROR\b"), "1;31"),
+    (re.compile(r"\b(FAILED|FAIL|KERNEL PANIC|HardFault|Traceback)\b"), "1;31"),
+    (re.compile(r"^\s*(WARNING|warning):|\bWARNING\b"), "33"),
+    (re.compile(r"\b(SKIPPED|RERUN|retrying|rescu)", re.IGNORECASE), "33"),
+    (re.compile(r"\bPASSED\b|\bcompleted successfully\b|^\s*OK\b"), "32"),
+    (re.compile(r"^RUNNING\b|\bRUNNING\b"), "36"),
+    (re.compile(r"^(Run \d+ logging to|Flashing|Resetting|Waiting for|Power-cycling)"), "36"),
+    (re.compile(r"^(Smoke venv unchanged|Artifacts unchanged|Pruned )"), "2"),
+]
+
+
+def highlight_remote_line(line: str) -> str:
+    """Colour one relayed line from the remote, unless it is coloured already."""
+    if not _COLOUR_ENABLED or "\033" in line:
+        return line
+    body = line.rstrip("\n")
+    if not body:
+        return line
+    for pattern, code in _REMOTE_PATTERNS:
+        if pattern.search(body):
+            newline = line[len(body):]
+            return f"\033[{code}m{body}\033[0m{newline}"
+    return line
+
+
 def _rootfs_sources_hash(debug: bool) -> str:
     """Compute a fast content hash over every source file that feeds into rootfs."""
     digest = hashlib.sha256()
@@ -156,6 +269,8 @@ class BoardProfile:
     interface_cfg: str
     target_cfg: str
     rootfs_address: str
+    # Must match the board's CONFIG_CONSOLE_BAUDRATE (its defconfig / KConfig).
+    console_baudrate: int = 3000000
 
 
 BOARD_PROFILES = {
@@ -174,6 +289,7 @@ BOARD_PROFILES = {
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
         rootfs_address="0x10100000",
+        console_baudrate=115200,
     ),
 }
 
@@ -230,11 +346,11 @@ def normalize_smoke_tcc_opt_levels(value: Any) -> str:
             levels.append(normalized)
     return " ".join(levels)
 
-# Serial console line rate, for this script and for every remote script it
-# generates. Must match the target's `console_baudrate`
-# (source/kernel/drivers/uart/uart_driver.zig) and CONSOLE_BAUDRATE in
-# tests/smoke/framework/session.py -- a mismatch does not fail loudly, it just
-# turns the console into garbage.
+# Default serial console line rate. The rate actually used is the board
+# profile's `console_baudrate` (same value unless the board overrides it), which
+# must match that board's CONFIG_CONSOLE_BAUDRATE and is exported to the suite as
+# YASOS_SMOKE_CONSOLE_BAUDRATE (tests/smoke/framework/session.py) -- a mismatch
+# does not fail loudly, it just turns the console into garbage.
 #
 # 3 Mbaud is the target PL011's ceiling: clk_peri/(16*divisor) with clk_peri at
 # 48 MHz and the divisor bottoming out at 1. It is exact, unlike 921600.
@@ -401,7 +517,7 @@ def load_cache() -> dict[str, Any]:
         raise RunnerError(f"Cache file is not valid JSON: {CACHE_PATH} ({error})") from error
     migrated, notes = migrate_cached_config(cached)
     for note in notes:
-        print(f"note: {note}")
+        print(_dim(f"note: {note}"))
     return merge_config(migrated)
 
 
@@ -699,7 +815,7 @@ def sha256_file(path: Path) -> str:
 
 
 def run_command(cmd: list[str], cwd: Path | None = None, input_text: str | None = None) -> None:
-    print(f"\n$ {command_string(cmd)}")
+    print(_dim("\n$ ") + _cmd(command_string(cmd)))
     completed = subprocess.run(
         cmd,
         cwd=cwd,
@@ -712,7 +828,7 @@ def run_command(cmd: list[str], cwd: Path | None = None, input_text: str | None 
 
 
 def run_interactive_command(cmd: list[str], cwd: Path | None = None, input_text: str | None = None) -> None:
-    print(f"\n$ {command_string(cmd)}")
+    print(_dim("\n$ ") + _cmd(command_string(cmd)))
     completed = subprocess.run(
         cmd,
         cwd=cwd,
@@ -725,7 +841,7 @@ def run_interactive_command(cmd: list[str], cwd: Path | None = None, input_text:
 
 
 def capture_command(cmd: list[str], cwd: Path | None = None, input_text: str | None = None) -> str:
-    print(f"\n$ {command_string(cmd)}")
+    print(_dim("\n$ ") + _cmd(command_string(cmd)))
     completed = subprocess.run(
         cmd,
         cwd=cwd,
@@ -865,7 +981,7 @@ def sync_remote_repo_subset(config: dict[str, Any], rel_paths: list[str]) -> str
         "./",
         remote_dest,
     ]
-    print(f"Syncing {len(rel_paths)} files to remote...")
+    print(_head(f"Syncing {len(rel_paths)} files to remote..."))
     run_command(rsync_cmd, cwd=REPO_ROOT, input_text="\n".join(rel_paths) + "\n")
     return remote_repo.rstrip("/")
 
@@ -903,7 +1019,7 @@ def sync_remote_repo_sources(config: dict[str, Any]) -> str:
         "./",
         remote_dest,
     ]
-    print("Syncing repository sources to remote...")
+    print(_head("Syncing repository sources to remote..."))
     run_command(rsync_cmd, cwd=REPO_ROOT)
     return remote_repo.rstrip("/")
 
@@ -945,7 +1061,7 @@ def ensure_gcc_torture_submodule(config: dict[str, Any]) -> None:
     )
     if torture_dir.is_dir():
         return
-    print("GCC torture tests enabled but submodule not fetched; initializing gcc-testsuite...")
+    print(_warn("GCC torture tests enabled but submodule not fetched; initializing gcc-testsuite..."))
     run_command(
         ["git", "submodule", "update", "--init", "--depth", "1", "tests/gcctestsuite/gcc-testsuite"],
         cwd=tinycc_dir,
@@ -1308,7 +1424,7 @@ class _LogTailer:
 
         if new_files and self._announce:
             total = sum(1 for _ in self._logs_dir.rglob("*.txt"))
-            _emit(f"[log sync] {new_files} new log(s) fetched ({total} total in {self._logs_dir})")
+            _emit(_dim(f"[log sync] {new_files} new log(s) fetched ({total} total in {self._logs_dir})"))
 
         if not candidates:
             return
@@ -1344,17 +1460,17 @@ class _LogTailer:
         self._streaming = True
         self._last_output_at = now
         elapsed = format_duration(now - self._in_flight_since())
-        _emit(f"[log tail] {path.name} still running after {elapsed}; streaming its log")
+        _emit(_head(f"[log tail] {path.name} still running after {elapsed}; streaming its log"))
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
         lines = text.splitlines()
         if len(lines) > LOG_STREAM_CONTEXT_LINES:
-            _emit(f"[log tail] ... {len(lines) - LOG_STREAM_CONTEXT_LINES} earlier line(s) omitted")
+            _emit(_dim(f"[log tail] ... {len(lines) - LOG_STREAM_CONTEXT_LINES} earlier line(s) omitted"))
             lines = lines[-LOG_STREAM_CONTEXT_LINES:]
         for line in lines:
-            _emit(f"  | {line}")
+            _emit(_dim("  | ") + line)
         self._sizes[path] = size
 
     def _stream_new_output(self, path: Path, size: int, now: float) -> None:
@@ -1372,14 +1488,14 @@ class _LogTailer:
             self._sizes[path] = size
             self._last_output_at = now
             for line in chunk.decode("utf-8", errors="replace").splitlines():
-                _emit(f"  | {line}")
+                _emit(_dim("  | ") + line)
         elif (
             LOG_STREAM_IDLE_NOTICE_SECONDS > 0.0
             and now - self._last_output_at >= LOG_STREAM_IDLE_NOTICE_SECONDS
         ):
             self._last_output_at = now
             idle = format_duration(now - self._in_flight_since())
-            _emit(f"[log tail] {path.name}: no new output, {idle} in flight")
+            _emit(_warn(f"[log tail] {path.name}: no new output, {idle} in flight"))
 
 
 def _background_log_sync(
@@ -1508,7 +1624,7 @@ def build_local_artifacts(
     _save_defconfig_hash(board.defconfig)
     if config.get("profile"):
         if _set_kconfig_option("CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING"):
-            print("Enabled CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING for profiling.")
+            print(_head("Enabled CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING for profiling."))
     run_command(
         ["zig", "build", f"-Doptimize={effective_optimize(config, debug)}"],
         cwd=REPO_ROOT,
@@ -1522,7 +1638,7 @@ def build_local_artifacts(
             run_command(rootfs_cmd, cwd=REPO_ROOT)
             _save_rootfs_hash(debug)
         elif _rootfs_is_up_to_date(debug):
-            print("rootfs sources unchanged — skipping build_rootfs.sh")
+            print(_dim("rootfs sources unchanged — skipping build_rootfs.sh"))
         else:
             if debug:
                 rootfs_cmd.append("--debug")
@@ -1614,7 +1730,9 @@ tcc_env_prefix=${25}
 run_id=${26}
 keep_runs=${27}
 stream=${28}
-shift 28
+colour=${29}
+console_baudrate=${30}
+shift 30
 
 detect_uhubctl_device() {
     # Find a USB device by vendor ID in sysfs and return its hub location
@@ -2139,21 +2257,32 @@ export YASOS_SMOKE_ROOTFS_ADDRESS="${rootfs_address}"
 export YASOS_SMOKE_OPENOCD_INTERFACE_CFG="${interface_cfg}"
 export YASOS_SMOKE_OPENOCD_TARGET_CFG="${target_cfg}"
 export YASOS_SMOKE_OPENOCD_ADAPTER_SPEED="${adapter_speed}"
+# The board's CONFIG_CONSOLE_BAUDRATE; session.py opens the port at this.
+export YASOS_SMOKE_CONSOLE_BAUDRATE="${console_baudrate}"
 
 # --stream: the suite prints its own per-case block -- the case name, the
 # target's transcript under it, a verdict line -- the way the legacy comparison
 # harness in yasos-legacy-tcc does, so the two arms can be filmed side by side.
 # See tests/smoke/stream_report.py.
 pytest_cmd=("$remote_work_dir/venv/bin/pytest" -W error -s)
+# This pytest's stdout is an ssh pipe, so neither it nor stream_report.py can
+# auto-detect a terminal; the decision was made locally (--color) and is handed
+# down here, for the run's transcript to be watched or recorded at the near end.
 if [[ "$stream" == "1" ]]; then
     export YASOS_SMOKE_STREAM=1
-    # This pytest's stdout is an ssh pipe, so colour cannot auto-detect; a
-    # recorded run is captured rather than watched on the rig.
-    export YASOS_SMOKE_COLOR=1
+    export YASOS_SMOKE_COLOR="$colour"
     # No -v: it would print the nodeid before every (now suppressed) status
     # word, naming each case twice above its own transcript.
 else
     pytest_cmd+=(-v)
+    # pytest's own green PASSED / red FAILED / yellow SKIPPED, plus the
+    # coloured summary line -- this is the default mode, so it is what a
+    # recorded suite run actually shows.
+    if [[ "$colour" == "1" ]]; then
+        pytest_cmd+=(--color=yes)
+    else
+        pytest_cmd+=(--color=no)
+    fi
 fi
 if (( test_retries > 0 )); then
     pytest_cmd+=(--reruns "$test_retries" --reruns-delay 1)
@@ -2201,6 +2330,8 @@ exit "$pytest_status"
         str(run_id),
         str(keep_runs),
         "1" if stream else "0",
+        "1" if colour_enabled() else "0",
+        str(board.console_baudrate),
         *pytest_args,
     ]
     cmd = ssh_base(config) + [
@@ -2216,10 +2347,10 @@ exit "$pytest_status"
         # creates it after flashing), which the tailer treats as "nothing to
         # follow yet" rather than as an error.
         local_run_dir = local_smoke_logs_dir(config) / str(run_id)
-        print(
+        print(_head(
             f"Run {run_id}: remote {remote_runs_root(config)}/{run_id}"
             f" -> local {local_run_dir}"
-        )
+        ))
         tailer = _LogTailer(
             local_run_dir,
             stream_after=0.0 if stream else float(
@@ -2235,7 +2366,7 @@ exit "$pytest_status"
         )
         sync_thread.start()
     try:
-        print(f"\n$ {command_string(cmd)}")
+        print(_dim("\n$ ") + _cmd(command_string(cmd)))
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -2252,7 +2383,7 @@ exit "$pytest_status"
             # The tailer prints from its own thread, so take the same lock the
             # pytest stream uses; otherwise the two interleave mid-line.
             with _STDOUT_LOCK:
-                sys.stdout.write(line)
+                sys.stdout.write(highlight_remote_line(line))
                 sys.stdout.flush()
         proc.wait()
         if proc.returncode != 0:
@@ -2269,10 +2400,10 @@ exit "$pytest_status"
             except RunnerError as fetch_error:
                 if run_error is None:
                     raise
-                print(f"warning: failed to fetch remote smoke logs: {fetch_error}", file=sys.stderr)
+                print(_warn(f"warning: failed to fetch remote smoke logs: {fetch_error}"), file=sys.stderr)
             else:
                 if fetched_logs_dir is not None:
-                    print(f"Fetched remote smoke logs to {fetched_logs_dir}")
+                    print(_dim(f"Fetched remote smoke logs to {fetched_logs_dir}"))
 
     if run_error is not None:
         raise run_error
@@ -2359,7 +2490,8 @@ def run_remote_connect(config: dict[str, Any]) -> None:
     an SSH-allocated TTY. Exit the console with Ctrl-].
     """
     serial_device = str(config.get("serial_device", "")).strip()
-    baud = str(CONSOLE_BAUDRATE)
+    board = BOARD_PROFILES[config.get("board", DEFAULT_CONFIG["board"])]
+    baud = str(board.console_baudrate)
     script = rf"""set -euo pipefail
 serial_device={shlex.quote(serial_device)}
 baud={shlex.quote(baud)}
@@ -2733,7 +2865,7 @@ def run_remote_gdb_live(
     # Serial sender for live mode: NO target reset (GDB/OpenOCD own the core);
     # just wait for the prompt — which appears only after GDB continues — then
     # send the command and keep draining the UART into the log until killed.
-    serial_live_py = f"CONSOLE_BAUDRATE = {CONSOLE_BAUDRATE}\n" + r'''
+    serial_live_py = f"CONSOLE_BAUDRATE = {board.console_baudrate}\n" + r'''
 import serial
 import sys
 import time
@@ -2957,7 +3089,7 @@ def run_remote_gdb_debug(
 
     # Build the serial capture Python script as a separate string to avoid
     # nested triple-quote issues inside the bash f-string.
-    serial_capture_py = f"CONSOLE_BAUDRATE = {CONSOLE_BAUDRATE}\n" + r'''
+    serial_capture_py = f"CONSOLE_BAUDRATE = {board.console_baudrate}\n" + r'''
 import serial
 import sys
 import time
@@ -3426,6 +3558,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", action="store_true", help="Enable TCC performance profiling. Captures per-phase bench breakdown and per-syscall cycle counts from the kernel. Results are saved alongside the timing report.")
     parser.add_argument("--force-flash", action="store_true", help="Upload and flash existing kernel/rootfs artifacts without rebuilding. Forces reflash even if remote hashes match.")
     parser.add_argument("--force-kernel-flash", action="store_true", help="Upload and flash only the kernel artifact without rebuilding. Skips rootfs entirely.")
+    parser.add_argument("--color", "--colour", dest="color", choices=("auto", "always", "never"), default="auto", help="Colour the runner's output and the remote suite's (default auto: on when stdout is a terminal, off through a pipe; NO_COLOR and FORCE_COLOR are honoured). 'always' is what a recorded run wants when the output is teed or piped -- it also turns on pytest --color=yes remotely, so PASSED/FAILED are green/red over ssh.")
     parser.add_argument("--list-boards", action="store_true", help="Print supported board identifiers and exit.")
     parser.add_argument("--list-tests", action="store_true", help="Print available pytest nodeids for the smoke suite and exit. Honors --tests, --pytest-args, -k, and --with-gcc-torture.")
     return parser.parse_args(fold_smoke_tcc_opt_level_args(sys.argv[1:]))
@@ -3433,6 +3566,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    set_colour_mode(args.color)
     if args.list_boards:
         list_boards()
         return 0
@@ -3636,12 +3770,12 @@ def main() -> int:
             return 0
 
         if args.debug:
-            print("Running remote smoke workflow with debug kernel and rootfs builds.")
+            print(_head("Running remote smoke workflow with debug kernel and rootfs builds."))
         else:
-            print("Running remote smoke workflow with cached configuration.")
+            print(_head("Running remote smoke workflow with cached configuration."))
         total_steps = 3 if args.flash_only else 4
         step = 1
-        print(f"[{step}/{total_steps}] Building local artifacts...")
+        print(_step(f"[{step}/{total_steps}] Building local artifacts..."))
         build_local_artifacts(
             runtime_config,
             debug=args.debug,
@@ -3652,14 +3786,14 @@ def main() -> int:
         rootfs_sha = sha256_file(ROOTFS_ARTIFACT)
         requirements_sha = sha256_file(SMOKE_REQUIREMENTS)
         step += 1
-        print(f"[{step}/{total_steps}] Uploading artifacts to remote host...")
+        print(_step(f"[{step}/{total_steps}] Uploading artifacts to remote host..."))
         remote_work_dir, remote_kernel, remote_rootfs = upload_artifacts(runtime_config)
         if not args.flash_only:
             step += 1
-            print(f"[{step}/{total_steps}] Syncing repository source files to the remote repository with rsync.")
+            print(_step(f"[{step}/{total_steps}] Syncing repository source files to the remote repository with rsync."))
             sync_smoke_support(runtime_config)
         step += 1
-        print(f"[{step}/{total_steps}] Running remote smoke tests...")
+        print(_step(f"[{step}/{total_steps}] Running remote smoke tests..."))
         run_remote_smoke(
             runtime_config,
             remote_work_dir,
@@ -3673,13 +3807,13 @@ def main() -> int:
             rerun_failed=args.rerun_failed,
         )
     except RunnerError as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(_err(f"error: {error}"), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("Interrupted.", file=sys.stderr)
+        print(_warn("Interrupted."), file=sys.stderr)
         return 130
 
-    print("Remote smoke workflow completed successfully.")
+    print(_ok("Remote smoke workflow completed successfully."))
     return 0
 
 

@@ -265,7 +265,10 @@ pub const FileHeader = struct {
         return 0;
     }
 
-    pub fn stat(self: *FileHeader, buf: *c.struct_stat) void {
+    /// `timestamp` is the whole image's age -- see `RomFs.image_time`. The
+    /// format has no per-entry date field, so all three stamps are the same one
+    /// and every entry in the image carries it.
+    pub fn stat(self: *FileHeader, buf: *c.struct_stat, timestamp: c.struct_timespec) void {
         buf.st_dev = 0;
         buf.st_ino = @intCast(self._reader.get_offset());
         buf.st_mode = @intCast(filetype_to_mode(self.filetype()));
@@ -276,6 +279,9 @@ pub const FileHeader = struct {
         buf.st_size = @intCast(self.size());
         buf.st_blksize = 1;
         buf.st_blocks = 1;
+        buf.st_atim = timestamp;
+        buf.st_mtim = timestamp;
+        buf.st_ctim = timestamp;
     }
 
     pub fn dupe(self: *const FileHeader) !FileHeader {

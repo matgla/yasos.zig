@@ -24,29 +24,47 @@ const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 const log = std.log.scoped(.ramfsdirectory);
 const refcount = kernel.sync.refcount;
 
+/// State every handle on one directory shares.
+///
+/// The refcount and the timestamps travel together because `__clone` copies the
+/// handle struct wholesale: anything a second handle must see a first handle's
+/// change to has to live behind a pointer, and folding the timestamps into the
+/// refcounter's allocation keeps a directory at the two allocations it already
+/// cost.
+const SharedState = struct {
+    refcounter: i16,
+    times: kernel.fs.FileTimes,
+};
+
 pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
     const Self = @This();
     _allocator: std.mem.Allocator,
     _root: *std.DoublyLinkedList,
-    _refcounter: *i16,
+    _shared: *SharedState,
     _name: []const u8,
 
     pub fn create(allocator: std.mem.Allocator, nodename: []const u8) !RamFsDirectory {
         const list = try allocator.create(std.DoublyLinkedList);
-        const refcounter = try allocator.create(i16);
-        refcount.init(refcounter);
+        const shared = try allocator.create(SharedState);
+        shared.times = kernel.fs.FileTimes.create(kernel.time.now_timespec());
+        refcount.init(&shared.refcounter);
         list.* = std.DoublyLinkedList{};
         return RamFsDirectory.init(.{
             ._allocator = allocator,
             ._root = list,
             ._name = nodename,
-            ._refcounter = refcounter,
+            ._shared = shared,
         });
+    }
+
+    /// This directory's shared timestamps, for `stat` and `utimens`.
+    pub fn times(self: *Self) *kernel.fs.FileTimes {
+        return &self._shared.times;
     }
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        refcount.acquire(self._refcounter);
+        refcount.acquire(&self._shared.refcounter);
     }
 
     pub fn create_node(allocator: std.mem.Allocator, nodename: []const u8) anyerror!kernel.fs.Node {
@@ -84,6 +102,10 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
 
     pub fn append(self: *Self, node: *RamFsNode) !void {
         self._root.append(&node.list_node);
+        // Adding an entry rewrites the directory, so both its modification and
+        // its change time move -- the same rule a real filesystem follows, and
+        // what lets `make` see that a directory gained a file.
+        self._shared.times.record_write(kernel.time.now_timespec());
     }
 
     pub fn unlink(self: *Self, nodename: []const u8) anyerror!void {
@@ -103,6 +125,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
             // other order reads freed memory to find its neighbours.
             self._root.remove(&node.list_node);
             node.delete(self._allocator);
+            self._shared.times.record_write(kernel.time.now_timespec());
             return;
         }
         return kernel.errno.ErrnoSet.NoEntry;
@@ -117,7 +140,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     }
 
     pub fn delete(self: *Self) void {
-        if (refcount.release(self._refcounter)) {
+        if (refcount.release(&self._shared.refcounter)) {
             var next = self._root.pop();
             while (next) |child| {
                 const file_node: *RamFsNode = @fieldParentPtr("list_node", child);
@@ -125,7 +148,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
                 next = self._root.pop();
             }
             self._allocator.destroy(self._root);
-            self._allocator.destroy(self._refcounter);
+            self._allocator.destroy(self._shared);
         }
     }
 });

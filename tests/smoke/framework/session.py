@@ -118,9 +118,11 @@ ECHO_IDLE_TIMEOUT = float(os.environ.get("YASOS_SMOKE_ECHO_TIMEOUT", "0.25"))
 # Reset/boot produces the prompt much later than a regular command echo.
 BOOT_TIMEOUT = float(os.environ.get("YASOS_SMOKE_BOOT_TIMEOUT", "15"))
 
-# Must match the target's `console_baudrate` (source/kernel/drivers/uart/
-# uart_driver.zig) and CONSOLE_BAUDRATE in scripts/remote_smoke_tui.py. A
-# mismatch does not fail loudly, it just turns the console into garbage.
+# Must match the target's CONFIG_CONSOLE_BAUDRATE (menuconfig: Console). The
+# remote runner exports the board profile's rate (console_baudrate in
+# scripts/remote_smoke_tui.py); 3000000 is only the fallback for runs that do
+# not set it. A mismatch does not fail loudly, it just turns the console into
+# garbage.
 #
 # 3 Mbaud is the target PL011's ceiling: clk_peri/(16*divisor) with clk_peri at
 # 48 MHz and the divisor bottoming out at 1. It is exact, unlike 921600.
@@ -571,10 +573,37 @@ class Session:
                 continue
             Session.target_needs_reset = False
             Session.target_crashed = False
+            self._set_target_clock()
             return
         raise last_exc if last_exc is not None else RuntimeError(
             "Prompt not found on serial port: '$ '"
         )
+
+    def _set_target_clock(self):
+        """Hand the freshly booted target the host's wall clock.
+
+        There is no RTC on these boards, so the kernel's clock starts at the
+        Unix epoch every boot and only moves if somebody sets it.  Nothing else
+        in a test run would: the result is a board where every file is stamped
+        1970 and, worse, where two files written seconds apart in different
+        tests are indistinguishable to anything comparing dates.
+
+        Done here rather than in a fixture on purpose.  This is the one place
+        that knows a reset just happened, which is also the only moment the
+        clock needs setting -- so it covers the whole suite (one reset at the
+        start) and a single test run against a board that has just rebooted,
+        without a per-test command in either case.
+
+        Best effort.  A rootfs built before `date` existed answers "not found",
+        and that is not a reason to fail a test that was not about the clock;
+        the failure is recorded in the session log instead.
+        """
+        try:
+            self.write_command(f"date -s @{int(time.time())}")
+            self.wait_for_prompt_except_logs()
+        except (RuntimeError,) + SERIAL_ERRORS as exc:
+            self.file.write(f"Could not set the target clock ({exc}).\n")
+            self.file.flush()
 
     def _flush_input(self):
         """Drop pending input, reopening the port if the handle has gone stale.

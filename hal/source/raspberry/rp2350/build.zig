@@ -118,6 +118,11 @@ fn addBoardHeaders(
     pp.addArg(b.fmt("-I{s}", .{b.pathJoin(&.{ picosdk, "generated/pico_base" })}));
     for (board_include_paths) |path| pp.addPrefixedDirectoryArg("-I", b.path(path));
     pp.addFileArg(b.path(header));
+    // Only `header` is a declared input, so without a depfile an edit to any
+    // header it includes leaves the cached translation in place, and Zig code
+    // keeps seeing the old declarations and macro values.
+    pp.addArg("-MD");
+    _ = pp.addPrefixedDepFileOutputArg("-MF", b.fmt("{s}_pp.d", .{import_name}));
     pp.addArg("-o");
     const expanded = pp.addOutputFileArg(b.fmt("{s}_pp.h", .{import_name}));
 
