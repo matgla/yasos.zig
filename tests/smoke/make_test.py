@@ -29,9 +29,36 @@ rule search (pattern_search) -- three of the four bugs that kept make out of
 the rootfs were reached through that function.
 """
 
+import pytest
+
 from .conftest import session_key
 
 MAKEDIR = "/tmp/maketest"
+
+
+@pytest.fixture(autouse=True)
+def _leave_tmp_as_found(request):
+    """Take this module's directories back out of /tmp after every test.
+
+    Each test clears its directory on the way in, which says nothing about what
+    the last one leaves behind: `make clean` still leaves four sources and a
+    Makefile in PROGDIR. /tmp is a ~32 KiB arena holding about a dozen small
+    files, shared with the whole run, and these used to be swept up by a mid-run
+    board reset -- until the reset stopped happening and the tests that run
+    later started failing on a full /tmp instead.
+    """
+    yield
+    session = request.node.stash[session_key]
+    try:
+        session.write_command("cd /")
+        session.wait_for_prompt(timeout=15)
+        session.write_command("rm -rf %s %s" % (MAKEDIR, PROGDIR))
+        session.wait_for_prompt(timeout=15)
+    except Exception:
+        # A test that wedged the board gets reset by the next test's setup,
+        # which clears /tmp anyway. Raising here would bury that test's own
+        # diagnosis under this teardown's.
+        pass
 
 
 def _fresh_dir(session):

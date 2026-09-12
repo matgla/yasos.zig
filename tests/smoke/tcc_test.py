@@ -44,3 +44,9 @@ def test_compile_hello_world_with_usage_tracking(request):
         data = session.read_line_except_logs()
         assert "You entered: " + number in data
         data = session.wait_for_prompt()
+
+    # Six iterations share /tmp/hello, the last four get one binary each. In a
+    # /tmp that holds about a dozen small files, that is not a footprint to
+    # leave for whatever runs next.
+    session.write_command("rm -f /tmp/hello /tmp/hello_*")
+    session.wait_for_prompt()

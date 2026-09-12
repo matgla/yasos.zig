@@ -57,6 +57,12 @@ def test_pipe_carries_more_than_it_can_hold(request):
     assert direct and piped, (direct, piped)
     assert direct[0] == piped[0], (direct, piped)
 
+    # 219 KB apiece. /tmp is a shared ~32 KiB arena that holds about a dozen
+    # small files, so leaving these behind is most of it gone for everything
+    # that runs later.
+    session.write_command("rm -f /tmp/pipe_direct.bin /tmp/pipe_copy.bin")
+    session.read_until_prompt()
+
 
 def test_pipeline_in_a_subshell(request):
     session = request.node.stash[session_key]

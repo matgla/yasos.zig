@@ -178,6 +178,10 @@ def test_secondary_core_actually_runs_processes(request):
         f"but the scheduler never put anything on it"
     )
 
+    # The batch file and prun's per-job logs, out of the shared /tmp arena.
+    session.write_command("rm -rf /tmp/smpj")
+    session.wait_for_prompt_except_logs(timeout=30)
+
 
 def test_cores_are_still_running(request):
     """Liveness, which the online flag cannot answer.
