@@ -30,6 +30,7 @@ scripts/genconfig.sh
 touch .config
 
 TOYBOX_CFLAGS="-I$1/usr/include${TOYBOX_EXTRA_CFLAGS:+ }$TOYBOX_EXTRA_CFLAGS"
+export LDOPTIMIZE="-Wl,--gc-sections -Wl,--as-needed"
 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-Wl,-oformat=elf32-littlearm -lm" make toybox
 mv -f ../toybox/toybox ../toybox/toybox.elf
 # Per-image stack profile: toybox applets (and the shell) run in 16 KiB rather

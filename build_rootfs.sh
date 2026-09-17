@@ -1,12 +1,22 @@
 #!/bin/bash
 
 if [[ "$(uname)" == "Darwin" ]]; then
-GETOPT_CMD="/opt/homebrew/Cellar/gnu-getopt/2.41/bin/getopt"
+GETOPT_CMD="$(brew --prefix gnu-getopt 2>/dev/null)/bin/getopt"
+if [[ ! -x "$GETOPT_CMD" ]]; then
+  echo "ERROR: GNU getopt not found; install it with 'brew install gnu-getopt'."
+  exit 2
+fi
+HOST_AR="$(brew --prefix llvm 2>/dev/null)/bin/llvm-ar"
+if [[ ! -x "$HOST_AR" ]]; then
+  echo "ERROR: llvm-ar not found; install it with 'brew install llvm'."
+  exit 2
+fi
 else
 GETOPT_CMD="/usr/bin/getopt"
+HOST_AR="ar"
 fi
 OPTIONS=co:d
-LONGOPTIONS=clear,output:,debug-regalloc,debug,no-kernel
+LONGOPTIONS=clear,output:,debug-regalloc,debug,tcc-ab-knobs,no-kernel,with-pch
 
 PARSED=$($GETOPT_CMD --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
 if [[ $? -ne 0 ]]; then
@@ -16,7 +26,7 @@ fi
 
 eval set -- "$PARSED"
 
-if [[ ! -v CC ]]; then
+if [[ -z "${CC+x}" ]]; then
   CC=armv8m-tcc
 else
   echo "Using CC: $CC"
@@ -413,13 +423,13 @@ build_cross_compiler()
   # reorg) — dropping only armv8m-arch/armv8m-ir would reuse the other stage's
   # objects and fail the link with "unrecognized file type".
   rm -rf armv8m-arch armv8m-ir armv8m-source armv8m-*.o *.o
-  make -j8 CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
+  make -j8 AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
-  make install INC-armv8m="$YASOS_SYSINCLUDES"
+  make install AR="$HOST_AR" INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -531,7 +541,7 @@ build_c_compiler()
     # ar's MRI batch mode (`ar -M`), which tcc's built-in archiver does not
     # support.  Archiving is target-agnostic, so the host ar handles the ARM
     # objects fine.
-    VERBOSE=1 make armv8m-tcc -j8 AR=ar LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
+    VERBOSE=1 make armv8m-tcc -j8 AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
 
     if [ $? -ne 0 ]; then
       exit -1;
@@ -593,7 +603,7 @@ build_c_compiler()
       done
     fi
     # Use the host `ar` for the backend archive (MRI mode); see stage 1 above.
-    VERBOSE=1 make armv8m-tcc -j8 AR=ar LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
+    VERBOSE=1 make armv8m-tcc -j8 AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
     if [ $? -ne 0 ]; then
       exit -1;
     fi
