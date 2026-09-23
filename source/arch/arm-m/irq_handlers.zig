@@ -69,33 +69,55 @@ fn in_kernel_sram(addr: usize) bool {
 // RP2350 (MSPLIM=0x20060000) and the QEMU mps2-an505 (MSPLIM=0x80FC0000), where
 // the kernel stack and the user PSP stack both live in the 0x80000000 PSRAM.
 const kernel_stack_window: usize = 0x80000; // 512 KiB above MSPLIM
-fn is_kernel_stack_leak(addr: usize) bool {
+fn in_kernel_main_stack(addr: usize) bool {
     const msplim = read_msplim();
     return addr >= msplim and addr < msplim + kernel_stack_window;
 }
 
-// User code executes from the romfs/app region in flash (>= 0x10100000) or from
-// PSRAM (0x11xxxxxx); kernel code lives below 0x10100000. The leak heuristic
-// only makes sense for a user fault — kernel code legitimately holds kernel-SRAM
-// pointers (frame pointers, stack addresses) in r4-r11.
-const romfs_begin: usize = 0x10100000;
-fn is_user_text(pc: usize) bool {
-    // RP2350: romfs/app in flash (0x10100000) or PSRAM (0x11xxxxxx).
-    // QEMU mps2-an505 (see linker_script.ld): non-XIP user code runs from the
-    // fast process_ram pool (0x10100000..0x10400000, which the RP2350 clause
-    // below already covers); XIP user binaries (romfs) and the slow psram pool
-    // span 0x80000000..0x80EC0000 in the 16 MB block. (0x28000000 is kernel RAM.)
-    return (pc >= romfs_begin and pc < 0x12000000) or
-        (pc >= 0x80000000 and pc < 0x80EC0000);
+fn is_kernel_stack_leak(addr: usize) bool {
+    return in_kernel_main_stack(addr);
 }
 
-// Readable RAM windows we are willing to peek at from the fault handler.
+// The romfs image: user binaries execute in place out of it.
+extern var __romfs_start__: u8;
+extern var __romfs_end__: u8;
+
+fn in_romfs(addr: usize) bool {
+    return addr >= @intFromPtr(&__romfs_start__) and addr < @intFromPtr(&__romfs_end__);
+}
+
+/// One of the pools the board's linker script defines, as the HAL reports them.
+/// `user_only` restricts the answer to the pools processes are loaded into.
+///
+/// Asking the board beats a hardcoded window list, which is only ever right for
+/// the boards that existed when it was written: every window below used to be
+/// an RP2350 or MPS2-AN505 constant, and on the MPS3-AN524 (romfs at
+/// 0x60000000, process pool at 0x66000000) that made every postmortem dump
+/// print "<unmapped, skipped>" and every backtrace candidate get rejected --
+/// precisely on the board being brought up, where the diagnostics are needed.
+fn in_board_ram(addr: usize, user_only: bool) bool {
+    for (hal.memory.get_memory_layout()) |region| {
+        if (region.size == 0) continue;
+        if (user_only and region.owner != .User) continue;
+        if (addr >= region.start_address and addr < region.start_address + region.size) return true;
+    }
+    return false;
+}
+
+// User code executes in place from the romfs image or from whichever user pool
+// it was loaded into; kernel code lives outside both. The leak heuristic only
+// makes sense for a user fault — kernel code legitimately holds kernel-SRAM
+// pointers (frame pointers, stack addresses) in r4-r11.
+fn is_user_text(pc: usize) bool {
+    return in_romfs(pc) or in_board_ram(pc, true);
+}
+
+// Readable RAM windows we are willing to peek at from the fault handler: the
+// board's own pools, the romfs image, and the kernel main stack (which is a
+// linker region of its own, outside the memory layout, so it is recognised
+// through MSPLIM the same way the leak test does it).
 fn is_readable_ram(addr: usize) bool {
-    return (addr >= 0x11000000 and addr < 0x11800000) or // RP2350 PSRAM
-        (addr >= kernel_sram_begin and addr < kernel_sram_end) or // RP2350 SRAM
-        (addr >= 0x10000000 and addr < 0x10400000) or // QEMU mps2-an505 ssram-0 (flash + fast process_ram pool)
-        (addr >= 0x28000000 and addr < 0x28400000) or // QEMU mps2-an505 ssram-1+2 (kernel RAM)
-        (addr >= 0x80000000 and addr < 0x81000000); // QEMU mps2-an505 16 MB block (romfs/kernel/fatdisk/kstack)
+    return in_board_ram(addr, false) or in_romfs(addr) or in_kernel_main_stack(addr);
 }
 
 // Dump up to `count` words starting at `start` (word-aligned), 4 per line,
