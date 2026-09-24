@@ -24,5 +24,6 @@
 #include <libs/libc/errno.h>
 #include <libs/libc/sys/stat.h>
 #include <libs/libc/sys/sysinfo.h>
+#include <libs/libc/sys/utsname.h>
 #include <libs/libc/sys/mman.h>
 #include <libs/libc/sys/resource.h>

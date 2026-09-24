@@ -121,6 +121,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_vfork => return handlers.sys_vfork,
             c.sys_unlink => return handlers.sys_unlink,
             c.sys_link => return handlers.sys_link,
+            c.sys_renameat2 => return handlers.sys_renameat2,
             c.sys_stat => return handlers.sys_stat,
             c.sys_getentropy => return handlers.sys_getentropy,
             c.sys_lseek => return handlers.sys_lseek,
@@ -160,6 +161,7 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_perf_dump => return handlers.sys_perf_dump,
             c.sys_pipe => return handlers.sys_pipe,
             c.sys_poll => return handlers.sys_poll,
+            c.sys_uname => return handlers.sys_uname,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -229,6 +231,7 @@ fn syscall_arg_bytes(comptime index: usize) ?usize {
         c.sys_vfork => @sizeOf(c.vfork_context),
         c.sys_unlink => @sizeOf(c.unlink_context),
         c.sys_link => @sizeOf(c.link_context),
+        c.sys_renameat2 => @sizeOf(c.rename_context),
         c.sys_stat => @sizeOf(c.stat_context),
         c.sys_lseek => @sizeOf(c.lseek_context),
         c.sys_getdents => @sizeOf(c.getdents_context),
@@ -258,6 +261,7 @@ fn syscall_arg_bytes(comptime index: usize) ?usize {
         c.sys_klog_ctl => @sizeOf(c.klog_ctl_context),
         c.sys_ftruncate => @sizeOf(c.ftruncate_context),
         c.sys_poll => @sizeOf(c.poll_context),
+        c.sys_uname => @sizeOf(c.uname_context),
         else => null,
     };
 }
@@ -350,9 +354,20 @@ test "SystemCall.FastSyscallsCopyOrIgnoreTheirArgs" {
     }
 }
 
-fn write_result(ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") isize {
+// Debug aid, off in normal builds: name every syscall that returns an error,
+// with the errno the caller will see. A userspace runtime usually reports such
+// a failure in its own vocabulary ("Unexpected", "NotLink") and several calls
+// later, which leaves no way to tell which syscall actually said no. Costs a
+// log line per failing syscall, and failures are common (probing for files), so
+// this is not something to leave on.
+const trace_syscall_errors = false;
+
+fn write_result(number: u32, ptr: *volatile anyopaque, result_or_error: anyerror!i32) linksection(".time_critical") isize {
     const c_result: *volatile c.syscall_result = @ptrCast(@alignCast(ptr));
     const result: i32 = result_or_error catch |err| {
+        if (trace_syscall_errors) {
+            log.err("syscall {d} -> {s} (errno {d})", .{ number, @errorName(err), kernel.errno.to_errno(err) });
+        }
         c_result.*.err = kernel.errno.to_errno(err);
         c_result.*.result = -1;
         return -1;
@@ -424,8 +439,19 @@ pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *vol
         return -1;
     }
 
+    // Alignment, for the same reason the range is checked: `write_result`
+    // @alignCasts this pointer, and in a safe build a misaligned one panics the
+    // kernel -- a process must not be able to take the system down by passing
+    // an odd result pointer. There is nowhere to report the error *to* (the
+    // report goes through this very pointer), so it fails the same way a bad
+    // range does.
+    if (untrusted and @intFromPtr(out) % @alignOf(c.syscall_result) != 0) {
+        log.err("syscall {d}: misaligned result pointer 0x{x}", .{ number, @intFromPtr(out) });
+        return -1;
+    }
+
     if (number >= c.SYSCALL_COUNT) {
-        return write_result(out, ErrnoSet.NotImplemented);
+        return write_result(number, out, ErrnoSet.NotImplemented);
     }
 
     var call_arg: *const anyopaque = @volatileCast(arg);
@@ -434,14 +460,14 @@ pub export fn _irq_svcall(number: u32, arg: *const volatile anyopaque, out: *vol
     if (untrusted) {
         if (syscall_arg_size_table[number]) |bytes| {
             if (!uaccess.access_ok(@intFromPtr(arg), bytes, .read)) {
-                return write_result(out, ErrnoSet.BadAddress);
+                return write_result(number, out, ErrnoSet.BadAddress);
             }
             @memcpy(landing[0..bytes], @as([*]const u8, @ptrCast(@volatileCast(arg)))[0..bytes]);
             call_arg = &landing;
         }
     }
 
-    const result = write_result(out, syscall_lookup_table[number](call_arg));
+    const result = write_result(number, out, syscall_lookup_table[number](call_arg));
     if (trap_heap_corruption) kernel.memory.heap.malloc.probe(number);
     // log.err("System call processing finished for: {d}", .{number});
     // execve and vfork are deliberately not accounted, because neither one's
@@ -518,6 +544,7 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_dlclose, syscall_lookup_table[c.sys_dlclose]);
     try std.testing.expectEqual(handlers.sys_dlsym, syscall_lookup_table[c.sys_dlsym]);
     try std.testing.expectEqual(handlers.sys_getuid, syscall_lookup_table[c.sys_getuid]);
+    try std.testing.expectEqual(handlers.sys_uname, syscall_lookup_table[c.sys_uname]);
     try std.testing.expectEqual(handlers.sys_geteuid, syscall_lookup_table[c.sys_geteuid]);
     try std.testing.expectEqual(handlers.sys_dup, syscall_lookup_table[c.sys_dup]);
     try std.testing.expectEqual(handlers.sys_sysinfo, syscall_lookup_table[c.sys_sysinfo]);
@@ -581,7 +608,7 @@ test "SystemCall.ShouldWriteResult" {
         .result = 0,
         .err = 0,
     };
-    _ = write_result(&result_data, 42);
+    _ = write_result(c.sys_getpid, &result_data, 42);
     try std.testing.expectEqual(42, result_data.result);
     try std.testing.expectEqual(-1, result_data.err);
 
@@ -589,7 +616,7 @@ test "SystemCall.ShouldWriteResult" {
         .result = 0,
         .err = 0,
     };
-    _ = write_result(&result_data, error.InvalidArgument);
+    _ = write_result(c.sys_getpid, &result_data, error.InvalidArgument);
     try std.testing.expectEqual(-1, result_data.result);
     try std.testing.expectEqual(kernel.errno.to_errno(error.InvalidArgument), result_data.err);
 }

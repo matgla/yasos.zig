@@ -138,11 +138,24 @@ pub fn check(ptr: usize, len: usize, comptime access: Access) !void {
     if (!access_ok(ptr, len, access)) return ErrnoSet.BadAddress;
 }
 
+/// Whether a user address is aligned well enough to be read as a `T`.
+///
+/// This has to be checked, not assumed: `@alignCast` on a misaligned pointer
+/// PANICS THE KERNEL in a safe build, so without this any process could bring
+/// the system down by passing an odd pointer to a syscall -- and on ARMv8-M a
+/// 64-bit field of a misaligned struct faults on LDRD even in a release build.
+/// A caller that gets this wrong has a bug, so it is told so (EINVAL) rather
+/// than being served through a bounce buffer.
+fn aligned_for(comptime T: type, address: usize) bool {
+    return @alignOf(T) <= 1 or address % @alignOf(T) == 0;
+}
+
 /// Validate a user pointer and return it as a kernel-usable slice.
 pub fn slice(comptime T: type, ptr: ?*anyopaque, count: usize) ![]T {
     const p = ptr orelse return ErrnoSet.InvalidArgument;
     const bytes = std.math.mul(usize, count, @sizeOf(T)) catch return ErrnoSet.BadAddress;
     try check(@intFromPtr(p), bytes, .write);
+    if (!aligned_for(T, @intFromPtr(p))) return ErrnoSet.InvalidArgument;
     return @as([*]T, @ptrCast(@alignCast(p)))[0..count];
 }
 
@@ -151,6 +164,7 @@ pub fn const_slice(comptime T: type, ptr: ?*const anyopaque, count: usize) ![]co
     const p = ptr orelse return ErrnoSet.InvalidArgument;
     const bytes = std.math.mul(usize, count, @sizeOf(T)) catch return ErrnoSet.BadAddress;
     try check(@intFromPtr(p), bytes, .read);
+    if (!aligned_for(T, @intFromPtr(p))) return ErrnoSet.InvalidArgument;
     return @as([*]const T, @ptrCast(@alignCast(p)))[0..count];
 }
 
@@ -158,6 +172,7 @@ pub fn const_slice(comptime T: type, ptr: ?*const anyopaque, count: usize) ![]co
 pub fn out_ptr(comptime T: type, ptr: ?*anyopaque) !*T {
     const p = ptr orelse return ErrnoSet.InvalidArgument;
     try check(@intFromPtr(p), @sizeOf(T), .write);
+    if (!aligned_for(T, @intFromPtr(p))) return ErrnoSet.InvalidArgument;
     return @ptrCast(@alignCast(p));
 }
 

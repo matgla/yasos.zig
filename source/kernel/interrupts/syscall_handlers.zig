@@ -418,7 +418,14 @@ pub fn sys_open(arg: *const anyopaque) !i32 {
     // Nothing there and no O_CREAT: a probe that walked the filesystem for
     // nothing. Library search is made of these, so they are counted apart.
     perf.open_call(false);
-    return -1;
+    // ENOENT, not a bare -1. The two are not the same to a caller: libc only
+    // copies an errno out of the result block when the kernel reports an error
+    // (syscalls.c `trigger_syscall`), so returning -1 as a *value* left errno
+    // untouched at whatever it already held. open() then failed with errno 0,
+    // and a runtime that reads errno to classify the failure -- as every
+    // Linux-shaped one does -- saw "no error" or, worse, a stale one from an
+    // unrelated call. POSIX requires ENOENT here.
+    return kernel.errno.ErrnoSet.NoEntry;
 }
 
 fn close_fd(fd: i32) i32 {
@@ -689,7 +696,11 @@ pub fn sys_write(arg: *const anyopaque) !i32 {
         kernel.file_log.drain();
         return 0;
     }
-    return -1;
+    // No such descriptor. EBADF rather than a bare -1: returning -1 as a value
+    // leaves errno at whatever the last failing call set (see the note in
+    // sys_open), so a caller that classifies failures by errno is told
+    // something untrue about an unrelated call.
+    return kernel.errno.ErrnoSet.BadFileDescriptor;
 }
 
 pub fn sys_vfork(arg: *const anyopaque) !i32 {
@@ -717,6 +728,29 @@ pub fn sys_link(arg: *const anyopaque) !i32 {
     return 0;
 }
 
+/// renameat2(2). The flags argument is accepted and ignored except for the one
+/// value that changes the outcome: RENAME_NOREPLACE has to fail when the
+/// destination exists, rather than silently replacing it.
+pub fn sys_renameat2(arg: *const anyopaque) !i32 {
+    const context: *const c.rename_context = @ptrCast(@alignCast(arg));
+    const old_path = try determine_path_for_file(kernel_allocator, context.oldpath, context.olddirfd);
+    defer kernel_allocator.free(old_path);
+    const new_path = try determine_path_for_file(kernel_allocator, context.newpath, context.newdirfd);
+    defer kernel_allocator.free(new_path);
+    if ((context.flags & c.RENAME_NOREPLACE) != 0) {
+        var existing = fs.get_ivfs().interface.get(new_path) catch |err| switch (err) {
+            error.NoEntry => null,
+            else => return err,
+        };
+        if (existing) |*node| {
+            node.delete();
+            return kernel.errno.ErrnoSet.FileExists;
+        }
+    }
+    try fs.get_ivfs().interface.rename(old_path, new_path);
+    return 0;
+}
+
     // Preemptible: see `sys_open`.
 pub fn sys_stat(arg: *const anyopaque) !i32 {
     const context: *const c.stat_context = @ptrCast(@alignCast(arg));
@@ -731,7 +765,7 @@ pub fn sys_stat(arg: *const anyopaque) !i32 {
 
 pub fn sys_getentropy(arg: *const anyopaque) !i32 {
     _ = arg;
-    return -1;
+    return kernel.errno.ErrnoSet.NotImplemented;
 }
 
     // Preemptible: see `sys_open`.
@@ -745,11 +779,11 @@ pub fn sys_lseek(arg: *const anyopaque) !i32 {
 
 pub fn sys_wait(arg: *const anyopaque) !i32 {
     _ = arg;
-    return -1;
+    return kernel.errno.ErrnoSet.NotImplemented;
 }
 pub fn sys_times(arg: *const anyopaque) !i32 {
     _ = arg;
-    return -1;
+    return kernel.errno.ErrnoSet.NotImplemented;
 }
 
     // Preemptible: see `sys_open`.
@@ -1219,6 +1253,54 @@ pub fn sys_sysinfo(arg: *const anyopaque) !i32 {
     return 0;
 }
 
+/// What uname(2) reports. None of it changes while the kernel runs, so it is
+/// settled at build time rather than assembled on every call.
+const utsname = struct {
+    const sysname = "YasOS";
+    /// There is no network for this machine to have a name on, so it is called
+    /// what it is: the board the kernel was configured for.
+    const nodename = config.board.board;
+    /// build.zig.zon's `.version`, handed over by build.zig.
+    const release = @import("build_info").release;
+    /// When the image was built -- the same moment `time.zig` starts the clock
+    /// from, so `uname -v` and a fresh file's date agree.
+    const version = build_date(@import("build_info").default_epoch_seconds);
+    const machine = config.cpu.arch;
+};
+
+fn build_date(comptime seconds: i64) []const u8 {
+    return comptime blk: {
+        if (seconds <= 0) break :blk "unknown";
+        const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(seconds) };
+        const year_day = epoch.getEpochDay().calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        break :blk std.fmt.comptimePrint("{d:0>4}-{d:0>2}-{d:0>2}", .{
+            year_day.year,
+            month_day.month.numeric(),
+            @as(u8, month_day.day_index) + 1,
+        });
+    };
+}
+
+/// Copy `value` into a fixed utsname field, truncated to leave room for the
+/// terminator, and clear the rest so nothing the caller left there shows through.
+fn fill_utsname_field(field: []u8, value: []const u8) void {
+    const n = @min(value.len, field.len - 1);
+    @memcpy(field[0..n], value[0..n]);
+    @memset(field[n..], 0);
+}
+
+pub fn sys_uname(arg: *const anyopaque) !i32 {
+    const context: *const c.uname_context = @ptrCast(@alignCast(arg));
+    const buf = try user_out(c.struct_utsname, context.buf);
+    fill_utsname_field(&buf.sysname, utsname.sysname);
+    fill_utsname_field(&buf.nodename, utsname.nodename);
+    fill_utsname_field(&buf.release, utsname.release);
+    fill_utsname_field(&buf.version, utsname.version);
+    fill_utsname_field(&buf.machine, utsname.machine);
+    return 0;
+}
+
 pub fn sys_sysconf(arg: *const anyopaque) !i32 {
     const context: *const c.sysconf_context = @ptrCast(@alignCast(arg));
     switch (context.name) {
@@ -1349,4 +1431,44 @@ test "DeterminePathForFile.ShouldKeepAbsolutePathUnchanged" {
     defer std.testing.allocator.free(resolved_path);
 
     try std.testing.expectEqualStrings("/usr/bin/a.out", resolved_path);
+}
+
+test "Uname.FillsEveryFieldTerminated" {
+    var buf: c.struct_utsname = undefined;
+    @memset(std.mem.asBytes(&buf), 0xaa);
+    const context = c.uname_context{ .buf = &buf };
+    try std.testing.expectEqual(@as(i32, 0), try sys_uname(&context));
+    try std.testing.expectEqualStrings("YasOS", std.mem.sliceTo(&buf.sysname, 0));
+    try std.testing.expectEqualStrings(config.board.board, std.mem.sliceTo(&buf.nodename, 0));
+    try std.testing.expectEqualStrings(@import("build_info").release, std.mem.sliceTo(&buf.release, 0));
+    try std.testing.expectEqualStrings(utsname.version, std.mem.sliceTo(&buf.version, 0));
+    try std.testing.expectEqualStrings(config.cpu.arch, std.mem.sliceTo(&buf.machine, 0));
+    // Nothing of what the caller left in the buffer survives past a terminator.
+    for (std.mem.asBytes(&buf)) |byte| try std.testing.expect(byte != 0xaa);
+}
+
+test "Uname.RefusesANullBuffer" {
+    const context = c.uname_context{ .buf = null };
+    try std.testing.expectError(ErrnoSet.InvalidArgument, sys_uname(&context));
+}
+
+test "Uname.FieldsAreEqualWidth" {
+    // toybox's uname (and plenty of other portable code) walks the struct in
+    // steps of sizeof(sysname); fields of different widths print the wrong bytes.
+    const width = @sizeOf(@FieldType(c.struct_utsname, "sysname"));
+    try std.testing.expectEqual(@as(usize, 1 * width), @offsetOf(c.struct_utsname, "nodename"));
+    try std.testing.expectEqual(@as(usize, 2 * width), @offsetOf(c.struct_utsname, "release"));
+    try std.testing.expectEqual(@as(usize, 3 * width), @offsetOf(c.struct_utsname, "version"));
+    try std.testing.expectEqual(@as(usize, 4 * width), @offsetOf(c.struct_utsname, "machine"));
+}
+
+test "Uname.TruncatesALongValue" {
+    var field: [4]u8 = .{ 1, 1, 1, 1 };
+    fill_utsname_field(&field, "YasOS");
+    try std.testing.expectEqualSlices(u8, "Yas\x00", &field);
+}
+
+test "Uname.BuildDateIsCalendarDate" {
+    try std.testing.expectEqualStrings("2026-09-21", build_date(1790000000));
+    try std.testing.expectEqualStrings("unknown", build_date(0));
 }

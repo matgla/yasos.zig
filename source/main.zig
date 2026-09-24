@@ -41,6 +41,14 @@ const mpu_kernel_protection = if (@hasDecl(config.process, "use_mpu_kernel_prote
 else
     false;
 
+// Off unless a config asks for it: the whole-PSRAM write/read-back was a
+// bring-up check and costs about half the boot (see the Kconfig help).
+const external_memory_post = if (@hasDecl(config, "instrumentation") and
+    @hasDecl(config.instrumentation, "external_memory_post"))
+    config.instrumentation.external_memory_post
+else
+    false;
+
 // RP2350-only board bring-up (overclock + external PSRAM). Other targets (e.g.
 // the QEMU mps2-an505 build) skip it entirely — see initialize_board().
 const is_rp2350 = std.mem.eql(u8, config.cpu.cpu, "rp2350");
@@ -321,7 +329,7 @@ fn initialize_board() void {
 
         if (hal.external_memory.enable()) {
             hal.external_memory.dump_configuration();
-            if (hal.external_memory.perform_post()) {} else {
+            if (external_memory_post and !hal.external_memory.perform_post()) {
                 kernel.log.err("External memory post test failed", .{});
             }
         } else {
