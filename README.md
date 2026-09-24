@@ -115,12 +115,13 @@ Selecting fewer levels is roughly proportional in wall time, so a focused run co
 
 ```bash
 python3 scripts/remote_smoke_tui.py --run-cached --smoke-tcc-opt-levels -O1
+python3 scripts/remote_smoke_tui.py --run-cached -O1            # the same, spelled like the compiler
 scripts/run_qemu_smoke.sh --opt-levels -O0
 scripts/run_hw_smoke.sh --opt-levels -O0,-O2
 make run_smoke_tests_packaged SMOKE_OPT_LEVELS=-O1
 ```
 
-Levels may be space- or comma-separated, written as `-O1`, `O1` or `1`, and `all` expands to the whole matrix. The remote runner's choice is also the cached `Smoke TCC opt lvls` TUI field, which cycles through the matrix and each single level. A settings cache written before this default changed, and still holding the old single `-O0`, is upgraded to the full matrix once, with a note on the run that does it.
+Levels may be space- or comma-separated, written as `-O1`, `O1` or `1`, and `all` expands to the whole matrix. The remote runner also takes them the way the compiler does, `-O0`, and repeating the flag adds a level rather than replacing one: `-O0 -O2` runs both. The remote runner's choice is also the cached `Smoke TCC opt lvls` TUI field, which cycles through the matrix and each single level. A settings cache written before this default changed, and still holding the old single `-O0`, is upgraded to the full matrix once, with a note on the run that does it.
 
 Pass `--flash-only` to upload and flash the artifacts on the remote host, then stop without creating the remote Python venv or running pytest.
 
