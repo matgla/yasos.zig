@@ -422,6 +422,91 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return kernel.errno.ErrnoSet.NotADirectory;
     }
 
+    /// rename(2) within this filesystem.
+    ///
+    /// The entry moves; the contents do not. A file's data and a directory's
+    /// child list already live behind a shared pointer (that is how `link` and
+    /// `RamFsDirectory.alias` work), so the new name is made to point at the
+    /// same contents and the old name is then unlinked. Nothing copies, no open
+    /// handle is disturbed, and a directory moves with its whole subtree.
+    ///
+    /// POSIX, as far as it is implemented here: renaming a name to itself
+    /// succeeds and changes nothing; an existing destination is replaced; a
+    /// destination that is a non-empty directory is refused (unlink reports it);
+    /// and a directory cannot be moved inside itself.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        var old_scratch: [path_scratch_bytes]u8 = undefined;
+        var new_scratch: [path_scratch_bytes]u8 = undefined;
+        const old_resolved = try resolve_into(&old_scratch, old_path);
+        const new_resolved = try resolve_into(&new_scratch, new_path);
+
+        if (std.mem.eql(u8, old_resolved, new_resolved)) {
+            // Same name: POSIX says do nothing and report success.
+            var existing = try self.get(old_resolved);
+            existing.delete();
+            return;
+        }
+
+        // Moving a directory into its own subtree would detach that subtree
+        // from the tree and leave it pointing at itself.
+        if (new_resolved.len > old_resolved.len and
+            std.mem.startsWith(u8, new_resolved, old_resolved) and
+            new_resolved[old_resolved.len] == '/')
+        {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        var node = try self.get(old_resolved);
+        defer node.delete();
+
+        const new_basename = std.fs.path.basenamePosix(new_resolved);
+        if (new_basename.len == 0) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        var parent_node = try self.get_parent_node(new_resolved);
+        defer parent_node.delete();
+        var parent_dir = parent_node.as_directory() orelse
+            return kernel.errno.ErrnoSet.NotADirectory;
+
+        // Replace whatever is already there, the way rename(2) does. Refusals
+        // (a non-empty directory) come back from unlink and stop the rename
+        // before anything has moved.
+        if (parent_dir.as(RamFsDirectory).data().get_node(new_basename) != null) {
+            try parent_dir.as(RamFsDirectory).data().unlink(new_basename);
+        }
+
+        const filename = try self._allocator.dupe(u8, new_basename);
+        errdefer self._allocator.free(filename);
+        const new_node = try self._allocator.create(RamFsNode);
+        errdefer self._allocator.destroy(new_node);
+
+        new_node.* = RamFsNode{
+            .node = if (node.as_directory()) |dir_handle| blk: {
+                var directory = dir_handle;
+                break :blk try directory.as(RamFsDirectory).data().alias(self._allocator, filename);
+            } else if (node.as_file()) |file_handle| blk: {
+                var file = file_handle;
+                break :blk try RamFsFile.InstanceType.create_node(
+                    self._allocator,
+                    file.as(RamFsFile).data()._data.share(),
+                    filename,
+                );
+            } else
+                return kernel.errno.ErrnoSet.InvalidArgument,
+            .list_node = std.DoublyLinkedList.Node{},
+            .name = filename,
+        };
+        try parent_dir.as(RamFsDirectory).data().append(new_node);
+
+        // The new entry holds the contents now, so dropping the old one only
+        // releases a reference.
+        const old_basename = std.fs.path.basenamePosix(old_resolved);
+        const old_dirpath = std.fs.path.dirname(old_resolved) orelse "/";
+        var old_parent = try self.borrow_directory(old_dirpath);
+        try old_parent.as(RamFsDirectory).data().unlink(old_basename);
+    }
+
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
         // Borrowed for the same reason as `stat`: asking whether a path exists

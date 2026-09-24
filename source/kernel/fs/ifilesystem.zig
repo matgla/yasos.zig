@@ -124,6 +124,13 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "link", .{ old_path, new_path }, anyerror!void);
     }
 
+    /// rename(2), within one filesystem. The VFS refuses a pair that crosses a
+    /// mount point before this is reached, so an implementation only ever sees
+    /// two paths of its own.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        return interface.VirtualCall(self, "rename", .{ old_path, new_path }, anyerror!void);
+    }
+
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         return interface.VirtualCall(self, "access", .{ path, mode, flags }, anyerror!void);
     }
@@ -213,6 +220,13 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         _ = old_path;
         _ = new_path;
         return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem does not allow linking
+    }
+
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        _ = self;
+        _ = old_path;
+        _ = new_path;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // nothing here can move
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {

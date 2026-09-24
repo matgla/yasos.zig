@@ -188,6 +188,19 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
     }
 
+    /// rename(2). littlefs moves the entry itself (and replaces the
+    /// destination, as rename(2) requires), so this is a straight forward.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        const old_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{old_path}, 0);
+        defer self._allocator.free(old_c);
+        const new_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{new_path}, 0);
+        defer self._allocator.free(new_c);
+        const result = littlefs.lfs_rename(&self._lfs, old_c, new_c);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
+    }
+
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         log.debug("Removing file or directory at path: {s}", .{path});
         const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);

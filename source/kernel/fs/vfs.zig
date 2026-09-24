@@ -379,6 +379,24 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return error.NotSupported;
     }
 
+    /// rename(2). Both paths have to land on the same mount point: moving an
+    /// entry between filesystems would mean copying the contents, which
+    /// rename() is not allowed to do (EXDEV is the answer that tells a caller
+    /// to copy-and-delete itself, and every runtime knows to do that).
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        const maybe_old = self.mount_points.find_longest_matching_point(*MountPoint, old_path);
+        const maybe_new = self.mount_points.find_longest_matching_point(*MountPoint, new_path);
+        if (maybe_old == null or maybe_new == null) {
+            return kernel.errno.ErrnoSet.NoEntry;
+        }
+        const old_node = maybe_old.?;
+        const new_node = maybe_new.?;
+        if (old_node.point != new_node.point) {
+            return kernel.errno.ErrnoSet.CrossDeviceLink;
+        }
+        return old_node.point.filesystem.interface.rename(old_node.left, new_node.left);
+    }
+
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         return self.raw_access(path, mode, flags) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, true) catch return err;

@@ -208,6 +208,21 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         };
     }
 
+    /// rename(2) through FatFs's own f_rename. FAT has no atomic replace, so a
+    /// destination that already exists is removed first -- which is what
+    /// rename(2) promises a caller, even if the two steps are not indivisible
+    /// here.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        fs_lock.acquire();
+        defer fs_lock.release();
+        const old_volume = try self.volume_path(old_path);
+        defer self._allocator.free(old_volume);
+        const new_volume = try self.volume_path(new_path);
+        defer self._allocator.free(new_volume);
+        fatfs.unlink(new_volume) catch {};
+        try fatfs.rename(old_volume, new_volume);
+    }
+
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         fs_lock.acquire();
         defer fs_lock.release();
