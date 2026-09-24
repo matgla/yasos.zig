@@ -60,6 +60,7 @@ import re
 import shlex
 import subprocess
 import time
+import sys
 from pathlib import Path
 
 import serial
@@ -69,6 +70,25 @@ from .paths import smoke_log_dir
 # Matches QEMU's "char device redirected to /dev/pts/N (label serial0)" line.
 _PTY_RE = re.compile(r"char device redirected to (\S+)")
 _SERIAL_TIMEOUT = float(os.environ.get("YASOS_SMOKE_SERIAL_TIMEOUT", "1"))
+
+
+def _default_fatdisk_offset():
+    """Where the board's fatdisk window starts, as an offset into guest RAM.
+
+    Read from the board rather than hardcoded. It used to be a literal here and
+    another in scripts/build_smoke_fatdisk.py; when the memory map was re-carved
+    and the window moved, neither said so. The corpus was written where the
+    guest no longer looks, `/mnt` came up empty, and ~2000 suite cases failed
+    with "file not found" -- which reads like a compiler problem, not a layout
+    one.
+    """
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    sys.path.insert(0, str(scripts))
+    try:
+        import build_smoke_fatdisk
+        return hex(build_smoke_fatdisk.FATDISK_OFFSET)
+    finally:
+        sys.path.remove(str(scripts))
 
 
 def _parse_size(text: str) -> int:
@@ -117,7 +137,7 @@ class QemuTarget:
         self.ram_size = os.environ.get("YASOS_QEMU_RAM_SIZE", "2G").strip()
         self.fatdisk_image = os.environ.get("YASOS_QEMU_FATDISK_IMAGE", "").strip()
         self.fatdisk_offset = int(
-            os.environ.get("YASOS_QEMU_FATDISK_OFFSET", "0x10000000"), 0
+            os.environ.get("YASOS_QEMU_FATDISK_OFFSET", "") or _default_fatdisk_offset(), 0
         )
         # Off by default: every launch restores the pristine corpus, so a test
         # cannot be influenced by what an earlier one wrote. Turning it on keeps

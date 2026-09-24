@@ -16,9 +16,10 @@
  *   - DDR at 0x60000000 (2 GB) holds everything else, sized generously:
  *       romfs       (embedded rootfs image, LOADed by `-kernel`)   64 MB
  *       kernel_ram  (.data/.bss/.heap/.stack)                      32 MB
- *       process_ram (fast user pool)                               32 MB
- *       psram       (large "slow" user pool)                      128 MB
- *       fatdisk     (host-readable FAT block-device window)         1 MB
+ *       process_ram (fast user pool)                               96 MB
+ *       temp_ram    (the hybrid /tmp arena)                        64 MB
+ *       psram       (large "slow" user pool)                      256 MB
+ *       fatdisk     (host-readable FAT block-device window)        16 MB
  *       kstack      (kernel MSP stack)                              1 MB
  *
  * kstack sits ABOVE every process pool so the vfork register-rescue path
