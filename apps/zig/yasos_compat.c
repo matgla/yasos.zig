@@ -13,10 +13,9 @@
  *   2. __atomic_* builtins. tcc emits calls for these; libtcc1.a has none.
  *   3. POSIX calls YasOS's libc does not have yet, most importantly statx(),
  *      which is how Zig stats a file on Linux.
- *   4. f16/f80/f128 soft float. The compiler only reaches these through
- *      comptime float work; they abort with the symbol name rather than
- *      silently returning nonsense, so if a program ever does need one, the
- *      failure says exactly which routine to write.
+ *   4. f16/f80/f128 soft float -- NOT here: Zig's own compiler-rt provides it,
+ *      rendered through the C backend by apps/zig/build_compiler_rt.sh. See
+ *      section 5 at the bottom.
  *
  * Copyright (C) 2026 Mateusz Stadnik <matgla@live.com>
  */
@@ -594,90 +593,16 @@ extern float logf(float);
 #define YZ_LN2 0.693147180559945309417
 #define YZ_LOG2E 1.442695040888963407360
 
-/* ── 5. f16 / f80 / f128 soft float ───────────────────────────────────────
+/* ── 5. f16 / f80 / f128 soft float ─────────────────────────────────
  *
- * Reached only through comptime float arithmetic in a program being compiled.
- * Each one aborts with its own name, so a program that needs one names the
- * routine to implement instead of producing a wrong number. The declared
- * signature is deliberately (void): these never return, and giving them their
- * real prototypes would mean writing out 100 of them for no gain. */
-
-/* ── f128, the parts the compiler actually reaches ────────────────────────
+ * Not here any more. The Zig compiler holds every comptime float in an f128,
+ * so it converts one to f64 whenever it materialises a float value -- which a
+ * program need not contain a float to trigger -- and it reaches far more of
+ * these than is worth writing by hand.
  *
- * The Zig compiler holds every comptime float in an f128, so it converts one
- * to f64 whenever it materialises a float value -- which a program need not
- * contain a float to trigger. tinycc's runtime has no f128, and Zig's own
- * compiler-rt cannot be built through the C backend for this target (its ARM
- * routines use asm operand syntax tinycc lacks, and its math aliases name f80
- * symbols that do not exist here), so the few routines the compiler reaches
- * are written out here.
- *
- * The C backend renders f128 under ZIG_TARGET_SOFT_COMPILER_RT_F128_ABI, i.e.
- * as a by-value struct of two 64-bit halves, so that is the parameter type. */
-typedef struct { uint64_t lo, hi; } yz_f128;
-
-/* Comparisons. The return values follow the soft-float ABI: __letf2/__lttf2
- * report >0 for "greater", __getf2/__gttf2 report <0 for "less", and both
- * report 1 (resp. -1... any nonzero with the right sign) for unordered, which
- * is why NaN is tested first. */
-static int yz_f128_unordered(yz_f128 a, yz_f128 b) {
-  const uint64_t ae = (a.hi >> 48) & 0x7FFF, be = (b.hi >> 48) & 0x7FFF;
-  const int a_nan = ae == 0x7FFF && ((a.hi & 0x0000FFFFFFFFFFFFULL) | a.lo);
-  const int b_nan = be == 0x7FFF && ((b.hi & 0x0000FFFFFFFFFFFFULL) | b.lo);
-  return a_nan || b_nan;
-}
-
-/* -1, 0 or 1 for a<b, a==b, a>b; callers check NaN separately. */
-static int yz_f128_cmp(yz_f128 a, yz_f128 b) {
-  const int a_neg = (a.hi >> 63) != 0, b_neg = (b.hi >> 63) != 0;
-  /* +-0 compare equal whatever their signs. */
-  const int a_zero = ((a.hi & 0x7FFFFFFFFFFFFFFFULL) | a.lo) == 0;
-  const int b_zero = ((b.hi & 0x7FFFFFFFFFFFFFFFULL) | b.lo) == 0;
-  if (a_zero && b_zero) return 0;
-  if (a_neg != b_neg) return a_neg ? -1 : 1;
-  /* Same sign: the magnitudes order as unsigned integers do, reversed when
-   * both are negative. */
-  int mag;
-  if (a.hi != b.hi)
-    mag = (a.hi & 0x7FFFFFFFFFFFFFFFULL) < (b.hi & 0x7FFFFFFFFFFFFFFFULL) ? -1 : 1;
-  else if (a.lo != b.lo)
-    mag = a.lo < b.lo ? -1 : 1;
-  else
-    return 0;
-  return a_neg ? -mag : mag;
-}
-
-int __eqtf2(yz_f128 a, yz_f128 b) { return yz_f128_unordered(a, b) ? 1 : yz_f128_cmp(a, b); }
-int __netf2(yz_f128 a, yz_f128 b) { return yz_f128_unordered(a, b) ? 1 : yz_f128_cmp(a, b); }
-int __lttf2(yz_f128 a, yz_f128 b) { return yz_f128_unordered(a, b) ? 1 : yz_f128_cmp(a, b); }
-int __letf2(yz_f128 a, yz_f128 b) { return yz_f128_unordered(a, b) ? 1 : yz_f128_cmp(a, b); }
-int __getf2(yz_f128 a, yz_f128 b) { return yz_f128_unordered(a, b) ? -1 : yz_f128_cmp(a, b); }
-/* The C backend's 128-bit integers have the same two-halves shape as its
- * f128, and the compiler builds float values out of them. */
-typedef struct { uint64_t lo, hi; } yz_u128;
-
-static int yz_clz64(uint64_t x) {
-  int n = 0;
-  if (!x) return 64;
-  while (!(x & 0x8000000000000000ULL)) { x <<= 1; n++; }
-  return n;
-}
-
-static void yz_no_float(const char *name) {
-  fprintf(stderr, "yasos_compat: %s: f16/f80/f128 arithmetic is not implemented on this target\n", name);
-  abort();
-}
-
-#define YZ_NO_FLOAT(name)                                                      \
-  void name(void) { yz_no_float(#name); }
-
-YZ_NO_FLOAT(__eqhf2)
-YZ_NO_FLOAT(__eqxf2)
-YZ_NO_FLOAT(__gehf2)
-YZ_NO_FLOAT(__gexf2)
-YZ_NO_FLOAT(__lehf2)
-YZ_NO_FLOAT(__lexf2)
-YZ_NO_FLOAT(__lthf2)
-YZ_NO_FLOAT(__ltxf2)
-YZ_NO_FLOAT(__nehf2)
-YZ_NO_FLOAT(__nexf2)
+ * Zig's own compiler-rt supplies all of them, and it renders through the C
+ * backend for this target like anything else: see apps/zig/build_compiler_rt.sh
+ * and apps/zig/strip_naked_asm.py, which adapt the two things tinycc cannot
+ * take (named inline-asm operands in eight ARM EABI wrappers, and second
+ * exported names expressed as attribute aliases of an assembler name).
+ * Link the resulting object next to this one. */
