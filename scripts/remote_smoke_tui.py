@@ -873,7 +873,10 @@ if ! command -v openocd >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! command -v uhubctl >/dev/null 2>&1; then
+# Looked for where the reset paths look (uhubctl_cmd, uhubctl_bin): it lives in
+# /usr/sbin, which a non-interactive ssh session does not have on its PATH, so
+# `command -v` alone warned about a tool every reset then found and used.
+if ! command -v uhubctl >/dev/null 2>&1 && [[ ! -x /usr/sbin/uhubctl ]]; then
     echo "warning: uhubctl not found, USB power-cycle reset unavailable" >&2
 fi
 
@@ -3412,6 +3415,14 @@ def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namesp
     if args.smoke_tcc_opt_level is not None:
         runtime_config["smoke_tcc_opt_level"] = args.smoke_tcc_opt_level
 
+    # Runtime-only (never cached), and the kernel's alone: --debug also rebuilds
+    # the rootfs with -g and TCC_DEBUG, which is a different firmware, while a
+    # debugger session that has to stop *on* `main` only needs a kernel whose
+    # `main` has not had its first line inlined away. In ReleaseFast the line
+    # gdb lands on after main's prologue is MallocAllocator.allocator's.
+    if getattr(args, "optimize", None):
+        runtime_config["optimize"] = args.optimize
+
     if getattr(args, "gcc_test_suite_only", False):
         runtime_config["with_gcc_torture"] = True
         runtime_config["pytest_args"] = "tests/smoke -m gcc_torture"
@@ -3490,6 +3501,21 @@ def smoke_tcc_opt_levels_argument(value: str) -> str:
     return levels
 
 
+class SmokeTccOptLevelsAction(argparse.Action):
+    """Each -O level flag adds to the selection instead of replacing it.
+
+    A compiler takes the last ``-O``, but here the flag picks which levels the
+    suites run at, so ``-O0 -O2`` means both -- the same thing
+    ``--smoke-tcc-opt-levels -O0 -O2`` already means.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        existing = getattr(namespace, self.dest, None)
+        if existing:
+            values = normalize_smoke_tcc_opt_levels(f"{existing} {values}")
+        setattr(namespace, self.dest, values)
+
+
 def fold_smoke_tcc_opt_level_args(argv: list[str]) -> list[str]:
     """Rewrite ``--smoke-tcc-opt-levels -O0 -O1`` into the ``=`` form.
 
@@ -3527,6 +3553,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-cached", action="store_true", help="Run immediately using cached settings without opening the TUI. This is now the default when a cache file exists.")
     parser.add_argument("--reconfigure", "--configure", dest="reconfigure", action="store_true", help="Open the TUI and update cached settings before running.")
     parser.add_argument("--debug", action="store_true", help="Build the kernel with Zig Debug optimization and pass --debug to build_rootfs.sh.")
+    parser.add_argument("--optimize", choices=OPTIMIZE_OPTIONS, default=None, help="Zig optimize mode for the kernel, for this run only (default: the cached 'Optimize' field). Unlike --debug it leaves the rootfs alone, so '--optimize Debug' gives gdb a kernel whose `break main` stops on main rather than on code inlined into it. --debug still wins.")
     parser.add_argument("--force", action="store_true", help="Force a clean rootfs rebuild, refresh the remote smoke venv, and reflash kernel/rootfs even if hashes match.")
     parser.add_argument("--gdb", action="store_true", help="Build locally, sync debug artifacts to the remote repository, then start an interactive remote GDB attach session over SSH without flashing. Combine with --reset to reset-halt before attaching.")
     parser.add_argument("--flash-only", action="store_true", help="Upload and flash artifacts on the remote host, then stop without running pytest.")
@@ -3540,7 +3567,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--keep-runs", type=int, default=None, metavar="N", help=f"How many numbered run directories to keep on the remote host (default {DEFAULT_CONFIG['keep_runs']}; 0 keeps all). Every run writes its logs and its timing/profile report to logs/<N>/, so two runs can be compared afterwards; the local mirror under .cache/remote_smoke_logs is never pruned.")
     parser.add_argument("--rerun-failed", action="store_true", help="Run only tests that failed in the previous remote pytest run by passing --lf to pytest. If no last-failed cache exists on the remote host, runs no tests instead of the full suite.")
     parser.add_argument("--with-gcc-torture", dest="with_gcc_torture", action="store_true", default=None, help="Enable GCC torture smoke tests for this run. Also syncs libs/tinycc/tests/gcctestsuite and exports YASOS_SMOKE_ENABLE_GCC_TORTURE=1 remotely.")
-    parser.add_argument("--smoke-tcc-opt-levels", "--smoke-tcc-opt-level", dest="smoke_tcc_opt_level", type=smoke_tcc_opt_levels_argument, metavar="LEVELS", help=f"tcc -O levels the smoke suites run at (default '{SMOKE_TCC_ALL_OPT_LEVELS}', i.e. every suite -- tests2, ir_tests and gcc-torture -- runs once per level). Pass one level for a focused, roughly 3x shorter run, or any subset: --smoke-tcc-opt-levels -O1, --smoke-tcc-opt-levels '-O0 -O2', --smoke-tcc-opt-levels all.")
+    parser.add_argument("-O", "--smoke-tcc-opt-levels", "--smoke-tcc-opt-level", dest="smoke_tcc_opt_level", action=SmokeTccOptLevelsAction, type=smoke_tcc_opt_levels_argument, metavar="LEVELS", help=f"tcc -O levels the smoke suites run at, for this run only (default: the cached 'Smoke TCC opt lvls' field, '{SMOKE_TCC_ALL_OPT_LEVELS}' out of the box, i.e. every suite -- tests2, ir_tests and gcc-torture -- runs once per level). Spelled like the compiler's: -O0, -O1, -O2; repeating it adds levels, so -O0 -O2 runs both. Pass one level for a focused, roughly 3x shorter run. The long form takes any subset: --smoke-tcc-opt-levels -O1, --smoke-tcc-opt-levels '-O0 -O2', --smoke-tcc-opt-levels all.")
     parser.add_argument("--gcc-test-suite-only", action="store_true", help="Run only GCC torture tests. Implies --with-gcc-torture and filters pytest to -m gcc_torture.")
     parser.add_argument("--extra-tcc-cflags", help="Extra CFLAGS passed to every TCC compilation during smoke tests. Example: --extra-tcc-cflags='-O1'.")
     parser.add_argument("--tcc-env-prefix", help="Environment prefix put in front of every on-device tcc invocation, so one firmware can carry both arms of an A/B. Example: --tcc-env-prefix='TCC_KEEP_FWD_DRY=1 '.")

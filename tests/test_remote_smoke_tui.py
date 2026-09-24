@@ -256,6 +256,28 @@ def test_apply_runtime_pytest_overrides_sets_keep_runs():
     assert config["keep_runs"] == 3
 
 
+def test_optimize_override_builds_a_debug_kernel_over_a_release_rootfs():
+    """`--optimize Debug` is the kernel's alone: `--debug` would also rebuild the
+    rootfs with -g and TCC_DEBUG, which is different firmware from the one the
+    smoke runs test. It is a property of one run and never reaches the cache."""
+    cached = dict(remote_smoke_tui.DEFAULT_CONFIG)
+    config = remote_smoke_tui.apply_runtime_pytest_overrides(
+        cached, _default_args(optimize="Debug"),
+    )
+
+    assert remote_smoke_tui.effective_optimize(config, debug=False) == "Debug"
+    assert cached["optimize"] == remote_smoke_tui.DEFAULT_CONFIG["optimize"]
+    untouched = remote_smoke_tui.apply_runtime_pytest_overrides(cached, _default_args())
+    assert remote_smoke_tui.effective_optimize(untouched, debug=False) == cached["optimize"]
+
+
+def test_optimize_flag_takes_only_zigs_modes(monkeypatch):
+    assert _parse(monkeypatch, "--optimize", "Debug").optimize == "Debug"
+    assert _parse(monkeypatch, "--flash-only").optimize is None
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, "--optimize", "RelWithDebInfo")
+
+
 def test_run_directories_live_outside_the_rsynced_repo_tree():
     """The repo is rsynced with --delete and excludes only the work dir, so a
     runs root under $remote_repo is wiped at the start of every run -- which
@@ -348,6 +370,32 @@ def test_opt_level_flag_absorbs_space_separated_values():
     # option.
     assert fold(["--smoke-tcc-opt-levels", "-O9"]) == ["--smoke-tcc-opt-levels=-O9"]
     assert fold(["--run-cached"]) == ["--run-cached"]
+
+
+def _parse(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["remote_smoke_tui.py", *argv])
+    return remote_smoke_tui.parse_args()
+
+
+def test_short_opt_level_flag_is_spelled_like_the_compilers(monkeypatch):
+    assert _parse(monkeypatch, "--stream", "-O0").smoke_tcc_opt_level == "-O0"
+    assert _parse(monkeypatch, "-O", "1").smoke_tcc_opt_level == "-O1"
+    assert _parse(monkeypatch, "-Oall").smoke_tcc_opt_level == "-O0 -O1 -O2"
+    # Not given at all leaves the cached selection in charge.
+    assert _parse(monkeypatch, "--stream").smoke_tcc_opt_level is None
+
+
+def test_repeated_opt_level_flags_add_levels(monkeypatch):
+    # The flag picks which levels run, so repeating it is a union, not the
+    # compiler's last-one-wins.
+    assert _parse(monkeypatch, "-O0", "-O2").smoke_tcc_opt_level == "-O0 -O2"
+    assert _parse(monkeypatch, "-O2", "-O0", "-O2").smoke_tcc_opt_level == "-O2 -O0"
+    assert _parse(monkeypatch, "--smoke-tcc-opt-levels", "-O1", "-O0").smoke_tcc_opt_level == "-O1 -O0"
+
+
+def test_short_opt_level_flag_rejects_unsupported_levels(monkeypatch):
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, "-O3")
 
 
 def test_merge_config_keeps_a_multi_level_selection():
