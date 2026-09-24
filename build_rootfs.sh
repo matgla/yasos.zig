@@ -158,6 +158,13 @@ PYEOF
 fi
 case "$FP_MODE" in
   soft)
+    # Say "no FPU" explicitly instead of leaving tcc at its ARM_FPU_AUTO
+    # default. AUTO already lands on the soft codegen tables, so the code is
+    # the same either way -- but AUTO still predefines __ARM_FP 12, which tells
+    # every library it is being built for a part that has an FPU. libc's
+    # vfork() believed it and kept its `vpush {s0-s31}` path, which NOCP-faults
+    # on a core with no FPU (QEMU's mps3-an524 Cortex-M33 model, Cortex-M23).
+    TCC_FP_DEFINE="-DCONFIG_TCC_DEFAULT_FPU=ARM_FPU_NONE"
     ;;
   rp2350|rp2350-dcp)
     TCC_FP_DEFINE="-DCONFIG_TCC_DEFAULT_FPU=ARM_FPU_RP2350"
