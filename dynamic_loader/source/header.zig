@@ -290,6 +290,10 @@ pub fn print_header(header: *const Header) void {
 }
 
 comptime {
+    // 124 bytes since YAFF_VERSION 3, which widened every table offset and the
+    // relocation/symbol counts from 16 to 32 bits (92 bytes before that). The
+    // check is here so a toolchain/loader mismatch is a build error rather than
+    // a module that loads with its sections read from the wrong offsets.
     var buf: [30]u8 = undefined;
-    if (@sizeOf(Header) != 92) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
+    if (@sizeOf(Header) != 124) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
 }

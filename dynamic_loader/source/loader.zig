@@ -52,7 +52,7 @@ const log = std.log.scoped(.yasld);
 /// (`dump_fault_maps`, source/kernel/modules.zig) and readable on demand from
 /// /proc/<pid>/maps. The kernel turns this back on for a profiling build, where
 /// the line is wanted inline with the `load kind=` timings.
-var emit_load_map: bool = false;
+var emit_load_map: bool = true; // TEMP: symbolizing a userspace fault
 
 /// Called by the kernel at loader init (source/kernel/modules.zig) with whatever
 /// the perf-profiling config says.
@@ -296,7 +296,7 @@ pub const Loader = struct {
         // modules.zig to attach a pid. Gated by `emit_load_map` — see there for
         // why this does not go out on every spawn by default.
         if (emit_load_map) {
-            log.info("loaded '{s}': .text=0x{x}(+0x{x}) .data=0x{x} .got=0x{x}", .{
+            log.err("loaded '{s}': .text=0x{x}(+0x{x}) .data=0x{x} .got=0x{x}", .{
                 module.name.?,
                 @intFromPtr(module.get_text().ptr),
                 module.get_text().len,
