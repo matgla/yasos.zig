@@ -142,6 +142,21 @@ fn dump_memory_window(label: []const u8, start: usize, count: usize) void {
     }
 }
 
+/// A real return address has a call immediately in front of it: a 32-bit BL/BLX
+/// (immediate), or a 16-bit BLX Rm. Without this test any stack word that
+/// happened to be odd and to land in the user pools was reported as a frame --
+/// and on a board whose heap is in those pools, that is most of the heap.
+fn preceded_by_a_call(ret: usize) bool {
+    if (ret < 4 or !is_readable_ram(ret -% 4)) return false;
+    const hw1 = (@as(*const volatile u16, @ptrFromInt(ret -% 2))).*; // last halfword
+    const hw0 = (@as(*const volatile u16, @ptrFromInt(ret -% 4))).*; // one before it
+    // BL / BLX <label>: first halfword 11110xxxxxxxxxxx, second 11x1xxxxxxxxxxx.
+    if ((hw0 & 0xF800) == 0xF000 and (hw1 & 0xD000) == 0xD000) return true;
+    // BLX Rm: 010001111 Rm 000.
+    if ((hw1 & 0xFF87) == 0x4780) return true;
+    return false;
+}
+
 // Scan the faulting process stack for plausible return addresses (odd =
 // Thumb, in the user text window) and dump the code bytes ending at each, so
 // the call chain can be byte-matched against the ELF (the YAFF load skew makes
@@ -153,7 +168,7 @@ fn dump_backtrace_codes(stack_ptr: usize, words: usize) void {
     log.err("  backtrace (code bytes ending at each stacked return addr):", .{});
     var i: usize = 0;
     var dumped: usize = 0;
-    while (i < words and dumped < 16) : (i += 1) {
+    while (i < words and dumped < 24) : (i += 1) {
         const a = base + i * 4;
         if (!is_readable_ram(a)) break;
         const v = (@as(*const volatile u32, @ptrFromInt(a))).*;
@@ -161,6 +176,7 @@ fn dump_backtrace_codes(stack_ptr: usize, words: usize) void {
         if ((v & 1) == 0) continue;
         if (!is_user_text(v)) continue;
         const ret = v & ~@as(usize, 1);
+        if (!preceded_by_a_call(ret)) continue;
         const win = (ret -% 10) & ~@as(usize, 0x3);
         if (!is_readable_ram(win)) continue;
         const w0 = (@as(*const volatile u32, @ptrFromInt(win))).*;
@@ -316,7 +332,12 @@ export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callco
     // frame and is the most informative window there is.
     // `dump_memory_window` skips unmapped addresses, so a garbage PSP costs a
     // line rather than a nested fault.
-    dump_memory_window("psp", psp, 72);
+    // 1024 words (4 KiB). 72 reached past the immediate caller frames of a
+    // small program, but not of a Zig-compiler-sized one: there a single frame
+    // runs to 600 bytes, and the field that explained the fault sat six frames
+    // up. This only ever runs on a fatal fault, so the ~250 extra lines of
+    // serial output buy the one thing the crash cannot be re-run to get.
+    dump_memory_window("psp", psp, 1024);
     // Dump instruction words around the faulting PC so the exact executed
     // instruction can be disassembled directly from loaded memory (the loader's
     // reported .text base can be skewed vs the ELF, so trust these bytes).
@@ -324,7 +345,7 @@ export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callco
     // Resolve stacked_pc/lr to <module>+offset: dump the faulting process's
     // module load map (executable + shared libs).
     dump_fault_maps(get_current_pid());
-    dump_backtrace_codes(psp, 64);
+    dump_backtrace_codes(psp, 512);
     // Unconditional: the context-switch event ring records what the scheduler
     // did, which is worth most when the scheduler is what faulted -- and a
     // PendSV fault is always on MSP, so gating on `uses_process_stack` would
