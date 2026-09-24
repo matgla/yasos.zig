@@ -97,6 +97,17 @@ fn rootfs_build_epoch(b: *std.Build) i64 {
     return if (seconds > 0) seconds else 0;
 }
 
+/// The `.version` build.zig.zon declares, which is what uname(2) reports as the
+/// release. Read out of the manifest rather than repeated here, so bumping the
+/// version is one edit.
+fn manifest_version() []const u8 {
+    const manifest = @embedFile("build.zig.zon");
+    const key = ".version = \"";
+    const start = (std.mem.indexOf(u8, manifest, key) orelse return "unknown") + key.len;
+    const end = std.mem.indexOfScalarPos(u8, manifest, start, '"') orelse return "unknown";
+    return manifest[start..end];
+}
+
 pub fn build(b: *std.Build) !void {
     const test_filters = b.option([]const []const u8, "test-filter", "comma separated list of test name filters") orelse &[0][]const u8{};
     const defconfig_file = b.option([]const u8, "defconfig_file", "use a specific defconfig file") orelse null;
@@ -158,6 +169,7 @@ pub fn build(b: *std.Build) !void {
     // kernel is relinked anyway (it embeds the thing).
     const build_info = b.addOptions();
     build_info.addOption(i64, "default_epoch_seconds", rootfs_build_epoch(b));
+    build_info.addOption([]const u8, "release", manifest_version());
     const build_info_module = build_info.createModule();
 
     const kernel_module_for_tests = b.addModule("kernel_under_test", .{

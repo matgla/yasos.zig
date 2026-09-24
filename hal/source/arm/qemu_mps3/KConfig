@@ -25,16 +25,17 @@ if CPU_QEMU_MPS3
   config CONFIG_CPU
     def_string "qemu_mps3"
 
+  # QEMU's mps3-an524 model has no FPU at all -- unlike the mps2-an505, whose
+  # Cortex-M33 does. Probe: with the machine halted, write 0x00F00000 (CP10/CP11
+  # full access) to CPACR at 0xE000ED88 over the gdbstub and read it back; on
+  # an524 it reads 0 and the stub exposes no FP registers, on an505 it sticks.
+  # Claiming an FPU here made the first context switch restore s16-s31 and take
+  # a NOCP UsageFault -> HardFault (CFSR=0x00080000) before the shell came up.
   config CONFIG_CPU_HAS_FPU
-    def_bool y
+    def_bool n
 
   config CONFIG_CPU_USE_FPU
-    def_bool y
-
-  # QEMU's Cortex-M33 model advertises single precision only (MVFR0 DP=0) and
-  # has no CP4, so no DCP: doubles stay in the software runtime.
-  config CONFIG_BUILD_USERSPACE_FP_MFPU
-    def_string "fpv5-sp-d16"
+    def_bool n
 
   config CONFIG_CPU_HAS_EXTERNAL_MEMORY_INTERFACE
     def_bool n

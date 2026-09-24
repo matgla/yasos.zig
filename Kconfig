@@ -187,6 +187,19 @@ menu "Logging & Instrumentation"
       loader). Leave disabled unless you are actively debugging and accept the
       risk; the serial console captures the same lines safely.
 
+  config CONFIG_INSTRUMENTATION_EXTERNAL_MEMORY_POST
+    prompt "Test all of external memory (PSRAM) at boot"
+    def_bool "false"
+    help
+      Write and read back every byte of external memory before the kernel
+      starts, and disable it on a mismatch. A bring-up check from when the
+      PSRAM interface was new; the rxdelay calibration that runs on every boot
+      already writes and reads back PSRAM at each sample point.
+
+      It is half the boot: measured 2026-09-22 on the Pimoroni Pico Plus 2
+      (8 MB PSRAM, 532 MHz), 474 ms of a 0.86 s reset-to-prompt in
+      ReleaseFast and 557 ms in Debug.
+
   choice "Log level"
     prompt "Log level"
     config CONFIG_INSTRUMENTATION_LOG_ERROR

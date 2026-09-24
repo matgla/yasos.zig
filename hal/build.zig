@@ -130,6 +130,28 @@ fn replace_tokens(b: *std.Build, linker_script: []const u8) []u8 {
     return path;
 }
 
+/// `<script>_debug.ld` beside a board's linker script, when the kernel is
+/// built Debug and the board ships one -- otherwise the script itself.
+///
+/// Debug keeps every temporary the optimiser would elide, so kernel frames are
+/// several times their release size and a stack sized for ReleaseFast is not
+/// one a Debug kernel boots on (rp2350: lockup on MSPLIM during filesystem
+/// init). A board that needs a different memory map for that build says so
+/// with a file, and every other board and every release build is untouched.
+///
+/// A whole second script rather than an INCLUDE of shared sections: ld.lld
+/// resolves INCLUDE against the working directory and -L, not beside the
+/// including script, and a root_module library path did not reach this link
+/// (tried 2026-09-22). A file the script includes would also be one input the
+/// compile step does not know it depends on.
+fn debug_variant(b: *std.Build, linker_script: []const u8, optimize: std.builtin.OptimizeMode) []const u8 {
+    if (optimize != .debug) return linker_script;
+    const extension = std.fs.path.extension(linker_script);
+    const candidate = b.fmt("{s}_debug{s}", .{ linker_script[0 .. linker_script.len - extension.len], extension });
+    _ = std.Io.Dir.cwd().statFile(b.graph.io, candidate, .{}) catch return linker_script;
+    return candidate;
+}
+
 pub const Builder = struct {
     pub fn configureBoard(_: *const Builder, b: *std.Build, board: []const u8, execName: []const u8, root_file: std.Build.LazyPath, optimize: std.builtin.OptimizeMode, config_file: []const u8) !*std.Build.Module {
         const boardDependency = try std.fmt.allocPrint(b.allocator, "boards/{s}/{s}.zig", .{ board, board });
@@ -212,7 +234,7 @@ pub const Builder = struct {
             exe.root_module.addImport("config", config_module);
 
             if (config.build_linker_script_path) |linker_script| {
-                const linker = replace_tokens(b, linker_script);
+                const linker = debug_variant(b, replace_tokens(b, linker_script), optimize);
                 const path = std.Build.LazyPath{
                     .cwd_relative = linker,
                 };

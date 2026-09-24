@@ -35,21 +35,33 @@ MEMORY
   /* DDR (2 GB at 0x60000000), carved into generous regions. */
   romfs       (rw)   : ORIGIN = 0x60000000, LENGTH = 64M
   kernel_ram  (rwx)  : ORIGIN = 0x64000000, LENGTH = 32M
-  /* Fast user process pool — backs the /tmp RamFs and non-XIP user code. */
-  process_ram (rwx)  : ORIGIN = 0x66000000, LENGTH = 32256K
+  /* Fast user process pool — process images, their stacks and their heaps.
+     96 MB because the Zig compiler is a process here: it asks for a multi-MB
+     stack (its frames are large enough that 32 KiB overflows during argument
+     parsing) on top of a ~1 MB image and a heap in the tens of MB. DDR is 2 GB,
+     so the pools on this board are sized for the largest thing that runs on it
+     rather than for the board's own scarcity. */
+  process_ram (rwx)  : ORIGIN = 0x66000000, LENGTH = 96M
   /* Arena for the hybrid /tmp filesystem (source/fs/ramfs, mounted by
-     source/main.zig): carved off the tail of the fast pool so a process image
-     can never eat it. Files past CONFIG_TMPFS_MAX_FILE_SIZE spill to
-     CONFIG_TMPFS_SPILL_DIRECTORY. Kernel-owned, so the MPU leaves it unmapped. */
-  temp_ram    (rw)   : ORIGIN = 0x67F80000, LENGTH = 512K
+     source/main.zig). Files past CONFIG_TMPFS_MAX_FILE_SIZE, and anything the
+     arena can no longer hold, spill to CONFIG_TMPFS_SPILL_DIRECTORY.
+     Kernel-owned, so the MPU leaves it unmapped.
+
+     64 MB, and its own DDR region rather than a slice off the tail of the fast
+     pool: /tmp is where an on-device compile puts its working files, and a Zig
+     compile writes a cache tree plus the C it hands to tcc. On a board whose
+     DDR is measured in gigabytes there is nothing to be gained by making the
+     two compete. */
+  temp_ram    (rw)   : ORIGIN = 0x6C000000, LENGTH = 64M
   /* "Slow" user process pool (memory region[2], the bulk pool every process
-     allocates from — see process_memory_pool.zig). 128 MB: no compile OOMs. */
-  psram       (rw)   : ORIGIN = 0x68000000, LENGTH = 128M
+     allocates from — see process_memory_pool.zig). 256 MB: no compile OOMs. */
+  psram       (rw)   : ORIGIN = 0x70000000, LENGTH = 256M
   /* fatdisk: 16 MB window for a host-readable FAT block device (board fatdisk0).
      Under a host-mmap'd RAM launch it maps to a fixed file offset that scripts/*
-     reference (0x70000000 - 0x60000000 = 0x10000000). NOT a LOADed section; on a
+     reference (0x80000000 - 0x60000000 = 0x20000000). NOT a LOADed section; on a
      plain-RAM launch the window is garbage so the FatFs mount fails and is
-     skipped (source/main.zig).
+     skipped (source/main.zig). Keep `fatdisk_address` in
+     hal/boards/qemu_mps3_an524 in step with the ORIGIN here.
 
      Sized to hold the whole smoke source corpus (4.13 MiB of mostly sub-kilobyte
      files, so slack for per-file cluster rounding) with room for the binaries the
@@ -57,9 +69,9 @@ MEMORY
      the host builds the corpus into a FAT image once and maps it, instead of the
      harness pushing 4.13 MiB over ZMODEM after every relaunch. DDR is 2 GB here,
      so the 15 MB comes out of nothing else. */
-  fatdisk     (rw)   : ORIGIN = 0x70000000, LENGTH = 16M
+  fatdisk     (rw)   : ORIGIN = 0x80000000, LENGTH = 16M
   /* Kernel MSP stack — highest address, above every process pool (PSPLIM, above). */
-  kstack      (rw)   : ORIGIN = 0x71000000, LENGTH = 1M
+  kstack      (rw)   : ORIGIN = 0x81000000, LENGTH = 1M
 }
 
 ENTRY(_start)
