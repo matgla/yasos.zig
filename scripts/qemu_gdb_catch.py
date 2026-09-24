@@ -6,7 +6,7 @@ sender that types --cmd at the shell prompt, then runs gdb-multiarch with the
 given --gdb-cmds (semicolon-separated) and prints gdb's output. Used to catch
 the YAFF heap corruptor with breakpoints/watchpoints.
 """
-import argparse, os, re, subprocess, sys, threading, time
+import argparse, os, re, shutil, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -20,12 +20,14 @@ def main():
     ap.add_argument("--gdb-cmds", help="semicolon-separated gdb commands")
     ap.add_argument("--gdb-file", help="path to a gdb command file (preferred; avoids shell escaping)")
     ap.add_argument("--port", type=int, default=1234)
+    ap.add_argument("--machine", default="mps2-an505",
+                    help="QEMU machine (e.g. mps3-an524 for the big-DDR board)")
     ap.add_argument("--settle", type=float, default=3.0, help="seconds after prompt before sending cmd")
     ap.add_argument("--gdb-timeout", type=float, default=90)
     args = ap.parse_args()
 
     log = "/tmp/qemu_gdb_catch.log"
-    qcmd = ["qemu-system-arm", "-machine", "mps2-an505", "-cpu", "cortex-m33",
+    qcmd = ["qemu-system-arm", "-machine", args.machine, "-cpu", "cortex-m33",
             "-display", "none", "-monitor", "none",
             "-semihosting-config", "enable=on,target=native",
             "-serial", "pty", "-kernel", str(KERNEL),
@@ -81,7 +83,10 @@ def main():
     gf = "/tmp/gdb_cmds.txt"
     Path(gf).write_text("\n".join(cmds) + "\n")
 
-    gdb = subprocess.Popen(["gdb-multiarch", "-nx", "-batch", "-x", gf, str(KERNEL)],
+    # gdb-multiarch is the Debian name; on Fedora the plain `gdb` is built with
+    # every target, so fall back to it rather than failing to launch.
+    gdb_bin = "gdb-multiarch" if shutil.which("gdb-multiarch") else "gdb"
+    gdb = subprocess.Popen([gdb_bin, "-nx", "-batch", "-x", gf, str(KERNEL)],
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         out, _ = gdb.communicate(timeout=args.gdb_timeout)
