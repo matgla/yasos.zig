@@ -884,6 +884,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 perf.reset();
             }
 
+            // Record what is now running before the path goes away: this is
+            // what /proc/<pid>/exe reports, and readlink on it is how a
+            // Linux-shaped program locates its own binary.
+            current_process.set_executable_path(path) catch |err| {
+                log.warn("pid={d}: could not record exe path: {s}", .{ current_process.pid, @errorName(err) });
+            };
+
             // Free the path now — it's no longer needed, and this function may
             // not return normally (process_get_back_to_parent_vfork bypasses
             // all defers in the caller).

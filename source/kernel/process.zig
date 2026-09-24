@@ -195,6 +195,12 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// tear the map down twice.
         _fds_cleared: bool = false,
         cwd: []u8,
+        /// Path of the image this process is running, as exec() was given it.
+        /// Kept so /proc/<pid>/exe can answer readlink(2) -- which is how any
+        /// Linux-shaped program finds its own binary (the Zig compiler does it
+        /// on startup, and refuses to run without an answer). Null until the
+        /// process has exec'd an image; owned by `_kernel_allocator`.
+        exe_path: ?[]u8 = null,
         node: std.DoublyLinkedList.Node,
         _process_memory_allocator: ProcessMemoryAllocator,
         _parent: ?*Self = null,
@@ -279,6 +285,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .resume_privileged = is_root,
                 ._fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
                 .cwd = cwd_handle,
+                // No image yet: exec() fills this in once one has loaded.
+                .exe_path = null,
                 .node = .{},
                 ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
                 ._parent = parent,
@@ -342,6 +350,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             }
             self.drop_exited_children();
             self._kernel_allocator.free(self.cwd);
+            if (self.exe_path) |path| {
+                self._kernel_allocator.free(path);
+                self.exe_path = null;
+            }
             self._process_memory_allocator.deinit();
             log.info("deinit pid={d}: after proc_mem.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             var it = self._blocked_by.first;
@@ -384,6 +396,12 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             const process = try self._kernel_allocator.create(Self);
             const cwd_handle = try self._kernel_allocator.alloc(u8, self.cwd.len);
             @memcpy(cwd_handle, self.cwd);
+            // The child runs the parent's image until it execs, so it reports
+            // the parent's /proc/<pid>/exe until then -- same as fork(2).
+            const exe_handle: ?[]u8 = if (self.exe_path) |path|
+                try self._kernel_allocator.dupe(u8, path)
+            else
+                null;
 
             process.* = .{
                 .state = State.Ready,
@@ -399,6 +417,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .resume_privileged = false,
                 ._fds = try self.dupe_fds(),
                 .cwd = cwd_handle,
+                .exe_path = exe_handle,
                 .node = .{},
                 ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
                 ._parent = self,
@@ -524,6 +543,18 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn get_current_directory(self: Self) []const u8 {
             return self.cwd;
+        }
+
+        /// Record the image this process now runs. Called by exec once the load
+        /// has succeeded, so a failed exec leaves the previous answer standing.
+        pub fn set_executable_path(self: *Self, path: []const u8) !void {
+            const copy = try self._kernel_allocator.dupe(u8, path);
+            if (self.exe_path) |old_path| self._kernel_allocator.free(old_path);
+            self.exe_path = copy;
+        }
+
+        pub fn get_executable_path(self: Self) ?[]const u8 {
+            return self.exe_path;
         }
 
         pub fn stack_pointer(self: Self) *const u8 {
@@ -902,7 +933,18 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn attach_file(self: *Self, path: []const u8, node: kernel.fs.Node) !i32 {
-            const fd = self.get_free_fd() orelse return kernel.errno.ErrnoSet.TooManyOpenFiles;
+            const fd = self.get_free_fd() orelse {
+                // EMFILE on its own says nothing about which limit was hit or
+                // what the process already had open, and it surfaces in the
+                // caller as a puzzling error about an unrelated file.
+                log.err("pid={d}: out of file descriptors opening '{s}' (RLIMIT_NOFILE={d}, open={d})", .{
+                    self.pid,
+                    path,
+                    self.resource_limits[c.RLIMIT_NOFILE].rlim_cur,
+                    self._fds.count(),
+                });
+                return kernel.errno.ErrnoSet.TooManyOpenFiles;
+            };
             return try self.attach_file_with_fd(@intCast(fd), path, node);
         }
 

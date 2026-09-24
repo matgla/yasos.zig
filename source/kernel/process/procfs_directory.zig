@@ -95,6 +95,14 @@ pub const ProcFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struc
 
     pub fn get(self: *Self, nodename: []const u8, result: *kernel.fs.Node) anyerror!void {
         if (self._is_root) {
+            // "self" is the caller's own pid, as on Linux. Programs reach their
+            // own state through /proc/self/... without having to ask getpid()
+            // first -- most importantly /proc/self/exe (see ProcFs.readlink).
+            if (std.mem.eql(u8, nodename, "self")) {
+                const pid: i16 = @intCast(kernel.process.process_manager.instance.get_current_process().pid);
+                result.* = try PidDirectory.InstanceType.create_node(self._allocator, pid);
+                return;
+            }
             const maybe_pid: ?i16 = std.fmt.parseInt(i16, nodename, 10) catch null;
             if (maybe_pid) |pid| {
                 if (pid == 0) {
