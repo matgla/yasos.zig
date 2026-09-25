@@ -960,6 +960,16 @@ if $BUILD_IMAGE; then
   rm -f rootfs/bin/armv8m-tcc
   rm -f rootfs/lib/libc.a
   rm -rf rootfs/usr/share
+  # Nothing here installs the Zig compiler, but rootfs/ is a staging dir only
+  # --clear wipes, so a zig copied in by hand (for QEMU) rides along into every
+  # later image. It is not ready on rp2350, and at 11.6 MB it was three
+  # quarters of the image the board is flashed with.
+  if [ -f "$KERNEL_CONFIG_JSON" ] && grep -q '"cpu": *"rp2350"' "$KERNEL_CONFIG_JSON"; then
+    if [ -e rootfs/usr/bin/zig ] || [ -e rootfs/usr/lib/zig ]; then
+      echo "Leaving the Zig compiler out of the rp2350 rootfs (not ready yet)."
+    fi
+    rm -rf rootfs/usr/bin/zig rootfs/usr/lib/zig
+  fi
   genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
 fi
 
