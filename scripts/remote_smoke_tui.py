@@ -167,6 +167,17 @@ _REMOTE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+# openocd prints one line per 128 KiB erased -- over a hundred for a rootfs --
+# and nothing while it writes. The flash script prints "Flashing rootfs: x/y
+# MiB, rate, ETA" per MiB instead, so the erase lines are only noise.
+_FLASH_NOISE = re.compile(r"^Info :\s+Erase chunk:")
+
+
+def is_flash_noise(line: str) -> bool:
+    """True for a relayed openocd line the runner does not show."""
+    return bool(_FLASH_NOISE.match(line))
+
+
 def highlight_remote_line(line: str) -> str:
     """Colour one relayed line from the remote, unless it is coloured already."""
     if not _COLOUR_ENABLED or "\033" in line:
@@ -1654,7 +1665,44 @@ def build_local_artifacts(
         raise RunnerError(f"Expected rootfs image was not produced: {ROOTFS_ARTIFACT}")
 
 
+# The RP2350 XIP flash window. Every kernel segment with file contents must
+# load inside it; a QEMU kernel puts .romfs at 0x60000000, where OpenOCD finds
+# no flash bank and the flash fails on the remote after the upload.
+RP2350_FLASH_START = 0x10000000
+RP2350_FLASH_END = 0x11000000
+
+
+def check_kernel_fits_flash(kernel: Path | None = None) -> None:
+    """Refuse a kernel ELF that loads outside RP2350 flash (e.g. a QEMU build).
+
+    Building regenerates config/target from the board's defconfig, but the
+    shared config can be repointed by a QEMU run, and --no-build and the
+    force-flash paths build nothing -- so check the artifact that is flashed.
+    """
+    kernel = kernel or KERNEL_ARTIFACT
+    data = kernel.read_bytes()
+    if data[:4] != b"\x7fELF" or data[4] != 1:
+        raise RunnerError(f"{kernel} is not a 32-bit ELF.")
+    phoff = int.from_bytes(data[28:32], "little")
+    phentsize = int.from_bytes(data[42:44], "little")
+    phnum = int.from_bytes(data[44:46], "little")
+    outside = []
+    for index in range(phnum):
+        base = phoff + index * phentsize
+        ptype, _, _, paddr, filesz = (
+            int.from_bytes(data[base + 4 * word : base + 4 * word + 4], "little") for word in range(5)
+        )
+        if ptype == 1 and filesz and not (RP2350_FLASH_START <= paddr and paddr + filesz <= RP2350_FLASH_END):
+            outside.append(f"0x{paddr:08x}+0x{filesz:x}")
+    if outside:
+        raise RunnerError(
+            f"{kernel} loads outside RP2350 flash ({', '.join(outside)}); it is not an RP2350 kernel. "
+            "Rebuild it for the board (drop --no-build / the force-flash option)."
+        )
+
+
 def upload_kernel_artifact(config: dict[str, Any]) -> tuple[str, str]:
+    check_kernel_fits_flash()
     remote_work_dir = prepare_remote_work_dir(config)
     remote_kernel = f"{remote_work_dir.rstrip('/')}/yasos_kernel"
     run_command(
@@ -1668,6 +1716,7 @@ def upload_kernel_artifact(config: dict[str, Any]) -> tuple[str, str]:
 
 
 def upload_artifacts(config: dict[str, Any]) -> tuple[str, str, str]:
+    check_kernel_fits_flash()
     remote_work_dir = prepare_remote_work_dir(config)
     remote_kernel = f"{remote_work_dir.rstrip('/')}/yasos_kernel"
     remote_rootfs = f"{remote_work_dir.rstrip('/')}/rootfs.img"
@@ -1694,6 +1743,7 @@ def run_remote_smoke(
     force: bool,
     kernel_only: bool = False,
     rerun_failed: bool = False,
+    reflash: bool = False,
 ) -> None:
     board = BOARD_PROFILES[config["board"]]
     adapter_speed = str(config["openocd_adapter_speed"])
@@ -1735,7 +1785,23 @@ keep_runs=${27}
 stream=${28}
 colour=${29}
 console_baudrate=${30}
-shift 30
+reflash=${31}
+shift 31
+
+# This script is fed over ssh without a tty, so a Ctrl-C on the runner (or a
+# dropped connection) signals nothing here: the script carries on, reparented,
+# with an openocd flashing a board nobody is watching and holding the probe
+# the next run needs. Watch for the reparenting and take the run down with it.
+ssh_session_pid=$PPID
+(
+    while true; do
+        parent=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ') || exit 0
+        [[ -n "$parent" ]] || exit 0
+        [[ "$parent" == "$ssh_session_pid" ]] || break
+        sleep 1
+    done
+    kill -TERM 0
+) >/dev/null 2>&1 </dev/null &
 
 detect_uhubctl_device() {
     # Find a USB device by vendor ID in sysfs and return its hub location
@@ -1989,7 +2055,7 @@ if [[ "$kernel_only" == "1" ]]; then
     flash_rootfs=0
 fi
 
-if [[ "$force" != "1" ]]; then
+if [[ "$force" != "1" ]] && [[ "$reflash" != "1" ]]; then
     if [[ -f "$kernel_sha_file" ]] && [[ "$(cat "$kernel_sha_file")" == "$kernel_sha" ]]; then
         flash_kernel=0
     fi
@@ -2003,16 +2069,71 @@ if (( flash_kernel || flash_rootfs )); then
     # overclock firmware — avoids CRC checksum mismatches during verify.
     openocd_rescue_reset 2>/dev/null || true
 
+    # Whatever is about to be flashed is not on the board any more once the
+    # erase starts, so a flash that dies halfway must not leave a sha behind
+    # that lets the next run skip it.
+    if (( flash_kernel )); then rm -f "$kernel_sha_file"; fi
+    if (( flash_rootfs )); then rm -f "$rootfs_sha_file"; fi
+
+    # openocd's `program` says nothing between the erase lines and "Programming
+    # Finished", which for a 15 MB rootfs is minutes of silence. Write it in
+    # 1 MiB parts instead and print size, rate and ETA after each one. The
+    # parts are rebuilt from the artifact every run.
+    flash_tcl="$artifact_state_dir/flash.tcl"
+    rootfs_parts_dir="$artifact_state_dir/rootfs-parts"
+    write_flash_tcl() {
+        cat <<'TCL'
+proc flash_progress {what done total t0} {
+    set dt [expr {([ms] - $t0) / 1000.0}]
+    set rate [expr {$dt > 0 ? $done / 1024.0 / $dt : 0}]
+    set eta [expr {$rate > 0 ? int(($total - $done) / 1024.0 / $rate) : 0}]
+    echo [format "Flashing %s: %.1f/%.1f MiB (%d%%), %.0f KiB/s, %ds elapsed, ETA %ds" \
+        $what [expr {$done / 1048576.0}] [expr {$total / 1048576.0}] \
+        [expr {$done * 100 / $total}] $rate [expr {int($dt)}] $eta]
+}
+TCL
+        if (( flash_rootfs )); then
+            rm -rf "$rootfs_parts_dir"
+            mkdir -p "$rootfs_parts_dir"
+            split -b 1048576 -d -a 3 "$remote_rootfs" "$rootfs_parts_dir/part."
+            rootfs_total=$(stat -c %s "$remote_rootfs")
+            echo 'set t0 [ms]'
+            echo 'set done 0'
+            part_offset=0
+            for part in "$rootfs_parts_dir"/part.*; do
+                part_size=$(stat -c %s "$part")
+                printf 'flash write_image erase %s 0x%x bin\n' "$part" $(( rootfs_address + part_offset ))
+                printf 'incr done %d\n' "$part_size"
+                printf 'flash_progress rootfs $done %d $t0\n' "$rootfs_total"
+                part_offset=$(( part_offset + part_size ))
+            done
+        fi
+        if (( flash_kernel )); then
+            echo 'set t0 [ms]'
+            echo "echo {Flashing kernel ($(stat -c %s "$remote_kernel") byte ELF, with verify)...}"
+            echo "program $remote_kernel verify"
+            echo 'echo [format "Flashed kernel in %.1fs" [expr {([ms] - $t0) / 1000.0}]]'
+        fi
+    }
+    write_flash_tcl > "$flash_tcl"
+
     flash_ok=0
     # Programming bursts a lot of CMSIS-DAP traffic; the configured speed (often
     # 20000 kHz, fine for interactive debug) desyncs the probe under that load
-    # ("CMSIS-DAP command mismatch"). Cap the FIRST program attempt at 8000 kHz;
-    # on any failure drop to 4000 kHz (then lower) — a wedged QSPI / marginal SWD
-    # link flashes far more reliably slow.
+    # ("CMSIS-DAP command mismatch"). Cap the FIRST program attempt at 8000 kHz,
+    # and drop to 4000 kHz (then lower) only when an attempt failed in a way
+    # speed can cure: a link error, or an unexplained one (a wedged QSPI flashes
+    # more reliably slow). An attempt that was killed, or that could not open
+    # the probe because another openocd holds it (a run whose ssh dropped),
+    # says nothing about the link -- it retries at the same speed and does not
+    # count towards the power-cycle and mass-erase escalation. Backing off on
+    # those is what once left a run flashing 15 MB at 2000 kHz.
     flash_speed=$adapter_speed
     if (( flash_speed > 8000 )); then
         flash_speed=8000
     fi
+    flash_log="$artifact_state_dir/flash-attempt.log"
+    link_failures=0
     for flash_attempt in 1 2 3 4; do
         openocd_cmd=(
             openocd
@@ -2022,19 +2143,33 @@ if (( flash_kernel || flash_rootfs )); then
             -c "adapter speed $flash_speed"
             -c "init"
             -c "reset halt"
+            -c "source $flash_tcl"
+            -c "reset run"
+            -c "exit"
         )
-        if (( flash_rootfs )); then
-            openocd_cmd+=( -c "program $remote_rootfs $rootfs_address" )
-        fi
-        if (( flash_kernel )); then
-            openocd_cmd+=( -c "program $remote_kernel verify" )
-        fi
-        openocd_cmd+=( -c "reset run" -c "exit" )
 
-        if "${openocd_cmd[@]}"; then
+        set +e
+        "${openocd_cmd[@]}" 2>&1 | tee "$flash_log"
+        flash_rc=${PIPESTATUS[0]}
+        set -e
+        if (( flash_rc == 0 )); then
             flash_ok=1
             break
         fi
+
+        if (( flash_rc >= 128 )); then
+            echo "Flash attempt $flash_attempt was killed (signal $(( flash_rc - 128 ))); retrying at ${flash_speed}kHz..." >&2
+            openocd_rescue_reset || true
+            continue
+        fi
+        if grep -Eqi 'unable to (find|open)|no CMSIS-DAP device|LIBUSB_ERROR_BUSY|resource busy' "$flash_log"; then
+            echo "Flash attempt $flash_attempt could not open the probe; it is held by:" >&2
+            pgrep -a openocd >&2 || echo "  (nothing any more)" >&2
+            echo "Retrying at ${flash_speed}kHz in 5s..." >&2
+            sleep 5
+            continue
+        fi
+        link_failures=$(( link_failures + 1 ))
 
         # Reduce adapter speed for the next attempt (floor 1000 kHz).
         if (( flash_speed > 4000 )); then
@@ -2049,7 +2184,7 @@ if (( flash_kernel || flash_rootfs )); then
         # lockups before retrying.
         openocd_rescue_reset || true
         # From the 2nd failure on, escalate to a full USB power-cycle.
-        if (( flash_attempt >= 2 )); then
+        if (( link_failures >= 2 )); then
             if usb_power_reset; then
                 echo "USB power-cycle complete, halting target..." >&2
                 openocd_reset_halt || openocd_rescue_reset
@@ -2065,8 +2200,9 @@ if (( flash_kernel || flash_rootfs )); then
         # / USB drops) — doing so amplifies a glitch into an erased, unbootable
         # board. Only reach for it after rescue-DP + speed backoff + USB
         # power-cycle have all failed, i.e. a genuinely wedged auto-running image.
-        if (( flash_attempt >= 3 && flash_attempt < 4 )); then
+        if (( link_failures >= 3 && flash_attempt < 4 )); then
             if openocd_mass_erase; then
+                rm -f "$kernel_sha_file" "$rootfs_sha_file"
                 flash_kernel=1
                 if [[ -n "$remote_rootfs" ]]; then
                     flash_rootfs=1
@@ -2075,6 +2211,7 @@ if (( flash_kernel || flash_rootfs )); then
                     echo "Re-run with a full flash (--force/--force-flash), not --force-kernel-flash." >&2
                     exit 1
                 fi
+                write_flash_tcl > "$flash_tcl"
             fi
         fi
     done
@@ -2335,6 +2472,7 @@ exit "$pytest_status"
         "1" if stream else "0",
         "1" if colour_enabled() else "0",
         str(board.console_baudrate),
+        "1" if reflash else "0",
         *pytest_args,
     ]
     cmd = ssh_base(config) + [
@@ -2383,6 +2521,8 @@ exit "$pytest_status"
         for line in proc.stdout:
             if tailer is not None:
                 tailer.note_output(line)
+            if is_flash_noise(line):
+                continue
             # The tailer prints from its own thread, so take the same lock the
             # pytest stream uses; otherwise the two interleave mid-line.
             with _STDOUT_LOCK:
@@ -3584,6 +3724,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-cli-level", help="Set pytest --log-cli-level for this run (e.g. INFO, DEBUG, WARNING). Passed through to the remote pytest invocation.")
     parser.add_argument("--profile", action="store_true", help="Enable TCC performance profiling. Captures per-phase bench breakdown and per-syscall cycle counts from the kernel. Results are saved alongside the timing report.")
     parser.add_argument("--force-flash", action="store_true", help="Upload and flash existing kernel/rootfs artifacts without rebuilding. Forces reflash even if remote hashes match.")
+    parser.add_argument("--no-build", action="store_true", help="Flash the kernel and rootfs already on disk -- always, even if the board holds them -- then run the tests, building nothing: no defconfig, no zig build, no build_rootfs.sh. For a run that must show exactly what an earlier build made (a recorded take after its build take). Unlike --force it leaves the remote venv alone. Nothing checks that config/target was built for the cached board.")
     parser.add_argument("--force-kernel-flash", action="store_true", help="Upload and flash only the kernel artifact without rebuilding. Skips rootfs entirely.")
     parser.add_argument("--color", "--colour", dest="color", choices=("auto", "always", "never"), default="auto", help="Colour the runner's output and the remote suite's (default auto: on when stdout is a terminal, off through a pipe; NO_COLOR and FORCE_COLOR are honoured). 'always' is what a recorded run wants when the output is teed or piped -- it also turns on pytest --color=yes remotely, so PASSED/FAILED are green/red over ssh.")
     parser.add_argument("--list-boards", action="store_true", help="Print supported board identifiers and exit.")
@@ -3611,6 +3752,9 @@ def main() -> int:
             raise RunnerError("--force-flash and --gdb cannot be used together")
         if args.force_kernel_flash and args.gdb:
             raise RunnerError("--force-kernel-flash and --gdb cannot be used together")
+        if args.no_build and (args.gdb or args.gdb_debug or args.force or args.debug):
+            raise RunnerError("--no-build builds nothing: it cannot be combined with "
+                              "--gdb, --gdb-debug, --force or --debug")
         if args.gdb_debug and args.gdb:
             raise RunnerError("--gdb-debug and --gdb cannot be used together")
         if args.gdb_debug and not args.cmd:
@@ -3643,7 +3787,7 @@ def main() -> int:
         # config (e.g. an old CPU clock) and the flashed firmware does not match
         # the defconfig that was edited.
         board = BOARD_PROFILES[config["board"]]
-        if not _defconfig_is_up_to_date(board.defconfig):
+        if not args.no_build and not _defconfig_is_up_to_date(board.defconfig):
             if not apply_defconfig or not args.force:
                 print(
                     f"defconfig {board.defconfig} changed since last build "
@@ -3802,13 +3946,19 @@ def main() -> int:
             print(_head("Running remote smoke workflow with cached configuration."))
         total_steps = 3 if args.flash_only else 4
         step = 1
-        print(_step(f"[{step}/{total_steps}] Building local artifacts..."))
-        build_local_artifacts(
-            runtime_config,
-            debug=args.debug,
-            force=args.force,
-            apply_defconfig=apply_defconfig,
-        )
+        if args.no_build:
+            for artifact in (KERNEL_ARTIFACT, ROOTFS_ARTIFACT):
+                if not artifact.exists():
+                    raise RunnerError(f"--no-build: {artifact} not found. Build first.")
+            print(_step(f"[{step}/{total_steps}] Using the artifacts on disk (--no-build)."))
+        else:
+            print(_step(f"[{step}/{total_steps}] Building local artifacts..."))
+            build_local_artifacts(
+                runtime_config,
+                debug=args.debug,
+                force=args.force,
+                apply_defconfig=apply_defconfig,
+            )
         kernel_sha = sha256_file(KERNEL_ARTIFACT)
         rootfs_sha = sha256_file(ROOTFS_ARTIFACT)
         requirements_sha = sha256_file(SMOKE_REQUIREMENTS)
@@ -3832,6 +3982,7 @@ def main() -> int:
             requirements_sha=requirements_sha,
             force=args.force,
             rerun_failed=args.rerun_failed,
+            reflash=args.no_build,
         )
     except RunnerError as error:
         print(_err(f"error: {error}"), file=sys.stderr)

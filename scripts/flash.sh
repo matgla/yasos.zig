@@ -159,6 +159,25 @@ fi
 if [ "$RESTART" = 0 ]; then
     KERNEL=$(realpath -e "$KERNEL" 2>/dev/null) || {
         echo "error: kernel ELF not found (build it with 'zig build')" >&2; exit 1; }
+    # --no-build skips the config check above, so check the ELF itself: every
+    # segment with file contents must load into the XIP flash window. A QEMU
+    # kernel puts .romfs at 0x60000000, where OpenOCD finds no flash bank.
+    bad=$(python3 - "$KERNEL" <<'EOF'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+phoff, = struct.unpack_from("<I", d, 28)
+phentsize, phnum = struct.unpack_from("<HH", d, 42)
+for i in range(phnum):
+    ptype, _, _, paddr, filesz = struct.unpack_from("<5I", d, phoff + i * phentsize)
+    if ptype == 1 and filesz and not (0x10000000 <= paddr and paddr + filesz <= 0x11000000):
+        print("0x%08x+0x%x" % (paddr, filesz))
+EOF
+    ) || bad="unreadable"
+    if [ -n "$bad" ]; then
+        echo "error: $KERNEL loads outside RP2350 flash ($(echo $bad)); it is not an RP2350 kernel." >&2
+        echo "       Select the board and rebuild: zig build defconfig -Ddefconfig_file=configs/mspc_defconfig" >&2
+        exit 1
+    fi
     if [ "$KERNEL_ONLY" = 0 ]; then
         ROOTFS=$(realpath -e "$ROOTFS" 2>/dev/null) || {
             echo "error: rootfs image not found (build it with './build_rootfs.sh -c -o rootfs.img'," >&2

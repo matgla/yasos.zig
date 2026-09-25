@@ -584,16 +584,122 @@ def test_highlight_keeps_the_line_ending(colour_off):
 
 
 def test_remote_script_reads_every_positional_it_is_given():
-    """The console baud rate is positional argument 30; the shift must match.
+    """The reflash flag is positional argument 31; the shift must match.
 
     A mismatch here does not fail loudly -- the extra argument would silently
     become the first pytest path and the run would collect the wrong tests.
     """
     source = MODULE_PATH.read_text()
-    assert "console_baudrate=${30}\nshift 30\n" in source
+    assert "console_baudrate=${30}\nreflash=${31}\nshift 31\n" in source
     start = source.index("    remote_args = [")
     end = source.index("    ]\n", start)
     entries = [line.strip() for line in source[start:end].splitlines()[1:] if line.strip()]
     assert entries[-1] == "*pytest_args,"
-    assert entries[-2] == "str(board.console_baudrate),"
-    assert len(entries) - 1 == 30
+    assert entries[-2] == '"1" if reflash else "0",'
+    assert entries[-3] == "str(board.console_baudrate),"
+    assert len(entries) - 1 == 31
+
+
+def _smoke_script() -> str:
+    source = MODULE_PATH.read_text()
+    start = source.index('remote_script = r"""set -euo pipefail\nremote_repo=$1\nremote_work_dir=$2')
+    body_start = source.index('r"""', start) + 4
+    return source[body_start:source.index('"""', body_start)]
+
+
+def test_erase_chunk_lines_are_hidden_and_progress_is_not():
+    assert remote_smoke_tui.is_flash_noise("Info :   Erase chunk: 0x00100000 -> 0x0011ffff\n")
+    assert not remote_smoke_tui.is_flash_noise(
+        "Flashing rootfs: 3.0/14.6 MiB (20%), 210 KiB/s, 14s elapsed, ETA 56s\n")
+    assert not remote_smoke_tui.is_flash_noise("Warn : Adding extra erase range, 0x10f99800 .. 0x10f99fff\n")
+
+
+def test_rootfs_is_written_in_mib_parts_at_consecutive_addresses(tmp_path):
+    """Each part is its own write_image at rootfs_address + its offset, followed
+    by a progress line; a wrong offset would put the image's tail in the wrong
+    place and nothing but the booted board would notice."""
+    script = _smoke_script()
+    function = script[script.index("    write_flash_tcl() {"):script.index('    write_flash_tcl > "$flash_tcl"')]
+    rootfs = tmp_path / "rootfs.img"
+    rootfs.write_bytes(b"\xa5" * (2 * 1048576 + 4096))
+    driver = (
+        "set -euo pipefail\n"
+        f"flash_rootfs=1; flash_kernel=0; remote_rootfs={rootfs}; rootfs_address=0x10100000\n"
+        f"rootfs_parts_dir={tmp_path}/parts\n"
+        + function
+        + "write_flash_tcl\n"
+    )
+    tcl = subprocess.run(["bash", "-c", driver], check=True, capture_output=True,
+                         text=True, encoding="utf-8").stdout
+    writes = re.findall(r"^flash write_image erase \S+/part\.(\d+) (0x[0-9a-f]+) bin$", tcl, re.MULTILINE)
+    assert writes == [("000", "0x10100000"), ("001", "0x10200000"), ("002", "0x10300000")]
+    assert tcl.count(f"flash_progress rootfs $done {rootfs.stat().st_size} $t0") == 3
+    assert "program" not in tcl.split("proc flash_progress", 1)[1].split("}\n", 1)[1]
+
+
+def test_flash_speed_backs_off_only_after_a_link_failure():
+    """A killed attempt, or one that could not open a probe another openocd
+    holds, must retry at the same speed -- backing off on those once left a
+    15 MB rootfs flashing at 2000 kHz."""
+    script = _smoke_script()
+    loop = script[script.index("    for flash_attempt in 1 2 3 4; do"):script.index("    if (( ! flash_ok )); then")]
+    backoff = loop.index("flash_speed=4000")
+    killed = loop.index("if (( flash_rc >= 128 )); then")
+    busy = loop.index("could not open the probe")
+    counted = loop.index("link_failures=$(( link_failures + 1 ))")
+    assert killed < busy < counted < backoff
+    assert loop[killed:busy].count("continue") == 1
+    assert loop[busy:counted].count("continue") == 1
+    assert "if (( link_failures >= 2 )); then" in loop
+    assert "if (( link_failures >= 3 && flash_attempt < 4 )); then" in loop
+
+
+def test_remote_script_dies_with_its_ssh_session():
+    script = _smoke_script()
+    assert "ssh_session_pid=$PPID" in script
+    assert "kill -TERM 0" in script
+
+
+def _write_elf32(path, segments):
+    """A minimal little-endian ELF32 with (p_type, p_paddr, p_filesz) segments."""
+    phoff = 52
+    header = bytearray(52)
+    header[:5] = b"\x7fELF\x01"
+    header[28:32] = phoff.to_bytes(4, "little")
+    header[42:44] = (32).to_bytes(2, "little")
+    header[44:46] = len(segments).to_bytes(2, "little")
+    table = bytearray()
+    for ptype, paddr, filesz in segments:
+        entry = bytearray(32)
+        entry[0:4] = ptype.to_bytes(4, "little")
+        entry[12:16] = paddr.to_bytes(4, "little")
+        entry[16:20] = filesz.to_bytes(4, "little")
+        table += entry
+    path.write_bytes(bytes(header + table))
+    return path
+
+
+def test_check_kernel_fits_flash_accepts_an_rp2350_kernel(tmp_path):
+    kernel = _write_elf32(tmp_path / "k", [
+        (1, 0x10000000, 0x3DCC8),
+        (1, 0x1003DCC8, 0x2854),
+        (1, 0x640000A0, 0),  # .bss: no file contents, never flashed
+    ])
+    remote_smoke_tui.check_kernel_fits_flash(kernel)
+
+
+def test_check_kernel_fits_flash_refuses_a_qemu_kernel(tmp_path):
+    kernel = _write_elf32(tmp_path / "k", [(1, 0x10000000, 0x3DCC8), (1, 0x60000000, 0x342800)])
+    with pytest.raises(remote_smoke_tui.RunnerError, match="0x60000000"):
+        remote_smoke_tui.check_kernel_fits_flash(kernel)
+
+
+def test_upload_artifacts_checks_the_kernel_before_uploading(tmp_path, monkeypatch):
+    kernel = _write_elf32(tmp_path / "k", [(1, 0x60000000, 0x10)])
+    monkeypatch.setattr(remote_smoke_tui, "KERNEL_ARTIFACT", kernel)
+    monkeypatch.setattr(remote_smoke_tui, "prepare_remote_work_dir",
+                        lambda config: pytest.fail("uploaded a kernel that does not fit flash"))
+    with pytest.raises(remote_smoke_tui.RunnerError):
+        remote_smoke_tui.upload_artifacts({})
+    with pytest.raises(remote_smoke_tui.RunnerError):
+        remote_smoke_tui.upload_kernel_artifact({})
