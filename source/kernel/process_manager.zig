@@ -60,7 +60,7 @@ else
 
 extern fn switch_to_next_task() void;
 extern fn switch_to_the_first_task(with_fpu: usize) void;
-extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
+extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: usize) i32;
 extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 
 extern fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32;
