@@ -861,10 +861,21 @@ IR_TESTS_FLOAT_TOLERANCE = {
 }
 
 
+# IR tests whose .expect belongs to a program built from several sources.
+# abi_mix: the host suite builds abi_mix_b.c with arm-none-eabi-gcc
+# (test_abi_gcc_interop); a gcc object does not fit YasOS's r9 model, so here
+# the device tcc builds all three, and each file still calls the other's
+# callees with structs in registers, split and on the stack.
+IR_MULTI_FILE_SOURCES = {
+    "abi_mix_main.c": ("abi_mix_main.c", "abi_mix_a.c", "abi_mix_b.c"),
+}
+
+
 def build_ir_test_cases():
     """Build test cases from ir_tests directory.
 
-    Each .c file with a corresponding .expect file becomes a test case.
+    Each .c file with a corresponding .expect file becomes a test case, built
+    from that file alone or from its IR_MULTI_FILE_SOURCES.
     """
     test_cases = []
 
@@ -888,7 +899,7 @@ def build_ir_test_cases():
             test_cases.append(TccTestCase(
                 test_id=test_id,
                 name=filename,
-                sources=(filename,),
+                sources=IR_MULTI_FILE_SOURCES.get(filename, (filename,)),
                 cflags=cflags,
                 source_dir=ir_tests_path,
                 skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
