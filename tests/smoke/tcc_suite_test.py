@@ -675,6 +675,9 @@ LARGE_STACK_TESTS = {
     "memcpy-1.c": 384,   # two 128 KiB (1<<17) local arrays
     "980605-1.c": 256,   # char ar[200000/2] = ~100 KiB
     "multi-ix.c": 192,   # 40 x int[500] = ~80 KiB
+    # ir_tests: frames past 32 KiB on purpose, to reach stack slots beyond a
+    # 16-bit offset -- far_locals and main each take ~40 KB, one calling the other.
+    "test_struct_far_frame.c": 128,
 }
 
 # Sources stay in the remote source tree; only compiler outputs use /tmp.
@@ -905,6 +908,7 @@ def build_ir_test_cases():
                 skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
                 xfail_reason=IR_TESTS_XFAIL.get((filename, opt_level)),
                 timeout=COMPILE_TIMEOUT_TESTS.get(filename),
+                run_stack_kib=LARGE_STACK_TESTS.get(filename),
             ))
 
     return test_cases
@@ -2498,6 +2502,13 @@ def test_run_ir_test_suite(request, testcase):
 
     progress = ProgressLine(testcase.test_id)
 
+    original_stack_size = None
+    required_stack_kb = testcase.run_stack_kib
+    if required_stack_kb is not None:
+        with record("setup_ms"):
+            original_stack_size = _read_stack_size(session)
+            _set_stack_size(session, required_stack_kb)
+
     try:
         run_case_with_optional_rerun(
             testcase, session, request, temp_source_plan, progress, timing
@@ -2506,6 +2517,9 @@ def test_run_ir_test_suite(request, testcase):
         progress.finish("failed")
         raise
     finally:
+        if original_stack_size is not None:
+            with record("cleanup_ms"):
+                _set_stack_size(session, original_stack_size)
         end_case()
         timing_results.append(timing)
     progress.finish("ok")
