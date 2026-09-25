@@ -87,6 +87,9 @@ pub const ImageError = error{
     UnsupportedFloatAbi,
     /// Needs hardware this part does not have, or does not have enabled.
     UnsupportedCpuFeatures,
+    /// The data region's alignment is not a power of two, or its offset does
+    /// not fit in it -- the image is damaged.
+    InvalidDataAlignment,
 };
 
 /// What this machine can execute. Supplied by the kernel, which is the only
@@ -823,6 +826,14 @@ pub const Loader = struct {
                 missing,
             });
             return error.UnsupportedCpuFeatures;
+        }
+
+        if (!std.math.isPowerOfTwo(header.data_alignment) or header.data_alignment_offset >= header.data_alignment) {
+            log.err("image data alignment {d} (offset {d}) is not valid", .{
+                header.data_alignment,
+                header.data_alignment_offset,
+            });
+            return error.InvalidDataAlignment;
         }
 
         return header;

@@ -130,7 +130,16 @@ pub const LoadedUniqueData = struct {
     thunks: ?*ThunkHolderData,
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
-    _underlaying_memory: []u8,
+    /// [data][bss][got], starting where the image's data alignment puts it;
+    /// data, bss and got are views into it.
+    region: []u8,
+    /// The allocation behind `region`, which may start up to
+    /// data_alignment - 1 bytes before it. Only for freeing.
+    _underlaying_memory: []align(region_base_alignment) u8,
+
+    /// What the process allocator is asked for. An image asking for no more
+    /// (nearly all of them) needs no padding in front of its region.
+    const region_base_alignment = 8;
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *const Header, parser: *const Parser) !*LoadedUniqueData {
         const self = try allocator.create(LoadedUniqueData);
@@ -143,11 +152,20 @@ pub const LoadedUniqueData = struct {
         const data_part = header.data_length - header.const_rodata_length;
         // memory is combined just for optimization purposes, they may even fit in single page for small modules
         const _t_alloc = profile.now_us();
-        const underlaying_memory = try process_allocator.alloc(u8, data_part + header.bss_length + header.got_length);
+        // Each object keeps its link-time alignment only if the region starts
+        // at the phase the linker gave it: A % data_alignment ==
+        // data_alignment_offset (both checked by Loader.process_header).
+        const region_length = data_part + header.bss_length + header.got_length;
+        const alignment: usize = header.data_alignment;
+        const phase: usize = header.data_alignment_offset;
+        const padding: usize = if (alignment <= region_base_alignment) phase else alignment - 1;
+        const underlaying_memory = try process_allocator.alignedAlloc(u8, .fromByteUnits(region_base_alignment), padding + region_length);
         profile.account(.process_data_alloc, _t_alloc);
         const _t_copy = profile.now_us();
         defer profile.account(.process_data_copy, _t_copy);
-        const got_pointer: [*]GotEntry = @ptrFromInt(@intFromPtr(underlaying_memory.ptr) + data_part + header.bss_length);
+        const skip = (phase -% @intFromPtr(underlaying_memory.ptr)) & (alignment - 1);
+        const region = underlaying_memory[skip .. skip + region_length];
+        const got_pointer: [*]GotEntry = @ptrFromInt(@intFromPtr(region.ptr) + data_part + header.bss_length);
         self.* = .{
             .data = null,
             .bss = null,
@@ -155,21 +173,22 @@ pub const LoadedUniqueData = struct {
             .thunks = null,
             .allocator = allocator,
             .process_allocator = process_allocator,
+            .region = region,
             ._underlaying_memory = underlaying_memory,
         };
         if (data_part > 0) {
-            self.data = underlaying_memory[0..data_part];
+            self.data = region[0..data_part];
             @memcpy(self.data.?, parser.get_process_data());
         }
 
         if (header.bss_length > 0) {
-            self.bss = underlaying_memory[data_part .. header.bss_length + data_part];
+            self.bss = region[data_part .. header.bss_length + data_part];
             @memset(self.bss.?, 0);
         }
 
         if (header.got_length > 0) {
             self.got = got_pointer[0 .. header.got_length / @sizeOf(GotEntry)];
-            @memcpy(self._underlaying_memory[data_part + header.bss_length ..], parser.get_got());
+            @memcpy(region[data_part + header.bss_length ..], parser.get_got());
         }
 
         // copy data
@@ -314,7 +333,7 @@ pub const Module = struct {
             }
         }
         if (self.unique_data) |unique| {
-            return @intFromPtr(unique._underlaying_memory.ptr) + (offset - self.const_rodata_length);
+            return @intFromPtr(unique.region.ptr) + (offset - self.const_rodata_length);
         }
         return 0;
     }

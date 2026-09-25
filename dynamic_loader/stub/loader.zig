@@ -58,6 +58,7 @@ pub const ImageError = error{
     UnsupportedArchitecture,
     UnsupportedFloatAbi,
     UnsupportedCpuFeatures,
+    InvalidDataAlignment,
 };
 
 pub const Loader = struct {
