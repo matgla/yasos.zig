@@ -407,6 +407,9 @@ export PYTHONUNBUFFERED=1
 
 export YASOS_QEMU_KERNEL="$KERNEL"
 export YASOS_QEMU_MACHINE="$QEMU_MACHINE"
+# YASOS_QEMU_EXTRA_ARGS_APPEND adds to the board's own arguments rather than
+# replacing them -- e.g. "-s" to open a gdb stub on a single-worker run.
+QEMU_EXTRA="$QEMU_EXTRA ${YASOS_QEMU_EXTRA_ARGS_APPEND:-}"
 [ -n "$QEMU_EXTRA" ] && export YASOS_QEMU_EXTRA_ARGS="$QEMU_EXTRA"
 
 # Put the source corpus on the device by writing it into the file that backs
