@@ -69,8 +69,12 @@ def _sample(session, step, samples):
 
 
 def _timed(session, command):
+    # Storage work is silent until the prompt: 40 file creations, or a copy and
+    # hash on the card, outlast the session's 1 s silence window on a slower
+    # (ReleaseSafe) kernel, and the harness then gives up on a healthy board.
     start = time.monotonic()
-    out = _run(session, command)
+    with session.timeout(60):
+        out = _run(session, command)
     elapsed = time.monotonic() - start
     print(f"HEAPBENCH time {elapsed * 1000:8.0f} ms  {command[:60]}")
     return out

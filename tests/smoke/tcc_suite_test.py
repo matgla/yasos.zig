@@ -394,6 +394,10 @@ COMPILE_TIMEOUT_TESTS = {
     # real, against 2.4 s at -O0.  Same optimizer-heavy class as 448 above
     # (host -O2: 0.05 s vs 448's 0.03 s); no hang.  30 s is ~3x.
     "549_copy_stub_calls.c": 30,
+    # -O2 compile 5462 ms on the 532 MHz rig (run 80, ReleaseFast kernel): 94%
+    # of the 5.81 s window, and CI's ReleaseSafe kernel tipped it over -- the
+    # compile exited 0 just after the harness gave up.
+    "601_overflow_builtins_narrow.c": 30,
 }
 
 

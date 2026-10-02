@@ -38,7 +38,11 @@ linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/
 MEMORY
 {
   flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 1024K
-  romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 4096K
+  /* 4096K -> 8192K (2026-10-02): the rootfs image reached 4.03 MB, and its
+   * tail -- fdisk's .text -- sat past the MPU's executable window, so the
+   * program faulted (IACCVIOL) on its first instruction.  Both rp2350 boards
+   * carry 16 MB of flash. */
+  romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 8192K
   /* .data + .bss + the kernel heap (malloc via _sbrk, which panics at the top).
    * 76K -> 108K (2026-09-30), taken off process_ram: .bss had grown to ~28 KB,
    * leaving a 48 KB heap, and the fstab/SD layout (four FAT volumes, the shared
