@@ -694,6 +694,21 @@ build_gnumake()
     # ships no generated ./configure, so there is nothing to build until this
     # has run once; it is skipped on every later build.
     echo "Bootstrapping GNU make (clones gnulib, needs network + autoconf/automake)..."
+    # Clone gnulib ourselves, at the revision bootstrap.conf pins.  bootstrap
+    # skips its own clone when ./gnulib exists, and its own is fragile: when the
+    # shallow fetch of GNULIB_REVISION fails (Savannah hiccups), it falls back
+    # to a plain `git fetch origin` and `reset --hard FETCH_HEAD`, which lands
+    # on whatever ref sorts first -- a 1990s tag without gnulib-tool -- and
+    # then dies on that.  A gnulib/ left behind by such a run is removed first.
+    if [ ! -f gnulib/gnulib-tool ]; then
+      rm -rf gnulib
+      gnulib_rev=$(sed -n 's/^GNULIB_REVISION=//p' bootstrap.conf)
+      for gnulib_url in https://git.savannah.gnu.org/git/gnulib.git \
+                        https://github.com/coreutils/gnulib.git; do
+        git clone --depth 1 --branch "$gnulib_rev" "$gnulib_url" gnulib && break
+        rm -rf gnulib
+      done
+    fi
     ./bootstrap
     if [ $? -ne 0 ]; then
       echo "ERROR: apps/make/bootstrap failed -- GNU make cannot be built." >&2
