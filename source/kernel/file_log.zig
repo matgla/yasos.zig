@@ -18,7 +18,7 @@
 // <https://www.gnu.org/licenses/>.
 //
 
-// Persistent kernel log on the SD card (/root/logs/kernel.log).
+// Persistent kernel log on the SD card (/var/log/kernel.log).
 //
 // Enabled by CONFIG_INSTRUMENTATION_LOG_TO_SD. Design constraints learned the
 // hard way (a synchronous per-line mirror bus-faulted the SDIO PIO/DMA driver
@@ -53,9 +53,11 @@ const log = std.log.scoped(.file_log);
 // Compile-time master switch (Kconfig: CONFIG_INSTRUMENTATION_LOG_TO_SD).
 const persist_to_sd = config.instrumentation.log_to_sd;
 
-const log_dir = "/root/logs";
-const log_path = "/root/logs/kernel.log";
-const prev_path = "/root/logs/kernel.prev.log";
+const log_dir = "/var/log";
+/// What the kernel log uses, for its `mount_api.User` (source/main.zig).
+pub const directory = log_dir;
+const log_path = "/var/log/kernel.log";
+const prev_path = "/var/log/kernel.prev.log";
 
 const buffer_size = 512;
 
@@ -79,11 +81,41 @@ var dropped: usize = 0;
 var appending: bool = false; // re-entrancy guard for the log sink
 var draining: bool = false; // set while SD I/O is in flight in drain()
 
+// /var was unmounted (release): the file is closed and lines stay in the ring
+// until reattach(). Read and written under `file_lock`.
+var detached: bool = false;
+// The file and its I/O: drain() against release(), which can run on another
+// core. drain() only tries it -- a log flush is never worth waiting for.
+var file_lock: kernel.sync.RankedMutex(.kernel_files) = .{};
+
 // Enable the RAM sink. No SD I/O here — the file is opened lazily on the first
-// drain() from a safe context. Call once after /root is mounted. The kernel log
+// drain() from a safe context. Call once after /var is mounted. The kernel log
 // front-end (kernel_stdout_log) feeds lines in via append(); see is_enabled().
 pub fn init() void {
     if (!persist_to_sd) return;
+    enabled = true;
+}
+
+// /var is being unmounted: write out what the ring holds and close the file.
+// Lines keep collecting in the ring (the newest 512 bytes) meanwhile.
+pub fn release() !void {
+    if (!persist_to_sd) return;
+    file_lock.lock();
+    defer file_lock.unlock();
+    if (opened and count != 0) flush_locked();
+    if (node) |*n| n.delete();
+    node = null;
+    opened = false;
+    detached = true;
+}
+
+// Storage is mounted on /var again: log there, starting a new file (the old
+// one rotates to kernel.prev.log) on the next drain.
+pub fn reattach() void {
+    if (!persist_to_sd) return;
+    file_lock.lock();
+    defer file_lock.unlock();
+    detached = false;
     enabled = true;
 }
 
@@ -170,6 +202,13 @@ fn rotate() void {
 pub fn drain() void {
     if (!persist_to_sd) return;
     if (!enabled or draining or count == 0) return;
+    if (!file_lock.try_lock()) return;
+    defer file_lock.unlock();
+    if (detached) return;
+    flush_locked();
+}
+
+fn flush_locked() void {
     draining = true;
     defer draining = false;
     // No context-switch window. This used to block them "so no process FS op

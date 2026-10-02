@@ -43,6 +43,9 @@ pub const SymbolEntry = struct {
 
 extern const indirect_call_thunk_template_size: usize;
 extern fn indirect_call_thunk_template_start() void;
+/// Where the template keeps the callee's GOT base and address (indirect_call_thunk.S).
+const thunk_r9_offset: usize = 8;
+const thunk_fn_offset: usize = 12;
 
 /// No reference count, deliberately. The block comes from the process pool,
 /// whose tier 1 is PSRAM, and an exclusive store there never succeeds (see
@@ -130,7 +133,16 @@ pub const LoadedUniqueData = struct {
     thunks: ?*ThunkHolderData,
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
-    _underlaying_memory: []u8,
+    /// [data][bss][got], starting where the image's data alignment puts it;
+    /// data, bss and got are views into it.
+    region: []u8,
+    /// The allocation behind `region`, which may start up to
+    /// data_alignment - 1 bytes before it. Only for freeing.
+    _underlaying_memory: []align(region_base_alignment) u8,
+
+    /// What the process allocator is asked for. An image asking for no more
+    /// (nearly all of them) needs no padding in front of its region.
+    const region_base_alignment = 8;
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *const Header, parser: *const Parser) !*LoadedUniqueData {
         const self = try allocator.create(LoadedUniqueData);
@@ -143,11 +155,20 @@ pub const LoadedUniqueData = struct {
         const data_part = header.data_length - header.const_rodata_length;
         // memory is combined just for optimization purposes, they may even fit in single page for small modules
         const _t_alloc = profile.now_us();
-        const underlaying_memory = try process_allocator.alloc(u8, data_part + header.bss_length + header.got_length);
+        // Each object keeps its link-time alignment only if the region starts
+        // at the phase the linker gave it: A % data_alignment ==
+        // data_alignment_offset (both checked by Loader.process_header).
+        const region_length = data_part + header.bss_length + header.got_length;
+        const alignment: usize = header.data_alignment;
+        const phase: usize = header.data_alignment_offset;
+        const padding: usize = if (alignment <= region_base_alignment) phase else alignment - 1;
+        const underlaying_memory = try process_allocator.alignedAlloc(u8, .fromByteUnits(region_base_alignment), padding + region_length);
         profile.account(.process_data_alloc, _t_alloc);
         const _t_copy = profile.now_us();
         defer profile.account(.process_data_copy, _t_copy);
-        const got_pointer: [*]GotEntry = @ptrFromInt(@intFromPtr(underlaying_memory.ptr) + data_part + header.bss_length);
+        const skip = (phase -% @intFromPtr(underlaying_memory.ptr)) & (alignment - 1);
+        const region = underlaying_memory[skip .. skip + region_length];
+        const got_pointer: [*]GotEntry = @ptrFromInt(@intFromPtr(region.ptr) + data_part + header.bss_length);
         self.* = .{
             .data = null,
             .bss = null,
@@ -155,21 +176,22 @@ pub const LoadedUniqueData = struct {
             .thunks = null,
             .allocator = allocator,
             .process_allocator = process_allocator,
+            .region = region,
             ._underlaying_memory = underlaying_memory,
         };
         if (data_part > 0) {
-            self.data = underlaying_memory[0..data_part];
+            self.data = region[0..data_part];
             @memcpy(self.data.?, parser.get_process_data());
         }
 
         if (header.bss_length > 0) {
-            self.bss = underlaying_memory[data_part .. header.bss_length + data_part];
+            self.bss = region[data_part .. header.bss_length + data_part];
             @memset(self.bss.?, 0);
         }
 
         if (header.got_length > 0) {
             self.got = got_pointer[0 .. header.got_length / @sizeOf(GotEntry)];
-            @memcpy(self._underlaying_memory[data_part + header.bss_length ..], parser.get_got());
+            @memcpy(region[data_part + header.bss_length ..], parser.get_got());
         }
 
         // copy data
@@ -192,10 +214,10 @@ pub const LoadedUniqueData = struct {
             const thunk_template: [*]const u8 = @ptrFromInt(@intFromPtr(&indirect_call_thunk_template_start) - 1);
             const thunk_slice: []const u8 = thunk_template[0..indirect_call_thunk_template_size];
             @memcpy(thunks.data[position .. position + indirect_call_thunk_template_size], thunk_slice[0..]);
-            // The head template embeds &indirect_call_shared_tail at +8 (copied
-            // verbatim); patch only the per-slot {r9, fn} descriptor at +12/+16.
-            @memcpy(thunks.data[position + 12 .. position + 12 + @sizeOf(usize)], std.mem.asBytes(&r9));
-            @memcpy(thunks.data[position + 16 .. position + 16 + @sizeOf(usize)], std.mem.asBytes(&symbol));
+            // Patch the per-slot {r9, fn} descriptor the template's two literal
+            // loads read, at +8/+12 (indirect_call_thunk.S).
+            @memcpy(thunks.data[position + thunk_r9_offset .. position + thunk_r9_offset + @sizeOf(usize)], std.mem.asBytes(&r9));
+            @memcpy(thunks.data[position + thunk_fn_offset .. position + thunk_fn_offset + @sizeOf(usize)], std.mem.asBytes(&symbol));
             return @intFromPtr(&thunks.data[position]) | 1;
         }
         return error.ThunksNotAllocated;
@@ -209,7 +231,7 @@ pub const LoadedUniqueData = struct {
     /// thunk, the initializer got the raw code address, and the two compared
     /// unequal (gcc-torture 930608-1: `p = &f; if (p != a[0]) abort();`).
     ///
-    /// The {r9, fn} descriptor each slot embeds at +12/+16 is itself the key,
+    /// The {r9, fn} descriptor each slot embeds at +8/+12 is itself the key,
     /// so the slots already written can be searched with no side table.
     /// `count` is how many slots the caller has filled so far — slots past it
     /// hold stale or uninitialised bytes.
@@ -223,8 +245,8 @@ pub const LoadedUniqueData = struct {
                 }
                 var slot_r9: usize = 0;
                 var slot_fn: usize = 0;
-                @memcpy(std.mem.asBytes(&slot_r9), thunks.data[position + 12 .. position + 12 + @sizeOf(usize)]);
-                @memcpy(std.mem.asBytes(&slot_fn), thunks.data[position + 16 .. position + 16 + @sizeOf(usize)]);
+                @memcpy(std.mem.asBytes(&slot_r9), thunks.data[position + thunk_r9_offset .. position + thunk_r9_offset + @sizeOf(usize)]);
+                @memcpy(std.mem.asBytes(&slot_fn), thunks.data[position + thunk_fn_offset .. position + thunk_fn_offset + @sizeOf(usize)]);
                 if (slot_r9 == r9 and slot_fn == symbol) {
                     return @intFromPtr(&thunks.data[position]) | 1;
                 }
@@ -265,6 +287,9 @@ pub const Module = struct {
     xip: bool,
     shared_data: ?*LoadedSharedData,
     unique_data: ?*LoadedUniqueData,
+    /// Address of the image `shared_data` was taken from: the loader's key
+    /// for sharing it (see `Loader.modules_list`). Zero until loaded.
+    image: usize = 0,
     // this needs to be corelated with thread info
     entry: ?SymbolEntry = null,
     list_node: std.DoublyLinkedList.Node,
@@ -314,7 +339,7 @@ pub const Module = struct {
             }
         }
         if (self.unique_data) |unique| {
-            return @intFromPtr(unique._underlaying_memory.ptr) + (offset - self.const_rodata_length);
+            return @intFromPtr(unique.region.ptr) + (offset - self.const_rodata_length);
         }
         return 0;
     }

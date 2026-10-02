@@ -52,6 +52,7 @@ pub const ErrnoSet = error{
     MathResultNotRepresentable,
     TooManySymbolicLinks,
     NameTooLong,
+    DirectoryNotEmpty,
     Invalid,
     NotImplemented,
 };
@@ -94,6 +95,7 @@ pub fn from_errno(rc: u16) anyerror {
         c.ERANGE => ErrnoSet.MathResultNotRepresentable,
         c.ELOOP => ErrnoSet.TooManySymbolicLinks,
         c.ENAMETOOLONG => ErrnoSet.NameTooLong,
+        c.ENOTEMPTY => ErrnoSet.DirectoryNotEmpty,
         c.ENOSYS => ErrnoSet.NotImplemented,
         else => ErrnoSet.Invalid,
     };
@@ -137,6 +139,7 @@ pub fn to_errno(err: anyerror) u16 {
         ErrnoSet.MathResultNotRepresentable => c.ERANGE,
         ErrnoSet.TooManySymbolicLinks => c.ELOOP,
         ErrnoSet.NameTooLong => c.ENAMETOOLONG,
+        ErrnoSet.DirectoryNotEmpty => c.ENOTEMPTY,
         ErrnoSet.NotImplemented => c.ENOSYS,
         else => c.EINVAL,
     };

@@ -88,6 +88,12 @@ class TransferError(Exception):
     """Raised when a file transfer fails."""
 
 
+class TargetAborted(TransferError):
+    """The receiver ended the session itself (ZFIN mid-transfer): rz could not
+    open or write a file and said why on the console. Never retried -- rz has
+    exited, so anything sent after this would land in the shell."""
+
+
 # ---- CRC-16-CCITT ----
 
 def _crc16_ccitt_table():
@@ -319,6 +325,8 @@ def _recv_ack_or_zrpos(ser, error_message: str, chunk_end: int = 0, on_garbage=N
 
     frame_type, fields = hdr
     offset = _frame_offset(fields)
+    if frame_type == ZFIN:
+        raise TargetAborted("target aborted the transfer (rz could not write; see the console)")
     if frame_type == ZACK:
         return ("ack", offset)
     if frame_type == ZRPOS:
@@ -394,6 +402,8 @@ def _send_one_file(ser, remote_path: str, file_data: bytes, on_garbage,
             logger.warning("zmodem: no ZRPOS for %s, re-sending ZFILE", remote_path)
             continue
         frame_type, fields = hdr
+        if frame_type == ZFIN:
+            raise TargetAborted(f"target aborted the transfer (rz could not open {remote_path}; see the console)")
         if frame_type != ZRPOS:
             raise TransferError(f"expected ZRPOS (0x09), got 0x{frame_type:02x}")
         break
@@ -430,6 +440,8 @@ def _send_one_file(ser, remote_path: str, file_data: bytes, on_garbage,
                 try:
                     response, response_offset = _recv_ack_or_zrpos(
                         ser, ack_error, chunk_end=end, on_garbage=on_garbage)
+                except TargetAborted:
+                    raise
                 except TransferError:
                     resend_attempts += 1
                     if resend_attempts > MAX_RESEND_ATTEMPTS:
@@ -813,3 +825,188 @@ def send_file(session, local_path: str, remote_path: str, timeout: float = 5.0,
             raise TransferError(f"target reported: {line}")
     else:
         logger.debug("send_file (zmodem): prompt returned, lines=%r", response_lines)
+
+
+# ---- Receiving: the board's `sz` sending to us ----
+
+ZRQINIT = 0x00
+ZSKIP = 0x05
+
+
+class _BufferedSerial:
+    """Byte reads that take whatever has arrived in one call.
+
+    The parsers above read one byte at a time; against pyserial that is a
+    syscall per byte, which a receiver taking a whole file cannot afford."""
+
+    def __init__(self, serial):
+        self._serial = serial
+        self._buffer = b""
+        self._pos = 0
+
+    def read(self, size=1):
+        if self._pos >= len(self._buffer):
+            waiting = self._serial.in_waiting
+            self._buffer = self._serial.read(max(1, waiting))
+            self._pos = 0
+            if not self._buffer:
+                return b""
+        chunk = self._buffer[self._pos:self._pos + size]
+        self._pos += len(chunk)
+        return chunk
+
+    def write(self, data):
+        return self._serial.write(data)
+
+    def pending(self) -> bytes:
+        """What was read from the port but not consumed yet."""
+        rest = self._buffer[self._pos:]
+        self._buffer, self._pos = b"", 0
+        return rest
+
+    @property
+    def timeout(self):
+        return self._serial.timeout
+
+    @timeout.setter
+    def timeout(self, value):
+        self._serial.timeout = value
+
+
+def _recv_data_subpacket(ser):
+    """Read one data sub-packet: (data, terminator), or None on a bad CRC or timeout."""
+    data = bytearray()
+    crc = 0
+    while True:
+        b = _read_byte(ser)
+        if b < 0:
+            return None
+        if b == ZDLE:
+            b = _read_byte(ser)
+            if b < 0:
+                return None
+            if b in (ZCRCE, ZCRCG, ZCRCQ, ZCRCW):
+                crc = _crc16_update(crc, b)
+                terminator = b
+                break
+            b ^= 0x40
+        crc = _crc16_update(crc, b)
+        data.append(b)
+        if len(data) > 4 * DATA_SUBPACKET_SIZE:
+            return None
+    hi = _read_zdle_byte(ser)
+    lo = _read_zdle_byte(ser)
+    if hi < 0 or lo < 0 or ((hi << 8) | lo) != crc:
+        return None
+    return bytes(data), terminator
+
+
+def receive_files(session, command: str, place, timeout: float = 30.0,
+                  on_file=None) -> list:
+    """Run *command* (an ``sz`` invocation) on the target and take its files.
+
+    *place(name)* maps the name each file announces to the host path it is
+    written to, or None to skip it. Returns [(name, host path, size)]. The
+    receiver is lockstep, like the target's rz: every sub-packet is
+    acknowledged, and a bad one is asked for again from where it began."""
+    ser = _BufferedSerial(session.serial)
+
+    def _record_garbage(data: bytes) -> None:
+        session._record_serial_output(data.decode('utf-8', 'ignore'))
+
+    session.write_command(command)
+    old_timeout = session.serial.timeout
+    session.serial.timeout = timeout
+    received = []
+    try:
+        hdr = _recv_header(ser, on_garbage=_record_garbage)
+        if hdr is None or hdr[0] != ZRQINIT:
+            raise TransferError("sz did not start (no ZRQINIT)")
+        ser.write(_build_header(ZRINIT, 0, CANFDX | ESCCTL, 0, 0))
+
+        name, path, data, retries = None, None, bytearray(), 0
+        while True:
+            hdr = _recv_header(ser, on_garbage=_record_garbage)
+            if hdr is None:
+                retries += 1
+                if retries > MAX_RESEND_ATTEMPTS * 2:
+                    raise TransferError("sz went silent")
+                if name is None:
+                    ser.write(_build_header(ZRINIT, 0, CANFDX | ESCCTL, 0, 0))
+                else:
+                    ser.write(_build_header(ZRPOS, *_split_offset(len(data))))
+                continue
+            frame_type, fields = hdr
+            if frame_type == ZRQINIT:
+                ser.write(_build_header(ZRINIT, 0, CANFDX | ESCCTL, 0, 0))
+            elif frame_type == ZFILE:
+                packet = _recv_data_subpacket(ser)
+                if packet is None:
+                    retries += 1
+                    continue  # the sender re-sends ZFILE when no ZRPOS comes
+                info = packet[0].split(b"\x00")
+                name = info[0].decode("utf-8", "replace")
+                path = place(name)
+                data = bytearray()
+                if path is None:
+                    name = None
+                    ser.write(_build_header(ZSKIP, 0, 0, 0, 0))
+                else:
+                    ser.write(_build_header(ZRPOS, 0, 0, 0, 0))
+            elif frame_type == ZDATA:
+                offset = _frame_offset(fields)
+                if name is None or offset > len(data):
+                    ser.write(_build_header(ZRPOS, *_split_offset(len(data))))
+                    continue
+                del data[offset:]
+                while True:
+                    packet = _recv_data_subpacket(ser)
+                    if packet is None:
+                        retries += 1
+                        if retries > MAX_RESEND_ATTEMPTS * 3:
+                            raise TransferError(f"too many bad sub-packets in {name}")
+                        ser.write(_build_header(ZRPOS, *_split_offset(len(data))))
+                        break
+                    chunk, terminator = packet
+                    data.extend(chunk)
+                    retries = 0
+                    if terminator in (ZCRCQ, ZCRCW):
+                        ser.write(_build_header(ZACK, *_split_offset(len(data))))
+                    if terminator in (ZCRCW, ZCRCE):
+                        break
+            elif frame_type == ZEOF:
+                if name is None:
+                    ser.write(_build_header(ZRINIT, 0, CANFDX | ESCCTL, 0, 0))
+                    continue
+                if _frame_offset(fields) != len(data):
+                    ser.write(_build_header(ZRPOS, *_split_offset(len(data))))
+                    continue
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(bytes(data))
+                received.append((name, path, len(data)))
+                if on_file is not None:
+                    on_file(name, len(data))
+                name, path, data = None, None, bytearray()
+                ser.write(_build_header(ZRINIT, 0, CANFDX | ESCCTL, 0, 0))
+            elif frame_type == ZFIN:
+                ser.write(_build_header(ZFIN, 0, 0, 0, 0))
+                break
+            else:
+                ser.write(_build_header(ZRPOS, *_split_offset(len(data))))
+    except TransferError:
+        _abort_transfer(session.serial)
+        raise
+    finally:
+        session.serial.timeout = old_timeout
+
+    # The buffered reader may already hold what followed ZFIN -- sz's summary
+    # and even the shell prompt -- which the session will never see again.
+    leftover = ser.pending().decode("utf-8", "ignore")
+    session._record_serial_output(leftover)
+    lines = leftover.splitlines()
+    if not leftover.endswith(session.prompt):
+        lines += session.wait_for_prompt_except_logs()
+    for line in lines:
+        if line.strip().startswith("ERROR"):
+            raise TransferError(f"target reported: {line.strip()}")
+    return received

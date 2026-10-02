@@ -1,0 +1,80 @@
+#!/bin/sh
+# cardreformat -- wipe a card and lay it out the way /etc/fstab expects:
+#
+#   1  YASBOOT  FAT    64M   /boot  (the bootloader reads it)
+#   2  YASVAR   ext4  256M   /var
+#   3  YASOPT   ext4   25%   /opt
+#   4  YASHOME  ext4  rest   /home  (/root lives in /home/root)
+#
+# fdisk writes the table, mkfs.fat and mkfs.ext4 format the partitions; this is
+# only the yasos layout written down, so a card can be redone in one command
+# during development. The kernel creates /var/log, /var/tmp and /home/root
+# when it first needs them. Unmount the card first (docs/storage.md) and
+# `mount -a` afterwards.
+#
+# The sizes and tools come from the environment when set -- which is how
+# scripts/yasos_device.py makes QEMU's 16 MiB card image with the host builds:
+#   BOOT_SIZE VAR_SIZE OPT_SIZE  fdisk "Last sector" answers (+64M, +25%, ...)
+#   FDISK MKFS_FAT MKFS_EXT4     the programs to run
+
+usage() {
+  echo "usage: cardreformat [-y] [DEVICE]"
+  echo
+  echo "Repartition and format DEVICE (default /dev/mmc0) for yasos."
+  echo "EVERYTHING ON IT IS LOST. -y: do not ask first."
+}
+
+yes=0
+device=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -y) yes=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage; exit 2 ;;
+    *) [ -n "$device" ] && { usage; exit 2; }; device=$1 ;;
+  esac
+  shift
+done
+device=${device:-/dev/mmc0}
+
+: "${BOOT_SIZE:=+64M}" "${VAR_SIZE:=+256M}" "${OPT_SIZE:=+25%}"
+: "${FDISK:=fdisk}" "${MKFS_FAT:=mkfs.fat}" "${MKFS_EXT4:=mkfs.ext4}"
+
+if [ ! -e "$device" ]; then
+  echo "cardreformat: $device: no such device" >&2
+  exit 1
+fi
+if grep -q "^$device" /proc/mounts 2>/dev/null; then
+  echo "cardreformat: $device is in use; unmount it first:" >&2
+  grep "^$device" /proc/mounts >&2
+  echo "(cd / first, and unmount /root before /home: it is bound into it)" >&2
+  exit 1
+fi
+if [ "$yes" != 1 ]; then
+  printf "All data on %s will be lost. Type YES to continue: " "$device"
+  read answer
+  if [ "$answer" != YES ]; then
+    echo "cardreformat: nothing written"
+    exit 1
+  fi
+fi
+
+# A new table, four primaries; util-linux asks no number for the last free
+# slot, and neither does ours.
+commands='o\nn\np\n1\n\n%s\nt\nc\nn\np\n2\n\n%s\nn\np\n3\n\n%s\nn\np\n\n\nw\n'
+# (Tested through $?: toysh gets `if ! a | b` wrong.)
+printf "$commands" "$BOOT_SIZE" "$VAR_SIZE" "$OPT_SIZE" | "$FDISK" "$device" > /dev/null
+if [ $? -ne 0 ]; then
+  echo "cardreformat: fdisk failed; nothing written" >&2
+  exit 1
+fi
+"$FDISK" -l "$device" | grep -v '^Units:'
+
+# By partition number on the whole device: the same on a card and on an
+# image file, and independent of the kernel having re-read the table yet.
+"$MKFS_FAT" -n YASBOOT -p 1 "$device" || exit 1
+"$MKFS_EXT4" -L YASVAR -p 2 "$device" || exit 1
+"$MKFS_EXT4" -L YASOPT -p 3 "$device" || exit 1
+"$MKFS_EXT4" -L YASHOME -p 4 "$device" || exit 1
+
+echo "done; mount -a mounts the new layout."

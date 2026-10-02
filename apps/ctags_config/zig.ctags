@@ -1,0 +1,50 @@
+#
+# Zig parser for the YasOS ctags. Universal-ctags has none upstream.
+#
+# build_rootfs.sh turns this into zig.c with the submodule's misc/optlib2c and
+# links it in as ZigParser (see yasos_parsers.h), so the target needs no
+# option file at run time. On a host ctags it also works as is:
+#   ctags --options=apps/ctags_config/zig.ctags -R source
+#
+# Line-based regexes, relying on zig fmt layout. What gets tagged:
+#   - every fn (Zig has no local functions, so none of these are locals)
+#   - every struct/enum/union/opaque/error-set definition
+#   - const/var at column 0 (file scope) or marked pub (container members);
+#     indented non-pub ones are skipped, because function locals look the same
+#   - test blocks, named by their string or identifier
+# The class patterns are {exclusive} so a `const T = struct` is not tagged
+# again as a plain constant.
+#
+
+--langdef=Zig
+--map-Zig=+.zig
+--map-Zig=+.zon
+
+--kinddef-Zig=f,function,functions
+--kinddef-Zig=s,struct,structs
+--kinddef-Zig=e,enum,enums
+--kinddef-Zig=u,union,unions
+--kinddef-Zig=o,opaque,opaque types
+--kinddef-Zig=E,errorset,error sets
+--kinddef-Zig=c,constant,constants
+--kinddef-Zig=v,variable,variables
+--kinddef-Zig=t,test,tests
+
+# Comments and multiline string lines never declare anything
+--regex-Zig=/^[ \t]*(\/\/|\\\\)//{exclusive}{placeholder}
+
+--regex-Zig=/^[ \t]*(pub[ \t]+)?((export|extern([ \t]+"[^"]*")?|inline|noinline)[ \t]+)*fn[ \t]+([A-Za-z_][A-Za-z0-9_]*)/\5/f/{exclusive}
+
+--regex-Zig=/^[ \t]*(pub[ \t]+)?(const|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[^=]*=[ \t]*((extern|packed)[ \t]+)?struct([ \t]*\(|[ \t]*\{|[ \t]*$)/\3/s/{exclusive}
+--regex-Zig=/^[ \t]*(pub[ \t]+)?(const|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[^=]*=[ \t]*(extern[ \t]+)?enum([ \t]*\(|[ \t]*\{|[ \t]*$)/\3/e/{exclusive}
+--regex-Zig=/^[ \t]*(pub[ \t]+)?(const|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[^=]*=[ \t]*((extern|packed)[ \t]+)?union([ \t]*\(|[ \t]*\{|[ \t]*$)/\3/u/{exclusive}
+--regex-Zig=/^[ \t]*(pub[ \t]+)?(const|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[^=]*=[ \t]*opaque[ \t]*\{/\3/o/{exclusive}
+--regex-Zig=/^[ \t]*(pub[ \t]+)?(const|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[^=]*=[ \t]*error[ \t]*\{/\3/E/{exclusive}
+
+--regex-Zig=/^(pub[ \t]+)?((export|extern([ \t]+"[^"]*")?|threadlocal)[ \t]+)*const[ \t]+([A-Za-z_][A-Za-z0-9_]*)/\5/c/{exclusive}
+--regex-Zig=/^(pub[ \t]+)?((export|extern([ \t]+"[^"]*")?|threadlocal)[ \t]+)*var[ \t]+([A-Za-z_][A-Za-z0-9_]*)/\5/v/{exclusive}
+--regex-Zig=/^[ \t]+pub[ \t]+((export|extern([ \t]+"[^"]*")?|threadlocal)[ \t]+)*const[ \t]+([A-Za-z_][A-Za-z0-9_]*)/\4/c/{exclusive}
+--regex-Zig=/^[ \t]+pub[ \t]+((export|extern([ \t]+"[^"]*")?|threadlocal)[ \t]+)*var[ \t]+([A-Za-z_][A-Za-z0-9_]*)/\4/v/{exclusive}
+
+--regex-Zig=/^[ \t]*test[ \t]+"([^"]*)"/\1/t/{exclusive}
+--regex-Zig=/^[ \t]*test[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\{/\1/t/{exclusive}

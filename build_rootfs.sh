@@ -16,7 +16,7 @@ GETOPT_CMD="/usr/bin/getopt"
 HOST_AR="ar"
 fi
 OPTIONS=co:d
-LONGOPTIONS=clear,output:,debug-regalloc,debug,tcc-ab-knobs,no-kernel,with-pch
+LONGOPTIONS=clear,output:,debug-regalloc,debug,tcc-ab-knobs,no-kernel,with-pch,zig:
 
 PARSED=$($GETOPT_CMD --options $OPTIONS --longoptions $LONGOPTIONS --name "$0" -- "$@")
 if [[ $? -ne 0 ]]; then
@@ -49,6 +49,8 @@ TCC_AB_KNOBS=false
 # out to be too small to justify the size on rp2350. Off by default; re-enable
 # with --with-pch.
 GENERATE_PCH=false
+# --zig <dir>: build the Zig compiler from that source tree into the image.
+ZIG_SOURCE=""
 # When a rootfs image is produced (-o), also rebuild the kernel so the freshly
 # built image (which the kernel .incbin's) is actually embedded. Without this the
 # kernel/QEMU silently runs a STALE romfs (e.g. an old armv8m-tcc) after a tcc or
@@ -87,6 +89,10 @@ while true; do
         --with-pch)
           GENERATE_PCH=true
           shift
+          ;;
+        --zig)
+          ZIG_SOURCE=$2
+          shift 2
           ;;
         --)
             shift
@@ -158,6 +164,13 @@ PYEOF
 fi
 case "$FP_MODE" in
   soft)
+    # Say "no FPU" explicitly instead of leaving tcc at its ARM_FPU_AUTO
+    # default. AUTO already lands on the soft codegen tables, so the code is
+    # the same either way -- but AUTO still predefines __ARM_FP 12, which tells
+    # every library it is being built for a part that has an FPU. libc's
+    # vfork() believed it and kept its `vpush {s0-s31}` path, which NOCP-faults
+    # on a core with no FPU (QEMU's mps3-an524 Cortex-M33 model, Cortex-M23).
+    TCC_FP_DEFINE="-DCONFIG_TCC_DEFAULT_FPU=ARM_FPU_NONE"
     ;;
   rp2350|rp2350-dcp)
     TCC_FP_DEFINE="-DCONFIG_TCC_DEFAULT_FPU=ARM_FPU_RP2350"
@@ -219,12 +232,14 @@ if $CLEAR; then
   rm -rf apps/textvaders/build
   rm -rf apps/hello_world/build
   rm -rf apps/prun/build
+  rm -rf apps/fbdemo/build
   rm -rf libs/libc/build
   rm -rf libs/libdl/build
   rm -rf libs/pthread/build
   rm -rf libs/yasos_curses/build
   rm -rf apps/textvaders/build
   rm -rf apps/hexdump/build
+  rm -rf apps/pioasm/build
   rm -rf apps/ccat/build
   rm -rf apps/yaffdump/build
   rm -rf apps/yaffdump/tests/build
@@ -246,9 +261,20 @@ mkdir -p rootfs
 mkdir -p rootfs/usr/include
 mkdir -p rootfs/usr/lib
 mkdir -p rootfs/proc
+# Mount points for /etc/fstab: the SD card's partitions (/boot, /var, /opt,
+# /home), /root bound to /home/root, and the QEMU exchange disk (/mnt).
 mkdir -p rootfs/root
 mkdir -p rootfs/home
 mkdir -p rootfs/mnt
+mkdir -p rootfs/boot
+mkdir -p rootfs/var
+mkdir -p rootfs/opt
+# /etc is kept in-tree under etc/ (fstab), like include/ below, and so are the
+# scripts that ship in /usr (usr/bin/cardreformat).
+mkdir -p rootfs/etc
+cp $SCRIPT_DIR/etc/* rootfs/etc/
+mkdir -p rootfs/usr/bin
+cp -r $SCRIPT_DIR/usr/. rootfs/usr/
 cd rootfs
 if [ ! -e lib ] && [ ! -L lib ]; then
   ln -s usr/lib lib
@@ -269,6 +295,11 @@ rm -rf rootfs/tmp
 mkdir -p rootfs/tmp
 cp $SCRIPT_DIR/hello_world.c rootfs/usr
 cp $SCRIPT_DIR/hello_script.sh rootfs/usr
+
+# yasos-specific userspace headers (kept in-tree under include/, since
+# rootfs/ is generated). yasos/fb.h is the /dev/fb0 interface.
+mkdir -p rootfs/usr/include/yasos
+cp $SCRIPT_DIR/include/yasos/*.h rootfs/usr/include/yasos
 
 mkdir -p rootfs/dev
 pwd
@@ -614,6 +645,9 @@ build_c_compiler()
       exit -1;
     fi
     mv $PREFIX/bin/armv8m-tcc $PREFIX/bin/tcc
+    # The default C compiler name build systems look for (autoconf's
+    # AC_PROG_CC tries gcc, then cc), so `./configure` needs no CC=tcc.
+    ln -sf tcc $PREFIX/bin/cc
     cp $PREFIX/lib/tcc/armv8m-libtcc1.a $PREFIX/lib/armv8m-libtcc1.a
     # Install FP libraries (shared .so for dynamic linking, .a for static).
     # Also done right after the cross compiler is built, since libc needs them
@@ -649,6 +683,7 @@ GNUMAKE_MAKE_ARGS="MAKE_CFLAGS= MAKE_MAINTAINER_MODE="
 # the header hint.  At the 32 KiB default it overflows (UsageFault STKOF, PSP ==
 # PSPLIM) on a Makefile as small as one rule with one prerequisite.
 GNUMAKE_STACK_SIZE=65536
+CTAGS_STACK_SIZE=65536
 
 build_gnumake()
 {
@@ -752,6 +787,72 @@ build_zork_makefile()
   cd ..
 }
 
+build_ctags()
+{
+  cd $1
+  if [ ! -x ./configure ]; then
+    # A submodule checkout ships no generated ./configure.
+    ./autogen.sh
+    if [ $? -ne 0 ]; then
+      echo "ERROR: apps/ctags/autogen.sh failed (needs autoconf, automake, pkg-config)." >&2
+      exit -1;
+    fi
+  fi
+  if [ $CLEAR = true ]; then
+    make distclean 2>/dev/null || true
+  fi
+  # Reconfigure when the Makefile is missing or stale, or when it was
+  # configured for another compiler: a plain ./configure in this tree makes an
+  # x86 build (CC = gcc), which the gnumake-style rerun check cannot see.
+  if [ ! -f Makefile ] || [ ! -f gnulib/Makefile ] || [ configure -nt Makefile ] ||
+     [ "$SCRIPT_DIR/build_rootfs.sh" -nt Makefile ] || ! grep -q "^CC = $CC\$" Makefile; then
+    make distclean 2>/dev/null || true
+    # packcc generates the parsers at build time, so it is built for the host
+    # (CC_FOR_BUILD). The optional libraries are not in the rootfs.
+    # GNULIB_MBRTOWC_SINGLE_THREAD: gnulib's mbtowc-lock.h has no variant for a
+    # platform without a thread API unless this is set, and its configure
+    # never sets it; ctags is single-threaded.
+    # EXTERNAL_PARSER_LIST_FILE / -UHAVE_PACKCC: only the languages in
+    # apps/ctags_config/yasos_parsers.h are built in (C, Asm, Make, Sh,
+    # Kconfig, Zig). All ~150 upstream parsers made a 1.30 MB binary; this is
+    # 0.45 MB. It also shrinks the GOT from ~13 KB to ~3.5 KB, back within
+    # the 4 KB reach of `ldr Rt,[r9,#imm12]`, so -mno-sb-relative-got is no
+    # longer needed (a GOT that outgrows it again fails the link loudly).
+    CPPFLAGS="-DGNULIB_MBRTOWC_SINGLE_THREAD=1 -UHAVE_PACKCC -I$SCRIPT_DIR/apps/ctags_config -DEXTERNAL_PARSER_LIST_FILE='\"yasos_parsers.h\"'" \
+      CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" LDFLAGS="-stack-size=$CTAGS_STACK_SIZE" \
+      CC="$CC" CC_FOR_BUILD=gcc ./configure --host=arm-none-eabi --prefix=$PREFIX \
+      --disable-xml --disable-json --disable-yaml --disable-seccomp --disable-pcre2 \
+      --disable-iconv --disable-readcmd --disable-external-sort --disable-threads
+    if [ $? -ne 0 ]; then
+      exit -1;
+    fi
+  fi
+  # Zig has no upstream parser. apps/ctags_config/zig.ctags is one; optlib2c
+  # turns it into C the way upstream builds its optlib/*.ctags, and the object
+  # goes into libctags.a next to them (yasos_parsers.h lists ZigParser). The
+  # generated files stay out of the submodule.
+  local zig_dir="$SCRIPT_DIR/build/ctags"
+  local zig_ctags="$SCRIPT_DIR/apps/ctags_config/zig.ctags"
+  mkdir -p "$zig_dir"
+  if [ ! -f "$zig_dir/zig.o" ] || [ "$zig_ctags" -nt "$zig_dir/zig.o" ] ||
+     [ Makefile -nt "$zig_dir/zig.o" ]; then
+    perl misc/optlib2c "$zig_ctags" > "$zig_dir/zig.c" &&
+      $CC -DHAVE_CONFIG_H -I. -Imain -Idsl -Ignulib $TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS \
+        -c "$zig_dir/zig.c" -o "$zig_dir/zig.o"
+    if [ $? -ne 0 ]; then
+      exit -1;
+    fi
+  fi
+  make -j8 ctags libctags_a_LIBADD="$zig_dir/zig.o" \
+    EXTRA_libctags_a_DEPENDENCIES="\$(GNULIB_LIBS) $zig_dir/zig.o"
+  if [ $? -ne 0 ]; then
+    exit -1;
+  fi
+  mkdir -p $PREFIX/bin
+  cp ctags $PREFIX/bin/ctags
+  cd ..
+}
+
 
 build_cross_compiler
 
@@ -841,12 +942,15 @@ build_makefile ascii_animations
 build_makefile textvaders
 build_makefile hello_world
 build_makefile prun
+build_makefile fbdemo
 build_makefile hexdump
+build_makefile pioasm
 build_makefile ccat
 build_makefile yaffdump
 build_makefile time
 build_makefile yasvi
 build_makefile mkfs
+build_makefile fdisk
 build_makefile longjump_tester
 build_zork_makefile zork
 build_makefile rzsz
@@ -855,10 +959,18 @@ build_makefile sdbench
 build_makefile syscallbench
 build_makefile fpbench
 build_gnumake make
+build_ctags ctags
 
 TOYBOX_EXTRA_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 if [ $? -ne 0 ]; then
   exit -1;
+fi
+
+# --zig <zig-source-dir>: the Zig compiler, rendered to C by a compiler built
+# from that tree and compiled by the cross (apps/zig/build_zig.sh).  Opt-in: it
+# takes minutes and ~6 MB of image, and the rp2350 image drops it below anyway.
+if [ -n "$ZIG_SOURCE" ]; then
+  "$SCRIPT_DIR/apps/zig/build_zig.sh" "$ZIG_SOURCE" "$SCRIPT_DIR/rootfs" "$SCRIPT_DIR/.cache/zig-build" || exit 1
 fi
 
 cd ..
@@ -953,6 +1065,16 @@ if $BUILD_IMAGE; then
   rm -f rootfs/bin/armv8m-tcc
   rm -f rootfs/lib/libc.a
   rm -rf rootfs/usr/share
+  # Nothing here installs the Zig compiler, but rootfs/ is a staging dir only
+  # --clear wipes, so a zig copied in by hand (for QEMU) rides along into every
+  # later image. It is not ready on rp2350, and at 11.6 MB it was three
+  # quarters of the image the board is flashed with.
+  if [ -f "$KERNEL_CONFIG_JSON" ] && grep -q '"cpu": *"rp2350"' "$KERNEL_CONFIG_JSON"; then
+    if [ -e rootfs/usr/bin/zig ] || [ -e rootfs/usr/lib/zig ]; then
+      echo "Leaving the Zig compiler out of the rp2350 rootfs (not ready yet)."
+    fi
+    rm -rf rootfs/usr/bin/zig rootfs/usr/lib/zig
+  fi
   genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
 fi
 

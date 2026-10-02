@@ -274,6 +274,7 @@ def manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(
         suite, "_source_manifest_state", {"generation": None, "digest": None, "count": 0}
     )
+    monkeypatch.setattr(suite, "_missing_after_repush", set())
     return types.SimpleNamespace(path=path, corpus=corpus)
 
 
@@ -825,6 +826,25 @@ def test_missing_include_of_a_confirmed_header_drops_the_source_manifest(manifes
 
     assert session.confirmed_uploads == {}
     assert not manifest.path.exists()
+
+
+def test_input_still_missing_after_a_repush_keeps_the_source_manifest(manifest):
+    entries = {suite.remote_source_path("fp/fp_conformance.h"): "a" * 64}
+    output = "421_fp_conformance.c:19: error: include file '../fp/fp_conformance.h' not found"
+    session = FakeSession([])
+
+    # The first time is a stale manifest as far as anyone can tell: drop it.
+    _write_manifest(manifest.path, entries)
+    session.confirmed_uploads.update(entries)
+    suite.note_compile_failure_for_manifest(session, output)
+    assert session.confirmed_uploads == {}
+
+    # The re-push put it back and tcc still cannot open it: not the manifest.
+    _write_manifest(manifest.path, entries)
+    session.confirmed_uploads.update(entries)
+    suite.note_compile_failure_for_manifest(session, output)
+    assert session.confirmed_uploads == entries
+    assert manifest.path.exists()
 
 
 def test_missing_include_we_never_uploaded_keeps_the_source_manifest(manifest):

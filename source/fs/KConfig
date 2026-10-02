@@ -56,9 +56,12 @@ config CONFIG_FATFS_CACHE_LINES
     allocation table at every cluster boundary, which would otherwise evict the
     directory run each time.
 
-    Keep it modest: the kernel heap is what is left of the 76 KB kernel RAM
-    bank. A filesystem that cannot get the memory falls back to reading through,
-    so this is a performance setting, never a correctness one.
+    Keep it modest: it comes out of the kernel heap, whatever .data/.bss leave
+    of the kernel RAM bank. A filesystem that cannot get the memory falls back
+    to reading through, so this is a performance setting, never a correctness
+    one. 0 turns the cache off together with the 4 KiB write-combining buffer
+    (about 20 KiB at the default): the right choice where FAT is only the
+    bootloader's /boot and the working storage is ext4.
 
     Count matters more than length here, because resolving a path touches one
     directory per component and each wants a line of its own. Measured on the
@@ -114,9 +117,11 @@ config CONFIG_TMPFS_PAGE_SIZE
 
 config CONFIG_TMPFS_SPILL_DIRECTORY
   string "Directory holding spilled file bodies"
-  default "/root/tmp"
+  default "/var/tmp"
   help
-    Must live on a writable filesystem (the SD-backed rootfs on hardware). Files
+    Default only: the tmpfs line in /etc/fstab names the directory with
+    `spill=DIR`, and that wins. Must live on a writable filesystem (the SD
+    card's /var on hardware). Files
     here are named yNNNNNNN.tmp and are removed when the /tmp file that owns them
     is unlinked. A reset leaves them behind, but the names restart at y0000001
     and a spill truncates whatever it finds, so the directory holds at most as

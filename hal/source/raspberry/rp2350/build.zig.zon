@@ -26,6 +26,7 @@
         .toolchains = .{
             .path = "../../../toolchains",
         },
+        .yaslibc = .{ .path = "../../../../libs/libc" },
         .hal_interface = .{ .path = "../../../interface" },
     },
     .paths = .{

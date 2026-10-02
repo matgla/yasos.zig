@@ -30,6 +30,7 @@ const ReadOnlyFile = @import("../fs/ifile.zig").ReadOnlyFile;
 const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
+const config = @import("config");
 const FileName = kernel.fs.FileName;
 const FileType = kernel.fs.FileType;
 
@@ -44,6 +45,7 @@ const LeakDumpFile = @import("leakdetect_file.zig").LeakDumpFile;
 const UartStatFile = @import("uartstat_file.zig").UartStatFile;
 const XipStatFile = @import("xipstat_file.zig").XipStatFile;
 const CpusFile = @import("cpus_file.zig").CpusFile;
+const StorageFile = @import("mounts_file.zig").StorageFile;
 const MemPeakFile = @import("mempeak_file.zig").MemPeakFile;
 const VregFile = @import("vreg_file.zig").VregFile;
 const TempFile = @import("temp_file.zig").TempFile;
@@ -111,6 +113,9 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try root_directory.data().append(vreg);
         const temp = try TempFile.InstanceType.create_node(allocator);
         try root_directory.data().append(temp);
+        inline for (.{ .mounts, .filesystems, .partitions }) |kind| {
+            try root_directory.data().append(try StorageFile.InstanceType.create_node(allocator, kind));
+        }
         return procfs;
     }
 
@@ -182,6 +187,47 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
+    /// readlink(2) for the one symbolic link procfs has: /proc/<pid>/exe, with
+    /// /proc/self/exe meaning the caller's own.
+    ///
+    /// This is how a Linux-shaped program finds its own binary --
+    /// std.process.executablePathAlloc, which the Zig compiler calls before it
+    /// will do anything else. Without it the caller gets the read-only
+    /// filesystem's default answer, EINVAL ("not a symbolic link"), and can
+    /// only give up: `error: unable to find zig self exe path: NotLink`.
+    ///
+    /// Truncation follows readlink(2): a buffer too short for the path gets as
+    /// much as fits, and the returned count says how much that was.
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+        _ = self;
+        const trimmed = std.mem.trim(u8, path, "/");
+        var it = std.mem.splitScalar(u8, trimmed, '/');
+        const who = it.next() orelse return kernel.errno.ErrnoSet.InvalidArgument;
+        const what = it.next() orelse return kernel.errno.ErrnoSet.InvalidArgument;
+        if (it.next() != null) return kernel.errno.ErrnoSet.InvalidArgument;
+        if (!std.mem.eql(u8, what, "exe")) return kernel.errno.ErrnoSet.InvalidArgument;
+
+        const manager = &kernel.process.process_manager.instance;
+        const process: *kernel.process.Process = if (std.mem.eql(u8, who, "self"))
+            manager.get_current_process()
+        else blk: {
+            const pid = std.fmt.parseInt(i32, who, 10) catch return kernel.errno.ErrnoSet.InvalidArgument;
+            break :blk manager.get_process_for_pid(pid) orelse return kernel.errno.ErrnoSet.NoEntry;
+        };
+
+        const exe = process.get_executable_path() orelse return kernel.errno.ErrnoSet.NoEntry;
+        const n = @min(exe.len, buffer.len);
+        @memcpy(buffer[0..n], exe[0..n]);
+        return n;
+    }
+
+    /// procfs holds exactly one kind of link (see `readlink`), which is enough
+    /// for the VFS to stop treating its paths as link-free.
+    pub fn supports_symlinks(self: *const Self) bool {
+        _ = self;
+        return true;
+    }
+
     pub fn format(self: *Self) anyerror!void {
         _ = self;
         // ProcDirectory is read-only, so formatting is not applicable
@@ -191,6 +237,16 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         _ = follow_links;
         initialize_stat_identity(data, path);
+        // The exe link has no node behind it -- it is answered by `readlink`
+        // alone -- so describe it here rather than letting the lookup below
+        // fail on a path that readlink(2) happily resolves.
+        if (std.mem.endsWith(u8, path, "/exe")) {
+            var scratch: [config.fs.max_path_length]u8 = undefined;
+            const len = try self.readlink(path, scratch[0..]);
+            data.st_mode = c.S_IFLNK | 0o777;
+            data.st_size = @intCast(len);
+            return;
+        }
         var node = try self.get(path);
         defer node.delete();
         if (node.is_directory()) {

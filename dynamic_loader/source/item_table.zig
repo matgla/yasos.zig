@@ -28,13 +28,15 @@ pub fn ItemTable(comptime ItemType: anytype) type {
     return struct {
         root: *const ItemType,
         lookup: []u16,
-        number_of_items: u16,
+        /// u32 to match YaffHeader's counts (32-bit since YAFF_VERSION 3). The
+        /// lookup entries themselves are still u16 offsets into the name table.
+        number_of_items: u32,
         alignment: u8,
         hashtable: ?YaffHashTable = null,
 
         const Self = @This();
 
-        pub fn create(table_address: usize, elements: u16, alignment: u8, lookup: []u16, hashtable: ?YaffHashTable) Self {
+        pub fn create(table_address: usize, elements: u32, alignment: u8, lookup: []u16, hashtable: ?YaffHashTable) Self {
             return .{
                 .root = @ptrFromInt(table_address),
                 .number_of_items = elements,

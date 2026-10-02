@@ -22,12 +22,11 @@ const std = @import("std");
 
 pub const ArmToolchain = struct {
     gcc: []const u8,
-    sysroot: []const u8,
-    include_path: []const u8,
     mcpu_arg: []const u8,
     mfloat_arg: []const u8,
-    libgcc_dir: []const u8,
-    libc_dir: []const u8,
+    /// gcc's own headers (stddef.h, stdarg.h, ...), for a preprocessor run
+    /// with -nostdinc that must still find them.
+    gcc_include_path: []const u8,
     libgcc_path: []const u8,
 };
 
@@ -39,13 +38,11 @@ pub fn resolveArmToolchain(b: *std.Build, target: std.Build.ResolvedTarget) !Arm
 
     // idea from: https://github.com/haydenridd/stm32-zig-porting-guide/blob/main/03_with_zig_build/build.zig
     //
-    // NOTE: we intentionally do NOT rebuild paths from `-print-sysroot`. Distro
-    // toolchains (Debian/Ubuntu gcc-arm-none-eabi, e.g. under WSL) report an EMPTY
-    // sysroot, which turned the old "{sysroot}/include" / "{sysroot}/lib/..." forms
-    // into bogus absolute paths like "/include" and broke the C library builds.
-    // Instead we ask gcc for the concrete multilib-resolved artifact locations,
-    // which are correct whether or not the toolchain reports a sysroot.
-    const gcc_arm_sysroot_path = std.mem.trim(u8, b.run(&.{ arm_gcc_exe, "-print-sysroot" }), " \r\n");
+    // gcc is only asked for its own files here: libgcc and its builtin headers.
+    // The C library is libs/libc (see `decorateModuleWithArmToolchain`), not
+    // the newlib the toolchain ships. Both paths come from the multilib-resolved
+    // queries rather than `-print-sysroot`, which distro toolchains (Debian,
+    // WSL) report empty.
     var cpu_name_buffer: [128]u8 = undefined;
     @memset(cpu_name_buffer[0..], 0);
     _ = std.mem.replace(u8, target.result.cpu.model.name, "_", "-", cpu_name_buffer[0..]);
@@ -53,44 +50,32 @@ pub fn resolveArmToolchain(b: *std.Build, target: std.Build.ResolvedTarget) !Arm
     const mcpu_arg = b.fmt("-mcpu={s}", .{cpu_name});
     const mfloat_arg = b.fmt("-mfloat-abi={s}", .{@tagName(target.result.abi.float())});
 
-    // Exact multilib-resolved artifact paths, e.g.
-    //   .../arm-none-eabi/lib/thumb/v8-m.main+fp/hard/libc.a
-    //   .../lib/gcc/arm-none-eabi/<ver>/thumb/v8-m.main+fp/hard/libgcc.a
+    // e.g. .../lib/gcc/arm-none-eabi/<ver>/thumb/v8-m.main+fp/hard/libgcc.a
     const libgcc_path = std.mem.trim(u8, b.run(&.{ arm_gcc_exe, mcpu_arg, mfloat_arg, "-print-libgcc-file-name" }), " \r\n");
-    const libc_path = std.mem.trim(u8, b.run(&.{ arm_gcc_exe, mcpu_arg, mfloat_arg, "-print-file-name=libc.a" }), " \r\n");
-
-    // Library search dirs: the gcc multilib dir (libgcc) and the newlib multilib dir (libc/libm).
-    const gcc_arm_lib_path1 = std.fs.path.dirname(libgcc_path) orelse libgcc_path;
-    const gcc_arm_lib_path2 = std.fs.path.dirname(libc_path) orelse libc_path;
-
-    // Newlib headers live at "<newlib-root>/include", where <newlib-root> is the
-    // libc.a path truncated at its final "/lib/" segment (this resolves correctly
-    // even through Debian's symlinked arm-none-eabi/include -> /usr/include/newlib).
-    // Fall back to the sysroot form for toolchains that do report a sysroot.
-    const include_path = if (std.mem.lastIndexOf(u8, libc_path, "/lib/")) |idx|
-        b.fmt("{s}/include", .{libc_path[0..idx]})
-    else
-        b.fmt("{s}/include", .{gcc_arm_sysroot_path});
+    const gcc_include_path = std.mem.trim(u8, b.run(&.{ arm_gcc_exe, "-print-file-name=include" }), " \r\n");
 
     return .{
         .gcc = arm_gcc_exe,
-        .sysroot = gcc_arm_sysroot_path,
-        .include_path = include_path,
         .mcpu_arg = mcpu_arg,
         .mfloat_arg = mfloat_arg,
-        .libgcc_dir = gcc_arm_lib_path1,
-        .libc_dir = gcc_arm_lib_path2,
+        .gcc_include_path = gcc_include_path,
         .libgcc_path = libgcc_path,
     };
 }
 
-pub fn decorateModuleWithArmToolchain(b: *std.Build, module: anytype, target: std.Build.ResolvedTarget) ![]const u8 {
+/// The C library of the kernel image: the no-OS build of libs/libc. The
+/// calling package has to list `yaslibc` among its dependencies.
+pub fn libc(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Dependency {
+    return b.dependency("yaslibc", .{ .target = target, .optimize = optimize });
+}
+
+/// Build `module`'s C against libs/libc's headers and link it with libs/libc
+/// and libgcc. The kernel supplies libc's porting hooks (_sbrk, _write,
+/// __malloc_lock, ...); see libs/libc/noos/.
+pub fn decorateModuleWithArmToolchain(b: *std.Build, module: anytype, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !void {
     const tc = try resolveArmToolchain(b, target);
-    module.addLibraryPath(.{ .cwd_relative = tc.libgcc_dir });
-    module.addLibraryPath(.{ .cwd_relative = tc.libc_dir });
-    module.addSystemIncludePath(.{ .cwd_relative = tc.include_path });
-    module.linkSystemLibrary("c_nano", .{});
-    module.linkSystemLibrary("m", .{});
+    const yaslibc = libc(b, target, optimize);
+    module.addSystemIncludePath(yaslibc.namedLazyPath("include"));
+    module.linkLibrary(yaslibc.artifact("yaslibc"));
     module.addObjectFile(.{ .cwd_relative = tc.libgcc_path });
-    return tc.sysroot;
 }

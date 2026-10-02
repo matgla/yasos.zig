@@ -43,3 +43,9 @@
 [submodule "libs/zfat"]
 	path = libs/zfat
 	url = git@github.com:matgla/zfat.git
+[submodule "apps/ctags"]
+	path = apps/ctags
+	url = https://github.com/universal-ctags/ctags.git
+[submodule "libs/lwext4"]
+	path = libs/lwext4
+	url = git@github.com:matgla/lwext4.git

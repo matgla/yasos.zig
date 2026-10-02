@@ -50,22 +50,20 @@ pub const CpusFile = interface.DeriveFromBase(CpusBufferedFile, struct {
     const Self = @This();
     base: CpusBufferedFile,
 
-    pub fn create() CpusFile {
-        var file = CpusFile.init(.{
-            .base = CpusBufferedFile.InstanceType.create("cpus"),
+    pub fn create(allocator: std.mem.Allocator) CpusFile {
+        return CpusFile.init(.{
+            .base = CpusBufferedFile.InstanceType.create(allocator, "cpus"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
     pub fn sync(self: *Self) i32 {
         const report = smp.selftest_report();
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         var written: usize = 0;
 
         var buf = vfmt.print(buffer, "smp {d}\n", .{@intFromBool(smp.enabled)});
@@ -120,7 +118,7 @@ pub const CpusFile = interface.DeriveFromBase(CpusBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -133,7 +131,7 @@ test "CpusFile.ShouldCreateNode" {
 }
 
 test "CpusFile.ShouldReportOneLinePairPerCore" {
-    var sut = try CpusFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try CpusFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());

@@ -39,8 +39,8 @@ pub const flash = struct {
 
     // Writable, host-readable FAT block device. Backed by the 16 MB `fatdisk`
     // window above the PSRAM pool (see linker_script.ld). Under a host-mmap'd
-    // RAM launch (memory-backend-file) this maps to file offset 0x10000000
-    // (0x70000000 - 0x60000000), letting the host drop in test sources and read
+    // RAM launch (memory-backend-file) this maps to file offset 0x20000000
+    // (0x80000000 - 0x60000000), letting the host drop in test sources and read
     // out device-compiled binaries (scripts/fatimg + scripts/qemu_fatdisk_run.py)
     // with no kernel rebuild. main.zig mounts a FatFs on it at /mnt; on a
     // plain-RAM launch the window is garbage so the mount fails and is skipped.
@@ -52,5 +52,5 @@ pub const flash = struct {
 pub const romfs_offset: usize = 0;
 
 // FAT block-device window — MUST match the `fatdisk` region in linker_script.ld.
-pub const fatdisk_address: usize = 0x70000000;
+pub const fatdisk_address: usize = 0x80000000;
 pub const fatdisk_size: usize = 16 * 1024 * 1024;

@@ -101,6 +101,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             node: kernel.fs.Node,
             path: []u8,
             diriter: ?IDirectoryIterator,
+            /// FD_CLOEXEC: closed by a successful exec (`close_on_exec_fds`).
+            /// Per descriptor, so a dup of it starts without the flag.
+            cloexec: bool = false,
 
             pub fn create(allocator: std.mem.Allocator, path: []const u8, node: kernel.fs.Node) !FileHandle {
                 return FileHandle{
@@ -194,7 +197,17 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// See `clear_fds`: it runs at exit *and* from `deinit`, and must not
         /// tear the map down twice.
         _fds_cleared: bool = false,
+        /// RLIMIT_STACK holds the stack hint of the image this process last
+        /// exec'd, not a limit anyone asked for, so the next exec replaces it
+        /// rather than handing it on (see `exec_stack_limit`). setrlimit clears it.
+        stack_limit_from_image: bool = false,
         cwd: []u8,
+        /// Path of the image this process is running, as exec() was given it.
+        /// Kept so /proc/<pid>/exe can answer readlink(2) -- which is how any
+        /// Linux-shaped program finds its own binary (the Zig compiler does it
+        /// on startup, and refuses to run without an answer). Null until the
+        /// process has exec'd an image; owned by `_kernel_allocator`.
+        exe_path: ?[]u8 = null,
         node: std.DoublyLinkedList.Node,
         _process_memory_allocator: ProcessMemoryAllocator,
         _parent: ?*Self = null,
@@ -279,6 +292,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .resume_privileged = is_root,
                 ._fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
                 .cwd = cwd_handle,
+                // No image yet: exec() fills this in once one has loaded.
+                .exe_path = null,
                 .node = .{},
                 ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
                 ._parent = parent,
@@ -312,8 +327,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return .{
                 .allocator = handle.allocator,
                 .diriter = handle.diriter,
-                .node = try handle.node.clone(),
+                // A reference to the same open file, as dup(2) takes: fork and
+                // vfork share the file description (and its offset) with the
+                // parent. clone() copied the object memberwise instead, so a
+                // FatFs file's name buffer and FIL were owned twice -- closing
+                // both copies freed the name twice and corrupted the kernel heap.
+                .node = handle.node.share(),
                 .path = try handle.allocator.dupe(u8, handle.path),
+                // fork/vfork copy the table flags and all
+                .cloexec = handle.cloexec,
             };
         }
         fn dupe_fds(self: *Self) !std.AutoHashMap(u16, FileHandle) {
@@ -342,6 +364,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             }
             self.drop_exited_children();
             self._kernel_allocator.free(self.cwd);
+            if (self.exe_path) |path| {
+                self._kernel_allocator.free(path);
+                self.exe_path = null;
+            }
             self._process_memory_allocator.deinit();
             log.info("deinit pid={d}: after proc_mem.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             var it = self._blocked_by.first;
@@ -384,6 +410,12 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             const process = try self._kernel_allocator.create(Self);
             const cwd_handle = try self._kernel_allocator.alloc(u8, self.cwd.len);
             @memcpy(cwd_handle, self.cwd);
+            // The child runs the parent's image until it execs, so it reports
+            // the parent's /proc/<pid>/exe until then -- same as fork(2).
+            const exe_handle: ?[]u8 = if (self.exe_path) |path|
+                try self._kernel_allocator.dupe(u8, path)
+            else
+                null;
 
             process.* = .{
                 .state = State.Ready,
@@ -399,6 +431,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .resume_privileged = false,
                 ._fds = try self.dupe_fds(),
                 .cwd = cwd_handle,
+                .exe_path = exe_handle,
                 .node = .{},
                 ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
                 ._parent = self,
@@ -409,6 +442,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._initialized = false,
                 ._start_time = hal.time.get_time_us(),
                 .resource_limits = self.resource_limits,
+                .stack_limit_from_image = self.stack_limit_from_image,
             };
             process.impl = try self.impl.vfork(process._process_memory_allocator.allocator());
             self._child = process;
@@ -524,6 +558,30 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn get_current_directory(self: Self) []const u8 {
             return self.cwd;
+        }
+
+        /// Does this process work inside `prefix`, or hold a descriptor open
+        /// on something under it? What umount(2) asks before it pulls a
+        /// filesystem away.
+        pub fn uses_path_under(self: *Self, prefix: []const u8) bool {
+            if (kernel.fs.path_is_under(self.cwd, prefix)) return true;
+            var it = self._fds.valueIterator();
+            while (it.next()) |handle| {
+                if (kernel.fs.path_is_under(handle.path, prefix)) return true;
+            }
+            return false;
+        }
+
+        /// Record the image this process now runs. Called by exec once the load
+        /// has succeeded, so a failed exec leaves the previous answer standing.
+        pub fn set_executable_path(self: *Self, path: []const u8) !void {
+            const copy = try self._kernel_allocator.dupe(u8, path);
+            if (self.exe_path) |old_path| self._kernel_allocator.free(old_path);
+            self.exe_path = copy;
+        }
+
+        pub fn get_executable_path(self: Self) ?[]const u8 {
+            return self.exe_path;
         }
 
         pub fn stack_pointer(self: Self) *const u8 {
@@ -729,6 +787,16 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             return &self._exited_children;
         }
 
+        /// Drop the uncollected exit records, handing each pid back to `owner`
+        /// (the process manager, `release_pid`): nobody can collect them now.
+        pub fn release_exited_children(self: *Self, owner: anytype) void {
+            while (self._exited_children.pop()) |node| {
+                const entry: *ExitedChild = @fieldParentPtr("node", node);
+                owner.release_pid(entry.pid);
+                self._kernel_allocator.destroy(entry);
+            }
+        }
+
         fn drop_exited_children(self: *Self) void {
             while (self._exited_children.pop()) |node| {
                 const entry: *ExitedChild = @fieldParentPtr("node", node);
@@ -784,8 +852,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             }
         }
 
-        /// Try to extend an existing mmap allocation in-place.
-        /// Returns the same address on success (with extended size), or error.
+        /// Try to resize an existing mmap allocation in place: extend it into the
+        /// free pages after it, or give back its tail.
+        /// Returns the same address on success (with the new size), or error.
         pub fn mremap(self: *Self, addr: *anyopaque, old_length: i32, new_length: i32, flags: i32) !*anyopaque {
             // Preemptible; see the syscall wrappers. The pool guards itself.
             _ = flags;
@@ -797,7 +866,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             if (@rem(new_length, ProcessMemoryPoolType.page_size) != 0) {
                 new_pages += 1;
             }
-            if (self._process_memory_allocator.try_extend_pages(addr, old_pages, new_pages)) |extended| {
+            if (new_pages < old_pages) {
+                if (self._process_memory_allocator.try_shrink_pages(addr, old_pages, new_pages)) |shrunk| {
+                    return shrunk.ptr;
+                }
+            } else if (self._process_memory_allocator.try_extend_pages(addr, old_pages, new_pages)) |extended| {
                 return extended.ptr;
             }
             return kernel.errno.ErrnoSet.OutOfMemory;
@@ -902,7 +975,18 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn attach_file(self: *Self, path: []const u8, node: kernel.fs.Node) !i32 {
-            const fd = self.get_free_fd() orelse return kernel.errno.ErrnoSet.TooManyOpenFiles;
+            const fd = self.get_free_fd() orelse {
+                // EMFILE on its own says nothing about which limit was hit or
+                // what the process already had open, and it surfaces in the
+                // caller as a puzzling error about an unrelated file.
+                log.err("pid={d}: out of file descriptors opening '{s}' (RLIMIT_NOFILE={d}, open={d})", .{
+                    self.pid,
+                    path,
+                    self.resource_limits[c.RLIMIT_NOFILE].rlim_cur,
+                    self._fds.count(),
+                });
+                return kernel.errno.ErrnoSet.TooManyOpenFiles;
+            };
             return try self.attach_file_with_fd(@intCast(fd), path, node);
         }
 
@@ -921,6 +1005,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn release_file(self: *Self, fd: i32) void {
+            if (fd < 0 or fd > std.math.maxInt(u16)) return;
             const maybe_handle = self._fds.getPtr(@intCast(fd));
             if (maybe_handle) |handle| {
                 if (self._last_tty_output_fd != null and self._last_tty_output_fd.? == @as(u16, @intCast(fd))) {
@@ -932,7 +1017,31 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             }
         }
 
+        /// Close every descriptor marked FD_CLOEXEC; called by exec once the new
+        /// image has loaded. toysh on nommu relies on it: it re-executes itself
+        /// for each subshell and marks its own end of the pipe that carries the
+        /// subshell's commands close-on-exec, so the child reads to EOF.
+        pub fn close_on_exec_fds(self: *Self) void {
+            var marked: [64]u16 = undefined;
+            while (true) {
+                var count: usize = 0;
+                var it = self._fds.iterator();
+                while (it.next()) |entry| {
+                    if (!entry.value_ptr.cloexec) continue;
+                    marked[count] = entry.key_ptr.*;
+                    count += 1;
+                    if (count == marked.len) break;
+                }
+                for (marked[0..count]) |fd| self.release_file(fd);
+                if (count < marked.len) return;
+            }
+        }
+
+        /// null for a descriptor that is not open -- including any number the
+        /// table cannot hold, which a user can pass to fcntl(2) and friends
+        /// (toysh probes up to 99999); casting those used to panic the kernel.
         pub fn get_file_handle(self: *Self, fd: i32) ?*FileHandle {
+            if (fd < 0 or fd > std.math.maxInt(u16)) return null;
             const maybe_handle = self._fds.getPtr(@intCast(fd));
             if (maybe_handle) |handle| {
                 return handle;

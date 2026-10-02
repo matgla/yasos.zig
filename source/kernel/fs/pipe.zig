@@ -210,6 +210,19 @@ pub const Pipe = struct {
             wait(&self._data_available);
         }
 
+        // Take whatever else is already there, a chunk per hold of the lock.
+        // Stopping at one chunk would hand the reader 512 bytes a call however
+        // much is buffered, and a `cat` copying from a pipe into an ext4 file
+        // then writes half-blocks: 219 KB that way took 4 s on the board
+        // against 0.6 s for the same copy without the pipe.
+        while (taken < out.len) {
+            const flags = pipe_lock.lock_irqsave();
+            const more = self.take(out[taken..]);
+            pipe_lock.unlock_irqrestore(flags);
+            if (more == 0) break;
+            taken += more;
+        }
+
         // Somebody may be blocked waiting for the space just freed.
         post(&self._space_available);
         return @intCast(taken);
@@ -284,6 +297,17 @@ pub const Pipe = struct {
         if (last) self.destroy();
     }
 };
+
+/// What `/proc/<pid>/status` shows for an open pipe end: which pipe it is
+/// and how many ends that pipe still has, so a reader that never sees EOF can
+/// be traced to whoever holds the write end.
+pub const EndState = struct { pipe: usize, writable: bool, readers: u32, writers: u32 };
+
+pub fn describe_end(object: *anyopaque) EndState {
+    const end: *PipeFile = @ptrCast(@alignCast(object));
+    const d = end.data();
+    return .{ .pipe = @intFromPtr(d._pipe), .writable = d._writable, .readers = d._pipe._readers, .writers = d._pipe._writers };
+}
 
 /// One end of a pipe. `_writable` decides which; everything else is the pipe.
 pub const PipeFile = interface.DeriveFromBase(IFile, struct {
@@ -545,6 +569,26 @@ test "Pipe.PollShouldStopReportingWritableOnceTheRingIsFull" {
     while (write_end.interface.write(&block) > 0) {}
 
     try testing.expectEqual(@as(PollMask, 0), write_end.interface.poll(c.POLLOUT));
+}
+
+test "Pipe.ShouldHandAReaderEverythingBufferedInOneCall" {
+    var ends = try create_pair(testing.allocator, true);
+    defer ends.read.delete();
+    defer ends.write.delete();
+
+    var read_end = ends.read.instance.file;
+    var write_end = ends.write.instance.file;
+    const block: [Pipe.capacity]u8 = @splat('x');
+    var stored: usize = 0;
+    while (stored < block.len) {
+        const n = write_end.interface.write(block[stored..]);
+        try testing.expect(n > 0);
+        stored += @intCast(n);
+    }
+
+    // The copy moves a chunk at a time; the read still returns all of it.
+    var buffer: [Pipe.capacity]u8 = undefined;
+    try testing.expectEqual(@as(isize, Pipe.capacity), read_end.interface.read(&buffer));
 }
 
 test "Pipe.ShouldRefuseTheWrongDirectionOnEachEnd" {

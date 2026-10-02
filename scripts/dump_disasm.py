@@ -110,17 +110,22 @@ def parse_dumps(text):
 # YaffHeader, libs/tinycc/source/obj/tccyaff.h -- packed, so these are plain
 # byte offsets into the file the board wrote.
 def parse_yaff(data):
-    if len(data) < 92 or data[:4] != b"YAFF":
+    if len(data) < 132 or data[:4] != b"YAFF":
         return None
     u32 = lambda o: struct.unpack_from("<I", data, o)[0]
     u16 = lambda o: struct.unpack_from("<H", data, o)[0]
+    # Offsets are for YAFF_VERSION 4: the relocation/symbol counts and every
+    # table offset are 32-bit since version 3 (they were 16-bit, and text_offset
+    # wrapped on any module with more than 64 KiB of tables ahead of its code);
+    # version 4 appended the data region's alignment.
     h = {
         "module_type": data[4], "arch": u16(5), "version": data[7],
         "code_length": u32(8), "init_length": u32(12), "data_length": u32(16),
         "bss_length": u32(20), "entry": u32(24),
-        "got_length": u32(48), "got_plt_length": u32(52), "plt_length": u32(56),
-        "text_offset": u16(70),
-        "stack_size": u32(80), "heap_size": u32(84), "const_rodata_length": u32(88),
+        "got_length": u32(60), "got_plt_length": u32(64), "plt_length": u32(68),
+        "text_offset": u32(92),
+        "stack_size": u32(112), "heap_size": u32(116), "const_rodata_length": u32(120),
+        "data_alignment": u32(124), "data_alignment_offset": u32(128),
     }
     # Module offset space, exactly as dynamic_loader/source/loader.zig
     # get_section_address_for_offset() walks it: code | init | plt | data | bss |

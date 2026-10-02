@@ -6,14 +6,15 @@ path = sys.argv[1] if len(sys.argv) > 1 else "rootfs/usr/bin/toybox"
 with open(path, "rb") as f:
     data = f.read()
 
-# Header fields
+# Header fields (YAFF_VERSION 3: the counts and offsets below are 32-bit; they
+# were 16-bit through version 2, which is why the byte offsets moved).
 code_length = struct.unpack_from("<I", data, 8)[0]
 data_length = struct.unpack_from("<I", data, 16)[0]
 bss_length = struct.unpack_from("<I", data, 20)[0]
-local_amt = struct.unpack_from("<H", data, 38)[0]
-data_reloc_amt = struct.unpack_from("<H", data, 40)[0]
-reloc_offset = struct.unpack_from("<H", data, 64)[0]
-sym_reloc_amt = struct.unpack_from("<H", data, 36)[0]
+sym_reloc_amt = struct.unpack_from("<I", data, 36)[0]
+local_amt = struct.unpack_from("<I", data, 40)[0]
+data_reloc_amt = struct.unpack_from("<I", data, 44)[0]
+reloc_offset = struct.unpack_from("<I", data, 80)[0]
 
 print(f"code_length=0x{code_length:x}")
 print(f"data_length=0x{data_length:x}")

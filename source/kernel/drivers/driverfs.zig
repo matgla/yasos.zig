@@ -92,6 +92,15 @@ const DriverDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct {
         };
     }
 
+    /// Take `node_name` out of /dev and drop the directory's reference to its
+    /// driver. Handles already open on it keep their own.
+    pub fn remove(self: *Self, node_name: []const u8) void {
+        if (self._container.fetchRemove(node_name)) |entry| {
+            var driver = entry.value;
+            driver.interface.delete();
+        }
+    }
+
     pub fn load_all(self: *Self) !void {
         log.debug("loading all drivers", .{});
         var it = self._container.iterator();
@@ -159,6 +168,10 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try self.get_root_directory().load_all();
     }
 
+    pub fn remove(self: *Self, node_name: []const u8) void {
+        self.get_root_directory().remove(node_name);
+    }
+
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
             return kernel.fs.Node.create_directory(try self._root.clone());
@@ -179,8 +192,13 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         if (node.is_directory()) {
             data.st_mode = c.S_IFDIR;
         } else if (node.is_file()) {
-            data.st_mode = c.S_IFREG;
-            const size = node.as_file().?.interface.size();
+            const file = node.as_file().?;
+            // mkfs and fdisk check S_ISBLK before they touch a device.
+            // Character devices still answer S_IFREG, as everything here
+            // always did; what the shell tools make of S_IFCHR is its own
+            // change.
+            data.st_mode = if (file.interface.filetype() == .BlockDevice) c.S_IFBLK else c.S_IFREG;
+            const size = file.interface.size();
             data.st_size = @truncate(size);
             data.st_blocks = @intCast((size + 511) / 512);
         }
@@ -200,12 +218,15 @@ pub const DriverFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         _ = flags;
         var node = try self.get(path);
         defer node.delete();
+        const is_directory = node.is_directory();
 
-        if ((mode & c.X_OK) != 0) {
+        // A device is written to (configure's `test -w /dev/null`), never
+        // executed; the directory is searched, never created in.
+        if ((mode & c.X_OK) != 0 and !is_directory) {
             return kernel.errno.ErrnoSet.PermissionDenied;
         }
 
-        if ((mode & c.W_OK) != 0) {
+        if ((mode & c.W_OK) != 0 and is_directory) {
             return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
         }
     }

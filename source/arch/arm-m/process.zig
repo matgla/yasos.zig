@@ -87,8 +87,27 @@ pub const HardwareStoredRegisters = extern struct {
     s14: void_or_register(),
     s15: void_or_register(),
     fpscr: void_or_register(),
-    aligner: u32,
+    // The word the hardware reserves at the top of an *FP* exception frame, so
+    // that a frame carrying FP state is 104 bytes. The integer-only frame is
+    // eight words and has no such slot: carrying one unconditionally made the
+    // synthetic frame 36 bytes, the hardware popped 32 on exception return, and
+    // every thread on a no-FPU build started life with SP 4 bytes low. AAPCS
+    // requires SP to be 8-byte aligned at a public interface, and tcc's va_arg
+    // relies on it -- so `printf("%lld")` read the wrong stack word in every
+    // process. `frame_is_a_whole_number_of_eight_byte_units` below is the guard.
+    reserved: void_or_register(),
 };
+
+comptime {
+    // An exception frame that is not a multiple of 8 bytes shifts the thread's
+    // stack pointer off AAPCS alignment for the rest of its life.
+    if (@sizeOf(HardwareStoredRegisters) % 8 != 0)
+        @compileError("hardware exception frame must be a multiple of 8 bytes");
+}
+
+/// r0-r3, r12, LR, PC, xPSR: the frame the hardware stacks when no FP state is
+/// involved, whether or not this build has an FPU.
+const basic_frame_size = 8 * @sizeOf(u32);
 
 pub const SoftwareStoredRegisters = extern struct {
     is_fpu_frame: u32,
@@ -158,7 +177,7 @@ fn create_default_hardware_registers(comptime exit_handler: *const fn () void, p
         .s14 = void_or_value(0),
         .s15 = void_or_value(0),
         .fpscr = void_or_value(0),
-        .aligner = 0,
+        .reserved = void_or_value(0),
     };
 }
 
@@ -412,7 +431,10 @@ pub const ArmProcess = struct {
 };
 
 pub fn get_offset_of_hardware_stored_registers(use_fpu: bool) isize {
-    return if (use_fpu) -@sizeOf(HardwareStoredRegisters) else -(@sizeOf(HardwareStoredRegisters) - @sizeOf(u32) * 18);
+    // Derived from `basic_frame_size` rather than by subtracting the FP fields
+    // from the struct: on a build without an FPU those fields are `void`, so the
+    // subtraction went negative and this returned a *positive* offset.
+    return if (use_fpu) -@sizeOf(HardwareStoredRegisters) else -basic_frame_size;
 }
 
 fn test_entry() void {}

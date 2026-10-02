@@ -1,0 +1,238 @@
+/*
+ * linker_script_debug.ld -- the RP2350 memory map for a Zig Debug kernel,
+ * picked by hal/build.zig for -Doptimize=Debug and never otherwise.
+ *
+ * A copy of linker_script.ld with three regions moved, and nothing else
+ * different: tests/test_linker_scripts.py fails if the two drift. Core 0's MSP
+ * stack (`scratch`) is 32 KB instead of 16 KB; the 16 KB comes off the top of
+ * process_ram (336K -> 320K), and core 1's stack moves down to stay butted
+ * against it. The region comments below are the release script's and describe
+ * the release sizes.
+ *
+ * Debug keeps every temporary the optimiser would elide, so kernel frames are
+ * several times larger -- MapsFile.create is a 20.6 KB frame there. On 16 KB
+ * the Debug kernel overflowed MSP during filesystem init (CFSR 0x00100000,
+ * STKOF; the HardFault then ran on the same stack and locked the core) and
+ * never reached the shell. Measured 2026-09-22 by painting the stack: boot,
+ * `ls`, `cat /proc/meminfo` and a process-stack-overflow fault dump peaked at
+ * 18.3 KiB. Release keeps all of process_ram because a compile wants ~315 KiB
+ * of it; a Debug kernel is for a debugger, not for that.
+ */
+/*
+linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/Device/ARM/ARMCM0plus/Source/GCC/gcc_arm.ld
+* and https://github.com/raspberrypi/pico-sdk/blob/master/src/rp2_common/pico_crt0/rp2040/memmap_default.ld
+*
+* exported symbols:
+* __preinit_array_start
+* __preinit_array_end
+* __init_array_start
+* __init_array_end
+* __fini_array_start
+* __fini_array_end
+* __exidx_start
+* __exidx_end
+*
+*
+*/
+
+MEMORY
+{
+  flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 1024K
+  romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 4096K
+  /* .data + .bss + the kernel heap (malloc via _sbrk, which panics at the top).
+   * 76K -> 108K (2026-09-30), taken off process_ram: .bss had grown to ~28 KB,
+   * leaving a 48 KB heap, and the fstab/SD layout (four FAT volumes, the shared
+   * FatFs line cache ~21 KB, the /proc storage files) left it ~46 KB full at
+   * idle, so a tcc self-compile ran it dry. 108K -> 128K (2026-10-01): with
+   * the card's full layout mounted (FAT /boot, ext4 /var /opt /home) the
+   * 71.5 KB heap left idled at ~70 KB and a pipe's 4 KB ring panicked it.
+   * Check MemKernelBrk against MemKernelLimit in /proc/meminfo before
+   * shrinking this again. */
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 128K
+  /* Arena for the hybrid /tmp filesystem (source/fs/ramfs, mounted by
+   * source/main.zig). Carved out of process_ram so a compile's process image
+   * can never eat it; files larger than CONFIG_TMPFS_MAX_FILE_SIZE (or anything
+   * that no longer fits here) spill to CONFIG_TMPFS_SPILL_DIRECTORY on the SD
+   * card. Kernel-owned: not mapped by the MPU for unprivileged code.
+   *
+   * 128K -> 32K (2026-08-06). This side of the split was over-provisioned and
+   * the other side was the binding constraint: a compile wants ~315 KiB (213
+   * heap + 100 image/stack) and could only have 300, so its heap spilled to
+   * PSRAM, where the kernel's page clear runs at 55 MB/s against SRAM's 777.
+   * Measured /tmp usage after a compile is 3 KiB (MemTmpUsed, /proc/meminfo).
+   * The cost is a spill tail: objects are tiny (p99 ~2 KiB) but linked
+   * executables are not -- 14 KiB typically, 49 KiB for strlen-5 and 52 KiB for
+   * mibench_rijndael -- so those now go to the SD card instead of RAM. Watch
+   * MemTmpPeak: if it pins at the ceiling, this went too far. */
+  temp_ram(rxw)     : ORIGIN = 0x20020000, LENGTH = 32K
+  process_ram(rxw)  : ORIGIN = 0x20028000, LENGTH = 320K
+  /* Core 1's MSP stack. MSP is banked per core; the memory behind it is not, so
+   * a second core needs a stack of its own. Placed below `scratch` rather than
+   * carved out of it, which keeps core 0's stack unchanged to the byte.
+   *
+   * 8 KB, because core 1 schedules processes and therefore takes their faults:
+   * the hardfault module-map dump alone is a 4 KB stack buffer
+   * (source/kernel/modules.zig), and 4 KB hit MSPLIM partway through a
+   * postmortem. The extra comes off process_ram, whose working set leaves
+   * ~80 KB spare.
+   *
+   * __stack_bottom__ (core 0's MSPLIM) is exactly __stack_top_core1__, so an
+   * overflow on either side faults on the limit instead of silently eating the
+   * other's stack. The ASSERT below holds that. */
+  core1_stack(rw)   : ORIGIN = 0x20078000, LENGTH = 8K
+  /* Kernel MSP stack: 16 KB ending at the top of SRAM (0x20082000). The top
+   * 8 KB (0x20080000..0x20082000) is the two 4 KB scratch banks merged (single-
+   * core: core1's stack bank is unused) — non-striped SRAM, used first since the
+   * stack grows down. The lower 8 KB (0x2007E000..0x20080000) is carved off the
+   * top of process_ram and only reached on deep stack usage (e.g. the hardfault
+   * handler's diagnostics, which dump a multi-KB maps buffer). kernel_ram is now
+   * just .data/.bss + ~80 KB heap. */
+  scratch(rxw)      : ORIGIN = 0x2007A000, LENGTH = 32K
+}
+
+SECTIONS
+{
+  .text :
+  {
+    . = ALIGN(4);
+    __vectors_start = .;
+    KEEP(*(.vectors))
+    __vectors_end = .;
+    __bootmeta_start__ = .;
+    KEEP(*(.bootmeta))
+    __bootmeta_end__ = .;
+    *(.text*)
+    KEEP(*(.init))
+    KEEP(*(.fini))
+
+    *(.rodata*)
+    KEEP(*(.eh_frame*))
+
+    *crtbegin.o(.ctors)
+    *crtbegin?.o(.ctors)
+    *(EXCLUDE_FILE(*crtend?.o *crtend.o) .ctors)
+    *(SORT(.ctors.*))
+    *(.ctors)
+    *crtbegin.o(.dtors)
+    *crtbegin?.o(.dtors)
+    *(EXCLUDE_FILE(*crtend?.o *crtend.o) .dtors)
+    *(SORT(.dtors.*))
+    *(.dtors)
+
+    . = ALIGN(4);
+    PROVIDE_HIDDEN(__preinit_array_start = .);
+    KEEP(*(SORT(.preinit_array.*)))
+    KEEP(*(.preinit_array))
+    PROVIDE_HIDDEN(__preinit_array_end = .);
+
+    . = ALIGN(4);
+    PROVIDE_HIDDEN(__init_array_start = .);
+    KEEP(*(SORT(.init_array.*)))
+    KEEP(*(.init_array))
+    PROVIDE_HIDDEN(__init_array_end = .);
+
+    . = ALIGN(4);
+    PROVIDE_HIDDEN(__fini_array_start = .);
+    KEEP(*(SORT(.fini_array.*)))
+    KEEP(*(.fini_array))
+    PROVIDE_HIDDEN(__fini_array_end = .);
+  } > flash
+
+  /* ARM exception handling */
+  .ARM.extab :
+  {
+    *(.ARM.extab* .gnu.linkonce.armextab.*)
+  } > flash
+
+  __exidx_start = .;
+  .ARM.exidx :
+  {
+    *(.ARM.exidx* .gnu.linkonce.armexidx.*)
+  } > flash
+  __exidx_end = .;
+
+   .romfs :
+  {
+    /* The rootfs image is flashed SEPARATELY into the romfs flash region (it is
+     * not linked into this section, so *(.romfs) is empty). Span the symbols
+     * over the whole romfs memory region so the kernel MPU maps it executable —
+     * otherwise unprivileged execve'd processes whose XIP .text lives above the
+     * 1 MB kernel-flash region fault with IACCVIOL. */
+    __romfs_start__ = ORIGIN(romfs);
+    KEEP(*(.romfs))
+    __romfs_end__ = ORIGIN(romfs) + LENGTH(romfs);
+  } > romfs
+  /* keep this at beginning of ram or align to arm alignment requirement for
+   cortex-m0plus */
+  .ram_vector_table (NOLOAD) :
+  {
+    *(.ram_vector_table)
+  } > kernel_ram
+
+  __data_start_flash__ = LOADADDR(.data);
+  .data :
+  {
+    . = ALIGN(4);
+    __data_start__ = .;
+    *(vtable)
+    *(.time_critical*)
+    *(.time_critical)
+    *(.data)
+    *(.data*)
+    __data_end__ = .;
+  } > kernel_ram AT> flash
+
+  .bss (NOLOAD) :
+  {
+    . = ALIGN(4);
+    __bss_start__ = .;
+    *(.bss)
+    *(.bss.*)
+    *(COMMON)
+    . = ALIGN(4);
+    __bss_end__ = .;
+  } > kernel_ram
+
+  .heap (NOLOAD):
+  {
+    __end__ = .;
+    end = __end__;
+    KEEP(*(.heap*))
+  } > kernel_ram
+
+  __heap_limit__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
+
+  /* Any scratch-bank data + the kernel stack live in the 16 KB scratch
+   * region. Stack grows down from the top; MSPLIM is the bottom. */
+  .scratch (NOLOAD) :
+  {
+    *(.scratch_x.* .scratch_y.*)
+    . = ALIGN(4);
+  } > scratch
+
+  .stack_dummy (NOLOAD):
+  {
+    KEEP(*(.stack* .stack1*))
+  } > scratch
+
+  __stack_top__ = ORIGIN(scratch) + LENGTH(scratch);
+  __stack_bottom__ = ORIGIN(scratch);
+
+  /* Core 1's MSP, set by the bootrom launch handshake (cpu.zig `start_core`)
+   * rather than by a reset vector, and its MSPLIM, set by `_start_core1`. */
+  __stack_top_core1__ = ORIGIN(core1_stack) + LENGTH(core1_stack);
+  __stack_bottom_core1__ = ORIGIN(core1_stack);
+  ASSERT(__stack_top_core1__ == __stack_bottom__, "core 1's stack must butt up against core 0's MSPLIM")
+
+  __flash_start__ = ORIGIN(flash);
+  __flash_end__ = ORIGIN(flash) + LENGTH(flash);
+  __kernel_ram_start__ = ORIGIN(kernel_ram);
+  __kernel_ram_end__ = ORIGIN(kernel_ram) + LENGTH(kernel_ram);
+  __process_ram_start__ = ORIGIN(process_ram);
+  __process_ram_end__ = ORIGIN(process_ram) + LENGTH(process_ram);
+  __temp_ram_start__ = ORIGIN(temp_ram);
+  __temp_ram_end__ = ORIGIN(temp_ram) + LENGTH(temp_ram);
+
+  PROVIDE(__stack = __stack_top__);
+  ASSERT(__end__ <= __heap_limit__, "kernel_ram too small: .bss/heap exceed kernel_ram")
+}

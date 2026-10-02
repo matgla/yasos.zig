@@ -5,11 +5,11 @@ path = sys.argv[1] if len(sys.argv) > 1 else "rootfs/usr/bin/toybox"
 with open(path, "rb") as f:
     data = f.read()
 
-# Parse header
+# Parse header (YAFF_VERSION 3 offsets: counts and table offsets are 32-bit)
 data_length = struct.unpack_from("<I", data, 16)[0]
 bss_length = struct.unpack_from("<I", data, 20)[0]
-exp_amt = struct.unpack_from("<H", data, 44)[0]
-exp_off = struct.unpack_from("<H", data, 68)[0]
+exp_amt = struct.unpack_from("<I", data, 52)[0]
+exp_off = struct.unpack_from("<I", data, 88)[0]
 
 print(f"data_length=0x{data_length:x} bss_length=0x{bss_length:x}")
 print(f"exported_symbols: amount={exp_amt} offset=0x{exp_off:x}")

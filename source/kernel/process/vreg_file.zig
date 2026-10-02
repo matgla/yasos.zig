@@ -156,23 +156,21 @@ pub const VregFile = interface.DeriveFromBase(VregBufferedFile, struct {
     const Self = @This();
     base: VregBufferedFile,
 
-    pub fn create() VregFile {
-        var file = VregFile.init(.{
-            .base = VregBufferedFile.InstanceType.create("vreg"),
+    pub fn create(allocator: std.mem.Allocator) VregFile {
+        return VregFile.init(.{
+            .base = VregBufferedFile.InstanceType.create(allocator, "vreg"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
     pub fn sync(self: *Self) i32 {
         const stats = read_stats();
         const now_ok: u1 = if (sampler) |read| @intFromBool(read()) else 0;
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         const buf = vfmt.print(
             buffer,
             "vreg_setpoint_mv {d}\nvreg_trip_nominal_mv {d}\nvreg_in_regulation {d}\n" ++
@@ -194,7 +192,7 @@ pub const VregFile = interface.DeriveFromBase(VregBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -214,7 +212,7 @@ test "VregFile.ShouldReportZerosWithoutASampler" {
 
     accumulate(5);
 
-    var sut = try VregFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try VregFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());
@@ -271,7 +269,7 @@ test "VregFile.ShouldReportTheCounters" {
     accumulate(7);
     accumulate(8);
 
-    var sut = try VregFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try VregFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());

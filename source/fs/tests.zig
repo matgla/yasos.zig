@@ -24,6 +24,7 @@ comptime {
     _ = @import("romfs/tests.zig");
     _ = @import("ramfs/tests.zig");
     _ = @import("fatfs/tests.zig");
+    _ = @import("ext4/tests.zig");
 }
 
 test {

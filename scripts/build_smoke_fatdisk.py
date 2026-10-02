@@ -17,17 +17,39 @@ Usage:
 import argparse
 import os
 import subprocess
+import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 FATIMG = REPO / "scripts" / "fatimg" / "fatimg"
 
-# MUST match hal/boards/qemu_mps3_an524/qemu_mps3_an524.zig + its linker_script.ld.
 RAM_BASE = 0x60000000
 RAM_SIZE = 2 * 1024 * 1024 * 1024  # qemu rejects any other size for mps3-an524
-FATDISK_ADDR = 0x70000000
-FATDISK_SIZE = 16 * 1024 * 1024
+LINKER_SCRIPT = REPO / "hal" / "source" / "arm" / "qemu_mps3" / "linker_script.ld"
+
+
+def _fatdisk_window():
+    """Where the board puts its fatdisk, read from the board's own linker script.
+
+    This used to be a pair of constants with a comment saying they must match
+    the board. They stopped matching the moment the map was re-carved for a
+    bigger user pool -- the window moved to 0x80000000 and psram took
+    0x70000000 -- and nothing said so: the harness wrote the corpus where the
+    guest no longer looks, so every source file was simply "not found" and
+    ~2000 suite cases failed identically. Ask the board instead.
+    """
+    text = LINKER_SCRIPT.read_text()
+    m = re.search(r"^\s*fatdisk\s*\([^)]*\)\s*:\s*ORIGIN\s*=\s*(0x[0-9a-fA-F]+)\s*,"
+                  r"\s*LENGTH\s*=\s*(\d+)([KMG]?)", text, re.MULTILINE)
+    if not m:
+        sys.exit(f"no fatdisk region in {LINKER_SCRIPT}")
+    addr = int(m.group(1), 16)
+    size = int(m.group(2)) * {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}[m.group(3)]
+    return addr, size
+
+
+FATDISK_ADDR, FATDISK_SIZE = _fatdisk_window()
 FATDISK_OFFSET = FATDISK_ADDR - RAM_BASE
 
 # Where the corpus lands inside the FAT volume. The guest mounts this disk at

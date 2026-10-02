@@ -242,6 +242,7 @@ fn map_load_error(err: anyerror) anyerror {
         error.UnsupportedArchitecture,
         error.UnsupportedFloatAbi,
         error.UnsupportedCpuFeatures,
+        error.InvalidDataAlignment,
         error.DependencyIsNotLibrary,
         => kernel.errno.ErrnoSet.ExecFormatError,
         else => err,

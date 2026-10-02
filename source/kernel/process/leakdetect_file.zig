@@ -33,22 +33,23 @@ pub const LeakStartFile = interface.DeriveFromBase(BufferedFile, struct {
     const Self = @This();
     base: BufferedFile,
 
-    pub fn create() LeakStartFile {
-        var file = LeakStartFile.init(.{
-            .base = BufferedFile.InstanceType.create("leakstart"),
+    /// Detection starts when procfs comes up, as it did when creating the
+    /// file rendered it; reading the file restarts it.
+    pub fn create(allocator: std.mem.Allocator) LeakStartFile {
+        TheKernelAllocator.start_leaks_detection();
+        return LeakStartFile.init(.{
+            .base = BufferedFile.InstanceType.create(allocator, "leakstart"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
     pub fn sync(self: *Self) i32 {
         TheKernelAllocator.start_leaks_detection();
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         var written_length: usize = 0;
         const buf = vfmt.print(buffer, "leak detection started\n", .{});
         written_length += buf.len;
@@ -57,7 +58,7 @@ pub const LeakStartFile = interface.DeriveFromBase(BufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -65,16 +66,14 @@ pub const LeakDumpFile = interface.DeriveFromBase(BufferedFile, struct {
     const Self = @This();
     base: BufferedFile,
 
-    pub fn create() LeakDumpFile {
-        var file = LeakDumpFile.init(.{
-            .base = BufferedFile.InstanceType.create("leakdump"),
+    pub fn create(allocator: std.mem.Allocator) LeakDumpFile {
+        return LeakDumpFile.init(.{
+            .base = BufferedFile.InstanceType.create(allocator, "leakdump"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
@@ -87,7 +86,7 @@ pub const LeakDumpFile = interface.DeriveFromBase(BufferedFile, struct {
 
     pub fn sync(self: *Self) i32 {
         const leaked = TheKernelAllocator.detect_leaks_filter(&is_pid_alive);
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         var written_length: usize = 0;
         const buf = vfmt.print(buffer, "leaked: {d} bytes\n", .{leaked});
         written_length += buf.len;
@@ -96,6 +95,6 @@ pub const LeakDumpFile = interface.DeriveFromBase(BufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });

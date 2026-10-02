@@ -49,8 +49,6 @@ fn initialize_bss() void {
     @memset(bss_start[0..bss_len], 0);
 }
 
-export fn _init() void {}
-
 export fn crt_init() void {
     initialize_data();
     initialize_bss();

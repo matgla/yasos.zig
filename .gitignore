@@ -24,3 +24,4 @@ pico_sdk_generated/
 
 # Zig fetched-package directory
 zig-pkg/
+.fbview_venv/

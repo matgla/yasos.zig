@@ -21,7 +21,9 @@ def test_list_rootfs(request):
     session = request.node.stash[session_key]
     session.write_command("ls")
     line = session.read_line_except_logs()
-    assert sorted(["dev", "usr", "lib", "tmp", "bin", "proc", "root", "home", "mnt" ]) == sorted(line.split())
+    # boot, var, opt, home, root: the SD card's mount points (/etc/fstab).
+    assert sorted(["dev", "usr", "lib", "tmp", "bin", "proc", "root", "home", "mnt",
+                   "boot", "etc", "opt", "var"]) == sorted(line.split())
 
 def test_list_bin(request):
     session = request.node.stash[session_key]

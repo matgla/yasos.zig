@@ -24,6 +24,10 @@ pub const VtDriver = @import("vt/vt_driver.zig").VtDriver;
 pub const FlashDriver = @import("flash/flash_driver.zig").FlashDriver;
 pub const MmcDriver = @import("mmc/mmc_driver.zig").MmcDriver;
 pub const MmcPartitionDriver = @import("mmc/mmc_partition_driver.zig").MmcPartitionDriver;
+/// Disks, MBR partitions, `LABEL=` lookup and the block ioctls.
+pub const block = @import("block.zig");
+pub const MemoryDeviceDriver = @import("null/null_driver.zig").MemoryDeviceDriver;
+pub const DisplayDriver = @import("display/display_driver.zig").DisplayDriver;
 pub const IDriver = @import("idriver.zig").IDriver;
 /// Serialises the seek-then-transfer pair on shared block devices. See its
 /// module comment; it is rank `dev`, inner to `fs`.

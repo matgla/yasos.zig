@@ -20,6 +20,21 @@ const interface = @import("interface");
 
 const kernel = @import("kernel");
 
+/// Device traffic since the last reset, for tests that budget a driver's I/O.
+pub const io = struct {
+    pub var reads: usize = 0;
+    pub var writes: usize = 0;
+    pub var read_bytes: usize = 0;
+    pub var written_bytes: usize = 0;
+
+    pub fn reset() void {
+        reads = 0;
+        writes = 0;
+        read_bytes = 0;
+        written_bytes = 0;
+    }
+};
+
 pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct {
     const Self = @This();
     allocator: std.mem.Allocator,
@@ -59,6 +74,8 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
     }
 
     pub fn read(self: *Self, buffer: []u8) isize {
+        io.reads += 1;
+        io.read_bytes += buffer.len;
         if (self.position >= @as(isize, @intCast(self.data.items.len))) {
             return 0;
         }
@@ -69,6 +86,8 @@ pub const FatFsDeviceFileStub = interface.DeriveFromBase(kernel.fs.IFile, struct
     }
 
     pub fn write(self: *Self, buffer: []const u8) isize {
+        io.writes += 1;
+        io.written_bytes += buffer.len;
         const length = buffer.len;
         const required_capacity = @as(usize, @intCast(self.position)) + length;
         if (required_capacity > self.data.items.len) {

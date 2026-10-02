@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vfmt = @import("../vfmt.zig");
 
 const c = @import("libc_imports").c;
@@ -33,7 +34,7 @@ const MemoryInfo = struct {
     total: usize,
 };
 
-const BufferSize = 640; // 15 lines of fixed-width fields; bufPrint failure here is silent
+const BufferSize = 768; // 18 lines of fixed-width fields; bufPrint failure here is silent
 const BufferedFileForMeminfo = kernel.fs.BufferedFile(BufferSize);
 pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct {
     const Self = @This();
@@ -53,15 +54,13 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
         return 0;
     }
 
-    pub fn create() MemInfoFile {
-        var meminfo = MemInfoFile.init(.{
-            .base = BufferedFileForMeminfo.InstanceType.create("meminfo"),
+    pub fn create(allocator: std.mem.Allocator) MemInfoFile {
+        return MemInfoFile.init(.{
+            .base = BufferedFileForMeminfo.InstanceType.create(allocator, "meminfo"),
         });
-        _ = meminfo.data().sync();
-        return meminfo;
     }
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
@@ -73,7 +72,7 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
             0;
         const memory_used_tmp = get_tmp_memory_usage();
         const memory_used_combined = memory_used + memory_used_slow;
-        var buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         var written_length: usize = 0;
         var sizebuf: [16]u8 = @splat(0);
         var buf = vfmt.print(buffer, "MemUsed:         {s}\n", .{format_size(memory_used_combined, &sizebuf)});
@@ -86,6 +85,16 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
         written_length += buf.len;
         buf = vfmt.print(buffer[written_length..], "MemProcessUsed:  {s}\n", .{format_size(memory_used_slow, &sizebuf)});
         written_length += buf.len;
+        buf = vfmt.print(buffer[written_length..], "MemKernelPeak:   {s}\n", .{format_size(kernel.memory.heap.malloc.get_peak_usage(), &sizebuf)});
+        written_length += buf.len;
+        // The break and its limit exist only in the kernel image; host tests
+        // have no `end` / `__heap_limit__` to measure against.
+        if (comptime !builtin.is_test) {
+            buf = vfmt.print(buffer[written_length..], "MemKernelBrk:    {s}\n", .{format_size(kernel.memory.heap.malloc.break_used(), &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "MemKernelLimit:  {s}\n", .{format_size(kernel.memory.heap.malloc.break_limit(), &sizebuf)});
+            written_length += buf.len;
+        }
         const alloc_count = kernel.memory.heap.malloc.get_counter();
         buf = vfmt.print(buffer[written_length..], "AllocCount:      {d: >8}\n", .{alloc_count});
         written_length += buf.len;
@@ -127,7 +136,7 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -136,8 +145,9 @@ test "MemInfoFile.ShouldShowMemInfo" {
     kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
     defer kernel.process.process_manager.deinitialize_process_manager();
 
-    var sut = try MemInfoFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try MemInfoFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
+    _ = sut.interface.sync();
 
     var buffer: [256]u8 = undefined;
     const readed: usize = @intCast(sut.interface.read(buffer[0..]));

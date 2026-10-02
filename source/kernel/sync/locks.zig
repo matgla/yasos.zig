@@ -39,10 +39,18 @@ pub const Rank = enum(u8) {
     /// Transitional big kernel lock, taken at every kernel entry. Peeled away
     /// one subsystem at a time, then deleted.
     bkl = 5,
+    /// The kernel's own files on a mount -- the `file_log` file. Held across
+    /// that file's whole open and I/O, path lookup included, so outside
+    /// `mount` and `block`; `umount` takes it to close the file.
+    kernel_files = 7,
     /// `modules.zig` + `loader.zig` tables, and the image load itself. A
     /// sleeping mutex outside `mount`/`fs`/`dev`, because the loader reads the
     /// executable through the VFS.
     loader = 8,
+    /// The disk registry in `drivers/block.zig`: partition probing, BLKRRPART,
+    /// `LABEL=` lookups. Held across disk reads, and outside `mount` because a
+    /// rescan asks the mount tree whether a partition is still in use.
+    block = 9,
     /// The `MountPoints` tree.
     mount = 10,
     /// Per-filesystem. FatFs, littlefs, romfs, ramfs, procfs, driverfs.
@@ -67,7 +75,7 @@ pub const Rank = enum(u8) {
     pidmap = 70,
     /// `ProcessMemoryPool`.
     pagepool = 80,
-    /// newlib's free list + `malloc.zig` accounting + `_sbrk`.
+    /// malloc's free list + `malloc.zig` accounting + `_sbrk`.
     kheap = 90,
     /// `stdout.zig`, UART TX, the `file_log` ring.
     console = 95,
@@ -146,7 +154,7 @@ pub fn reset() void {
 /// the process across a switch -- see `RoundRobin.update_current`. Every other
 /// rank is a spin_irq, held with interrupts masked, so it cannot migrate.
 pub const migrating_ranks: u16 =
-    bit(.loader) | bit(.mount) | bit(.fs) | bit(.dev) | bit(.sdio);
+    bit(.loader) | bit(.block) | bit(.mount) | bit(.fs) | bit(.dev) | bit(.sdio);
 
 /// Detach the migrating ranks from this core, for storing on the process being
 /// switched away from. Leaves the spin ranks, which belong to the core.
@@ -313,8 +321,8 @@ pub fn Ranked(comptime rank: Rank) type {
 }
 
 /// A spinlock the holder may take again. There are exactly two: the BKL, which
-/// is transitional, and the kernel heap, where newlib's API forces it --
-/// `realloc` takes `__malloc_lock` and then calls the also-locking `_malloc_r`.
+/// is transitional, and the kernel heap, where malloc.zig holds the lock around
+/// its call into the also-locking `malloc`.
 pub fn RecursiveRanked(comptime rank: Rank) type {
     return struct {
         inner: SpinLock align(reservation_granule) = .{},

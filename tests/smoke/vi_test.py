@@ -239,3 +239,137 @@ def test_vi_create_modify_file(request):
     # leave the slate clean for the next test
     session.write_command(f"rm -f {VI_PATH}")
     session.wait_for_prompt_except_logs()
+
+
+CTAGS_DIR = "/tmp/vi_ctags"
+CTRL_BRACKET = "\x1d"  # Ctrl-]
+CTRL_T = "\x14"
+
+
+def _write_lines(session, path, lines):
+    """Create *path* one `echo >>` per line (toybox has no printf)."""
+    session.write_command(f"rm -f {path}")
+    session.wait_for_prompt_except_logs()
+    for line in lines:
+        session.write_command(f"echo '{line}' >> {path}")
+        session.wait_for_prompt_except_logs()
+
+
+def test_vi_ctags_jump_and_return(request):
+    """Ctrl-] jumps to the definition ctags recorded, Ctrl-T comes back.
+
+    Builds a two-file project, tags it with the bundled ctags, and drives vi:
+    Ctrl-] on a call to helper() must land on "helper" in util.c's definition,
+    and Ctrl-T must return to the exact call site. A marker typed at each
+    landing spot and saved shows where the cursor was, without parsing the
+    screen.
+    """
+    session = request.node.stash[session_key]
+    session.write_command(f"rm -rf {CTAGS_DIR}")
+    session.wait_for_prompt_except_logs()
+    session.write_command(f"mkdir -p {CTAGS_DIR}")
+    session.wait_for_prompt_except_logs()
+    session.write_command(f"cd {CTAGS_DIR}")
+    session.wait_for_prompt_except_logs()
+    try:
+        _write_lines(session, "main.c", [
+            "int helper(int x);",
+            "int main(void)",
+            "{",
+            "  return helper(1);",
+            "}",
+        ])
+        _write_lines(session, "util.c", [
+            "/* util */",
+            "int helper(int x)",
+            "{",
+            "  return x;",
+            "}",
+        ])
+        session.write_command("ctags main.c util.c")
+        out = session.wait_for_prompt_except_logs(timeout=20)
+        assert not any("rror" in line or "fault" in line for line in out), out
+
+        _vi_open(session, "main.c")
+        _vi_feed(session, "3j")            # line 4: "  return helper(1);"
+        _vi_feed(session, "9l")            # column 9: the 'h' of helper
+        _vi_feed(session, CTRL_BRACKET, settle=0.8)  # opens util.c
+        _vi_feed(session, "i")
+        _vi_feed(session, "A_")            # "int A_helper(int x)" if on the name
+        _vi_feed(session, ESC)
+        _vi_feed(session, ":w" + ENTER, settle=0.8)
+        _vi_feed(session, CTRL_T, settle=0.8)        # back to main.c
+        _vi_feed(session, "i")
+        _vi_feed(session, "B_")            # "  return B_helper(1);" if returned
+        _vi_feed(session, ESC)
+        _vi_save_quit(session)
+
+        util = _cat_lines(session, "util.c")
+        assert any("int A_helper(int x)" in line for line in util), util
+        main = _cat_lines(session, "main.c")
+        assert any("return B_helper(1);" in line for line in main), main
+    finally:
+        session.write_command("cd /")
+        session.wait_for_prompt_except_logs()
+        session.write_command(f"rm -rf {CTAGS_DIR}")
+        session.wait_for_prompt_except_logs()
+
+
+ZIG_TAGS_DIR = "/tmp/ctags_zig"
+
+
+def test_ctags_zig_parser(request):
+    """The bundled ctags tags Zig (apps/ctags_config/zig.ctags, built in).
+
+    Checks each kind it records, and that a function-local const and a
+    commented-out fn stay untagged.
+    """
+    session = request.node.stash[session_key]
+    session.write_command(f"rm -rf {ZIG_TAGS_DIR}")
+    session.wait_for_prompt_except_logs()
+    session.write_command(f"mkdir -p {ZIG_TAGS_DIR}")
+    session.wait_for_prompt_except_logs()
+    session.write_command(f"cd {ZIG_TAGS_DIR}")
+    session.wait_for_prompt_except_logs()
+    try:
+        _write_lines(session, "t.zig", [
+            'const std = @import("std");',
+            "pub const Point = struct {",
+            "    x: i32,",
+            "    pub const zero = Point{ .x = 0 };",
+            "    pub fn len(self: Point) i32 {",
+            "        const local = self.x;",
+            "        return local;",
+            "    }",
+            "};",
+            "const Color = enum(u8) { red, green };",
+            "var counter: u32 = 0;",
+            "// fn commented() void {}",
+            'test "point_len" {',
+            "    try std.testing.expect(Point.zero.len() == 0);",
+            "}",
+        ])
+        session.write_command("ctags -x --sort=no t.zig")
+        out = session.wait_for_prompt_except_logs(timeout=20)
+        assert not any("rror" in line or "fault" in line for line in out), out
+
+        # -x lines: "<name> <kind> <line> <file> <source line>"
+        tags = set()
+        for line in out:
+            m = re.match(r"\s*(\S+)\s+(\S+)\s+(\d+)\s+t\.zig\b", line)
+            if m:
+                tags.add((m.group(1), m.group(2), int(m.group(3))))
+        assert tags == {
+            ("std", "constant", 1),
+            ("Point", "struct", 2),
+            ("zero", "constant", 4),
+            ("len", "function", 5),
+            ("Color", "enum", 10),
+            ("counter", "variable", 11),
+            ("point_len", "test", 13),
+        }, out
+    finally:
+        session.write_command("cd /")
+        session.wait_for_prompt_except_logs()
+        session.write_command(f"rm -rf {ZIG_TAGS_DIR}")
+        session.wait_for_prompt_except_logs()

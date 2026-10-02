@@ -55,8 +55,6 @@ fn initialize_libc_constructors() void {
     __libc_init_array();
 }
 
-export fn _init() void {}
-
 export fn crt_init() void {
     c.reset_block(~(c.RESETS_RESET_IO_QSPI_BITS | c.RESETS_RESET_PADS_QSPI_BITS |
         c.RESETS_RESET_PLL_USB_BITS | c.RESETS_RESET_USBCTRL_BITS | c.RESETS_RESET_SYSCFG_BITS |

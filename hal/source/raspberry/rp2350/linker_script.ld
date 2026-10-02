@@ -19,7 +19,16 @@ MEMORY
 {
   flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 1024K
   romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 4096K
-  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 76K
+  /* .data + .bss + the kernel heap (malloc via _sbrk, which panics at the top).
+   * 76K -> 108K (2026-09-30), taken off process_ram: .bss had grown to ~28 KB,
+   * leaving a 48 KB heap, and the fstab/SD layout (four FAT volumes, the shared
+   * FatFs line cache ~21 KB, the /proc storage files) left it ~46 KB full at
+   * idle, so a tcc self-compile ran it dry. 108K -> 128K (2026-10-01): with
+   * the card's full layout mounted (FAT /boot, ext4 /var /opt /home) the
+   * 71.5 KB heap left idled at ~70 KB and a pipe's 4 KB ring panicked it.
+   * Check MemKernelBrk against MemKernelLimit in /proc/meminfo before
+   * shrinking this again. */
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 128K
   /* Arena for the hybrid /tmp filesystem (source/fs/ramfs, mounted by
    * source/main.zig). Carved out of process_ram so a compile's process image
    * can never eat it; files larger than CONFIG_TMPFS_MAX_FILE_SIZE (or anything
@@ -35,8 +44,8 @@ MEMORY
    * executables are not -- 14 KiB typically, 49 KiB for strlen-5 and 52 KiB for
    * mibench_rijndael -- so those now go to the SD card instead of RAM. Watch
    * MemTmpPeak: if it pins at the ceiling, this went too far. */
-  temp_ram(rxw)     : ORIGIN = 0x20013000, LENGTH = 32K
-  process_ram(rxw)  : ORIGIN = 0x2001B000, LENGTH = 388K
+  temp_ram(rxw)     : ORIGIN = 0x20020000, LENGTH = 32K
+  process_ram(rxw)  : ORIGIN = 0x20028000, LENGTH = 336K
   /* Core 1's MSP stack. MSP is banked per core; the memory behind it is not, so
    * a second core needs a stack of its own. Placed below `scratch` rather than
    * carved out of it, which keeps core 0's stack unchanged to the byte.
@@ -57,7 +66,7 @@ MEMORY
    * stack grows down. The lower 8 KB (0x2007E000..0x20080000) is carved off the
    * top of process_ram and only reached on deep stack usage (e.g. the hardfault
    * handler's diagnostics, which dump a multi-KB maps buffer). kernel_ram is now
-   * just .bss + ~64 KB heap. */
+   * just .data/.bss + ~80 KB heap. */
   scratch(rxw)      : ORIGIN = 0x2007E000, LENGTH = 16K
 }
 

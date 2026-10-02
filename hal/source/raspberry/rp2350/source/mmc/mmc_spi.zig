@@ -24,6 +24,13 @@ const hal = @import("hal_interface");
 const log = std.log.scoped(.@"mmc/spi");
 
 const mmc_spi = @import("mmc_spi_headers");
+// pioasm's zig output for mmc_spi.pio: the program without a translate-c pass
+const mmc_spi_pio = @import("mmc_spi_pio");
+
+comptime {
+    // the generated Program stands in for the SDK's struct pio_program
+    std.debug.assert(@sizeOf(mmc_spi_pio.Program) == @sizeOf(mmc_spi.pio_program_t));
+}
 
 pub const MmcSpi = struct {
     _config: hal.mmc.MmcConfig,
@@ -147,14 +154,14 @@ pub const MmcSpi = struct {
     fn initialize_interface(self: *MmcSpi) error{PIOInitializationFailure}!void {
         log.info("initializing interface", .{});
         var offset: u32 = 0;
-        if (!mmc_spi.pio_claim_free_sm_and_add_program_for_gpio_range(&mmc_spi.mmc_spi_transmit_program, &self._pio, &self._sm, &offset, self._sclk, 6, true)) {
+        if (!mmc_spi.pio_claim_free_sm_and_add_program_for_gpio_range(@ptrCast(&mmc_spi_pio.mmc_spi_transmit_program), &self._pio, &self._sm, &offset, self._sclk, 6, true)) {
             return error.PIOInitializationFailure;
         }
         // SD card init requires <=400 kHz. PIO divides clk_sys by (clkdiv * 2),
         // so target ~250 kHz = clk_sys / (divider * 2).
         const sys_hz: u32 = mmc_spi.clock_get_hz(mmc_spi.clk_sys);
         const init_divider: f32 = @as(f32, @floatFromInt(sys_hz)) / (2.0 * 250_000.0);
-        mmc_spi.pio_mmc_spi_transmit_init(self._pio, self._sm, offset, init_divider, self._sclk, self._mosi, self._miso);
+        mmc_spi_pio.pio_mmc_spi_transmit_init(mmc_spi, self._pio, self._sm, offset, init_divider, self._sclk, self._mosi, self._miso);
     }
 
     pub fn change_speed_to(self: MmcSpi, speed_hz: u32) void {

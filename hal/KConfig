@@ -30,12 +30,7 @@ config CONFIG_BUILD_LINKER_SCRIPT_PATH
 config CONFIG_BUILD_BUNDLE_COMPILER_RT 
     bool "Bundle compiler RT" 
     help 
-        Bundle compiler RT. Compiler RT may not be compatible with GCC based environment, i.e. for newlib nano
-
-config CONFIG_BUILD_USE_NEWLIB
-    bool "Use newlib libc library"
-    help
-        Newlib may be incompatible with host environment
+        Bundle compiler RT. Compiler RT may not be compatible with GCC based environment, i.e. with libgcc
 
 config CONFIG_BUILD_USERSPACE_HARDWARE_FP
     bool "Hardware floating point for userspace code"
@@ -79,7 +74,7 @@ config CONFIG_BUILD_USERSPACE_FP_MFPU
 
 config CONFIG_BUILD_USERSPACE_FP_SHARED
     bool "One shared floating point runtime for the whole rootfs"
-    default y
+    default n
     help
       Bind the __aeabi_* floating point runtime as a shared library
       (/usr/lib/librp2350fp.so, libsoftfp.so, ...) instead of copying it out of
@@ -101,6 +96,12 @@ config CONFIG_BUILD_USERSPACE_FP_SHARED
       (on RP2350: float add/sub/mul/div, double add/sub/compare) are untouched,
       because they never became a call in the first place -- it is the remaining
       library operations, double multiply and divide most of all, that pay.
+
+      Off by default: linked statically, a module calls its own copy of the
+      helpers it uses with a plain `bl` -- no PLT stub, and tcc keeps R9 across
+      the call (it counts fp/lib<runtime>.a like libtcc1 when deciding which
+      calls leave the module) -- and each image still runs the runtime its own
+      -mfpu chose, because the call is bound at link time, not looked up.
 
       Implemented as the tcc toolchain default (-mfp-lib=shared) rather than as
       per-Makefile flags, for the same reason as the -mfpu default above: half

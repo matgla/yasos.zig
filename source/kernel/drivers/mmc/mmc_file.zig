@@ -48,11 +48,18 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn read(self: *Self, buf: []u8) isize {
-        return self._driver.read(self._current_block << 9, buf);
+        const result = self._driver.read(self._current_block << 9, buf);
+        // Sequential access moves on, like any file: `dd if=/dev/mmc0` read the
+        // first sector over and over. Whole sectors only -- the position is
+        // kept in sectors.
+        if (result > 0) self._current_block += @as(u64, @intCast(result)) >> 9;
+        return result;
     }
 
     pub fn write(self: *Self, buf: []const u8) isize {
-        return self._driver.write(self._current_block << 9, buf);
+        const result = self._driver.write(self._current_block << 9, buf);
+        if (result > 0) self._current_block += @as(u64, @intCast(result)) >> 9;
+        return result;
     }
 
     pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
@@ -65,8 +72,11 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
                 self._current_block = @intCast(offset >> 9);
             },
             c.SEEK_END => {
-                log.err("SEEK_END is not implemented for MMC disk", .{});
-                return kernel.errno.ErrnoSet.IllegalSeek;
+                const new_position: i64 = @as(i64, @intCast(self._driver.size_in_sectors())) + (offset >> 9);
+                if (new_position < 0) {
+                    return kernel.errno.ErrnoSet.IllegalSeek;
+                }
+                self._current_block = @intCast(new_position);
             },
             c.SEEK_CUR => {
                 const new_position: i64 = @as(i64, @intCast(self._current_block)) + (offset >> 9);
@@ -94,10 +104,7 @@ pub const MmcFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     }
 
     pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
-        _ = self;
-        _ = cmd;
-        _ = arg;
-        return 0;
+        return kernel.driver.block.common_ioctl(self._name, self.size(), cmd, arg) orelse 0;
     }
 
     pub fn fcntl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -267,13 +274,15 @@ test "MmcFile.Seek.SEEK_CUR.ShouldRejectNegativePosition" {
     try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, result);
 }
 
-test "MmcFile.Seek.SEEK_END.ShouldReturnError" {
+test "MmcFile.Seek.SEEK_END.ShouldLandAtTheEnd" {
     var file = try create_sut();
     defer mmc_stub.impl.reset();
     defer file.interface.delete();
 
-    const result = file.interface.seek(0, c.SEEK_END);
-    try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, result);
+    // An uninitialised card is zero sectors long, so the end is 0; before it
+    // is out of range.
+    try std.testing.expectEqual(@as(i64, 0), try file.interface.seek(0, c.SEEK_END));
+    try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, file.interface.seek(-512, c.SEEK_END));
 }
 
 test "MmcFile.Seek.InvalidWhence.ShouldReturnError" {
