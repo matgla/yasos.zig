@@ -1,0 +1,25 @@
+# /etc/fstab -- what the kernel mounts at boot, top to bottom
+# (source/fs/mounter.zig). The romfs root and /dev are mounted before this
+# file is read; `mount -a` runs it again from the shell.
+#
+# The SD card is laid out by /usr/bin/cardreformat (fdisk, then mkfs.fat and
+# mkfs.ext4): FAT /boot (the bootloader reads it), ext4 /var, /opt and /home,
+# found by label, so these lines fit any card -- and a partitioned image in
+# QEMU's fatdisk window. No card (QEMU, a board without
+# one): /var and /home fall back to RAM, /boot and /opt stay empty.
+#
+# Options beyond ro/rw/noauto/nofail:
+#   x-fallback=ramfs  mount an empty RamFs if the real mount fails
+#   x-format-blank    format the device if its first sector is all zero
+#   x-mkdir           bind: create the source directory first
+#   spill=DIR         tmpfs: where files too big for RAM go
+#
+# <source>      <target> <type> <options>                  <dump> <pass>
+proc            /proc    proc   defaults                   0 0
+LABEL=YASBOOT   /boot    vfat   nofail                     0 2
+LABEL=YASVAR    /var     ext4   nofail,x-fallback=ramfs    0 2
+LABEL=YASOPT    /opt     ext4   nofail                     0 2
+LABEL=YASHOME   /home    ext4   nofail,x-fallback=ramfs    0 2
+/home/root      /root    bind   x-mkdir                    0 0
+tmpfs           /tmp     tmpfs  spill=/var/tmp             0 0
+/dev/fatdisk0   /mnt     vfat   nofail,x-format-blank      0 0

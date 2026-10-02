@@ -52,7 +52,7 @@ const log = std.log.scoped(.yasld);
 /// (`dump_fault_maps`, source/kernel/modules.zig) and readable on demand from
 /// /proc/<pid>/maps. The kernel turns this back on for a profiling build, where
 /// the line is wanted inline with the `load kind=` timings.
-var emit_load_map: bool = false;
+var emit_load_map: bool = true; // TEMP: symbolizing a userspace fault
 
 /// Called by the kernel at loader init (source/kernel/modules.zig) with whatever
 /// the perf-profiling config says.
@@ -87,6 +87,9 @@ pub const ImageError = error{
     UnsupportedFloatAbi,
     /// Needs hardware this part does not have, or does not have enabled.
     UnsupportedCpuFeatures,
+    /// The data region's alignment is not a power of two, or its offset does
+    /// not fit in it -- the image is damaged.
+    InvalidDataAlignment,
 };
 
 /// What this machine can execute. Supplied by the kernel, which is the only
@@ -111,16 +114,24 @@ pub const Loader = struct {
 
     file_resolver: FileResolver,
 
-    // mapping from name to loaded instances
-    // pid to module mapping done inside kernel itself
-    modules_list: std.StringHashMap(LoadedModule),
+    // Loaded images whose read-only parts (text, plt, shared rodata, exported
+    // symbols) processes share, keyed by the address of the image's header.
+    // Not by module name: a program rebuilt under the same name (a new toybox
+    // run from /mnt while the romfs one is the shell) was handed the running
+    // image's text under its own data and GOT, and crashed wherever the two
+    // layouts differed. The shared parts are views into the image itself, so
+    // the image *is* their identity: an XIP image has one address and is
+    // shared by everyone running it, while a file read into RAM has a copy per
+    // process and must never lend its text to another -- that copy dies with
+    // the process that read it. A pid to module mapping lives in the kernel.
+    modules_list: std.AutoHashMap(usize, LoadedModule),
     kernel_allocator: std.mem.Allocator,
     machine: MachineProfile,
 
     pub fn create(file_resolver: FileResolver, kernel_allocator: std.mem.Allocator, machine: MachineProfile) Loader {
         return .{
             .file_resolver = file_resolver,
-            .modules_list = std.StringHashMap(LoadedModule).init(kernel_allocator),
+            .modules_list = std.AutoHashMap(usize, LoadedModule).init(kernel_allocator),
             .kernel_allocator = kernel_allocator,
             .machine = machine,
         };
@@ -130,8 +141,8 @@ pub const Loader = struct {
         self.modules_list.deinit();
     }
 
-    fn get_shared_data(self: *Loader, module_name: []const u8, process_allocator: std.mem.Allocator, parser: *const Parser, xip: bool) !*LoadedSharedData {
-        var maybe_existing_module = self.modules_list.getPtr(module_name);
+    fn get_shared_data(self: *Loader, image: usize, process_allocator: std.mem.Allocator, parser: *const Parser, xip: bool) !*LoadedSharedData {
+        var maybe_existing_module = self.modules_list.getPtr(image);
         if (maybe_existing_module) |*loaded| {
             log.debug("Module is already loaded, propagating .text for: {s}", .{parser.name});
             refcount.acquire(&loaded.*.users);
@@ -139,7 +150,8 @@ pub const Loader = struct {
         }
         log.debug("module doesn't exists, creating one for: {s}", .{parser.name});
         const shared_data = try LoadedSharedData.create(self.kernel_allocator, process_allocator, xip, parser);
-        try self.modules_list.put(parser.name, .{
+        errdefer shared_data.destroy();
+        try self.modules_list.put(image, .{
             .users = 1,
             .shared_data = shared_data,
         });
@@ -167,7 +179,10 @@ pub const Loader = struct {
     pub fn unload_module(self: *Loader, module: *Module) void {
         if (module.name) |name| {
             log.debug("Unloading module: {s}", .{name});
-            const maybe_shared_data = self.modules_list.getPtr(name);
+            // A module that failed before reaching `get_shared_data` holds no
+            // reference, and must not drop one that another process holds.
+            if (module.shared_data == null) return;
+            const maybe_shared_data = self.modules_list.getPtr(module.image);
             if (maybe_shared_data) |*shared_data| {
                 // Fused with the decrement. Separate, two unloads racing on the
                 // last two users both see zero and both destroy. Note this is
@@ -177,7 +192,7 @@ pub const Loader = struct {
                 if (refcount.release(&shared_data.*.users)) {
                     log.debug("Removing shared data for: {s}", .{name});
                     shared_data.*.shared_data.destroy();
-                    _ = self.modules_list.remove(name);
+                    _ = self.modules_list.remove(module.image);
                 }
             }
         } else {
@@ -219,7 +234,8 @@ pub const Loader = struct {
 
         // if module is already loaded just data must be loaded
         _t = profile.now_us();
-        const shared_data = try self.get_shared_data(parser.name, process_allocator, &parser, module.xip);
+        module.image = @intFromPtr(header);
+        const shared_data = try self.get_shared_data(module.image, process_allocator, &parser, module.xip);
         module.add_shared_data(shared_data);
         profile.account(.shared_data, _t);
 
@@ -296,7 +312,7 @@ pub const Loader = struct {
         // modules.zig to attach a pid. Gated by `emit_load_map` — see there for
         // why this does not go out on every spawn by default.
         if (emit_load_map) {
-            log.info("loaded '{s}': .text=0x{x}(+0x{x}) .data=0x{x} .got=0x{x}", .{
+            log.err("loaded '{s}': .text=0x{x}(+0x{x}) .data=0x{x} .got=0x{x}", .{
                 module.name.?,
                 @intFromPtr(module.get_text().ptr),
                 module.get_text().len,
@@ -823,6 +839,14 @@ pub const Loader = struct {
                 missing,
             });
             return error.UnsupportedCpuFeatures;
+        }
+
+        if (!std.math.isPowerOfTwo(header.data_alignment) or header.data_alignment_offset >= header.data_alignment) {
+            log.err("image data alignment {d} (offset {d}) is not valid", .{
+                header.data_alignment,
+                header.data_alignment_offset,
+            });
+            return error.InvalidDataAlignment;
         }
 
         return header;

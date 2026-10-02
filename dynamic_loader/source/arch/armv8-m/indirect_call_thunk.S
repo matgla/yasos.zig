@@ -19,51 +19,34 @@
 .syntax unified
 .cpu cortex-m33
 
-/* Shared dispatch tail — assembled ONCE into kernel flash and pointed at by
- * every per-process head, so the per-process thunk drops from 28 B to 20 B.
- * Entry: ip = &descriptor (the {r9, fn} word pair in the per-process head).
- * It swaps to the callee's R9 and tail-jumps, so the callee returns straight to
- * the original caller.
+/* Per-process function-pointer thunk template (16 B), copied per fn-pointer
+ * slot. A function pointer on YasOS is the address of one of these: it swaps
+ * to the callee's R9 and tail-jumps, so the callee returns straight to the
+ * original caller.
  *
- * It MUST NOT touch SP. This used to `push {r4, lr}` so it could restore the
- * caller's R9 after a BLX, and that push moved every stack-passed argument 8
- * bytes out from under the callee. Calls of up to four arguments are unaffected
- * (r0-r3), which is why it survived so long; gcc-torture's nestfunc-2 calls a
- * function pointer with *seven*, and its callee read the saved r4/lr as two of
- * them -- producing a garbage result and, once that value was used as a
- * pointer, a HardFault. The failure looked layout-dependent because what the
- * callee read at the displaced offsets was whatever the caller's frame happened
- * to hold.
+ *   +0  ldr.w r9, [pc, #4]   -> r9 = the callee's GOT base at +8
+ *   +4  ldr.w pc, [pc, #4]   -> branch to the callee address at +12
+ *   +8  .word r9             (patched by the loader)
+ *   +12 .word fn             (patched by the loader; Thumb bit set)
  *
- * Restoring R9 here was never this stub's job: the compiler already brackets
- * every PIC indirect call with its own save/restore (arm-thumb-gen.c emits
- * `str.w r9,[sp,#n]` before the BLX and `ldr.w r9,[sp,#n]` after it), so the
- * old sequence was redundant as well as harmful. Tail-jumping is also shorter:
- * three instructions and no stack traffic per indirect call. */
-.global indirect_call_shared_tail
-.thumb_func
-.type indirect_call_shared_tail, %function
-indirect_call_shared_tail:
-    ldr.w r9, [ip]          /* r9 = descriptor[0] = callee GOT base */
-    ldr.w ip, [ip, #4]      /* ip = descriptor[1] = callee address  */
-    bx ip                   /* tail jump: SP and LR untouched */
-
-/* Per-process head template (20 B), copied per fn-pointer slot. Layout:
- *   +0  addw ip, pc, #8     -> ip = &descriptor (the r9 word at +12)
- *   +4  ldr.w pc, [pc]      -> branch to the shared tail (loaded from +8;
- *                              an indirect load, so the 256 MiB RAM->flash gap
- *                              that rules out a direct b.w is a non-issue)
- *   +8  .word tail          -> &indirect_call_shared_tail, resolved at link
- *                              time and copied verbatim (no per-slot patch)
- *   +12 .word r9            -> callee GOT base (patched by the loader)
- *   +16 .word fn            -> callee address  (patched by the loader) */
+ * Both loads are literal loads off the PC (Align(PC,4)+4 = the word two
+ * behind each instruction), so the slot only has to be word-aligned. The
+ * earlier 20 B head reached a shared tail in kernel flash through an
+ * `addw ip; ldr.w pc,[pc]; .word tail` sequence and the tail did the two
+ * loads and a `bx ip`: one branch and one instruction more per call, and 4 B
+ * more per slot, for nothing the two-load form does not do.
+ *
+ * It MUST NOT touch SP. It once did `push {r4, lr}` to restore the caller's
+ * R9 after a BLX, and that push moved every stack-passed argument 8 bytes out
+ * from under the callee (gcc-torture nestfunc-2, seven arguments). Restoring
+ * R9 is the caller's job anyway: the compiler reloads it after every call
+ * that can leave the module (arm-thumb-gen.c). */
 .global indirect_call_thunk_template_start
 .thumb_func
 .type indirect_call_thunk_template_start, %function
 indirect_call_thunk_template_start:
-    addw ip, pc, #8
-    ldr.w pc, [pc]
-    .word indirect_call_shared_tail
+    ldr.w r9, [pc, #4]
+    ldr.w pc, [pc, #4]
     .word 0xffffffff
     .word 0xffffffff
 

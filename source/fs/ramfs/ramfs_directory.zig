@@ -57,6 +57,25 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         });
     }
 
+    /// A second entry onto the same directory contents, under another name.
+    ///
+    /// The list of children and the timestamps live behind pointers precisely
+    /// so two handles can share them (see SharedState above), so this is the
+    /// directory counterpart of a hard link -- and it is what rename() needs:
+    /// the entry moves to a new parent while the contents stay exactly where
+    /// they are, with no child touched and no open handle invalidated.
+    pub fn alias(self: *Self, allocator: std.mem.Allocator, nodename: []const u8) anyerror!kernel.fs.Node {
+        refcount.acquire(&self._shared.refcounter);
+        errdefer _ = refcount.release(&self._shared.refcounter);
+        const dir = try (RamFsDirectory.init(.{
+            ._allocator = allocator,
+            ._root = self._root,
+            ._shared = self._shared,
+            ._name = nodename,
+        })).interface.new(allocator);
+        return kernel.fs.Node.create_directory(dir);
+    }
+
     /// This directory's shared timestamps, for `stat` and `utimens`.
     pub fn times(self: *Self) *kernel.fs.FileTimes {
         return &self._shared.times;

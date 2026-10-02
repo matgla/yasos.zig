@@ -32,7 +32,7 @@ const MemoryInfo = struct {
     total: usize,
 };
 
-const BufferSize = 512;
+const BufferSize = 1024;
 const PidStatBufferedFile = kernel.fs.BufferedFile(BufferSize);
 pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
     const Self = @This();
@@ -40,31 +40,52 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
     _pid: i16,
     _human_readable: bool,
 
-    pub fn create(pid: i16, human_readable: bool) PidStatFile {
-        var file = PidStatFile.init(.{
-            .base = PidStatBufferedFile.InstanceType.create(if (human_readable) "status" else "stat"),
+    pub fn create(allocator: std.mem.Allocator, pid: i16, human_readable: bool) PidStatFile {
+        return PidStatFile.init(.{
+            .base = PidStatBufferedFile.InstanceType.create(allocator, if (human_readable) "status" else "stat"),
             ._pid = pid,
             ._human_readable = human_readable,
         });
-
-        _ = file.data().sync();
-        return file;
     }
+
+    /// Rendered here rather than in `create`: the content belongs to the
+    /// instance the caller gets (see BufferedFile).
     pub fn create_node(allocator: std.mem.Allocator, pid: i16, human_readable: bool) anyerror!kernel.fs.Node {
-        const file = try create(pid, human_readable).interface.new(allocator);
+        var file = try create(allocator, pid, human_readable).interface.new(allocator);
+        _ = file.interface.sync();
         return kernel.fs.Node.create_file(file);
     }
 
     const human_readable_file_content_format =
         \\Name:   {s}
         \\Umask:  0000
-        \\State:  R(running)
         \\Tgid:   {d}
         \\Ngid:   {d}
         \\Pid:    {d}
         \\PPid:   {d}
         \\
     ;
+
+    fn write_status_content(process: anytype, name: []const u8, pid: i16, buffer: []u8) usize {
+        const ppid: i32 = if (process.get_parent()) |p| p.pid else 0;
+        var written = vfmt.print(buffer, human_readable_file_content_format, .{ name, pid, pid, pid, ppid }).len;
+        written += vfmt.print(buffer[written..], "Sched:  {s}\nWaitOn: 0x{x}\n", .{ @tagName(process.state), if (process.waiting_for) |w| @intFromPtr(w) else 0 }).len;
+        // Open descriptors; for a pipe end, the pipe and its end counts, which
+        // is what finding a reader that never gets EOF comes down to.
+        if (!process._fds_cleared) {
+            var it = process._fds.iterator();
+            while (it.next()) |entry| {
+                const handle = entry.value_ptr;
+                written += vfmt.print(buffer[written..], "fd {d}{s}: {s}", .{ entry.key_ptr.*, if (handle.cloexec) " cloexec" else "", handle.path }).len;
+                if (handle.node.is_file() and handle.node.filetype() == .Fifo) {
+                    const e = kernel.fs.describe_pipe_end(handle.node.instance.file.__ptr);
+                    written += vfmt.print(buffer[written..], " pipe=0x{x} {s} r={d} w={d}", .{ e.pipe, if (e.writable) "W" else "R", e.readers, e.writers }).len;
+                }
+                written += vfmt.print(buffer[written..], "\n", .{}).len;
+            }
+        }
+        return written;
+    }
 
     const PidStat = struct {
         pid: i32,
@@ -121,31 +142,38 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
         exit_code: i32,
     };
 
-    fn write_stat_content(stat: *const PidStat, buffer: []u8) usize {
-        var written: usize = 0;
-        inline for (@typeInfo(PidStat).@"struct".field_names) |field_name| {
-            if (comptime std.mem.eql(u8, field_name, "comm")) {
-                const buf = vfmt.print(buffer[written..], "({s}) ", .{stat.comm});
-                written += buf.len;
-            } else if (comptime std.mem.eql(u8, field_name, "state")) {
-                const buf = vfmt.print(buffer[written..], "{s} ", .{stat.state});
-                written += buf.len;
-            } else {
-                const buf = vfmt.print(buffer[written..], "{d} ", .{@field(stat, field_name)});
-                written += buf.len;
-            }
-        }
-        const buf = vfmt.print(buffer[written..], "\n", .{});
-        written += buf.len;
+    const stat_fields = @typeInfo(PidStat).@"struct".field_names;
 
-        return written;
+    // One format string for the whole line, built at comptime. A print per
+    // field, unrolled over 52 fields, was 152 KB of C in one function
+    // (erasure + bounds-checked slicing each time) and 15 MB of tcc heap to
+    // compile it on the device.
+    const stat_format = blk: {
+        var fmt: []const u8 = "";
+        for (stat_fields) |field_name| {
+            fmt = fmt ++ if (std.mem.eql(u8, field_name, "comm"))
+                "({s}) "
+            else if (std.mem.eql(u8, field_name, "state"))
+                "{s} "
+            else
+                "{d} ";
+        }
+        break :blk fmt ++ "\n";
+    };
+
+    fn write_stat_content(stat: *const PidStat, buffer: []u8) usize {
+        var args: [stat_fields.len]vfmt.Value = undefined;
+        inline for (stat_fields, 0..) |field_name, i| {
+            args[i] = vfmt.value(@field(stat, field_name));
+        }
+        return vfmt.vprint(buffer, stat_format, &args).len;
     }
 
     pub fn sync(self: *Self) i32 {
         const maybe_process = kernel.process.process_manager.instance.get_process_for_pid(self._pid);
         if (maybe_process) |process| {
             // const proc_name = process.get_name();
-            const buffer = &interface.base(self)._buffer;
+            const buffer = interface.base(self).buffer() orelse return -1;
             var name: []const u8 = "??";
             if (kernel.dynamic_loader.get_executable_for_pid(self._pid)) |ex| {
                 if (ex.module.name) |n| {
@@ -153,8 +181,7 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
                 }
             }
             if (self._human_readable) {
-                const buf = vfmt.print(buffer, human_readable_file_content_format, .{ name, 0, 0, self._pid, 0 });
-                interface.base(self)._end = buf.len;
+                interface.base(self)._end = write_status_content(process, name, self._pid, buffer);
             } else {
                 const stat: PidStat = .{
                     .pid = self._pid,
@@ -217,7 +244,7 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -290,11 +317,12 @@ test "PidStatFile.ShouldCreateStatFile" {
     const expected_status =
         \\Name:   dummy_module
         \\Umask:  0000
-        \\State:  R(running)
-        \\Tgid:   0
-        \\Ngid:   0
+        \\Tgid:   1
+        \\Ngid:   1
         \\Pid:    1
         \\PPid:   0
+        \\Sched:  Ready
+        \\WaitOn: 0x0
         \\
     ;
     try std.testing.expectEqualStrings(expected_status, buf[0..@intCast(readed_status)]);

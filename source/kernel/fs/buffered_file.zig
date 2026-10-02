@@ -22,34 +22,84 @@ const interface = @import("interface");
 
 const kernel = @import("../kernel.zig");
 
+/// A read-only file whose whole content is rendered by `sync` into one buffer
+/// (the /proc files).
+///
+/// The buffer lives on the kernel heap only while the file is open: `buffer()`
+/// allocates it the first time `sync` renders, `delete` gives it back. The
+/// instance a directory keeps to hand out clones never syncs, so it costs the
+/// object alone -- these used to carry the buffer inline, and the /proc root's
+/// dozen files held ~9 KB of the kernel heap for the whole run, plus a full
+/// copy per open.
+///
+/// A clone is a plain copy of the object (libs/oop `dupe`), so it would share
+/// the original's buffer. `_owner` records which instance allocated it; any
+/// other instance treats the buffer as absent and allocates its own, which
+/// makes cloning a synced file safe as well as cheap.
 pub fn BufferedFile(comptime BufferSize: usize) type {
     const Internal = struct {
         const BufferedFileInst = interface.DeriveFromBase(kernel.fs.ReadOnlyFile, struct {
             const Self = @This();
             base: kernel.fs.ReadOnlyFile,
             _position: usize,
-            _buffer: [BufferSize]u8,
+            _allocator: std.mem.Allocator,
+            _storage: ?*[BufferSize]u8,
+            _owner: ?*const Self,
             _name: []const u8,
             _end: usize,
 
-            pub fn create(filename: []const u8) BufferedFileInst {
+            pub fn create(allocator: std.mem.Allocator, filename: []const u8) BufferedFileInst {
                 const file = BufferedFileInst.init(.{
                     .base = kernel.fs.ReadOnlyFile.init(.{}),
                     ._position = 0,
-                    ._buffer = @as([BufferSize]u8, @splat(0)),
+                    ._allocator = allocator,
+                    ._storage = null,
+                    ._owner = null,
                     ._name = filename,
                     ._end = 0,
                 });
                 return file;
             }
 
-            pub fn read(self: *Self, buffer: []u8) isize {
-                const file_len = self._end;
-                if (self._position >= file_len) {
+            /// The buffer this instance renders into, allocated on first use.
+            /// Null when the heap cannot spare it; `sync` then leaves the file
+            /// empty.
+            pub fn buffer(self: *Self) ?*[BufferSize]u8 {
+                if (self.content_storage()) |storage| return storage;
+                self._storage = self._allocator.create([BufferSize]u8) catch {
+                    self._storage = null;
+                    self._owner = null;
+                    self._end = 0;
+                    return null;
+                };
+                self._owner = self;
+                return self._storage;
+            }
+
+            fn content_storage(self: *const Self) ?*[BufferSize]u8 {
+                if (self._owner != self) return null;
+                return self._storage;
+            }
+
+            fn content(self: *const Self) []const u8 {
+                const storage = self.content_storage() orelse return &.{};
+                return storage[0..@min(self._end, BufferSize)];
+            }
+
+            pub fn delete(self: *Self) void {
+                if (self.content_storage()) |storage| self._allocator.destroy(storage);
+                self._storage = null;
+                self._owner = null;
+                self._end = 0;
+            }
+
+            pub fn read(self: *Self, buffer_out: []u8) isize {
+                const data = self.content();
+                if (self._position >= data.len) {
                     return 0;
                 }
-                const read_length = @min(@min(self._end - self._position, self._end), buffer.len);
-                @memcpy(buffer[0..read_length], self._buffer[self._position .. self._position + read_length]);
+                const read_length = @min(data.len - self._position, buffer_out.len);
+                @memcpy(buffer_out[0..read_length], data[self._position .. self._position + read_length]);
                 self._position += read_length;
                 return @intCast(read_length);
             }
@@ -64,7 +114,7 @@ pub fn BufferedFile(comptime BufferSize: usize) type {
                         new_position = @as(isize, @intCast(self._position)) + @as(isize, @intCast(offset));
                     },
                     c.SEEK_END => {
-                        new_position = @as(isize, @intCast(self._end)) + @as(isize, @intCast(offset));
+                        new_position = @as(isize, @intCast(self.content().len)) + @as(isize, @intCast(offset));
                     },
                     else => {
                         return kernel.errno.ErrnoSet.InvalidArgument;
@@ -100,7 +150,7 @@ pub fn BufferedFile(comptime BufferSize: usize) type {
             }
 
             pub fn size(self: *const Self) u64 {
-                return self._end;
+                return self.content().len;
             }
 
             pub fn filetype(self: *const Self) kernel.fs.FileType {
@@ -116,28 +166,28 @@ const BufferedFileForTests = interface.DeriveFromBase(BufferedFile(128), struct 
     pub const Self = @This();
     base: BufferedFile(128),
 
-    pub fn create(filename: []const u8) BufferedFileForTests {
-        var o = BufferedFileForTests.init(.{
-            .base = BufferedFile(128).InstanceType.create(filename),
+    pub fn create(allocator: std.mem.Allocator, filename: []const u8) BufferedFileForTests {
+        return BufferedFileForTests.init(.{
+            .base = BufferedFile(128).InstanceType.create(allocator, filename),
         });
-        _ = o.data().sync();
-        return o;
     }
 
     pub fn sync(self: *Self) i32 {
-        const buf = vfmt.print(&interface.base(self)._buffer, "Hello buffered file", .{});
+        const buffer = interface.base(self).buffer() orelse return -1;
+        const buf = vfmt.print(buffer, "Hello buffered file", .{});
         interface.base(self)._end = buf.len;
         return 0;
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
 test "BufferedFile.ShouldCreateAndReadFile" {
-    var file = try BufferedFileForTests.InstanceType.create("buffered_file_test.txt").interface.new(std.testing.allocator);
+    var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "buffered_file_test.txt").interface.new(std.testing.allocator);
     defer file.interface.delete();
+    _ = file.interface.sync();
 
     const test_data = "Hello buffered file";
     var read_buffer: [64]u8 = undefined;
@@ -153,37 +203,65 @@ test "BufferedFile.ShouldCreateAndReadFile" {
 }
 
 test "BufferedFile.Create.ShouldInitializeCorrectly" {
-    var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+    var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
     defer file.interface.delete();
+    _ = file.interface.sync();
 
     try std.testing.expectEqualStrings("test.txt", file.interface.name());
     try std.testing.expectEqual(@as(usize, 19), file.interface.size()); // "Hello buffered file" length
     try std.testing.expectEqual(kernel.fs.FileType.File, file.interface.filetype());
 }
 
-test "BufferedFile.Name.ShouldReturnFileName" {
-    var file = try BufferedFileForTests.InstanceType.create("myfile.bin").interface.new(std.testing.allocator);
+test "BufferedFile.HoldsNoBufferUntilSynced" {
+    var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "lazy.txt").interface.new(std.testing.allocator);
     defer file.interface.delete();
+
+    try std.testing.expectEqual(@as(u64, 0), file.interface.size());
+    var read_buffer: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), file.interface.read(read_buffer[0..]));
+}
+
+test "BufferedFile.CloneOfASyncedFileRendersIntoItsOwnBuffer" {
+    var original = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "shared.txt").interface.new(std.testing.allocator);
+    _ = original.interface.sync();
+
+    // A clone is a byte copy of the object; the buffer pointer it carries is
+    // the original's, which it must neither read nor free.
+    var copy = try original.clone();
+    defer copy.interface.delete();
+    try std.testing.expectEqual(@as(u64, 0), copy.interface.size());
+
+    original.interface.delete();
+    _ = copy.interface.sync();
+    var read_buffer: [64]u8 = undefined;
+    const bytes_read = copy.interface.read(read_buffer[0..]);
+    try std.testing.expectEqualStrings("Hello buffered file", read_buffer[0..@intCast(bytes_read)]);
+}
+
+test "BufferedFile.Name.ShouldReturnFileName" {
+    var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "myfile.bin").interface.new(std.testing.allocator);
+    defer file.interface.delete();
+    _ = file.interface.sync();
 
     try std.testing.expectEqualStrings("myfile.bin", file.interface.name());
 }
 
 // test "BufferedFile.Filetype.ShouldReturnFile" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     try std.testing.expectEqual(kernel.fs.FileType.File, file.interface.filetype());
 // }
 
 // test "BufferedFile.Size.ShouldReturnBufferEnd" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     try std.testing.expectEqual(@as(usize, 19), file.interface.size());
 // }
 
 // test "BufferedFile.Read.ShouldReturnZeroAtEnd" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     // Read all content
@@ -196,7 +274,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Read.ShouldHandlePartialReads" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     // Read in small chunks
@@ -211,7 +289,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Seek.SEEK_SET.ShouldSetAbsolutePosition" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     const result = try file.interface.seek(6, c.SEEK_SET);
@@ -223,7 +301,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Seek.SEEK_SET.ShouldRejectNegativeOffset" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     const result = try file.interface.seek(-5, c.SEEK_SET);
@@ -231,7 +309,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Seek.SEEK_CUR.ShouldSeekRelatively" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     // Seek to position 5
@@ -246,7 +324,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Seek.SEEK_CUR.ShouldSeekBackward" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     // Seek to position 10
@@ -261,7 +339,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Seek.SEEK_CUR.ShouldRejectNegativeResult" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     // Try to seek before start
@@ -270,7 +348,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Seek.SEEK_END.ShouldSeekFromEnd" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     // Seek to 5 bytes before end (size is 19, so position will be 14)
@@ -283,7 +361,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Seek.InvalidWhence.ShouldReturnError" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     const result = try file.interface.seek(0, 999);
@@ -291,7 +369,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Tell.ShouldReturnCurrentPosition" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     try std.testing.expectEqual(@as(c.off_t, 0), file.interface.tell());
@@ -308,7 +386,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Ioctl.ShouldReturnZero" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     const result = file.interface.ioctl(0, null);
@@ -316,7 +394,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.Fcntl.ShouldReturnZero" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     const result = file.interface.fcntl(0, null);
@@ -324,7 +402,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.MultipleReadsAndSeeks.ShouldMaintainCorrectPosition" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     var buffer: [10]u8 = undefined;
@@ -344,7 +422,7 @@ test "BufferedFile.Name.ShouldReturnFileName" {
 // }
 
 // test "BufferedFile.ReadBeyondBuffer.ShouldNotCrash" {
-//     var file = try BufferedFileForTests.InstanceType.create("test.txt").interface.new(std.testing.allocator);
+//     var file = try BufferedFileForTests.InstanceType.create(std.testing.allocator, "test.txt").interface.new(std.testing.allocator);
 //     defer file.interface.delete();
 
 //     // Try to read more than available

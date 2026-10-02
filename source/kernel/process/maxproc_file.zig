@@ -40,27 +40,25 @@ pub const MaxProcFile = interface.DeriveFromBase(MaxProcBufferedFile, struct {
     const Self = @This();
     base: MaxProcBufferedFile,
 
-    pub fn create() MaxProcFile {
-        var file = MaxProcFile.init(.{
-            .base = MaxProcBufferedFile.InstanceType.create("pid_max"),
+    pub fn create(allocator: std.mem.Allocator) MaxProcFile {
+        return MaxProcFile.init(.{
+            .base = MaxProcBufferedFile.InstanceType.create(allocator, "pid_max"),
         });
-        _ = file.data().sync();
-        return file;
     }
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
     pub fn sync(self: *Self) i32 {
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         const buf = vfmt.print(buffer, "{d}\n", .{config.process.max_pid_value});
         interface.base(self)._end = buf.len;
         return 0;
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -73,7 +71,7 @@ test "MaxProcFile.ShouldCreateNode" {
 }
 
 test "MaxProcFile.ShouldSyncAndContainMaxPid" {
-    var sut = try MaxProcFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try MaxProcFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     const result = sut.interface.sync();

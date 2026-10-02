@@ -19,4 +19,7 @@ comptime {
     _ = @import("mbr.zig");
     _ = @import("buffered_file.zig");
     _ = @import("pipe.zig");
+    _ = @import("fstab.zig");
+    _ = @import("mount_api.zig");
+    _ = @import("bindfs.zig");
 }

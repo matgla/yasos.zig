@@ -54,16 +54,14 @@ pub const MemPeakFile = interface.DeriveFromBase(MemPeakBufferedFile, struct {
     const Self = @This();
     base: MemPeakBufferedFile,
 
-    pub fn create() MemPeakFile {
-        var file = MemPeakFile.init(.{
-            .base = MemPeakBufferedFile.InstanceType.create("mempeak"),
+    pub fn create(allocator: std.mem.Allocator) MemPeakFile {
+        return MemPeakFile.init(.{
+            .base = MemPeakBufferedFile.InstanceType.create(allocator, "mempeak"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
@@ -73,7 +71,7 @@ pub const MemPeakFile = interface.DeriveFromBase(MemPeakBufferedFile, struct {
         const used = used_bytes();
         const peak = sample_peak_bytes();
 
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         var written: usize = 0;
         var buf = vfmt.print(buffer, "process_peak_bytes {d}\n", .{peak});
         written += buf.len;
@@ -84,7 +82,7 @@ pub const MemPeakFile = interface.DeriveFromBase(MemPeakBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -97,7 +95,7 @@ test "MemPeakFile.ShouldCreateNode" {
 }
 
 test "MemPeakFile.ShouldReportBothCounters" {
-    var sut = try MemPeakFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try MemPeakFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());

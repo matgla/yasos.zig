@@ -158,7 +158,9 @@ fn fill_dirent(entry: kernel.fs.DirectoryEntry, dirent_address: *anyopaque, capa
     return @intCast(required_space);
 }
 
-fn get_file_from_process(fd: u16) !kernel.fs.IFile {
+/// The open file behind a user's descriptor. EBADF for one that is not open,
+/// whatever its value (it is the user's number, not something already checked).
+fn get_file_from_process(fd: i32) !kernel.fs.IFile {
     const process = process_manager.instance.get_current_process();
     const maybe_handle = process.get_file_handle(fd);
     if (maybe_handle) |handle| {
@@ -168,7 +170,7 @@ fn get_file_from_process(fd: u16) !kernel.fs.IFile {
         }
         return kernel.errno.ErrnoSet.IsADirectory;
     }
-    return kernel.errno.ErrnoSet.NoSuchProcess;
+    return kernel.errno.ErrnoSet.BadFileDescriptor;
 }
 
 const DirentTraverseTracker = struct {
@@ -271,9 +273,27 @@ pub fn sys_mkdir(arg: *const anyopaque) !i32 {
 }
 
     // Preemptible: see `sys_open`.
+/// fstat of a pipe. A pipe has no path to stat -- its descriptor is named
+/// "pipe:[read]" / "pipe:[write]" -- so it is described from the open node.
+/// toysh on nommu hands each subshell its state over a pipe on fd 254 and the
+/// child only accepts it when fstat says S_ISFIFO; failing here broke every
+/// `$(...)`. Returns false for anything that is not an open pipe.
+fn stat_open_fifo(fd: i32, out: *c.struct_stat) bool {
+    if (fd < 0) return false;
+    const process = process_manager.instance.get_current_process();
+    const handle = process.get_file_handle(fd) orelse return false;
+    const file = handle.node.as_file() orelse return false;
+    if (file.interface.filetype() != FileType.Fifo) return false;
+    out.* = std.mem.zeroes(c.struct_stat);
+    out.st_mode = c.S_IFIFO | 0o600;
+    out.st_nlink = 1;
+    return true;
+}
+
 pub fn sys_fstat(arg: *const anyopaque) !i32 {
     const context: *const c.fstat_context = @ptrCast(@alignCast(arg));
-    _ = try user_out(c.struct_stat, context.buf);
+    const out = try user_out(c.struct_stat, context.buf);
+    if (stat_open_fifo(context.fd, out)) return 0;
     const path = try determine_path_for_file(kernel_allocator, null, context.fd);
     defer kernel_allocator.free(path);
     fs.get_ivfs().interface.stat(path, context.buf, true) catch |err| {
@@ -377,6 +397,13 @@ fn apply_open_position_flags(fd: i32, flags: i32) !void {
     }
 }
 
+/// O_CLOEXEC: the new descriptor is closed by a successful exec.
+fn apply_open_cloexec(fd: i32, flags: i32) void {
+    if ((flags & c.O_CLOEXEC) == 0 or fd < 0) return;
+    const process = process_manager.instance.get_current_process();
+    if (process.get_file_handle(fd)) |handle| handle.cloexec = true;
+}
+
 pub fn sys_open(arg: *const anyopaque) !i32 {
     const context: *const c.open_context = @ptrCast(@alignCast(arg));
     const t_resolve = if (perf.enabled) perf.read_cycles() else 0;
@@ -399,9 +426,19 @@ pub fn sys_open(arg: *const anyopaque) !i32 {
     };
     const t_attach = if (perf.enabled) perf.read_cycles() else 0;
     perf.open_record(.lookup, t_attach -% t_lookup);
+    // Writing is refused up front on a read-only mount. Creating is too, by
+    // the VFS itself below.
+    if ((context.flags & c.O_ACCMODE) != c.O_RDONLY and fs.get_vfs().is_read_only(path)) {
+        if (maybe_node) |node| {
+            var owned = node;
+            owned.delete();
+        }
+        return ErrnoSet.ReadOnlyFileSystem;
+    }
     if (maybe_node) |file| {
         const fd_result = try process.attach_file(path, file);
         try apply_open_position_flags(fd_result, context.flags);
+        apply_open_cloexec(fd_result, context.flags);
         if (perf.enabled) {
             perf.open_record(.attach, perf.read_cycles() -% t_attach);
             perf.open_call(true);
@@ -412,13 +449,21 @@ pub fn sys_open(arg: *const anyopaque) !i32 {
         const ifile = try fs.get_ivfs().interface.get(path);
         const fd_result = try process.attach_file(path, ifile);
         try apply_open_position_flags(fd_result, context.flags);
+        apply_open_cloexec(fd_result, context.flags);
         perf.open_call(true);
         return fd_result;
     }
     // Nothing there and no O_CREAT: a probe that walked the filesystem for
     // nothing. Library search is made of these, so they are counted apart.
     perf.open_call(false);
-    return -1;
+    // ENOENT, not a bare -1. The two are not the same to a caller: libc only
+    // copies an errno out of the result block when the kernel reports an error
+    // (syscalls.c `trigger_syscall`), so returning -1 as a *value* left errno
+    // untouched at whatever it already held. open() then failed with errno 0,
+    // and a runtime that reads errno to classify the failure -- as every
+    // Linux-shaped one does -- saw "no error" or, worse, a stale one from an
+    // unrelated call. POSIX requires ENOENT here.
+    return kernel.errno.ErrnoSet.NoEntry;
 }
 
 fn close_fd(fd: i32) i32 {
@@ -562,7 +607,7 @@ pub fn sys_read(arg: *const anyopaque) !i32 {
     // the kernel with attacker-chosen file contents.
     const destination = try user_out_slice(context.buf, context.count);
     const result_out = try user_out(isize, context.result);
-    const maybe_handle = process.get_file_handle(@intCast(context.fd));
+    const maybe_handle = process.get_file_handle(context.fd);
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
@@ -675,7 +720,7 @@ pub fn sys_write(arg: *const anyopaque) !i32 {
     const data = try user_in_slice(context.buf, context.count);
     const result_out = try user_out(isize, context.result);
 
-    const maybe_handle = process.get_file_handle(@intCast(context.fd));
+    const maybe_handle = process.get_file_handle(context.fd);
     if (maybe_handle) |handle| {
         var maybe_file = handle.node.as_file();
         if (maybe_file) |*file| {
@@ -689,7 +734,11 @@ pub fn sys_write(arg: *const anyopaque) !i32 {
         kernel.file_log.drain();
         return 0;
     }
-    return -1;
+    // No such descriptor. EBADF rather than a bare -1: returning -1 as a value
+    // leaves errno at whatever the last failing call set (see the note in
+    // sys_open), so a caller that classifies failures by errno is told
+    // something untrue about an unrelated call.
+    return kernel.errno.ErrnoSet.BadFileDescriptor;
 }
 
 pub fn sys_vfork(arg: *const anyopaque) !i32 {
@@ -717,10 +766,35 @@ pub fn sys_link(arg: *const anyopaque) !i32 {
     return 0;
 }
 
+/// renameat2(2). The flags argument is accepted and ignored except for the one
+/// value that changes the outcome: RENAME_NOREPLACE has to fail when the
+/// destination exists, rather than silently replacing it.
+pub fn sys_renameat2(arg: *const anyopaque) !i32 {
+    const context: *const c.rename_context = @ptrCast(@alignCast(arg));
+    const old_path = try determine_path_for_file(kernel_allocator, context.oldpath, context.olddirfd);
+    defer kernel_allocator.free(old_path);
+    const new_path = try determine_path_for_file(kernel_allocator, context.newpath, context.newdirfd);
+    defer kernel_allocator.free(new_path);
+    if ((context.flags & c.RENAME_NOREPLACE) != 0) {
+        var existing = fs.get_ivfs().interface.get(new_path) catch |err| switch (err) {
+            error.NoEntry => null,
+            else => return err,
+        };
+        if (existing) |*node| {
+            node.delete();
+            return kernel.errno.ErrnoSet.FileExists;
+        }
+    }
+    try fs.get_ivfs().interface.rename(old_path, new_path);
+    return 0;
+}
+
     // Preemptible: see `sys_open`.
 pub fn sys_stat(arg: *const anyopaque) !i32 {
     const context: *const c.stat_context = @ptrCast(@alignCast(arg));
-    _ = try user_out(c.struct_stat, context.statbuf);
+    const out = try user_out(c.struct_stat, context.statbuf);
+    // libc's fstat() is this call with no path.
+    if (context.pathname == null and stat_open_fifo(context.fd, out)) return 0;
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.fd);
     defer kernel_allocator.free(path);
     fs.get_ivfs().interface.stat(path, context.statbuf, context.follow_links != 0) catch |err| {
@@ -731,25 +805,74 @@ pub fn sys_stat(arg: *const anyopaque) !i32 {
 
 pub fn sys_getentropy(arg: *const anyopaque) !i32 {
     _ = arg;
-    return -1;
+    return kernel.errno.ErrnoSet.NotImplemented;
 }
 
     // Preemptible: see `sys_open`.
 pub fn sys_lseek(arg: *const anyopaque) !i32 {
     const context: *const c.lseek_context = @ptrCast(@alignCast(arg));
     const result_out = try user_out(c.off_t, context.result);
-    var file = try get_file_from_process(@intCast(context.fd));
-    result_out.* = @intCast(try file.interface.seek(@intCast(context.offset), context.whence));
+    var file = try get_file_from_process(context.fd);
+    const position = try file.interface.seek(@intCast(context.offset), context.whence);
+    // Past what a 32-bit off_t holds -- any seek towards the end of an SD
+    // card over 2 GiB. EFBIG rather than the panic an @intCast would be;
+    // lseek64 is the way to get there.
+    result_out.* = std.math.cast(c.off_t, position) orelse return ErrnoSet.FileTooLarge;
+    return 0;
+}
+
+/// symlinkat(2). The target is stored as given, relative or not.
+pub fn sys_symlink(arg: *const anyopaque) !i32 {
+    const context: *const c.symlink_context = @ptrCast(@alignCast(arg));
+    var target_storage: [max_user_path]u8 = undefined;
+    const target = try user_string(&target_storage, context.target);
+    if (target.len == 0) return ErrnoSet.NoEntry;
+    const linkpath = try determine_path_for_file(kernel_allocator, context.linkpath, context.dirfd);
+    defer kernel_allocator.free(linkpath);
+    try fs.get_ivfs().interface.symlink(target, linkpath);
+    return 0;
+}
+
+/// fchmodat(2) and fchmod(2) (a null path names the open file `fd`).
+pub fn sys_chmod(arg: *const anyopaque) !i32 {
+    const context: *const c.chmod_context = @ptrCast(@alignCast(arg));
+    const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
+    defer kernel_allocator.free(path);
+    const follow = (context.flags & c.AT_SYMLINK_NOFOLLOW) == 0;
+    try fs.get_vfs().chmod(path, @intCast(context.mode & 0o7777), follow);
+    return 0;
+}
+
+/// fchownat(2), fchown(2), lchown(2). An id of -1 (all ones in uid_t) is
+/// left as it is.
+pub fn sys_chown(arg: *const anyopaque) !i32 {
+    const context: *const c.chown_context = @ptrCast(@alignCast(arg));
+    const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
+    defer kernel_allocator.free(path);
+    const follow = (context.flags & c.AT_SYMLINK_NOFOLLOW) == 0;
+    const unchanged = std.math.maxInt(u32);
+    const uid: u32 = if (context.uid == std.math.maxInt(c.uid_t)) unchanged else context.uid;
+    const gid: u32 = if (context.gid == std.math.maxInt(c.gid_t)) unchanged else context.gid;
+    try fs.get_vfs().chown(path, uid, gid, follow);
+    return 0;
+}
+
+/// lseek(2) with a 64-bit offset, for block devices bigger than 2 GiB.
+pub fn sys_lseek64(arg: *const anyopaque) !i32 {
+    const context: *const c.lseek64_context = @ptrCast(@alignCast(arg));
+    const result_out = try user_out(c.off64_t, context.result);
+    var file = try get_file_from_process(context.fd);
+    result_out.* = try file.interface.seek(context.offset, context.whence);
     return 0;
 }
 
 pub fn sys_wait(arg: *const anyopaque) !i32 {
     _ = arg;
-    return -1;
+    return kernel.errno.ErrnoSet.NotImplemented;
 }
 pub fn sys_times(arg: *const anyopaque) !i32 {
     _ = arg;
-    return -1;
+    return kernel.errno.ErrnoSet.NotImplemented;
 }
 
     // Preemptible: see `sys_open`.
@@ -765,7 +888,7 @@ pub fn sys_getdents(arg: *const anyopaque) !i32 {
     _ = try user_out_slice(@ptrCast(context.dirp), context.count);
 
     const process = process_manager.instance.get_current_process();
-    const maybe_handle = process.get_file_handle(@intCast(context.fd));
+    const maybe_handle = process.get_file_handle(context.fd);
     if (maybe_handle) |handle| {
         // if iterator not exists create one
         const diriter: ?*kernel.fs.IDirectoryIterator = handle.get_iterator() catch null;
@@ -806,7 +929,7 @@ fn check_ioctl_arg(op: i32, raw: isize) !void {
 pub fn sys_ioctl(arg: *const anyopaque) !i32 {
     const context: *const c.ioctl_context = @ptrCast(@alignCast(arg));
     try check_ioctl_arg(context.op, context.arg);
-    var file = try get_file_from_process(@intCast(context.fd));
+    var file = try get_file_from_process(context.fd);
     // arg is a signed ssize_t carrying "int or void*"; a user pointer at/above
     // 0x80000000 is negative as ssize_t, so reinterpret the bits (@bitCast)
     // rather than @intCast (which would trip "integer does not fit").
@@ -919,6 +1042,84 @@ pub fn sys_waitpid(arg: *const anyopaque) !i32 {
     return process_manager.instance.waitpid(context.pid, out, context.options);
 }
 
+/// exec(2) follows a symbolic link to the program, and the only links this
+/// kernel has are procfs's /proc/<pid>/exe (see ProcFs.readlink). toysh on a
+/// nommu system re-enters itself for every subshell with
+/// execv("/proc/self/exe", ...); without this that exec failed, so every
+/// `$(...)` and backquote in a script killed the shell. Takes ownership of
+/// `path` and returns the path to load (the link's target, or `path` itself).
+fn resolve_exec_link(path: []const u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, path, "/proc/")) return path;
+    var buffer: [max_user_path]u8 = undefined;
+    const length = fs.get_ivfs().interface.readlink(path, buffer[0..]) catch return path;
+    const target = try kernel_allocator.dupe(u8, buffer[0..length]);
+    kernel_allocator.free(path);
+    return target;
+}
+
+/// A `#!` script turned into an exec of its interpreter.
+const ShebangExec = struct {
+    interpreter: []const u8, // kernel_allocator, handed to prepare_exec as its path
+    argv: [*c][*c]u8, // points into `block`
+    block: []usize, // pointer array + strings, freed by prepare_exec
+};
+
+/// `#!interpreter [argument]` on a script's first line: exec runs the
+/// interpreter with argv = { interpreter, [argument,] script, argv[1..] }, as
+/// Linux does (the rest of the line after the interpreter is one argument).
+/// Every autoconf `configure` starts with `#! /bin/sh`; without this the
+/// loader rejected them as a bad image. Null for anything that is not a `#!`
+/// file; ENOEXEC for a `#!` line it cannot use.
+fn shebang_exec(path: []const u8, argv: [*c][*c]u8) !?ShebangExec {
+    var node = fs.get_ivfs().interface.get(path) catch return null;
+    defer node.delete();
+    var file = node.as_file() orelse return null;
+    var head: [128]u8 = undefined;
+    const got = file.interface.read(head[0..]);
+    if (got < 3 or head[0] != '#' or head[1] != '!') return null;
+    const text = head[0..@intCast(got)];
+    const line_end = std.mem.indexOfScalar(u8, text, '\n') orelse return ErrnoSet.ExecFormatError;
+    const line = std.mem.trim(u8, text[2..line_end], " \t\r");
+    const split = std.mem.indexOfAny(u8, line, " \t");
+    const interpreter = if (split) |i| line[0..i] else line;
+    const argument: ?[]const u8 = if (split) |i| blk: {
+        const rest = std.mem.trim(u8, line[i..], " \t");
+        break :blk if (rest.len > 0) rest else null;
+    } else null;
+    if (interpreter.len == 0 or interpreter[0] != '/') return ErrnoSet.ExecFormatError;
+
+    var argc: usize = 0;
+    while (argv[argc] != null) : (argc += 1) {}
+    const new_argc = 1 + @as(usize, if (argument != null) 1 else 0) + 1 + (if (argc > 0) argc - 1 else 0);
+    const ptr_bytes = (new_argc + 1) * @sizeOf([*c]u8);
+    const str_bytes = interpreter.len + 1 + (if (argument) |a| a.len + 1 else 0) + path.len + 1;
+    const words = try kernel_allocator.alloc(usize, (ptr_bytes + str_bytes + @sizeOf(usize) - 1) / @sizeOf(usize));
+    errdefer kernel_allocator.free(words);
+    const bytes = std.mem.sliceAsBytes(words);
+    const ptrs: [*][*c]u8 = @ptrCast(words.ptr);
+    var offset: usize = ptr_bytes;
+    var slot: usize = 0;
+    for ([_]?[]const u8{ interpreter, argument, path }) |maybe| {
+        const s = maybe orelse continue;
+        @memcpy(bytes[offset .. offset + s.len], s);
+        bytes[offset + s.len] = 0;
+        ptrs[slot] = @ptrCast(&bytes[offset]);
+        slot += 1;
+        offset += s.len + 1;
+    }
+    var i: usize = 1;
+    while (i < argc) : (i += 1) {
+        ptrs[slot] = argv[i];
+        slot += 1;
+    }
+    ptrs[slot] = null;
+    return .{
+        .interpreter = try kernel_allocator.dupe(u8, interpreter),
+        .argv = @ptrCast(ptrs),
+        .block = words,
+    };
+}
+
 pub fn sys_execve(arg: *const anyopaque) !i32 {
     const context: *const c.execve_context = @ptrCast(@alignCast(arg));
     if (context.argv == null) return ErrnoSet.InvalidArgument;
@@ -926,13 +1127,29 @@ pub fn sys_execve(arg: *const anyopaque) !i32 {
     // so they have to be proven well-formed before it starts.
     try check_user_string_vector(context.argv);
     try check_user_string_vector(context.envp);
-    const path = try determine_path_for_file(kernel_allocator, context.filename, -1);
+    var path = try resolve_exec_link(try determine_path_for_file(kernel_allocator, context.filename, -1));
+    var argv = context.argv;
+    var scratch: ?[]usize = null;
+    const maybe_script = shebang_exec(path, context.argv) catch |err| {
+        kernel_allocator.free(path);
+        return err;
+    };
+    if (maybe_script) |script| {
+        kernel_allocator.free(path);
+        path = script.interpreter;
+        argv = script.argv;
+        scratch = script.block;
+    }
     // Path is freed inside prepare_exec after load_executable, because
     // prepare_exec may not return normally (vfork context switch bypasses defers).
+    // The same goes for the `#!` argument block, once it has been copied.
     //
     // Neither vector is unwrapped: `execve(path, argv, NULL)` is allowed, and
     // `clone_exec_args` reads a null envp as an empty environment.
-    return process_manager.instance.prepare_exec(path, context.argv, context.envp, kernel_allocator);
+    return process_manager.instance.prepare_exec(path, argv, context.envp, kernel_allocator, &scratch) catch |err| {
+        if (scratch) |block| kernel_allocator.free(block);
+        return err;
+    };
 }
 
 /// `pipe(2)` / `pipe2(2)`. Both descriptors are installed before either is
@@ -943,8 +1160,6 @@ pub fn sys_pipe(arg: *const anyopaque) !i32 {
     const out = try uaccess_slice_i32(context.fds);
     const process = process_manager.instance.get_current_process();
 
-    // O_CLOEXEC is accepted and ignored: this kernel carries the descriptor
-    // table across exec unchanged, so there is no close-on-exec to honour.
     const nonblocking = (context.flags & c.O_NONBLOCK) != 0;
     var ends = try kernel.fs.create_pipe(kernel_allocator, nonblocking);
 
@@ -965,6 +1180,10 @@ pub fn sys_pipe(arg: *const anyopaque) !i32 {
     const write_fd = try process.attach_file("pipe:[write]", ends.write);
     write_end_owned = false;
 
+    if ((context.flags & c.O_CLOEXEC) != 0) {
+        process.get_file_handle(read_fd).?.cloexec = true;
+        process.get_file_handle(write_fd).?.cloexec = true;
+    }
     out[0] = read_fd;
     out[1] = write_fd;
     return 0;
@@ -1086,6 +1305,112 @@ pub fn sys_chdir(arg: *const anyopaque) !i32 {
     return kernel.errno.ErrnoSet.NotADirectory;
 }
 
+/// fchdir(2): make the directory `fd` is open on the working directory. A
+/// descriptor remembers the absolute path it was opened by, so this is a chdir
+/// to that path. toybox `find -exec`/`-execdir` returns to its start directory
+/// this way.
+pub fn sys_fchdir(arg: *const anyopaque) !i32 {
+    const context: *const c.fchdir_context = @ptrCast(@alignCast(arg));
+    if (context.fd < 0) {
+        return kernel.errno.ErrnoSet.BadFileDescriptor;
+    }
+    const process = process_manager.instance.get_current_process();
+    const handle = process.get_file_handle(context.fd) orelse return kernel.errno.ErrnoSet.BadFileDescriptor;
+    if (!handle.node.is_directory()) {
+        return kernel.errno.ErrnoSet.NotADirectory;
+    }
+    const resolved_path = try std.fs.path.resolve(kernel_allocator, &.{handle.path});
+    defer kernel_allocator.free(resolved_path);
+    try process.change_directory(resolved_path);
+    return 0;
+}
+
+/// mount(2). `data` is the fstab option string ("nofail,spill=/var/tmp"); the
+/// flags that have a meaning here (MS_RDONLY, MS_BIND) are folded into it, so
+/// the backend sees one description of the request whichever way it came.
+pub fn sys_mount(arg: *const anyopaque) !i32 {
+    const context: *const c.mount_context = @ptrCast(@alignCast(arg));
+    var source_storage: [max_user_path]u8 = undefined;
+    var fstype_storage: [32]u8 = undefined;
+    var options_storage: [max_user_path]u8 = undefined;
+
+    const target = try determine_path_for_file(kernel_allocator, context.target, -1);
+    defer kernel_allocator.free(target);
+
+    const flags: u32 = @truncate(context.mountflags);
+    const is_bind = (flags & c.MS_BIND) != 0;
+    var fstype: []const u8 = if (is_bind) "bind" else "";
+    if (!is_bind) {
+        if (context.filesystemtype == null) return ErrnoSet.InvalidArgument;
+        fstype = try user_string(&fstype_storage, context.filesystemtype);
+    }
+
+    var source: []const u8 = "none";
+    var resolved_source: ?[]const u8 = null;
+    defer if (resolved_source) |resolved| kernel_allocator.free(resolved);
+    if (context.source != null) {
+        source = try user_string(&source_storage, context.source);
+        // A bind source is a directory, and may be given relative to the
+        // working directory like any other path.
+        if (std.mem.eql(u8, fstype, "bind") and source.len > 0 and source[0] != '/') {
+            resolved_source = try determine_path_for_file(kernel_allocator, context.source, -1);
+            source = resolved_source.?;
+        }
+    }
+
+    var options: []const u8 = "";
+    if (context.data != null) {
+        options = try user_string(&options_storage, @ptrCast(context.data));
+    }
+    var combined: [max_user_path + 4]u8 = undefined;
+    if ((flags & c.MS_RDONLY) != 0 and !kernel.fs.fstab.has_option_in(options, "ro")) {
+        options = std.fmt.bufPrint(&combined, "{s}{s}ro", .{ options, if (options.len == 0) "" else "," }) catch return ErrnoSet.NameTooLong;
+    }
+    try kernel.fs.mount_api.mount(.{ .source = source, .target = target, .fstype = fstype, .flags = flags, .options = options });
+    return 0;
+}
+
+/// umount2(2). MNT_FORCE and MNT_DETACH are accepted and ignored: nothing here
+/// can be detached lazily, so a busy mount stays busy.
+pub fn sys_umount(arg: *const anyopaque) !i32 {
+    const context: *const c.umount_context = @ptrCast(@alignCast(arg));
+    const target = try determine_path_for_file(kernel_allocator, context.target, -1);
+    defer kernel_allocator.free(target);
+    try kernel.fs.mount_api.umount(target);
+    return 0;
+}
+
+/// statvfs(2) / fstatvfs(2): `path`, or the file `fd` is open on when `path`
+/// is null.
+pub fn sys_statvfs(arg: *const anyopaque) !i32 {
+    const context: *const c.statvfs_context = @ptrCast(@alignCast(arg));
+    const out = try user_out(c.struct_statvfs, context.buf);
+    const path = try determine_path_for_file(kernel_allocator, context.path, context.fd);
+    defer kernel_allocator.free(path);
+    // Existence first: statvfs of a missing path is ENOENT, not the figures of
+    // whatever filesystem would have held it.
+    var probe: c.struct_stat = undefined;
+    try fs.get_ivfs().interface.stat(path, &probe, true);
+    const stats = try fs.get_vfs().statvfs_path(path);
+    const clamp = struct {
+        fn f(value: u64) c_ulong {
+            return @intCast(@min(value, std.math.maxInt(c_ulong)));
+        }
+    }.f;
+    out.* = std.mem.zeroes(c.struct_statvfs);
+    out.f_bsize = stats.block_size;
+    out.f_frsize = stats.block_size;
+    out.f_blocks = clamp(stats.total_blocks);
+    out.f_bfree = clamp(stats.free_blocks);
+    out.f_bavail = clamp(stats.free_blocks);
+    out.f_files = clamp(stats.total_files);
+    out.f_ffree = clamp(stats.free_files);
+    out.f_favail = clamp(stats.free_files);
+    out.f_namemax = stats.name_max;
+    if (stats.read_only) out.f_flag |= c.ST_RDONLY;
+    return 0;
+}
+
 pub fn sys_time(arg: *const anyopaque) !i32 {
     const context: *const c.time_context = @ptrCast(@alignCast(arg));
     const now_seconds: c.time_t = @intCast(time.realtime_seconds());
@@ -1098,7 +1423,16 @@ pub fn sys_time(arg: *const anyopaque) !i32 {
     // Preemptible: see `sys_open`.
 pub fn sys_fcntl(arg: *const anyopaque) !i32 {
     const context: *const c.fcntl_context = @ptrCast(@alignCast(arg));
-    var file = try get_file_from_process(@intCast(context.fd));
+    // Descriptor flags belong to the descriptor table, not the open file.
+    if (context.op == c.F_GETFD or context.op == c.F_SETFD) {
+        if (context.fd < 0) return ErrnoSet.BadFileDescriptor;
+        const process = process_manager.instance.get_current_process();
+        const handle = process.get_file_handle(context.fd) orelse return ErrnoSet.BadFileDescriptor;
+        if (context.op == c.F_GETFD) return if (handle.cloexec) c.FD_CLOEXEC else 0;
+        handle.cloexec = (context.arg & c.FD_CLOEXEC) != 0;
+        return 0;
+    }
+    var file = try get_file_from_process(context.fd);
     // See sys_ioctl: arg is a signed ssize_t that may hold a high user pointer.
     return file.interface.fcntl(context.op, @ptrFromInt(@as(usize, @bitCast(context.arg))));
 }
@@ -1178,13 +1512,13 @@ pub fn sys_geteuid(arg: *const anyopaque) !i32 {
 pub fn sys_dup(arg: *const anyopaque) !i32 {
     const context: *const c.dup_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    const maybe_handle = process.get_file_handle(@intCast(context.fd));
+    const maybe_handle = process.get_file_handle(context.fd);
     if (maybe_handle) |handle| {
         // dup2(fd, fd) on an open fd is a no-op that returns fd (POSIX).
         // Falling through instead closed newfd first, which here IS the handle
         // we are about to copy from: release_file frees its path and drops the
         // node's last reference, so the share() below incremented an already
-        // freed refcount cell. That cell is by then a chunk on newlib's free
+        // freed refcount cell. That cell is by then a chunk on malloc's free
         // list, and the increment lands on its `next` pointer -- the kernel
         // free list ends up with a next of <chunk>+1 and the next unrelated
         // free() faults walking it. toybox does exactly this dup2(0, 0) on
@@ -1199,6 +1533,7 @@ pub fn sys_dup(arg: *const anyopaque) !i32 {
         errdefer shared.delete();
         var fd: i32 = 0;
         if (context.newfd >= 0) {
+            if (context.newfd > std.math.maxInt(i16)) return ErrnoSet.BadFileDescriptor;
             fd = context.newfd;
             _ = close_fd(fd);
         } else {
@@ -1216,6 +1551,54 @@ pub fn sys_sysinfo(arg: *const anyopaque) !i32 {
     info.totalram = 1;
     info.freeram = 0;
     info.procs = @intCast(process_manager.instance.processes.len());
+    return 0;
+}
+
+/// What uname(2) reports. None of it changes while the kernel runs, so it is
+/// settled at build time rather than assembled on every call.
+const utsname = struct {
+    const sysname = "YasOS";
+    /// There is no network for this machine to have a name on, so it is called
+    /// what it is: the board the kernel was configured for.
+    const nodename = config.board.board;
+    /// build.zig.zon's `.version`, handed over by build.zig.
+    const release = @import("build_info").release;
+    /// When the image was built -- the same moment `time.zig` starts the clock
+    /// from, so `uname -v` and a fresh file's date agree.
+    const version = build_date(@import("build_info").default_epoch_seconds);
+    const machine = config.cpu.arch;
+};
+
+fn build_date(comptime seconds: i64) []const u8 {
+    return comptime blk: {
+        if (seconds <= 0) break :blk "unknown";
+        const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(seconds) };
+        const year_day = epoch.getEpochDay().calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        break :blk std.fmt.comptimePrint("{d:0>4}-{d:0>2}-{d:0>2}", .{
+            year_day.year,
+            month_day.month.numeric(),
+            @as(u8, month_day.day_index) + 1,
+        });
+    };
+}
+
+/// Copy `value` into a fixed utsname field, truncated to leave room for the
+/// terminator, and clear the rest so nothing the caller left there shows through.
+fn fill_utsname_field(field: []u8, value: []const u8) void {
+    const n = @min(value.len, field.len - 1);
+    @memcpy(field[0..n], value[0..n]);
+    @memset(field[n..], 0);
+}
+
+pub fn sys_uname(arg: *const anyopaque) !i32 {
+    const context: *const c.uname_context = @ptrCast(@alignCast(arg));
+    const buf = try user_out(c.struct_utsname, context.buf);
+    fill_utsname_field(&buf.sysname, utsname.sysname);
+    fill_utsname_field(&buf.nodename, utsname.nodename);
+    fill_utsname_field(&buf.release, utsname.release);
+    fill_utsname_field(&buf.version, utsname.version);
+    fill_utsname_field(&buf.machine, utsname.machine);
     return 0;
 }
 
@@ -1252,6 +1635,7 @@ pub fn sys_prlimit(arg: *const anyopaque) !i32 {
     if (context.new_limit) |new_limit| {
         const limit = try user_in(c.struct_rlimit, new_limit);
         try process.set_resource_limit(context.resource, limit.*);
+        if (context.resource == c.RLIMIT_STACK) process.stack_limit_from_image = false;
     }
 
     return 0;
@@ -1275,7 +1659,7 @@ pub fn sys_klog_ctl(arg: *const anyopaque) !i32 {
     // Preemptible: see `sys_open`.
 pub fn sys_ftruncate(arg: *const anyopaque) !i32 {
     const context: *const c.ftruncate_context = @ptrCast(@alignCast(arg));
-    var file = try get_file_from_process(@intCast(context.fd));
+    var file = try get_file_from_process(context.fd);
     try file.interface.truncate(@intCast(context.length));
     return 0;
 }
@@ -1349,4 +1733,58 @@ test "DeterminePathForFile.ShouldKeepAbsolutePathUnchanged" {
     defer std.testing.allocator.free(resolved_path);
 
     try std.testing.expectEqualStrings("/usr/bin/a.out", resolved_path);
+}
+
+test "Fchdir.RejectsDescriptorsTheProcessDoesNotHave" {
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+
+    init(std.testing.allocator);
+    try process_manager.instance.create_root_process(4096, &test_process_entry, null, "/mnt/bin");
+
+    const negative = c.fchdir_context{ .fd = -1 };
+    try std.testing.expectError(ErrnoSet.BadFileDescriptor, sys_fchdir(&negative));
+    const unopened = c.fchdir_context{ .fd = 42 };
+    try std.testing.expectError(ErrnoSet.BadFileDescriptor, sys_fchdir(&unopened));
+    try std.testing.expectEqualStrings("/mnt/bin", process_manager.instance.get_current_process().get_current_directory());
+}
+
+test "Uname.FillsEveryFieldTerminated" {
+    var buf: c.struct_utsname = undefined;
+    @memset(std.mem.asBytes(&buf), 0xaa);
+    const context = c.uname_context{ .buf = &buf };
+    try std.testing.expectEqual(@as(i32, 0), try sys_uname(&context));
+    try std.testing.expectEqualStrings("YasOS", std.mem.sliceTo(&buf.sysname, 0));
+    try std.testing.expectEqualStrings(config.board.board, std.mem.sliceTo(&buf.nodename, 0));
+    try std.testing.expectEqualStrings(@import("build_info").release, std.mem.sliceTo(&buf.release, 0));
+    try std.testing.expectEqualStrings(utsname.version, std.mem.sliceTo(&buf.version, 0));
+    try std.testing.expectEqualStrings(config.cpu.arch, std.mem.sliceTo(&buf.machine, 0));
+    // Nothing of what the caller left in the buffer survives past a terminator.
+    for (std.mem.asBytes(&buf)) |byte| try std.testing.expect(byte != 0xaa);
+}
+
+test "Uname.RefusesANullBuffer" {
+    const context = c.uname_context{ .buf = null };
+    try std.testing.expectError(ErrnoSet.InvalidArgument, sys_uname(&context));
+}
+
+test "Uname.FieldsAreEqualWidth" {
+    // toybox's uname (and plenty of other portable code) walks the struct in
+    // steps of sizeof(sysname); fields of different widths print the wrong bytes.
+    const width = @sizeOf(@FieldType(c.struct_utsname, "sysname"));
+    try std.testing.expectEqual(@as(usize, 1 * width), @offsetOf(c.struct_utsname, "nodename"));
+    try std.testing.expectEqual(@as(usize, 2 * width), @offsetOf(c.struct_utsname, "release"));
+    try std.testing.expectEqual(@as(usize, 3 * width), @offsetOf(c.struct_utsname, "version"));
+    try std.testing.expectEqual(@as(usize, 4 * width), @offsetOf(c.struct_utsname, "machine"));
+}
+
+test "Uname.TruncatesALongValue" {
+    var field: [4]u8 = .{ 1, 1, 1, 1 };
+    fill_utsname_field(&field, "YasOS");
+    try std.testing.expectEqualSlices(u8, "Yas\x00", &field);
+}
+
+test "Uname.BuildDateIsCalendarDate" {
+    try std.testing.expectEqualStrings("2026-09-21", build_date(1790000000));
+    try std.testing.expectEqualStrings("unknown", build_date(0));
 }

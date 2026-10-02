@@ -49,7 +49,10 @@ pub const MmcPartitionFile =
             self._dev = other._dev.share();
             self._start_lba = other._start_lba;
             self._size_in_sectors = other._size_in_sectors;
-            self._current_position = 0;
+            // Absolute, like everywhere else in this file: 0 would put a
+            // fresh clone's first read on the disk's sector 0 -- the MBR --
+            // rather than the partition's.
+            self._current_position = @as(i64, @intCast(other._start_lba)) << 9;
         }
 
         pub fn create_node(allocator: std.mem.Allocator, dev: kernel.fs.IFile, filename: []const u8, start_lba: u32, size_in_sectors: u32) anyerror!kernel.fs.Node {
@@ -98,8 +101,13 @@ pub const MmcPartitionFile =
                 return kernel.errno.ErrnoSet.InvalidArgument;
             }
 
-            self._current_position = @intCast(try self._dev.interface.seek(new_pos, c.SEEK_SET));
-            return self._current_position - part_start;
+            // The device is positioned again by every read and write, so only
+            // check here that it can go there; the position is ours to keep.
+            // (Its return value is not relied on: a device that answered 0,
+            // as flash once did, turned every partition seek negative.)
+            _ = try self._dev.interface.seek(new_pos, c.SEEK_SET);
+            self._current_position = new_pos;
+            return new_pos - part_start;
         }
 
         pub fn sync(self: *Self) i32 {
@@ -116,10 +124,10 @@ pub const MmcPartitionFile =
         }
 
         pub fn ioctl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
-            _ = self;
-            _ = cmd;
-            _ = arg;
-            return 0;
+            const command: u32 = @bitCast(cmd);
+            // A partition has no table of its own to re-read.
+            if (command == c.BLKRRPART) return -@as(i32, c.EINVAL);
+            return kernel.driver.block.common_ioctl(self._name, self.size(), cmd, arg) orelse 0;
         }
 
         pub fn fcntl(self: *Self, cmd: i32, arg: ?*anyopaque) i32 {
@@ -398,11 +406,11 @@ test "MmcPartitionFile.Clone.ShouldCreateIndependentCopy" {
     // Advance position on first file
     _ = try file1.interface.seek(5120, c.SEEK_SET);
 
-    // Clone should start with fresh position
+    // Clone starts fresh: at the partition's first byte, which is absolute.
     var file2 = try file1.clone();
     defer file2.interface.delete();
 
-    try std.testing.expectEqual(@as(i64, 0), file2.as(MmcPartitionFile).data()._current_position);
+    try std.testing.expectEqual(@as(i64, 100 << 9), file2.as(MmcPartitionFile).data()._current_position);
     try std.testing.expectEqual(@as(u32, 100), file2.as(MmcPartitionFile).data()._start_lba);
     try std.testing.expectEqual(@as(u32, 200), file2.as(MmcPartitionFile).data()._size_in_sectors);
 }

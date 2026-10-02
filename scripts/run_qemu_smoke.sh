@@ -80,8 +80,13 @@
 #   YASOS_QEMU_OPTIMIZE   zig optimize mode for the build (default ReleaseSafe;
 #                         --fast selects ReleaseFast)
 #   YASOS_SMOKE_ENABLE_GCC_TORTURE   default 1 here; set 0 to skip GCC torture
-#   YASOS_SMOKE_XDIST     pytest-xdist worker count (default auto = all CPUs);
-#                         set 0 to run serially
+#   YASOS_SMOKE_XDIST     pytest-xdist worker count (default auto = all CPUs,
+#                         capped by the memory budget); set 0 to run serially
+#   YASOS_SMOKE_MEM_RESERVE      memory left for the host (default 8G); the run
+#                         is confined to MemAvailable minus this and an overrun
+#                         OOM-kills a qemu inside the run, not the host
+#   YASOS_SMOKE_MEM_PER_WORKER   budget per worker when sizing -n auto (default 2G)
+#   YASOS_SMOKE_MEM_LIMIT=0      disables the budget and the confinement
 #   YASOS_SMOKE_TCC_OPT_LEVELS   tcc -O levels to exercise across all suites
 #                         (default "-O0 -O1 -O2"); e.g. set "-O0" for one level
 #   YASOS_SMOKE_ANNOUNCE_AFTER   print a "RUNNING <elapsed>" line once a test has
@@ -118,7 +123,13 @@ QEMU_MACHINE="mps3-an524"
 # pass -- and it makes a contended lock crawl at about 140 sections a second.
 # The stall itself is fixed in the kernel: source/kernel/smp.zig's self-test no
 # longer blocks on a lock.
-QEMU_EXTRA="-global sse-200.CPU0_FPU=on -global sse-200.CPU1_FPU=on"
+#
+# The DSP extension is the same story: QEMU leaves it off on CPU0 by default,
+# while both the AN524 and the RP2350's Cortex-M33 have it, and tcc targets it
+# (UMAAL for multi-word multiplies, e.g. the soft-float dmul tcc links into
+# every program).  Without it a program dies on its first UMAAL with an
+# UNDEFINSTR UsageFault (CFSR=0x00010000).
+QEMU_EXTRA="-global sse-200.CPU0_FPU=on -global sse-200.CPU1_FPU=on -global sse-200.CPU0_DSP=on -global sse-200.CPU1_DSP=on"
 MAP_CORPUS=1
 PRESERVE_STATE=0
 # Default to ReleaseSafe so safety checks (overflow, bounds, null-unwrap) stay on
@@ -319,10 +330,53 @@ case "$YASOS_SMOKE_ENABLE_GCC_TORTURE" in
         ;;
 esac
 
-# Run one QEMU per pytest-xdist worker in parallel by default, using all
-# available CPUs. Override the worker count by passing your own -n (e.g. -n 4),
-# or disable parallelism with -n 0 / YASOS_SMOKE_XDIST=0.
+# Memory budget for the whole run. Every worker runs its own qemu whose guest
+# RAM is a 2 GB shared file mapping, and every page the guest touches is dirty
+# page cache that stays resident -- with -n auto on a many-core host that
+# outgrew physical memory and, with no swap, the kernel OOM killer took down
+# whatever it picked on the desktop instead of a test. So the run gets
+# MemAvailable minus a reserve left for the rest of the machine, and:
+#   - -n auto becomes a worker count that fits in it (below), and
+#   - the run is confined to it (the pytest invocation at the end): a user
+#     scope with MemoryMax, so an overrun OOM-kills a qemu inside the run --
+#     one failed test -- never the host. Without systemd a watchdog kills this
+#     run's qemus when MemAvailable falls under half the reserve.
+#   YASOS_SMOKE_MEM_RESERVE     memory left for the host (default 8G)
+#   YASOS_SMOKE_MEM_PER_WORKER  budget per xdist worker for -n auto (default 2G)
+#   YASOS_SMOKE_MEM_LIMIT=0     turns both off
+_to_kib() { # 8G / 512M / 1048576K / plain KiB -> KiB
+    local v="${1^^}"
+    case "$v" in
+        *G) echo $(( ${v%G} * 1024 * 1024 )) ;;
+        *M) echo $(( ${v%M} * 1024 )) ;;
+        *K) echo "${v%K}" ;;
+        *)  echo "$v" ;;
+    esac
+}
+MEM_LIMIT="${YASOS_SMOKE_MEM_LIMIT:-1}"
+MEM_RESERVE_KIB=$(_to_kib "${YASOS_SMOKE_MEM_RESERVE:-8G}")
+MEM_PER_WORKER_KIB=$(_to_kib "${YASOS_SMOKE_MEM_PER_WORKER:-2G}")
+MEM_AVAIL_KIB=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+MEM_BUDGET_KIB=$(( MEM_AVAIL_KIB - MEM_RESERVE_KIB ))
+if [ "$MEM_LIMIT" != "0" ] && [ "$MEM_BUDGET_KIB" -lt "$MEM_PER_WORKER_KIB" ]; then
+    echo "error: only $(( MEM_AVAIL_KIB / 1024 )) MiB available; the run needs the" \
+         "$(( MEM_RESERVE_KIB / 1024 )) MiB reserve plus $(( MEM_PER_WORKER_KIB / 1024 )) MiB" \
+         "for one worker (YASOS_SMOKE_MEM_RESERVE / YASOS_SMOKE_MEM_PER_WORKER)" >&2
+    exit 1
+fi
+
+# Run one QEMU per pytest-xdist worker in parallel by default: as many as there
+# are CPUs, capped by how many fit in the memory budget above. Override the
+# worker count by passing your own -n (e.g. -n 4), or disable parallelism with
+# -n 0 / YASOS_SMOKE_XDIST=0.
 XDIST_DEFAULT="${YASOS_SMOKE_XDIST:-auto}"
+if [ "$XDIST_DEFAULT" = "auto" ] && [ "$MEM_LIMIT" != "0" ]; then
+    _cpus=$(nproc)
+    _fit=$(( MEM_BUDGET_KIB / MEM_PER_WORKER_KIB ))
+    XDIST_DEFAULT=$(( _fit < _cpus ? _fit : _cpus ))
+    echo ">> Workers: $XDIST_DEFAULT ($_cpus CPUs, $(( MEM_BUDGET_KIB / 1024 )) MiB budget" \
+         "at $(( MEM_PER_WORKER_KIB / 1024 )) MiB per worker)"
+fi
 have_n=0
 for arg in "${PYTEST_ARGS[@]}"; do
     case "$arg" in
@@ -359,6 +413,9 @@ export PYTHONUNBUFFERED=1
 
 export YASOS_QEMU_KERNEL="$KERNEL"
 export YASOS_QEMU_MACHINE="$QEMU_MACHINE"
+# YASOS_QEMU_EXTRA_ARGS_APPEND adds to the board's own arguments rather than
+# replacing them -- e.g. "-s" to open a gdb stub on a single-worker run.
+QEMU_EXTRA="$QEMU_EXTRA ${YASOS_QEMU_EXTRA_ARGS_APPEND:-}"
 [ -n "$QEMU_EXTRA" ] && export YASOS_QEMU_EXTRA_ARGS="$QEMU_EXTRA"
 
 # Put the source corpus on the device by writing it into the file that backs
@@ -441,11 +498,52 @@ PYTEST_LOG="$PYTEST_LOG_DIR/pytest.log"
 # when the suite failed. PYTHONUNBUFFERED (exported above) is what keeps the
 # per-test lines coming through the pipe as they are produced rather than in
 # block-buffered lumps.
+#
+# The run is confined to MEM_BUDGET_KIB (see the memory budget block above).
+# MemoryHigh sits under MemoryMax so the kernel first reclaims -- writes the
+# guests' dirty RAM-backing pages back to disk -- and only OOM-kills at the
+# hard limit. OOMPolicy=continue: the default would stop the whole scope on the
+# first kill, ending the run instead of failing one test.
+RUN_PREFIX=()
+WATCHDOG_PID=""
+if [ "$MEM_LIMIT" != "0" ]; then
+    if command -v systemd-run >/dev/null 2>&1 &&
+       systemd-run --user --scope --quiet -p MemoryMax=64M true >/dev/null 2>&1; then
+        RUN_PREFIX=(systemd-run --user --scope --quiet
+                    -p "MemoryMax=${MEM_BUDGET_KIB}K"
+                    -p "MemoryHigh=$(( MEM_BUDGET_KIB * 9 / 10 ))K"
+                    -p MemorySwapMax=0 -p OOMPolicy=continue)
+        echo ">> Memory: run confined to $(( MEM_BUDGET_KIB / 1024 )) MiB" \
+             "($(( MEM_RESERVE_KIB / 1024 )) MiB reserved for the host)"
+    else
+        # No user systemd (a container, CI): watch MemAvailable and kill this
+        # run's qemus -- matched by the kernel path, never by `pkill -f`, which
+        # would match this script's own command line -- once it falls under
+        # half the reserve. Each killed test fails; the host survives.
+        _floor_kib=$(( MEM_RESERVE_KIB / 2 ))
+        (
+            while sleep 1; do
+                _avail=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+                if [ "$_avail" -lt "$_floor_kib" ]; then
+                    ps -eo pid=,comm=,args= | awk -v k="$KERNEL" \
+                        '$2 ~ /^qemu-system/ && index($0, k) {print $1}' | xargs -r kill -9
+                    echo ">> Memory watchdog: MemAvailable $(( _avail / 1024 )) MiB" \
+                         "< $(( _floor_kib / 1024 )) MiB, killed this run's qemu" >&2
+                fi
+            done
+        ) &
+        WATCHDOG_PID=$!
+        echo ">> Memory: no user systemd; watchdog kills qemu below" \
+             "$(( _floor_kib / 1024 )) MiB available"
+    fi
+fi
+
 status=0
 set +e
-"$VENV/bin/python" -m pytest -s "${PYTEST_ARGS[@]}" 2>&1 | tee "$PYTEST_LOG"
+"${RUN_PREFIX[@]}" "$VENV/bin/python" -m pytest -s "${PYTEST_ARGS[@]}" 2>&1 | tee "$PYTEST_LOG"
 status=${PIPESTATUS[0]}
 set -e
+[ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
 
 # Collect this run's logs (per-test session logs, logs/failed/, and the qemu
 # process logs) into .cache/qemu_smoke_logs/ — the local analogue of the remote

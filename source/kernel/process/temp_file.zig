@@ -95,16 +95,14 @@ pub const TempFile = interface.DeriveFromBase(TempBufferedFile, struct {
     const Self = @This();
     base: TempBufferedFile,
 
-    pub fn create() TempFile {
-        var file = TempFile.init(.{
-            .base = TempBufferedFile.InstanceType.create("temp"),
+    pub fn create(allocator: std.mem.Allocator) TempFile {
+        return TempFile.init(.{
+            .base = TempBufferedFile.InstanceType.create(allocator, "temp"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
@@ -113,7 +111,7 @@ pub const TempFile = interface.DeriveFromBase(TempBufferedFile, struct {
         const uv = microvolts(reading.raw_sum, reading.samples);
         const mc: i32 = if (reading.samples == 0) 0 else millicelsius(uv);
         const mean_raw: u32 = if (reading.samples == 0) 0 else reading.raw_sum / reading.samples;
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         const buf = vfmt.print(
             buffer,
             "temp_mc {d}\ntemp_mv {d}\ntemp_raw {d}\ntemp_samples {d}\ntemp_errors {d}\ntemp_reference_mv {d}\n",
@@ -124,7 +122,7 @@ pub const TempFile = interface.DeriveFromBase(TempBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -140,7 +138,7 @@ test "TempFile.ShouldCreateNode" {
 test "TempFile.ShouldReportZerosWithoutAProvider" {
     clear_provider();
 
-    var sut = try TempFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try TempFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());
@@ -172,7 +170,7 @@ test "TempFile.ShouldReportTheMeanOfTheProvidersConversions" {
     set_provider(&Source.get);
     defer clear_provider();
 
-    var sut = try TempFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try TempFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());

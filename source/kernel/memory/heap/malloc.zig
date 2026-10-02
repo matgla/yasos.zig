@@ -126,18 +126,20 @@ pub fn reset() void {
 }
 
 // ── Kernel free-list integrity check ─────────────────────────────────────────
-// newlib-nano holds its free list as `chunk { long size; chunk *next; }` sorted
-// by ascending address (that ordering is what _free_r's insertion walk relies
-// on). A heap overflow shows up as a garbage `next`, and it is only noticed much
-// later — inside _free_r, faulting on `ldr r3,[r3,#4]`, with nothing left to say
-// who wrote it. Walking the list at a known point instead attributes the damage
-// to the operation that did it.
-const NanoChunk = extern struct {
-    size: isize,
-    next: ?*NanoChunk,
+// libc (libs/libc/noos/malloc.c) holds its free list as
+// `chunk { size_t size; long offset; chunk *next; }` sorted by ascending address
+// (that ordering is what free()'s insertion walk relies on). A heap overflow
+// shows up as a garbage `next`, and it is only noticed much later -- inside
+// free(), faulting on the list walk, with nothing left to say who wrote it.
+// Walking the list at a known point instead attributes the damage to the
+// operation that did it.
+const FreeChunk = extern struct {
+    size: usize,
+    offset: isize,
+    next: ?*FreeChunk,
 };
 
-extern var __malloc_free_list: ?*NanoChunk;
+extern var __malloc_free_list: ?*FreeChunk;
 extern var end: u8;
 extern var __heap_limit__: u8;
 
@@ -152,7 +154,7 @@ var free_list_fault_reported: bool = false;
 
 /// Report the first site at which the free list is found broken, then stay
 /// quiet, so the log names the operation that did the damage instead of the
-/// unrelated _free_r that trips over it some arbitrary number of calls later.
+/// unrelated free() that trips over it some arbitrary number of calls later.
 /// `tag` identifies the call site (system_call.zig passes the syscall number).
 /// Sprinkle it through a suspect path to bisect down to the offending statement.
 pub fn probe(tag: u32) void {
@@ -184,16 +186,49 @@ pub fn check_free_list() ?FreeListFault {
         // A corrupted `next` usually points outside the heap or into the middle
         // of a word; both are cheaper to detect than the resulting fault.
         if (index > 8192) return fault.at("cycle", addr, prev, index);
-        if (addr & 3 != 0) return fault.at("misaligned", addr, prev, index);
-        if (addr < lo or addr + @sizeOf(NanoChunk) > hi) return fault.at("out-of-heap", addr, prev, index);
-        if (chunk.size <= 0 or @as(usize, @intCast(chunk.size)) > hi - addr) return fault.at("bad-size", addr, prev, index);
-        // Sortedness is the invariant _free_r walks on, so a break here is
+        if (addr & 7 != 0) return fault.at("misaligned", addr, prev, index);
+        if (addr < lo or addr + @sizeOf(FreeChunk) > hi) return fault.at("out-of-heap", addr, prev, index);
+        if (chunk.size < @sizeOf(FreeChunk) or chunk.size > hi - addr) return fault.at("bad-size", addr, prev, index);
+        // Sortedness is the invariant free() walks on, so a break here is
         // exactly what would send it off the rails.
         if (addr <= prev) return fault.at("unsorted", addr, prev, index);
         prev = addr;
         node = chunk.next;
     }
     return null;
+}
+
+extern fn _sbrk(incr: usize) *allowzero anyopaque;
+
+/// Bytes the kernel heap can still hand out: what the break has not claimed yet
+/// plus what sits on malloc's free list. An upper bound -- a single allocation
+/// may not fit in a fragmented list -- which is what a caller budgeting against
+/// running the heap dry (a deliberate panic) needs.
+pub fn headroom() usize {
+    const brk = @intFromPtr(_sbrk(0));
+    const limit = @intFromPtr(&__heap_limit__);
+    var free: usize = if (limit > brk) limit - brk else 0;
+    var node = __malloc_free_list;
+    var index: usize = 0;
+    while (node) |chunk| : (index += 1) {
+        if (index > 8192 or chunk.size == 0) break;
+        free += chunk.size;
+        node = chunk.next;
+    }
+    return free;
+}
+
+/// Bytes of kernel_ram the break has claimed since boot. malloc never gives
+/// the break back, so this is the kernel heap's high-water mark including
+/// chunk headers and fragmentation -- the figure `_sbrk` compares against
+/// `__heap_limit__` before it panics.
+pub fn break_used() usize {
+    return @intFromPtr(_sbrk(0)) - @intFromPtr(&end);
+}
+
+/// Everything the break may ever claim: kernel_ram left after .data/.bss.
+pub fn break_limit() usize {
+    return @intFromPtr(&__heap_limit__) - @intFromPtr(&end);
 }
 
 var get_current_pid_fn: ?*const fn () i32 = null;

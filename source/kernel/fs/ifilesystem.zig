@@ -89,6 +89,19 @@ pub const FileTimes = struct {
     }
 };
 
+/// What statvfs(2) reports about a filesystem, sizes in `block_size` units.
+/// A filesystem with no notion of capacity (procfs, the device directory)
+/// answers with zeros, which `df` prints as dashes rather than a lie.
+pub const FsStats = struct {
+    block_size: u32 = 512,
+    total_blocks: u64 = 0,
+    free_blocks: u64 = 0,
+    total_files: u64 = 0,
+    free_files: u64 = 0,
+    name_max: u32 = 255,
+    read_only: bool = false,
+};
+
 pub const IFileSystem = interface.ConstructInterface(struct {
     pub const Self = @This();
 
@@ -122,6 +135,13 @@ pub const IFileSystem = interface.ConstructInterface(struct {
 
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
         return interface.VirtualCall(self, "link", .{ old_path, new_path }, anyerror!void);
+    }
+
+    /// rename(2), within one filesystem. The VFS refuses a pair that crosses a
+    /// mount point before this is reached, so an implementation only ever sees
+    /// two paths of its own.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        return interface.VirtualCall(self, "rename", .{ old_path, new_path }, anyerror!void);
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
@@ -179,6 +199,24 @@ pub const IFileSystem = interface.ConstructInterface(struct {
     pub fn supports_symlinks(self: *const Self) bool {
         return interface.VirtualCall(self, "supports_symlinks", .{}, bool);
     }
+
+    /// Capacity and free space, for statvfs(2) and `df`.
+    pub fn statvfs(self: *Self) anyerror!FsStats {
+        return interface.VirtualCall(self, "statvfs", .{}, anyerror!FsStats);
+    }
+
+    /// chmod(2): the permission bits (07777) of `path`. A filesystem with
+    /// nowhere to keep them (FAT) accepts and ignores, as it always did.
+    /// With `follow_links` a final symbolic link is the VFS's to resolve: a
+    /// filesystem that holds links refuses it with NoEntry, as `stat` does.
+    pub fn chmod(self: *Self, path: []const u8, mode: u32, follow_links: bool) anyerror!void {
+        return interface.VirtualCall(self, "chmod", .{ path, mode, follow_links }, anyerror!void);
+    }
+
+    /// chown(2). -1 (maxInt) for either id leaves that one alone.
+    pub fn chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_links: bool) anyerror!void {
+        return interface.VirtualCall(self, "chown", .{ path, uid, gid, follow_links }, anyerror!void);
+    }
 });
 
 pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
@@ -213,6 +251,13 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         _ = old_path;
         _ = new_path;
         return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // Read-only filesystem does not allow linking
+    }
+
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        _ = self;
+        _ = old_path;
+        _ = new_path;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem; // nothing here can move
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
@@ -253,5 +298,27 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     pub fn supports_symlinks(self: *const Self) bool {
         _ = self;
         return false;
+    }
+
+    pub fn statvfs(self: *Self) anyerror!FsStats {
+        _ = self;
+        return .{ .read_only = true };
+    }
+
+    pub fn chmod(self: *Self, path: []const u8, mode: u32, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = mode;
+        _ = follow_links;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+    }
+
+    pub fn chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = uid;
+        _ = gid;
+        _ = follow_links;
+        return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
     }
 });

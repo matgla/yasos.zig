@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) !void {
     hal.addImport("cortex-m", cortex_m);
     cortex_m.addImport("arch", arch);
 
-    _ = try toolchain.decorateModuleWithArmToolchain(b, hal, target);
+    try toolchain.decorateModuleWithArmToolchain(b, hal, target, optimize);
 
     const repo_root = try std.Io.Dir.cwd().realPathFileAlloc(b.graph.io, ".", b.allocator);
     hal.addAssemblyFile(b.path("startup/startup.S"));

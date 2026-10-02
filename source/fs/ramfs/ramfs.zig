@@ -34,7 +34,8 @@ const log = kernel.log;
 const interface = @import("interface");
 
 const RamFsFile = @import("ramfs_file.zig").RamFsFile;
-const RamFsData = @import("ramfs_data.zig").RamFsData;
+const ramfs_data = @import("ramfs_data.zig");
+const RamFsData = ramfs_data.RamFsData;
 const RamFsNode = @import("ramfs_node.zig").RamFsNode;
 pub const Tier = @import("ramfs_tier.zig").Tier;
 
@@ -127,6 +128,14 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return try self._root.clone();
     }
 
+    /// A plain RamFs keeps its nodes on the kernel heap; see
+    /// ramfs_data.ensure_room_for_node. A tiered one (tmpfs) has its arena.
+    fn ensure_room_for_node(self: *const Self) !void {
+        if (self._tier == null) {
+            try ramfs_data.ensure_room_for_node();
+        }
+    }
+
     pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
         if (path.len == 0) {
             return kernel.errno.ErrnoSet.InvalidArgument;
@@ -146,6 +155,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         defer parent_node.delete();
         var maybe_parent_dir = parent_node.as_directory();
         if (maybe_parent_dir) |*parent_dir| {
+            try self.ensure_room_for_node();
             const filedata = try self._allocator.create(RamFsData);
             filedata.* = try RamFsData.create_tiered(self._allocator, self._tier);
             const filenode = try self._allocator.create(RamFsNode);
@@ -185,6 +195,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         defer parent_node.delete();
         var maybe_parent_dir = parent_node.as_directory();
         if (maybe_parent_dir) |*parent_dir| {
+            try self.ensure_room_for_node();
             const node = try self._allocator.create(RamFsNode);
             const dirname = try self._allocator.dupe(u8, basename);
             node.* = RamFsNode{
@@ -259,6 +270,9 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
         _ = follow_symlinks;
         initialize_stat_identity(data, path);
+        // Per instance, like a real device number: /var and /home can both be
+        // RAM fallbacks, and they are not one filesystem.
+        data.st_dev = @truncate(std.hash.Wyhash.hash(@intFromPtr(self), "ramfs") | 1);
         // Borrowed, because `rm` stats before it unlinks: a stat that allocates
         // makes a full /tmp unremovable even though the unlink itself would have
         // worked. Nothing here needs a handle — the node is only read.
@@ -322,6 +336,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         if (maybe_parent_dir) |*parent_dir| {
             // A symbolic link's body always stays in memory: it is a handful of
             // bytes, and resolving one must not depend on the backing store.
+            try self.ensure_room_for_node();
             const filedata = try self._allocator.create(RamFsData);
             filedata.* = try RamFsData.create(self._allocator);
             // The link target is stored verbatim as the file content.
@@ -344,6 +359,29 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         // Nodes carry a FileType, SymbolicLink included, and symlink() creates
         // them.
         return true;
+    }
+
+    /// No fixed capacity: bodies come from the heap (or the /tmp arena) as
+    /// they grow. Reported as empty rather than guessed at.
+    pub fn statvfs(self: *Self) anyerror!kernel.fs.FsStats {
+        _ = self;
+        return .{ .block_size = 512 };
+    }
+
+    /// No permission bits or owners on this filesystem: accepted, ignored.
+    pub fn chmod(self: *Self, path: []const u8, mode: u32, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = mode;
+        _ = follow_links;
+    }
+
+    pub fn chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = uid;
+        _ = gid;
+        _ = follow_links;
     }
 
     pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
@@ -402,6 +440,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         defer parent_node.delete();
         var maybe_parent_dir = parent_node.as_directory();
         if (maybe_parent_dir) |*parent_dir| {
+            try self.ensure_room_for_node();
             const filename = try self._allocator.dupe(u8, std.fs.path.basename(new_path));
             const new_node = try self._allocator.create(RamFsNode);
             var file = node.as_file().?;
@@ -422,17 +461,99 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return kernel.errno.ErrnoSet.NotADirectory;
     }
 
+    /// rename(2) within this filesystem.
+    ///
+    /// The entry moves; the contents do not. A file's data and a directory's
+    /// child list already live behind a shared pointer (that is how `link` and
+    /// `RamFsDirectory.alias` work), so the new name is made to point at the
+    /// same contents and the old name is then unlinked. Nothing copies, no open
+    /// handle is disturbed, and a directory moves with its whole subtree.
+    ///
+    /// POSIX, as far as it is implemented here: renaming a name to itself
+    /// succeeds and changes nothing; an existing destination is replaced; a
+    /// destination that is a non-empty directory is refused (unlink reports it);
+    /// and a directory cannot be moved inside itself.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        var old_scratch: [path_scratch_bytes]u8 = undefined;
+        var new_scratch: [path_scratch_bytes]u8 = undefined;
+        const old_resolved = try resolve_into(&old_scratch, old_path);
+        const new_resolved = try resolve_into(&new_scratch, new_path);
+
+        if (std.mem.eql(u8, old_resolved, new_resolved)) {
+            // Same name: POSIX says do nothing and report success.
+            var existing = try self.get(old_resolved);
+            existing.delete();
+            return;
+        }
+
+        // Moving a directory into its own subtree would detach that subtree
+        // from the tree and leave it pointing at itself.
+        if (new_resolved.len > old_resolved.len and
+            std.mem.startsWith(u8, new_resolved, old_resolved) and
+            new_resolved[old_resolved.len] == '/')
+        {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        var node = try self.get(old_resolved);
+        defer node.delete();
+
+        const new_basename = std.fs.path.basenamePosix(new_resolved);
+        if (new_basename.len == 0) {
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        }
+
+        var parent_node = try self.get_parent_node(new_resolved);
+        defer parent_node.delete();
+        var parent_dir = parent_node.as_directory() orelse
+            return kernel.errno.ErrnoSet.NotADirectory;
+
+        // Replace whatever is already there, the way rename(2) does. Refusals
+        // (a non-empty directory) come back from unlink and stop the rename
+        // before anything has moved.
+        if (parent_dir.as(RamFsDirectory).data().get_node(new_basename) != null) {
+            try parent_dir.as(RamFsDirectory).data().unlink(new_basename);
+        }
+
+        const filename = try self._allocator.dupe(u8, new_basename);
+        errdefer self._allocator.free(filename);
+        const new_node = try self._allocator.create(RamFsNode);
+        errdefer self._allocator.destroy(new_node);
+
+        new_node.* = RamFsNode{
+            .node = if (node.as_directory()) |dir_handle| blk: {
+                var directory = dir_handle;
+                break :blk try directory.as(RamFsDirectory).data().alias(self._allocator, filename);
+            } else if (node.as_file()) |file_handle| blk: {
+                var file = file_handle;
+                break :blk try RamFsFile.InstanceType.create_node(
+                    self._allocator,
+                    file.as(RamFsFile).data()._data.share(),
+                    filename,
+                );
+            } else
+                return kernel.errno.ErrnoSet.InvalidArgument,
+            .list_node = std.DoublyLinkedList.Node{},
+            .name = filename,
+        };
+        try parent_dir.as(RamFsDirectory).data().append(new_node);
+
+        // The new entry holds the contents now, so dropping the old one only
+        // releases a reference.
+        const old_basename = std.fs.path.basenamePosix(old_resolved);
+        const old_dirpath = std.fs.path.dirname(old_resolved) orelse "/";
+        var old_parent = try self.borrow_directory(old_dirpath);
+        try old_parent.as(RamFsDirectory).data().unlink(old_basename);
+    }
+
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
         // Borrowed for the same reason as `stat`: asking whether a path exists
         // must not be a thing a full filesystem can refuse to answer.
-        const n = try self.borrow_node(path);
-
-        if ((mode & c.W_OK) != 0 or (mode & c.X_OK) != 0) {
-            if (n.filetype() == FileType.Directory) {
-                return kernel.errno.ErrnoSet.IsADirectory;
-            }
-        }
+        _ = mode;
+        // Every node is readable, writable and, a directory, searchable
+        // (X_OK on a directory is search permission): existence is the answer.
+        _ = try self.borrow_node(path);
     }
 });
 
@@ -745,6 +866,72 @@ test "RamFs.Tiered.ShouldRemoveTheSpilledBodyOnUnlink" {
     try std.testing.expectEqual(@as(usize, 0), fixture.spilled_body_count());
 }
 
+test "RamFs.Tiered.DetachIsBusyWhileABodyIsSpilled" {
+    var fixture = try TieredFixture.init(std.testing.allocator, std.testing.allocator, 8);
+    defer fixture.deinit(std.testing.allocator);
+
+    try fixture.tier.detach();
+    fixture.tier.reattach();
+
+    try fixture.sut.interface.create("/held", 0);
+    try fixture.write("/held", 0, "long enough to spill");
+    try std.testing.expectError(kernel.errno.ErrnoSet.DeviceOrResourceBusy, fixture.tier.detach());
+
+    // Removing the file frees its body, and the directory with it.
+    try fixture.sut.interface.unlink("/held");
+    try fixture.tier.detach();
+}
+
+test "RamFs.Tiered.ShouldNotSpillWhileDetached" {
+    var fixture = try TieredFixture.init(std.testing.allocator, std.testing.allocator, 8);
+    defer fixture.deinit(std.testing.allocator);
+
+    // No arena: RAM is the kernel heap, so the write that would spill fails.
+    try fixture.tier.detach();
+    try fixture.sut.interface.create("/late", 0);
+    {
+        var node = try fixture.sut.interface.get("/late");
+        defer node.delete();
+        var file = node.as_file().?;
+        try std.testing.expectEqual(@as(isize, 0), file.interface.write("long enough to spill"));
+    }
+    try std.testing.expectEqual(@as(usize, 0), fixture.spilled_body_count());
+
+    fixture.tier.reattach();
+    try fixture.write("/late", 0, "long enough to spill");
+    try std.testing.expectEqual(@as(usize, 1), fixture.spilled_body_count());
+    try fixture.expect_content("/late", "long enough to spill");
+}
+
+test "RamFs.Tiered.ShouldKeepBigFilesInTheArenaWhileDetached" {
+    var arena_memory: [8192]u8 align(256) = undefined;
+    var pool = try kernel.memory.heap.TmpMemoryPool(256).init(std.testing.allocator, &arena_memory);
+    defer pool.deinit();
+    var page_allocator = kernel.memory.heap.TmpPageAllocator(@TypeOf(pool)).init(&pool);
+
+    var fixture = try TieredFixture.init(std.testing.allocator, page_allocator.allocator(), 8);
+    defer fixture.deinit(std.testing.allocator);
+    const Arena = struct {
+        fn free(context: *anyopaque) usize {
+            const p: *@TypeOf(pool) = @ptrCast(@alignCast(context));
+            return p.memory_size - p.get_used_size();
+        }
+    };
+    fixture.tier.set_arena(.{ .context = &pool, .free_bytes = &Arena.free }, 1024);
+
+    try fixture.tier.detach();
+    try fixture.sut.interface.create("/big", 0);
+    try fixture.write("/big", 0, "past the 8-byte threshold");
+    try std.testing.expectEqual(@as(usize, 0), fixture.spilled_body_count());
+    try fixture.expect_content("/big", "past the 8-byte threshold");
+
+    // Back on a mount, the next write past the threshold spills as before.
+    fixture.tier.reattach();
+    try fixture.write("/big", 25, "!");
+    try std.testing.expectEqual(@as(usize, 1), fixture.spilled_body_count());
+    try fixture.expect_content("/big", "past the 8-byte threshold!");
+}
+
 test "RamFs.Tiered.ShouldKeepSymbolicLinksInMemory" {
     var fixture = try TieredFixture.init(std.testing.allocator, std.testing.allocator, 4);
     defer fixture.deinit(std.testing.allocator);
@@ -755,6 +942,28 @@ test "RamFs.Tiered.ShouldKeepSymbolicLinksInMemory" {
     var buffer: [64]u8 = undefined;
     const length = try fixture.sut.interface.readlink("/link", &buffer);
     try std.testing.expectEqualStrings("/a/rather/long/target/path", buffer[0..length]);
+}
+
+test "RamFs.ShouldRefuseNewNodesWhenTheKernelHeapRunsLow" {
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+    try sut.interface.mkdir("/dir", 0);
+
+    const Low = struct {
+        fn headroom() usize {
+            return 1024;
+        }
+    };
+    ramfs_data.kernel_heap_headroom = &Low.headroom;
+    defer ramfs_data.kernel_heap_headroom = null;
+    const no_space = kernel.errno.ErrnoSet.NoSpaceLeftOnDevice;
+    try std.testing.expectError(no_space, sut.interface.create("/dir/file", 0));
+    try std.testing.expectError(no_space, sut.interface.mkdir("/dir/sub", 0));
+    try std.testing.expectError(no_space, sut.interface.symlink("/dir", "/link"));
+    try std.testing.expect(!has_path(&sut, "/dir/file"));
+    // what exists stays usable
+    try std.testing.expect(has_path(&sut, "/dir"));
 }
 
 test "RamFsFile.ShouldCreateAndRemoveFiles" {
@@ -1110,7 +1319,8 @@ test "RamFs.AccessShouldWork" {
 
     try sut.interface.mkdir("/test", 0);
     try sut.interface.access("/test", c.F_OK, 0);
-    try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, sut.interface.access("/test", c.W_OK, 0));
+    // a directory is writable (files can be made in it) and searchable
+    try sut.interface.access("/test", c.W_OK | c.X_OK, 0);
 
     try sut.interface.create("/test/file.txt", 0);
     try sut.interface.access("/test/file.txt", c.F_OK, 0);

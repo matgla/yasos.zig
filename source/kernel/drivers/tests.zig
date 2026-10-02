@@ -26,4 +26,6 @@ comptime {
     _ = @import("mmc/mmc_io.zig");
     _ = @import("flash/flash_file.zig");
     _ = @import("flash/flash_driver.zig");
+    _ = @import("null/null_driver.zig");
+    _ = @import("block.zig");
 }

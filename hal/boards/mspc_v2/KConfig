@@ -128,8 +128,6 @@ if BOARD_MSPC_V2_DISCARD_IN_CONF
     default CONFIG_MMC_BUS_MODE_SPI
   endchoice
 
-  config CONFIG_BUILD_USE_NEWLIB
-    default y
 
 endif
 

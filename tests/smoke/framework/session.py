@@ -78,6 +78,47 @@ def _restore_timeout(port, value):
         pass
 
 
+class PushbackSerial(serial.Serial):
+    """A serial port that lets a reader hand back bytes it read too far.
+
+    ``_read_until`` has to stop exactly at its marker, which it used to get by
+    reading one byte per call. At 3 Mbaud that cannot keep up with a burst: a
+    23 KB HardFault dump arrives in ~0.15 s, the per-byte loop drains a few
+    tens of KB/s, the tty buffer fills and throttles the CDC-ACM link, and
+    the debug probe drops what arrives meanwhile -- the tail, with the
+    program's output and the prompt (measured on the rig: 13-14 KB of 23 KB
+    per-byte, all of it in 4 KB reads). Reading in bulk and pushing the bytes
+    past the marker back keeps both properties.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._pushback = bytearray()
+        super().__init__(*args, **kwargs)
+
+    def unread(self, data):
+        self._pushback[:0] = data
+
+    @property
+    def in_waiting(self):
+        return len(self._pushback) + super().in_waiting
+
+    def read(self, size=1):
+        if not self._pushback:
+            return super().read(size)
+        take = min(size, len(self._pushback))
+        out = bytes(self._pushback[:take])
+        del self._pushback[:take]
+        if take < size:
+            more = super().in_waiting
+            if more:
+                out += super().read(min(size - take, more))
+        return out
+
+    def reset_input_buffer(self):
+        self._pushback.clear()
+        super().reset_input_buffer()
+
+
 def _open_serial_port(port, deadline=None):
     """Open *port*, retrying until *deadline* while a fresh node settles.
 
@@ -89,7 +130,7 @@ def _open_serial_port(port, deadline=None):
     last = None
     while True:
         try:
-            return serial.Serial(port, CONSOLE_BAUDRATE, timeout=SERIAL_TIMEOUT)
+            return PushbackSerial(port, CONSOLE_BAUDRATE, timeout=SERIAL_TIMEOUT)
         except SERIAL_ERRORS as exc:
             last = exc
         if deadline is None or time.monotonic() >= deadline:
@@ -477,17 +518,26 @@ class Session:
         crashed_on_entry = Session.target_crashed
         try:
             deadline = time.monotonic() + idle_timeout
+            # Stop exactly at the marker (matching pyserial read_until
+            # semantics) and never consume the next command's output. A port
+            # that can take bytes back (PushbackSerial) is read in bulk and
+            # handed what followed the marker; any other port one byte per
+            # call. read() returns immediately while bytes are available and
+            # blocks up to `poll` when idle, which is how we sample the
+            # silence deadline.
+            unread = getattr(self.serial, "unread", None)
             while True:
-                # Read one byte at a time so we stop exactly at the marker
-                # (matching pyserial read_until semantics) and never over-read
-                # into the next command's output.  read(1) returns immediately
-                # while bytes are available and blocks up to `poll` when idle,
-                # which is how we sample the silence deadline.
-                c = self.serial.read(1)
+                c = self.serial.read(max(1, self.serial.in_waiting) if unread else 1)
                 if c:
+                    start = max(0, len(buf) - lenterm + 1)
                     buf += c
                     deadline = time.monotonic() + idle_timeout
-                    if buf[-lenterm:] == marker_b:
+                    hit = buf.find(marker_b, start)
+                    if hit >= 0:
+                        end = hit + lenterm
+                        if end < len(buf):
+                            unread(bytes(buf[end:]))
+                            del buf[end:]
                         break
                     # Log as we go rather than only on the way out. A target
                     # that faults mid-command dumps diagnostics forever, and
@@ -785,8 +835,8 @@ class Session:
         registers, the module map that turns a stacked PC into a file, and the
         per-core context-switch event ring -- are all printed *after* that and
         were being thrown away, on every crash, for every run. The SD fallback
-        did not cover it either: ``cat /root/logs/kernel.prev.log`` came back
-        "cat: /root/logs/kernel.prev.log" (no such file) in all of them.
+        did not cover it either: ``cat /root/logs/kernel.prev.log`` (where the
+        log lived then) came back "no such file" in all of them.
 
         So: keep reading until the target has been quiet for
         ``CRASH_DUMP_QUIET_S``, capped at ``CRASH_DUMP_CAP_S`` in case the fault
@@ -820,7 +870,7 @@ class Session:
         """After a crash: reboot the board and pull the persisted kernel logs
         off the SD card into this test's log file.
 
-        The kernel rotates /root/logs/kernel.log -> kernel.prev.log on every
+        The kernel rotates /var/log/kernel.log -> kernel.prev.log on every
         boot, so after this reset kernel.prev.log holds the full log of the run
         that just crashed (dynamic-loader load addresses, pre-fault kernel
         messages). The live HardFault postmortem is already in this file from
@@ -839,7 +889,7 @@ class Session:
         Session._collecting = True
         try:
             for name in ("kernel.prev.log", "kernel.log"):
-                path = f"/root/logs/{name}"
+                path = f"/var/log/{name}"
                 self.file.write(f"\n----- {path} (persisted) -----\n")
                 self.file.flush()
                 try:

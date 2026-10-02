@@ -59,6 +59,32 @@ const pad_chunk = 64;
 /// (CONFIG_TMPFS_PAGE_SIZE); a mismatch only costs a little slack.
 const growth_granularity = 256;
 
+/// Kernel heap still available (kernel.memory.heap.malloc.headroom), installed
+/// at boot. A plain RamFs keeps its bodies on the kernel heap, and running that
+/// dry is a deliberate panic -- one runaway writer into /root (where /tmp spills
+/// when there is no card) took the kernel down. With it set, growth that would
+/// cut into `kernel_heap_reserve` fails the write with ENOSPC instead.
+pub var kernel_heap_headroom: ?*const fn () usize = null;
+const kernel_heap_reserve = 256 * 1024;
+
+/// What a new file, directory or link must leave of the kernel heap. Far
+/// below `kernel_heap_reserve`, which on the rp2350 is more than the whole
+/// heap: the kernel makes /home/root and /var/log in a fallback RamFs at boot.
+/// But each node costs a few hundred bytes the write check never sees, and a
+/// zmodem push of a few thousand empty files into one (its writes all
+/// refused) ran the heap dry and panicked the kernel.
+const kernel_heap_node_reserve = 16 * 1024;
+
+/// ENOSPC when a new node in a plain RamFs would cut into the kernel heap's
+/// last `kernel_heap_node_reserve` bytes.
+pub fn ensure_room_for_node() !void {
+    if (kernel_heap_headroom) |headroom| {
+        if (headroom() < kernel_heap_node_reserve) {
+            return kernel.errno.ErrnoSet.NoSpaceLeftOnDevice;
+        }
+    }
+}
+
 const SpilledBody = struct {
     file: kernel.fs.IFile,
     length: usize,
@@ -118,6 +144,7 @@ pub const RamFsData = struct {
                     body.file.interface.delete();
                     if (self.tier) |tier| {
                         tier.remove_body(body.id);
+                        tier.drop_body();
                     }
                 },
             }
@@ -178,7 +205,7 @@ pub const RamFsData = struct {
                 const end = position + bytes.len;
                 const grows = end > self.storage.ram.items.len;
                 if (end > tier.max_file_bytes or (grows and tier.arena_is_low())) {
-                    try self.spill();
+                    if (!tier.keeps_in_arena(grows)) try self.spill();
                 }
             }
         }
@@ -209,7 +236,7 @@ pub const RamFsData = struct {
             if (self.tier) |tier| {
                 const grows = length > self.storage.ram.items.len;
                 if (length > tier.max_file_bytes or (grows and tier.arena_is_low())) {
-                    try self.spill();
+                    if (!tier.keeps_in_arena(grows)) try self.spill();
                 }
             }
         }
@@ -235,7 +262,22 @@ pub const RamFsData = struct {
         }
         if (self.tier == null) {
             // A plain RamFs sits on the kernel heap, where doubling is the right
-            // trade and what the allocator underneath expects.
+            // trade and what the allocator underneath expects -- until the heap
+            // is nearly gone: then grow exactly, and refuse what does not fit.
+            // A reallocation holds the old body and the new one at once, hence
+            // the whole new capacity is what has to fit.
+            if (kernel_heap_headroom) |headroom| {
+                if (length > list.capacity) {
+                    const room = headroom();
+                    const doubled = @max(length, list.capacity *| 2);
+                    if (length +| kernel_heap_reserve > room) {
+                        return kernel.errno.ErrnoSet.NoSpaceLeftOnDevice;
+                    }
+                    if (doubled +| kernel_heap_reserve > room) {
+                        try list.ensureTotalCapacityPrecise(self._allocator, length);
+                    }
+                }
+            }
             try list.ensureTotalCapacity(self._allocator, length);
         } else {
             // A tiered one sits on a small arena, where doubling a file that is
@@ -306,6 +348,8 @@ pub const RamFsData = struct {
             return;
         }
 
+        try tier.claim_body();
+        errdefer tier.drop_body();
         const id = tier.next_identifier();
         var file = try tier.open_body(id);
         errdefer {
@@ -343,4 +387,40 @@ test "RamFsData.ShouldAppendToFile" {
     try std.testing.expectEqual(file1.refcounter.*, 1);
     try std.testing.expectEqualStrings("This is test content", file2.storage.ram.items);
     try std.testing.expect(file2.deinit());
+}
+
+var fake_kernel_heap_headroom: usize = 0;
+fn fake_headroom() usize {
+    return fake_kernel_heap_headroom;
+}
+
+test "RamFsData.NodesStopShortOfTheKernelHeapFloor" {
+    kernel_heap_headroom = &fake_headroom;
+    defer kernel_heap_headroom = null;
+    fake_kernel_heap_headroom = kernel_heap_node_reserve;
+    try ensure_room_for_node();
+    fake_kernel_heap_headroom = kernel_heap_node_reserve - 1;
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoSpaceLeftOnDevice, ensure_room_for_node());
+}
+
+test "RamFsData.GrowthThatWouldDrainTheKernelHeapFailsWithNoSpace" {
+    kernel_heap_headroom = &fake_headroom;
+    defer kernel_heap_headroom = null;
+    var file = try RamFsData.create(std.testing.allocator);
+    defer _ = file.deinit();
+    const big = try std.testing.allocator.alloc(u8, 4096);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'x');
+
+    fake_kernel_heap_headroom = kernel_heap_reserve + 64;
+    try std.testing.expectEqual(16, try file.write_at(0, "0123456789abcdef"));
+    // growth past the reserve is refused, and what was written stays
+    const past = file.storage.ram.capacity + 64;
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoSpaceLeftOnDevice, file.write_at(0, big[0..past]));
+    try std.testing.expectEqualStrings("0123456789abcdef", file.storage.ram.items);
+    // near the limit a doubling would not fit, the exact size still does
+    const cap = file.storage.ram.capacity;
+    fake_kernel_heap_headroom = kernel_heap_reserve + cap + 8;
+    try std.testing.expectEqual(cap + 8, try file.write_at(0, big[0 .. cap + 8]));
+    try std.testing.expectEqual(cap + 8, file.storage.ram.capacity);
 }

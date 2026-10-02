@@ -464,6 +464,7 @@ static void print_header(const YaffFile *yaff) {
   printf("  version           %u.%u\n", h->version_major, h->version_minor);
   printf("  entry             0x%x%s\n", h->entry & ~1u, (h->entry & 1u) ? " (thumb)" : "");
   printf("  alignment         %u\n", h->alignment);
+  printf("  data alignment    %u (starts at +%u)\n", h->data_alignment, h->data_alignment_offset);
   printf("  text at           0x%x\n", h->text_offset);
   if (h->stack_size == 0xFFFFFFFFu) {
     printf("  stack / heap      OS default\n");

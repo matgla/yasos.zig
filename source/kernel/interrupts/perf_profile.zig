@@ -364,7 +364,7 @@ pub fn romfs_read() void {
 
 // Kernel-heap traffic: `open` allocates a node per hit, and a miss sends the VFS
 // through resolve_symlinks, which builds and normalises a path per component.
-// newlib's malloc is a free-list walk, so these are counted and timed together.
+// libc's malloc is a free-list walk, so these are counted and timed together.
 var kheap_calls: u32 = 0;
 var kheap_cycles: u64 = 0;
 

@@ -45,7 +45,7 @@ PTY_RE = re.compile(r"char device redirected to (\S+)")
 H_CODE_LEN = 8      # uint32 code_length
 H_DATA_LEN = 16     # uint32 data_length
 H_ENTRY = 24        # uint32 entry
-H_TEXT_OFF = 70     # uint16 text_offset (code section start, relative to header)
+H_TEXT_OFF = 92     # uint32 text_offset (code section start, relative to header)
 
 
 def launch(backing, ram_mb):
@@ -83,7 +83,7 @@ def carve(backing, out):
         if i + 80 > len(d):
             continue
         code_len = struct.unpack_from("<I", d, i + H_CODE_LEN)[0]
-        text_off = struct.unpack_from("<H", d, i + H_TEXT_OFF)[0]
+        text_off = struct.unpack_from("<I", d, i + H_TEXT_OFF)[0]
         if not (0 < code_len < 0x10000 and 0 < text_off < 0x4000):
             continue
         code = d[i + text_off: i + text_off + code_len]

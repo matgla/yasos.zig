@@ -381,6 +381,23 @@ COMPILE_TIMEOUT_TESTS = {
     # ~3x the measured time, in line with the margins above (bitops: 84 s
     # measured, 160 s budgeted).
     "448_shift64_lowering.c": 120,
+    # Not the compile: the run.  It checks every alignment/tail/overlap of the
+    # aeabi mem* helpers and 3000 64-bit divisions against byte loops and a
+    # bit-at-a-time reference, printing only after each half -- longer than
+    # the 5 s silence window on the board at -O0.  The output was correct
+    # ("mem bad=0", "div bad=0"); it arrived after the harness had given up and
+    # typed its cleanup `rm` into the still-running program.
+    "498_aeabi_mem_div_runtime.c": 60,
+    # A compile, at -O1/-O2 only.  Runs 74 and 80 on the 532 MHz rig both
+    # stopped listening at the 5.81 s scaled deadline (compile_ms 5908) and
+    # the compile then exited 0 during cleanup, 1.3-3.7 s later -- so ~7-10 s
+    # real, against 2.4 s at -O0.  Same optimizer-heavy class as 448 above
+    # (host -O2: 0.05 s vs 448's 0.03 s); no hang.  30 s is ~3x.
+    "549_copy_stub_calls.c": 30,
+    # -O2 compile 5462 ms on the 532 MHz rig (run 80, ReleaseFast kernel): 94%
+    # of the 5.81 s window, and CI's ReleaseSafe kernel tipped it over -- the
+    # compile exited 0 just after the harness gave up.
+    "601_overflow_builtins_narrow.c": 30,
 }
 
 
@@ -675,6 +692,16 @@ LARGE_STACK_TESTS = {
     "memcpy-1.c": 384,   # two 128 KiB (1<<17) local arrays
     "980605-1.c": 256,   # char ar[200000/2] = ~100 KiB
     "multi-ix.c": 192,   # 40 x int[500] = ~80 KiB
+    # ir_tests: frames past 32 KiB on purpose, to reach stack slots beyond a
+    # 16-bit offset -- far_locals and main each take ~40 KB, one calling the other.
+    "test_struct_far_frame.c": 128,
+    # a frame just over 32 KiB (a 32 KiB buffer under the struct copies) plus a
+    # stack scribble ahead of it; STKOF on the 32 KiB default.
+    "485_frame_colour_struct_far.c": 128,
+    # by-value struct arguments of locals past 32 KiB, after a 36 KB scribble.
+    "524_sra_far_struct_arg.c": 128,
+    # a 40 KB local next to a relayout-retried frame: STKOF on the 32 KiB default.
+    "536_frame_relayout_retry_keeps_copies.c": 128,
 }
 
 # Sources stay in the remote source tree; only compiler outputs use /tmp.
@@ -861,10 +888,21 @@ IR_TESTS_FLOAT_TOLERANCE = {
 }
 
 
+# IR tests whose .expect belongs to a program built from several sources.
+# abi_mix: the host suite builds abi_mix_b.c with arm-none-eabi-gcc
+# (test_abi_gcc_interop); a gcc object does not fit YasOS's r9 model, so here
+# the device tcc builds all three, and each file still calls the other's
+# callees with structs in registers, split and on the stack.
+IR_MULTI_FILE_SOURCES = {
+    "abi_mix_main.c": ("abi_mix_main.c", "abi_mix_a.c", "abi_mix_b.c"),
+}
+
+
 def build_ir_test_cases():
     """Build test cases from ir_tests directory.
 
-    Each .c file with a corresponding .expect file becomes a test case.
+    Each .c file with a corresponding .expect file becomes a test case, built
+    from that file alone or from its IR_MULTI_FILE_SOURCES.
     """
     test_cases = []
 
@@ -888,12 +926,13 @@ def build_ir_test_cases():
             test_cases.append(TccTestCase(
                 test_id=test_id,
                 name=filename,
-                sources=(filename,),
+                sources=IR_MULTI_FILE_SOURCES.get(filename, (filename,)),
                 cflags=cflags,
                 source_dir=ir_tests_path,
                 skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
                 xfail_reason=IR_TESTS_XFAIL.get((filename, opt_level)),
                 timeout=COMPILE_TIMEOUT_TESTS.get(filename),
+                run_stack_kib=LARGE_STACK_TESTS.get(filename),
             ))
 
     return test_cases
@@ -1582,6 +1621,15 @@ def _push_corpus_to_device(session, corpus, witnessed):
     total_bytes = sum(
         os.path.getsize(local_path) for local_path, _ in transfers
     )
+    # A RAM-backed root holds the corpus on the kernel heap, with a node per
+    # file on top of the bytes; twice the corpus is the least to try it with.
+    root = sources_root_state(session)
+    if root["ram"] and (root["heap"] is None or root["heap"] < 2 * total_bytes):
+        _manifest_progress(
+            f"not pushing {total_bytes // 1024} KiB into RAM ({REMOTE_SOURCES_ROOT}, "
+            f"kernel heap {(root['heap'] or 0) // 1024} KiB); verifying per test"
+        )
+        return None
     _manifest_progress(
         f"pushing {len(transfers)} of {len(corpus)} sources "
         f"({total_bytes // 1024} KiB) in one batch"
@@ -1797,8 +1845,8 @@ def flush_source_manifest(session, force=False):
     return True
 
 
-def _names_a_confirmed_source(compile_output, confirmed):
-    """Did tcc fail to open a file the confirmed set claims to have put there?
+def _confirmed_sources_named(compile_output, confirmed):
+    """The inputs tcc failed to open that the confirmed set claims are there.
 
     A source we passed on the command line is named by its full remote path. An
     include is named the way the source spelled it, so it is matched by
@@ -1807,13 +1855,19 @@ def _names_a_confirmed_source(compile_output, confirmed):
     blamed on the manifest.
     """
     basenames = {posixpath.basename(remote_path) for remote_path in confirmed or {}}
+    named = set()
     for match in MISSING_INPUT_PATTERN.finditer(compile_output):
         name = match.group("name")
-        if name.startswith(REMOTE_SOURCES_ROOT + "/"):
-            return True
-        if posixpath.basename(name) in basenames:
-            return True
-    return False
+        if name.startswith(REMOTE_SOURCES_ROOT + "/") or posixpath.basename(name) in basenames:
+            named.add(name)
+    return named
+
+
+# Inputs that have already cost the manifest once this session. A re-push puts
+# every source back, so one that is still missing afterwards was there all
+# along and the device could not open it -- dropping again would only push the
+# whole corpus once more for every remaining test that includes it.
+_missing_after_repush = set()
 
 
 def note_compile_failure_for_manifest(session, compile_output):
@@ -1828,8 +1882,16 @@ def note_compile_failure_for_manifest(session, compile_output):
     if not SOURCE_MANIFEST_ENABLED:
         return
     confirmed = getattr(session, "confirmed_uploads", None)
-    if not _names_a_confirmed_source(compile_output, confirmed):
+    named = _confirmed_sources_named(compile_output, confirmed)
+    if not named:
         return
+    if named <= _missing_after_repush:
+        logger.warning(
+            "source manifest: %s still missing after a re-push; the device cannot "
+            "open it, keeping the manifest", ", ".join(sorted(named))
+        )
+        return
+    _missing_after_repush.update(named)
 
     if confirmed is not None:
         confirmed.clear()
@@ -1958,7 +2020,85 @@ def _discover_local_dependencies(upload_entries):
 
     return discovered
 
+# Filesystems that keep their files in RAM. On a target whose card is missing
+# or not laid out for /etc/fstab, /var and /home fall back to ramfs -- and so
+# does /root, bound to /home/root. A ramfs lives on the kernel heap: on QEMU
+# that is room enough for a test's sources, on the rp2350 (about 80 KiB) it
+# takes no writes at all, and the nodes of a few hundred empty files pushed
+# there anyway used to exhaust the heap and take the kernel down.
+_RAM_FILESYSTEMS = {"ramfs", "tmpfs"}
+
+
+def _backing_fstype(path, mounts):
+    """The filesystem *path* is stored on, following bind mounts.
+
+    *mounts* is [(source, target, fstype)] from /proc/mounts."""
+    for _ in range(8):  # a bind of a bind of ...
+        best = None
+        for source, target, fstype in mounts:
+            inside = target == "/" or path == target or path.startswith(target + "/")
+            if inside and (best is None or len(target) > len(best[1])):
+                best = (source, target, fstype)
+        if best is None:
+            return None
+        source, target, fstype = best
+        if fstype != "bind":
+            return fstype
+        rest = path if target == "/" else path[len(target):]
+        path = source.rstrip("/") + rest
+    return None
+
+
+def _meminfo_bytes(text, key):
+    """A size from /proc/meminfo ("MemKernelLimit:   80 KB"), or None."""
+    match = re.search(rf"^{key}:\s+(\d+)\s*(MB|KB|B)\b", text, re.MULTILINE)
+    if not match:
+        return None
+    scale = {"MB": 1 << 20, "KB": 1 << 10, "B": 1}[match.group(2)]
+    return int(match.group(1)) * scale
+
+
+def sources_root_state(session):
+    """Where REMOTE_SOURCES_ROOT is stored: {"ram": bool, "heap": bytes or None,
+    "unusable": reason or None}.
+
+    Asked once per boot of the target (the generation the session bumps on a
+    reset); the answer only changes when the card does."""
+    generation = getattr(session, "confirmed_uploads_generation", 0)
+    cached = getattr(session, "_sources_root_state", None)
+    if cached is not None and cached[0] == generation:
+        return cached[1]
+    session.write_command("cat /proc/mounts")
+    mounts = []
+    for line in session.read_until_prompt().splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1].startswith("/"):
+            mounts.append((fields[0], fields[1], fields[2]))
+    fstype = _backing_fstype(REMOTE_SOURCES_ROOT, mounts)
+    state = {"ram": fstype in _RAM_FILESYSTEMS, "heap": None, "unusable": None}
+    if state["ram"]:
+        session.write_command("cat /proc/meminfo")
+        state["heap"] = _meminfo_bytes(session.read_until_prompt(), "MemKernelLimit")
+        probe = posixpath.join(REMOTE_SOURCES_ROOT, ".write_probe")
+        session.write_command(
+            f"mkdir -p {shlex.quote(REMOTE_SOURCES_ROOT)} && echo write-probe-ok > "
+            f"{shlex.quote(probe)} && cat {shlex.quote(probe)}; rm -f {shlex.quote(probe)}"
+        )
+        if "write-probe-ok" not in session.read_until_prompt().replace("echo write-probe-ok", ""):
+            state["unusable"] = (
+                f"{REMOTE_SOURCES_ROOT} is on {fstype} (RAM) and takes no writes: the SD "
+                f"card is missing or not laid out for /etc/fstab -- run `cardreformat` "
+                f"on the target (docs/storage.md) and reboot it"
+            )
+            _manifest_progress(f"not uploading: {state['unusable']}")
+    session._sources_root_state = (generation, state)
+    return state
+
+
 def upload_test_sources(testcase, session):
+    unusable = sources_root_state(session)["unusable"]
+    if unusable:
+        pytest.skip(unusable)
     ensure_source_manifest_seeded(session)
 
     upload_states = []
@@ -2487,6 +2627,13 @@ def test_run_ir_test_suite(request, testcase):
 
     progress = ProgressLine(testcase.test_id)
 
+    original_stack_size = None
+    required_stack_kb = testcase.run_stack_kib
+    if required_stack_kb is not None:
+        with record("setup_ms"):
+            original_stack_size = _read_stack_size(session)
+            _set_stack_size(session, required_stack_kb)
+
     try:
         run_case_with_optional_rerun(
             testcase, session, request, temp_source_plan, progress, timing
@@ -2495,6 +2642,9 @@ def test_run_ir_test_suite(request, testcase):
         progress.finish("failed")
         raise
     finally:
+        if original_stack_size is not None:
+            with record("cleanup_ms"):
+                _set_stack_size(session, original_stack_size)
         end_case()
         timing_results.append(timing)
     progress.finish("ok")

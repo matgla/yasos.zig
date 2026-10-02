@@ -13,6 +13,7 @@
  *   fatimg cp     <img> <host> <fat>  copy host file -> image
  *   fatimg cpmany <img> <listfile>  copy many files under one mount
  *   fatimg get    <img> <fat> <host>  copy image file -> host
+ *   fatimg pull   <img> <hostdir>    copy the whole volume -> host dir
  *   fatimg ls     <img>             list root directory
  *
  * Copyright (C) 2025 Mateusz Stadnik <matgla@live.com>
@@ -21,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include <ff.h>
 
@@ -281,6 +284,83 @@ out_unmount:
   return rc;
 }
 
+/* Copy one FAT directory (and everything under it) into a host directory. */
+static int pull_dir(const char *fat, const char *host) {
+  if (mkdir(host, 0777) && errno != EEXIST) {
+    fprintf(stderr, "fatimg: mkdir(%s): %s\n", host, strerror(errno));
+    return 1;
+  }
+  DIR dir;
+  FRESULT r = f_opendir(&dir, fat);
+  if (r != FR_OK) {
+    fprintf(stderr, "fatimg: f_opendir(%s): %s\n", fat, frtext(r));
+    return 1;
+  }
+  int rc = 0;
+  FILINFO fno;
+  for (;;) {
+    r = f_readdir(&dir, &fno);
+    if (r != FR_OK) {
+      fprintf(stderr, "fatimg: f_readdir(%s): %s\n", fat, frtext(r));
+      rc = 1;
+      break;
+    }
+    if (fno.fname[0] == 0)
+      break;
+    char fpath[1024], hpath[4096];
+    snprintf(fpath, sizeof(fpath), "%s/%s", fat, fno.fname);
+    snprintf(hpath, sizeof(hpath), "%s/%s", host, fno.fname);
+    if (fno.fattrib & AM_DIR) {
+      rc |= pull_dir(fpath, hpath);
+      continue;
+    }
+    FIL ff;
+    r = f_open(&ff, fpath, FA_READ);
+    if (r != FR_OK) {
+      fprintf(stderr, "fatimg: f_open(%s) for read: %s\n", fpath, frtext(r));
+      rc = 1;
+      continue;
+    }
+    FILE *hf = fopen(hpath, "wb");
+    if (!hf) {
+      fprintf(stderr, "fatimg: create %s: %s\n", hpath, strerror(errno));
+      f_close(&ff);
+      rc = 1;
+      continue;
+    }
+    static BYTE buf[4096];
+    UINT br;
+    do {
+      r = f_read(&ff, buf, sizeof(buf), &br);
+      if (r != FR_OK) {
+        fprintf(stderr, "fatimg: f_read(%s): %s\n", fpath, frtext(r));
+        rc = 1;
+        break;
+      }
+      if (br && fwrite(buf, 1, br, hf) != br) {
+        fprintf(stderr, "fatimg: write %s: %s\n", hpath, strerror(errno));
+        rc = 1;
+        break;
+      }
+    } while (br == sizeof(buf));
+    fclose(hf);
+    f_close(&ff);
+  }
+  f_closedir(&dir);
+  return rc;
+}
+
+static int cmd_pull(int argc, char **argv) {
+  /* argv: <img> <hostdir> */
+  (void)argc;
+  if (do_mount(argv[0]))
+    return 1;
+  int rc = pull_dir("0:", argv[1]);
+  f_mount(0, "0:", 0);
+  fatimg_close();
+  return rc;
+}
+
 static int cmd_ls(int argc, char **argv) {
   (void)argc;
   const char *img = argv[0];
@@ -311,11 +391,12 @@ static int cmd_ls(int argc, char **argv) {
 int main(int argc, char **argv) {
   if (argc < 3) {
     fprintf(stderr,
-            "usage: %s <mkfs|cp|cpmany|get|ls> <img> [args...]\n"
+            "usage: %s <mkfs|cp|cpmany|get|pull|ls> <img> [args...]\n"
             "  mkfs   <img> [size_kb]\n"
             "  cp     <img> <hostfile> <fatname>\n"
             "  cpmany <img> <listfile>   ('<host>\\t<fat>' per line, one mount)\n"
             "  get    <img> <fatname> <hostfile>\n"
+            "  pull   <img> <hostdir>    (the whole volume, recursively)\n"
             "  ls     <img>\n",
             argv[0]);
     return 2;
@@ -331,6 +412,8 @@ int main(int argc, char **argv) {
     return (nrest >= 2) ? cmd_cpmany(nrest, rest) : 2;
   if (!strcmp(cmd, "get"))
     return (nrest >= 3) ? cmd_get(nrest, rest) : 2;
+  if (!strcmp(cmd, "pull"))
+    return (nrest >= 2) ? cmd_pull(nrest, rest) : 2;
   if (!strcmp(cmd, "ls"))
     return cmd_ls(nrest, rest);
   fprintf(stderr, "fatimg: unknown command '%s'\n", cmd);

@@ -71,6 +71,13 @@ pub const Tier = struct {
     spills: usize = 0,
     spilled_bytes: usize = 0,
 
+    /// Bodies on `backing` now, and whether new ones may be made there: the
+    /// spill directory's mount can go only while it holds none (`detach`).
+    /// A spill counts itself before it checks `detached`, and `detach` sets
+    /// it before it checks the count, so one of the two always sees the other.
+    live_bodies: kernel.sync.Atomic(u32) = .init(0),
+    detached: kernel.sync.Atomic(bool) = .init(false),
+
     pub fn init(backing: *kernel.fs.IFileSystem, directory: []const u8, max_file_bytes: usize) Tier {
         return .{
             .backing = backing,
@@ -129,6 +136,46 @@ pub const Tier = struct {
         self.backing.interface.unlink(path) catch |err| {
             log.warn("can't remove spilled body '{s}': {s}", .{ path, @errorName(err) });
         };
+    }
+
+    /// Count a body about to be made. Fails while detached (ENOSPC for the
+    /// write); `keeps_in_arena` says when the file stays in RAM instead.
+    pub fn claim_body(self: *Tier) !void {
+        _ = self.live_bodies.fetchAdd(1, .seq_cst);
+        if (self.detached.load(.seq_cst)) {
+            _ = self.live_bodies.fetchSub(1, .seq_cst);
+            return kernel.errno.ErrnoSet.NoSpaceLeftOnDevice;
+        }
+    }
+
+    /// A body counted by `claim_body` is gone.
+    pub fn drop_body(self: *Tier) void {
+        _ = self.live_bodies.fetchSub(1, .seq_cst);
+    }
+
+    /// The spill directory's mount is going away: make no more bodies there.
+    /// Busy while a file still has its body there -- the data would go with
+    /// the mount (removing the file frees it).
+    pub fn detach(self: *Tier) !void {
+        self.detached.store(true, .seq_cst);
+        const live = self.live_bodies.load(.seq_cst);
+        if (live != 0) {
+            self.detached.store(false, .seq_cst);
+            log.info("{d} file(s) in /tmp have their data in {s}", .{ live, self.directory });
+            return kernel.errno.ErrnoSet.DeviceOrResourceBusy;
+        }
+    }
+
+    /// Whether a body due to spill stays in the arena instead: only while
+    /// detached, and only while the arena -- never the kernel heap, which is
+    /// what a tier without one allocates from -- has room above its reserve.
+    pub fn keeps_in_arena(self: *const Tier, grows: bool) bool {
+        if (!self.detached.load(.seq_cst) or self.arena == null) return false;
+        return !(grows and self.arena_is_low());
+    }
+
+    pub fn reattach(self: *Tier) void {
+        self.detached.store(false, .seq_cst);
     }
 
     pub fn account_spill(self: *Tier, bytes: usize) void {

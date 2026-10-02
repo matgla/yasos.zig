@@ -42,28 +42,27 @@ pub const MapsFile = interface.DeriveFromBase(MapsBufferedFile, struct {
     base: MapsBufferedFile,
     _pid: i16,
 
-    pub fn create(pid: i16) MapsFile {
-        var file = MapsFile.init(.{
-            .base = MapsBufferedFile.InstanceType.create("maps"),
+    pub fn create(allocator: std.mem.Allocator, pid: i16) MapsFile {
+        return MapsFile.init(.{
+            .base = MapsBufferedFile.InstanceType.create(allocator, "maps"),
             ._pid = pid,
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator, pid: i16) anyerror!kernel.fs.Node {
-        const file = try create(pid).interface.new(allocator);
+        var file = try create(allocator, pid).interface.new(allocator);
+        _ = file.interface.sync();
         return kernel.fs.Node.create_file(file);
     }
 
     pub fn sync(self: *Self) i32 {
-        var buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         const written = kernel.dynamic_loader.format_maps(@intCast(self._pid), buffer[0..]);
         interface.base(self)._end = written;
         return 0;
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });

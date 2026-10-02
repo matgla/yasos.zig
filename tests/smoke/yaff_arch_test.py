@@ -39,10 +39,13 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DONOR = os.path.join(REPO_ROOT, "rootfs", "usr", "bin", "hello")
 DONOR_OUTPUT = "Hello, World!"
 
-# Field offsets in the packed 92-byte YaffHeader (libs/tinycc/source/obj/tccyaff.h).
+# Field offsets in the packed YaffHeader (libs/tinycc/source/obj/tccyaff.h),
+# YAFF_VERSION 4.  arch_section_offset is 32-bit since version 3; the 16-bit
+# one these cases used to patch at byte 60 is got_length now, so they read the
+# section's position from the wrong field and corrupted the GOT size instead.
 HDR_ARCH = 5  # uint16
 HDR_YAFF_VERSION = 7  # uint8
-HDR_ARCH_SECTION_OFFSET = 60  # uint16
+HDR_ARCH_SECTION_OFFSET = 72  # uint32
 
 # Field offsets inside YaffArchSection.
 SEC_FPU = 3  # uint8
@@ -62,7 +65,7 @@ def _read_donor():
 
 
 def _arch_section_offset(image):
-    (offset,) = struct.unpack_from("<H", image, HDR_ARCH_SECTION_OFFSET)
+    (offset,) = struct.unpack_from("<I", image, HDR_ARCH_SECTION_OFFSET)
     assert offset != 0, "donor image carries no architecture section"
     return offset
 
@@ -118,7 +121,7 @@ def test_rejects_unknown_format_version(request):
 def test_rejects_missing_arch_section(request):
     session = request.node.stash[session_key]
     image = _read_donor()
-    struct.pack_into("<H", image, HDR_ARCH_SECTION_OFFSET, 0)
+    struct.pack_into("<I", image, HDR_ARCH_SECTION_OFFSET, 0)
     output = _run_image(session, image, "yaff_nosec")
     _assert_refused(output, "MissingArchSection")
 

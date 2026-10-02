@@ -68,22 +68,20 @@ pub const UartStatFile = interface.DeriveFromBase(UartStatBufferedFile, struct {
     const Self = @This();
     base: UartStatBufferedFile,
 
-    pub fn create() UartStatFile {
-        var file = UartStatFile.init(.{
-            .base = UartStatBufferedFile.InstanceType.create("uart"),
+    pub fn create(allocator: std.mem.Allocator) UartStatFile {
+        return UartStatFile.init(.{
+            .base = UartStatBufferedFile.InstanceType.create(allocator, "uart"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
     pub fn sync(self: *Self) i32 {
         const stats = if (provider) |source| source() else Stats{};
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         const buf = vfmt.print(
             buffer,
             "rx_bytes {d}\nrx_overruns {d}\nrx_dropped {d}\nrx_fifo_full {d}\n" ++
@@ -101,7 +99,7 @@ pub const UartStatFile = interface.DeriveFromBase(UartStatBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -116,7 +114,7 @@ test "UartStatFile.ShouldCreateNode" {
 
 test "UartStatFile.ShouldReportZerosWithoutAProvider" {
     clear_provider();
-    var sut = try UartStatFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try UartStatFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());
@@ -149,7 +147,7 @@ test "UartStatFile.ShouldReportTheProvidersCounters" {
     set_provider(&Source.get);
     defer clear_provider();
 
-    var sut = try UartStatFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try UartStatFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());

@@ -722,6 +722,38 @@ pub const ProcessMemoryPool = struct {
         mark_free(region, old_end, new_end);
         return null;
     }
+
+    /// Shrink an existing allocation in place: the pages past `new_pages` go back
+    /// to the pool and the mapping keeps its start address. Returns the shortened
+    /// slice, or null when `address` is not the start of a mapping of `old_pages`
+    /// owned by `pid` (or `new_pages` is not smaller). Without this a mapping could
+    /// only be released whole, so shrinking one meant a copy while both existed.
+    pub fn try_shrink_pages(self: *ProcessMemoryPool, address: *anyopaque, old_pages: i32, new_pages: i32, pid: c.pid_t) ?[]u8 {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        if (new_pages <= 0 or new_pages >= old_pages) return null;
+        const addr_int = @intFromPtr(address);
+        const region = self.region_for_addr(addr_int) orelse return null;
+
+        // old/new_pages count in the 256 B grain; round to this region's grain.
+        const old_region_pages = (@as(usize, @intCast(old_pages)) * page_size + region.page_size - 1) / region.page_size;
+        const new_region_pages = (@as(usize, @intCast(new_pages)) * page_size + region.page_size - 1) / region.page_size;
+        const start_index = (addr_int - region.start_address) / region.page_size;
+
+        const mapping = self.memory_map.getPtr(pid) orelse return null;
+        var next = mapping.first;
+        while (next) |entity_node| : (next = entity_node.next) {
+            const entity: *ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
+            if (@as(*anyopaque, entity.address.ptr) != address) continue;
+            // Only the whole mapping, as the caller knows it, may be cut down:
+            // a stale length would free pages this entity does not cover.
+            if (entity.address.len != old_region_pages * region.page_size) return null;
+            mark_free(region, start_index + new_region_pages, start_index + old_region_pages);
+            entity.address = entity.address[0 .. new_region_pages * region.page_size];
+            return entity.address;
+        }
+        return null;
+    }
 };
 
 test "ProcessMemoryPool.ShouldInitializeAndDeinitialize" {
@@ -996,6 +1028,43 @@ fn expect_hint_is_lower_bound(pool: *const ProcessMemoryPool) !void {
             try std.testing.expect(region.page_bitmap.isSet(index));
         }
     }
+}
+
+test "ProcessMemoryPool.ShrinkGivesBackTheTailInPlace" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 4;
+    const pages = pool.allocate_pages(8, pid).?;
+    const after = pool.allocate_pages(1, pid).?;
+    @memset(pages, 0x5a);
+
+    // A stale length is refused and changes nothing.
+    try std.testing.expect(pool.try_shrink_pages(pages.ptr, 7, 3, pid) == null);
+    // So is growing, shrinking to nothing, or another process's mapping.
+    try std.testing.expect(pool.try_shrink_pages(pages.ptr, 8, 8, pid) == null);
+    try std.testing.expect(pool.try_shrink_pages(pages.ptr, 8, 0, pid) == null);
+    try std.testing.expect(pool.try_shrink_pages(pages.ptr, 8, 3, pid + 1) == null);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 9), pool.get_used_size());
+
+    const shrunk = pool.try_shrink_pages(pages.ptr, 8, 3, pid).?;
+    try std.testing.expectEqual(pages.ptr, shrunk.ptr);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 3), shrunk.len);
+    for (shrunk) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
+    try std.testing.expectEqual(@as(usize, ProcessMemoryPool.page_size * 4), pool.get_used_size());
+    try std.testing.expectEqual(@as(usize, 4), pool.used_pages_for(pid));
+    try expect_counts_match_bitmap(&pool);
+
+    // The freed tail sits between the shrunk mapping and `after`: first fit reuses it.
+    const reused = pool.allocate_pages(5, pid).?;
+    try std.testing.expectEqual(@intFromPtr(pages.ptr) + 3 * ProcessMemoryPool.page_size, @intFromPtr(reused.ptr));
+
+    // The mapping is released by its new length.
+    pool.free_pages(shrunk.ptr, 3, pid);
+    pool.free_pages(reused.ptr, 5, pid);
+    pool.free_pages(after.ptr, 1, pid);
+    try expect_counts_match_bitmap(&pool);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
 }
 
 test "ProcessMemoryPool.UsedCountTracksBitmapAcrossAllocAndFree" {

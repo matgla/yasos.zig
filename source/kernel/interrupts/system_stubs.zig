@@ -37,7 +37,7 @@ const FileType = @import("../fs/ifile.zig").FileType;
 const handlers = @import("syscall_handlers.zig");
 
 // Issue a system call via the SVC trap so the work runs in the privileged
-// kernel handler. These newlib porting stubs are resolved into user processes,
+// kernel handler. These libc porting hooks (libs/libc/noos/syscalls.c) are resolved into user processes,
 // which run unprivileged when kernel MPU protection is enabled; calling kernel
 // code directly from them would fault on the protected kernel RAM, so they must
 // trap instead. Mirrors libc's trigger_syscall (libs/libc/syscalls.c).
@@ -57,6 +57,13 @@ fn get_file_from_process(fd: u16) ?*kernel.fs.IFile {
         }
     }
     return null;
+}
+
+// The no-OS libc has no abort(), and newlib's went with it, but libgcc's ARM
+// unwinder (pulled in by the kernel's C in ReleaseSafe) calls one. Inside the
+// kernel there is nothing to abort but the kernel.
+pub export fn abort() noreturn {
+    @panic("abort()");
 }
 
 pub export fn _exit(code: c_int) void {
@@ -160,9 +167,9 @@ extern var end: u8;
 extern var __heap_limit__: u8;
 var heap_end: *u8 = &end;
 
-// newlib (and other C runtimes) expect sbrk() to report failure by returning
-// (void*)-1, NOT NULL: malloc/sbrk_aligned check `p == (void*)-1` (compiled as
-// `adds r,p,#1; beq fail`).  Returning 0 made newlib treat NULL as a valid
+// C runtimes expect sbrk() to report failure by returning (void*)-1, NOT NULL:
+// malloc checks `p == (void*)-1` (compiled as `adds r,p,#1; beq fail`).
+// Returning 0 once made newlib, the kernel's libc then, treat NULL as a valid
 // allocation on heap exhaustion, so it wrote chunk metadata at low/invalid
 // addresses and corrupted the kernel stack -> wild `pop {pc}` HardFault
 // (seen as a kernel-context fault in sbrk_aligned under tcc at -O1/-O2).
@@ -173,7 +180,7 @@ export fn _sbrk(incr: usize) *allowzero anyopaque {
     const next_heap_end: *u8 = @ptrFromInt(@intFromPtr(heap_end) + incr);
 
     if (@intFromPtr(next_heap_end) >= @intFromPtr(&__heap_limit__)) {
-        // Kernel heap exhausted. Returning SBRK_FAILED lets newlib hand NULL
+        // Kernel heap exhausted. Returning SBRK_FAILED lets malloc hand NULL
         // back to the caller (the documented contract), but a kernel allocation
         // that silently fails tends to resurface far away as corrupted
         // bookkeeping — e.g. the process-tracking structs that live in
@@ -191,10 +198,10 @@ export fn _sbrk(incr: usize) *allowzero anyopaque {
     return prev_heap_end;
 }
 
-/// True physical kernel-heap bytes claimed from the SRAM heap region. newlib's
-/// malloc grows the break via _sbrk and (almost) never returns it, so this is an
+/// True physical kernel-heap bytes claimed from the SRAM heap region. libc's
+/// malloc grows the break via _sbrk and never returns it, so this is an
 /// accurate high-water of physical kernel_ram in use — and, unlike malloc.zig's
-/// memory_in_use counter, it INCLUDES leak-detection trackers, newlib chunk
+/// memory_in_use counter, it INCLUDES leak-detection trackers, malloc chunk
 /// headers, and free-list fragmentation. This is the number to size kernel_ram by.
 pub fn kernel_heap_physical_used() usize {
     return @intFromPtr(heap_end) - @intFromPtr(&end);
@@ -211,33 +218,26 @@ pub fn process_sbrk(incr: usize) *allowzero anyopaque {
     return prev_heap_end;
 }
 
-// newlib guards its malloc free-list with __malloc_lock/__malloc_unlock, but the
-// default retarget stubs are no-ops (`bx lr`).  The KERNEL heap is newlib malloc
-// (used by the dynamic loader during execve / lazy PLT resolve), so without a
-// real lock the free-list had NO protection against re-entrancy: a SysTick ->
-// PendSV context switch could preempt a malloc/free mid free-list update and let
-// another kernel allocation splice the chain, producing a wild `pop {pc}` == 0
-// HardFault in sbrk_aligned / the loader's generate_thunk / lazy_resolve.  This
-// is timing-dependent, so it only surfaced under heavy host load (parallel QEMU
-// smoke runs) where the CPU-starved guest widens the preemption window.
+// libc (libs/libc/noos/malloc.c) guards its free list with
+// __malloc_lock/__malloc_unlock, weak no-ops unless the program supplies its
+// own. The KERNEL heap is that malloc (used by the dynamic loader during execve
+// / lazy PLT resolve), so without a real lock the free list has NO protection
+// against re-entrancy: a SysTick -> PendSV context switch could preempt a
+// malloc/free mid free-list update and let another kernel allocation splice the
+// chain. With newlib underneath that produced a wild `pop {pc}` == 0 HardFault
+// in sbrk_aligned / the loader's generate_thunk / lazy_resolve, timing-dependent
+// enough to surface only under heavy host load (parallel QEMU smoke runs).
 //
 // A blocking mutex/semaphore is the WRONG primitive here: Semaphore.acquire()
 // issues an SVC, and the lazy resolver already runs in SVC/exception context
 // (nested SVC -> HardFault); it would also yield the CPU while the heap invariant
-// is half-updated.  The correct fix is a short interrupt-disabled critical
-// section.  It must be nesting-safe because newlib's realloc takes the lock and
-// then calls the (also-locking) _malloc_r / _free_r.
+// is half-updated. The correct fix is a short interrupt-disabled critical
+// section, and a nesting-safe one: the Zig allocator in malloc.zig holds it
+// around its own call into malloc.
 //
-// The interrupt-disabled section is now a *ranked recursive spinlock* around the
+// The interrupt-disabled section is a *ranked recursive spinlock* around the
 // same nesting counter -- see memory/heap/kheap_lock.zig. PRIMASK alone excludes
 // this core's own handlers and nothing on a second core.
-
-// On RP2350 the pico-sdk references malloc early, pulling newlib's strong mlock.o
-// into the link ahead of this Zig compilation unit -> a duplicate-symbol error.
-// There the override is provided by hal/source/raspberry/rp2350/malloc_lock.c
-// (a C object linked before libc_nano.a), so this Zig export is compiled out.
-const provide_malloc_lock_in_zig = !std.mem.eql(u8, config.cpu.cpu, "rp2350");
-
 fn malloc_lock_impl(_: ?*anyopaque) callconv(.c) void {
     kheap_lock.yasos_kheap_lock();
 }
@@ -247,14 +247,8 @@ fn malloc_unlock_impl(_: ?*anyopaque) callconv(.c) void {
 }
 
 comptime {
-    // Unconditional: on the rp2350 the Zig `__malloc_lock` export is compiled
-    // out (link order), but malloc_lock.c still forwards to the Zig lock, so
-    // the implementation has to be emitted regardless.
-    _ = kheap_lock;
-    if (provide_malloc_lock_in_zig) {
-        @export(&malloc_lock_impl, .{ .name = "__malloc_lock" });
-        @export(&malloc_unlock_impl, .{ .name = "__malloc_unlock" });
-    }
+    @export(&malloc_lock_impl, .{ .name = "__malloc_lock" });
+    @export(&malloc_unlock_impl, .{ .name = "__malloc_unlock" });
 }
 
 export fn hard_assertion_failure() void {

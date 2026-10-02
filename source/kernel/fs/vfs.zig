@@ -77,6 +77,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     fn raw_create(self: *Self, path: []const u8, mode: i32) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
+            if (node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
             return try node.point.filesystem.interface.create(node.left, mode);
         }
         return kernel.errno.ErrnoSet.NoEntry;
@@ -85,6 +86,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     fn raw_mkdir(self: *Self, path: []const u8, mode: i32) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
+            if (node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
             return try node.point.filesystem.interface.mkdir(node.left, mode);
         }
         return kernel.errno.ErrnoSet.NoEntry;
@@ -93,6 +95,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     fn raw_unlink(self: *Self, path: []const u8) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
+            if (node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
             return node.point.filesystem.interface.unlink(node.left);
         }
         return kernel.errno.ErrnoSet.NoEntry;
@@ -122,8 +125,27 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     fn raw_utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_symlinks: bool) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         if (maybe_node) |*node| {
+            if (node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
             const trimmed_path = std.mem.trim(u8, node.left, "/ ");
             return try node.point.filesystem.interface.utimens(trimmed_path, times, follow_symlinks);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    fn raw_chmod(self: *Self, path: []const u8, mode: u32, follow_symlinks: bool) anyerror!void {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            if (node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+            return node.point.filesystem.interface.chmod(std.mem.trim(u8, node.left, "/ "), mode, follow_symlinks);
+        }
+        return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    fn raw_chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_symlinks: bool) anyerror!void {
+        const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
+        if (maybe_node) |*node| {
+            if (node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+            return node.point.filesystem.interface.chown(std.mem.trim(u8, node.left, "/ "), uid, gid, follow_symlinks);
         }
         return kernel.errno.ErrnoSet.NoEntry;
     }
@@ -147,6 +169,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     fn raw_symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, linkpath);
         if (maybe_node) |*node| {
+            if (node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
             return try node.point.filesystem.interface.symlink(target, node.left);
         }
         return kernel.errno.ErrnoSet.NoEntry;
@@ -372,11 +395,81 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         try self.mount_points.mount_filesystem(path, fs);
     }
 
+    /// Mount with the description `/proc/mounts` shows. On error the caller
+    /// still owns `fs`.
+    pub fn mount_filesystem_with_info(self: *Self, path: []const u8, fs: IFileSystem, info: kernel.fs.MountInfo) !void {
+        try self.mount_points.mount_filesystem_with_info(path, fs, info);
+    }
+
+    /// chmod(2), with the same symlink fallback as `stat`.
+    pub fn chmod(self: *Self, path: []const u8, mode: u32, follow_symlinks: bool) anyerror!void {
+        return self.raw_chmod(path, mode, follow_symlinks) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_chmod(resolved, mode, follow_symlinks);
+            }
+            return err;
+        };
+    }
+
+    /// chown(2), likewise.
+    pub fn chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_symlinks: bool) anyerror!void {
+        return self.raw_chown(path, uid, gid, follow_symlinks) catch |err| {
+            const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
+            if (maybe_resolved) |resolved| {
+                defer self.mount_points.allocator.free(resolved);
+                return self.raw_chown(resolved, uid, gid, follow_symlinks);
+            }
+            return err;
+        };
+    }
+
+    /// Whether `path` lies on a mount made with `ro`. `open` asks before it
+    /// hands out a descriptor that could write.
+    pub fn is_read_only(self: *Self, path: []const u8) bool {
+        const match = self.mount_points.find_longest_matching_point(*MountPoint, path) orelse return false;
+        return match.point.info.read_only();
+    }
+
+    /// The root filesystem's figures; `statvfs_path` is the useful one.
+    pub fn statvfs(self: *Self) anyerror!kernel.fs.FsStats {
+        return self.statvfs_path("/");
+    }
+
+    /// statvfs(2): the figures of whichever filesystem serves `path`.
+    pub fn statvfs_path(self: *Self, path: []const u8) anyerror!kernel.fs.FsStats {
+        const match = self.mount_points.find_longest_matching_point(*MountPoint, path) orelse return kernel.errno.ErrnoSet.NoEntry;
+        var filesystem = match.point.filesystem;
+        var stats = try filesystem.interface.statvfs();
+        if (match.point.info.read_only()) stats.read_only = true;
+        return stats;
+    }
+
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
         _ = self;
         _ = old_path;
         _ = new_path;
         return error.NotSupported;
+    }
+
+    /// rename(2). Both paths have to land on the same mount point: moving an
+    /// entry between filesystems would mean copying the contents, which
+    /// rename() is not allowed to do (EXDEV is the answer that tells a caller
+    /// to copy-and-delete itself, and every runtime knows to do that).
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        const maybe_old = self.mount_points.find_longest_matching_point(*MountPoint, old_path);
+        const maybe_new = self.mount_points.find_longest_matching_point(*MountPoint, new_path);
+        if (maybe_old == null or maybe_new == null) {
+            return kernel.errno.ErrnoSet.NoEntry;
+        }
+        const old_node = maybe_old.?;
+        const new_node = maybe_new.?;
+        if (old_node.point != new_node.point) {
+            return kernel.errno.ErrnoSet.CrossDeviceLink;
+        }
+        if (old_node.point.info.read_only()) return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
+        return old_node.point.filesystem.interface.rename(old_node.left, new_node.left);
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {

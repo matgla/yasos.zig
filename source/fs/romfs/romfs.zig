@@ -110,6 +110,19 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         var node = try self.get_file_header(path, follow_symlinks);
         defer node.deinit();
         node.stat(data, kernel.time.timespec_of_uptime_us(self.mount_uptime_us));
+        // Per instance, like the other filesystems: `df` takes st_dev 0 as
+        // "overmounted" and hid the root.
+        data.st_dev = @truncate(std.hash.Wyhash.hash(@intFromPtr(self), "romfs") | 1);
+    }
+
+    /// The whole image, all of it used: nothing is ever written to it.
+    pub fn statvfs(self: *Self) anyerror!kernel.fs.FsStats {
+        return .{
+            .block_size = 512,
+            .total_blocks = (@as(u64, self.root.size()) + 511) / 512,
+            .free_blocks = 0,
+            .read_only = true,
+        };
     }
 
     pub fn supports_symlinks(self: *const Self) bool {
@@ -220,14 +233,9 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
         var node = try self.get(path);
-        defer node.delete();
+        node.delete();
 
-        if ((mode & c.X_OK) != 0) {
-            if (node.filetype() == FileType.Directory) {
-                return kernel.errno.ErrnoSet.IsADirectory;
-            }
-        }
-
+        // X_OK on a directory is search permission, which every one grants.
         if ((mode & c.W_OK) != 0) {
             return kernel.errno.ErrnoSet.ReadOnlyFileSystem;
         }
@@ -657,8 +665,10 @@ test "RomFs.ShouldAccessDirectory" {
     // Test directory existence
     try fs.interface.access("/subdir", c.F_OK, 0);
 
-    // Test execute access on directory should fail with IsADirectory
-    try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, fs.interface.access("/subdir", c.X_OK, 0));
+    // X_OK on a directory asks for search permission, which it has
+    // (configure checks "test -x /"); W_OK is a read-only filesystem.
+    try fs.interface.access("/subdir", c.X_OK, 0);
+    try std.testing.expectError(kernel.errno.ErrnoSet.ReadOnlyFileSystem, fs.interface.access("/subdir", c.W_OK, 0));
 }
 
 test "RomFs.ShouldRejectAccessOnNonExistentPath" {

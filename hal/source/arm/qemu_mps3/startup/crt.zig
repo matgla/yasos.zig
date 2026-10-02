@@ -49,8 +49,6 @@ fn initialize_bss() void {
     @memset(bss_start[0..bss_len], 0);
 }
 
-export fn _init() void {}
-
 fn enable_fpu() void {
     // Enable the FPU (full access to CP10/CP11) before any FP instruction.
     // CPACR is banked per core, so every core has to do this for itself.

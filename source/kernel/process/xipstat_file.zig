@@ -138,22 +138,20 @@ pub const XipStatFile = interface.DeriveFromBase(XipStatBufferedFile, struct {
     const Self = @This();
     base: XipStatBufferedFile,
 
-    pub fn create() XipStatFile {
-        var file = XipStatFile.init(.{
-            .base = XipStatBufferedFile.InstanceType.create("xip"),
+    pub fn create(allocator: std.mem.Allocator) XipStatFile {
+        return XipStatFile.init(.{
+            .base = XipStatBufferedFile.InstanceType.create(allocator, "xip"),
         });
-        _ = file.data().sync();
-        return file;
     }
 
     pub fn create_node(allocator: std.mem.Allocator) anyerror!kernel.fs.Node {
-        const file = try create().interface.new(allocator);
+        const file = try create(allocator).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }
 
     pub fn sync(self: *Self) i32 {
         const stats = read_stats();
-        const buffer = &interface.base(self)._buffer;
+        const buffer = interface.base(self).buffer() orelse return -1;
         const buf = vfmt.print(
             buffer,
             "xip_hit {d}\nxip_acc {d}\nxip_saturated {d}\n",
@@ -164,7 +162,7 @@ pub const XipStatFile = interface.DeriveFromBase(XipStatBufferedFile, struct {
     }
 
     pub fn delete(self: *Self) void {
-        _ = self;
+        interface.base(self).delete();
     }
 });
 
@@ -184,7 +182,7 @@ test "XipStatFile.ShouldReportZerosWithoutASampler" {
 
     accumulate();
 
-    var sut = try XipStatFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try XipStatFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());
@@ -262,7 +260,7 @@ test "XipStatFile.ShouldReportTheAccumulatedTotals" {
 
     accumulate();
 
-    var sut = try XipStatFile.InstanceType.create().interface.new(std.testing.allocator);
+    var sut = try XipStatFile.InstanceType.create(std.testing.allocator).interface.new(std.testing.allocator);
     defer sut.interface.delete();
 
     try std.testing.expectEqual(@as(i32, 0), sut.interface.sync());

@@ -72,17 +72,21 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                 return @intCast(data.len);
             }
 
+            /// Returns the new position, as lseek does: the partition layer
+            /// and FatFs's disk wrapper both take their bearings from it.
             pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
-                switch (whence) {
-                    c.SEEK_SET => {
-                        if (offset < 0) {
-                            return kernel.errno.ErrnoSet.IllegalSeek;
-                        }
-                        self._current_address = @intCast(offset);
-                    },
-                    else => return kernel.errno.ErrnoSet.IllegalSeek,
+                const base: i64 = switch (whence) {
+                    c.SEEK_SET => 0,
+                    c.SEEK_CUR => @intCast(self._current_address),
+                    c.SEEK_END => @intCast(self.size()),
+                    else => return kernel.errno.ErrnoSet.InvalidArgument,
+                };
+                const position = base + offset;
+                if (position < 0 or position > std.math.maxInt(u32)) {
+                    return kernel.errno.ErrnoSet.IllegalSeek;
                 }
-                return 0;
+                self._current_address = @intCast(position);
+                return position;
             }
 
             pub fn sync(self: *Self) i32 {
@@ -91,8 +95,7 @@ pub fn FlashFile(comptime FlashType: anytype) type {
             }
 
             pub fn tell(self: *Self) i64 {
-                _ = self;
-                return 0;
+                return @intCast(self._current_address);
             }
 
             pub fn name(self: *const Self) []const u8 {
@@ -110,6 +113,9 @@ pub fn FlashFile(comptime FlashType: anytype) type {
                         attr.mapped_address_r = self._flash.get_physical_address().ptr;
                     },
                     else => {
+                        if (kernel.driver.block.common_ioctl(self._name, self.size(), cmd, arg)) |result| {
+                            return result;
+                        }
                         return -1;
                     },
                 }
@@ -231,16 +237,28 @@ test "FlashFile.Seek.SEEK_SET.ShouldSetPosition" {
     defer file.interface.delete();
 
     const result = try file.interface.seek(100, c.SEEK_SET);
-    try std.testing.expectEqual(@as(c.off_t, 0), result);
+    try std.testing.expectEqual(@as(i64, 100), result);
     try std.testing.expectEqual(@as(u32, 100), file.as(TestFlashFile).data()._current_address);
+    try std.testing.expectEqual(@as(i64, 100), file.interface.tell());
+}
+
+test "FlashFile.Seek.CurAndEndAreRelative" {
+    var file = try create_sut();
+    defer file.interface.delete();
+
+    _ = try file.interface.seek(100, c.SEEK_SET);
+    try std.testing.expectEqual(@as(i64, 150), try file.interface.seek(50, c.SEEK_CUR));
+    const size: i64 = @intCast(file.interface.size());
+    try std.testing.expectEqual(size - 512, try file.interface.seek(-512, c.SEEK_END));
+    try std.testing.expectError(kernel.errno.ErrnoSet.IllegalSeek, file.interface.seek(-1, c.SEEK_SET));
 }
 
 test "FlashFile.Seek.InvalidWhence.ShouldReturnError" {
     var file = try create_sut();
     defer file.interface.delete();
 
-    const result = file.interface.seek(100, c.SEEK_CUR);
-    try std.testing.expectEqual(kernel.errno.ErrnoSet.IllegalSeek, result);
+    const result = file.interface.seek(100, 999);
+    try std.testing.expectEqual(kernel.errno.ErrnoSet.InvalidArgument, result);
 }
 
 test "FlashFile.Read.ShouldAdvancePosition" {

@@ -44,15 +44,19 @@ def test_pipe_carries_more_than_it_can_hold(request):
     reordered across all of them.
     """
     session = request.node.stash[session_key]
-    session.write_command("cat /usr/bin/toybox > /tmp/pipe_direct.bin")
-    session.read_until_prompt()
-    session.write_command("cat /usr/bin/toybox | cat > /tmp/pipe_copy.bin")
-    session.read_until_prompt()
+    # Every step is silent until its prompt, and /tmp spills these 219 KB files
+    # to the card: on the ReleaseSafe CI kernel the copy outlasts the session's
+    # 1 s silence window while the board is fine.
+    with session.timeout(60):
+        session.write_command("cat /usr/bin/toybox > /tmp/pipe_direct.bin")
+        session.read_until_prompt()
+        session.write_command("cat /usr/bin/toybox | cat > /tmp/pipe_copy.bin")
+        session.read_until_prompt()
 
-    session.write_command("sha256sum /tmp/pipe_direct.bin")
-    direct = session.read_until_prompt().split()
-    session.write_command("sha256sum /tmp/pipe_copy.bin")
-    piped = session.read_until_prompt().split()
+        session.write_command("sha256sum /tmp/pipe_direct.bin")
+        direct = session.read_until_prompt().split()
+        session.write_command("sha256sum /tmp/pipe_copy.bin")
+        piped = session.read_until_prompt().split()
 
     assert direct and piped, (direct, piped)
     assert direct[0] == piped[0], (direct, piped)
@@ -60,8 +64,9 @@ def test_pipe_carries_more_than_it_can_hold(request):
     # 219 KB apiece. /tmp is a shared ~32 KiB arena that holds about a dozen
     # small files, so leaving these behind is most of it gone for everything
     # that runs later.
-    session.write_command("rm -f /tmp/pipe_direct.bin /tmp/pipe_copy.bin")
-    session.read_until_prompt()
+    with session.timeout(60):
+        session.write_command("rm -f /tmp/pipe_direct.bin /tmp/pipe_copy.bin")
+        session.read_until_prompt()
 
 
 def test_pipeline_in_a_subshell(request):

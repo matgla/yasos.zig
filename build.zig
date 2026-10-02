@@ -22,6 +22,7 @@ const hal = @import("yasos_hal");
 var gcc: ?[]const u8 = null;
 
 const littlefs = @import("source/fs/littlefs/build.zig");
+const lwext4 = @import("source/fs/ext4/build.zig");
 
 fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
     const create_venv_args = [_][]const u8{ "python3", "-m", "venv", "yasos_venv" };
@@ -84,7 +85,7 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
 
 /// How many FAT volumes may be mounted at once. Must match
 /// `source/fs/fatfs/fatfs.zig`'s `max_volumes`.
-const fat_volume_count: u5 = 4;
+const fat_volume_count: u5 = 8;
 
 /// `rootfs.img`'s modification time in seconds since the Unix epoch, or 0 when
 /// there is no image yet (a first build, or a tree that was cleaned). Zero
@@ -95,6 +96,17 @@ fn rootfs_build_epoch(b: *std.Build) i64 {
     // that the seconds always fit an i64 for any date this can hold.
     const seconds: i64 = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_s));
     return if (seconds > 0) seconds else 0;
+}
+
+/// The `.version` build.zig.zon declares, which is what uname(2) reports as the
+/// release. Read out of the manifest rather than repeated here, so bumping the
+/// version is one edit.
+fn manifest_version() []const u8 {
+    const manifest = @embedFile("build.zig.zon");
+    const key = ".version = \"";
+    const start = (std.mem.indexOf(u8, manifest, key) orelse return "unknown") + key.len;
+    const end = std.mem.indexOfScalarPos(u8, manifest, start, '"') orelse return "unknown";
+    return manifest[start..end];
 }
 
 pub fn build(b: *std.Build) !void {
@@ -158,6 +170,7 @@ pub fn build(b: *std.Build) !void {
     // kernel is relinked anyway (it embeds the thing).
     const build_info = b.addOptions();
     build_info.addOption(i64, "default_epoch_seconds", rootfs_build_epoch(b));
+    build_info.addOption([]const u8, "release", manifest_version());
     const build_info_module = build_info.createModule();
 
     const kernel_module_for_tests = b.addModule("kernel_under_test", .{
@@ -367,6 +380,11 @@ pub fn build(b: *std.Build) !void {
     const zfat_host_module = zfat_host.module("zfat");
 
     fs_tests.root_module.addImport("zfat", zfat_host_module);
+    // lwext4 on the host, against the host's C library: same configuration
+    // as the kernel's (source/fs/ext4/build.zig), so the driver under test is
+    // the one that ships.
+    fs_tests.root_module.linkLibrary(lwext4.build_lwext4(b, optimize, target, true));
+    fs_tests.root_module.addImport("lwext4", lwext4.headers(b, optimize, target, true).createModule());
 
     kernel_module_for_tests.addImport("interface", oop.module("interface"));
     kernel_module_for_tests.addImport("libc_imports", libc_imports_for_tests);
@@ -558,6 +576,21 @@ pub fn build(b: *std.Build) !void {
             }
             kernel_module.addIncludePath(b.path("libs/littlefs"));
             kernel_module.linkLibrary(littlefs_lib);
+
+            // ext4 (source/fs/ext4): lwext4 against the kernel's C library.
+            // Small, and without the UB traps: 36 KB less text than building it
+            // like the kernel, and the library is covered by the host tests.
+            const lwext4_lib = lwext4.build_lwext4(b, .ReleaseSmall, kernel_exec.root_module.resolved_target.?, false);
+            // yasos libc's headers and nothing else -- not the kernel's system
+            // include paths, which may be a toolchain libc (newlib) whose
+            // errno numbers and prototypes are not the kernel's.
+            lwext4_lib.root_module.addSystemIncludePath(b.path("libs/libc"));
+            lwext4_lib.root_module.sanitize_c = .off;
+            kernel_exec.root_module.linkLibrary(lwext4_lib);
+            const lwext4_headers = lwext4.headers(b, optimize, kernel_target, false);
+            lwext4_headers.addIncludePath(b.path("libs/libc"));
+            lwext4_headers.addIncludePath(b.path("."));
+            kernel_exec.root_module.addImport("lwext4", lwext4_headers.createModule());
             const littlefs_headers = b.addTranslateC(.{
                 .root_source_file = b.path("libs/littlefs/lfs.h"),
                 .target = kernel_target,

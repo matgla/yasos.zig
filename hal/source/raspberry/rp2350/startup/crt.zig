@@ -188,8 +188,6 @@ fn initialize_libc_constructors() void {
     __libc_init_array();
 }
 
-export fn _init() void {}
-
 const ram_vector_table_size: usize = c.VTABLE_FIRST_IRQ + c.PICO_NUM_VTABLE_IRQS;
 var ram_vector_table: [ram_vector_table_size]usize linksection(".ram_vector_table") = @splat(0);
 

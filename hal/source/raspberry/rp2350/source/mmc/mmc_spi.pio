@@ -41,3 +41,40 @@ static inline void pio_mmc_spi_transmit_init(PIO pio, uint sm, uint program_offs
 }
 
 %}
+% zig {
+/// pio_mmc_spi_transmit_init from the c-sdk block above, for Zig: `sdk` is the
+/// translated SDK headers (hardware/pio.h, hardware/gpio.h).
+pub fn pio_mmc_spi_transmit_init(comptime sdk: type, pio: sdk.PIO, sm: c_uint, program_offset: c_uint, clkdiv: f32, pin_sck: c_uint, pin_mosi: c_uint, pin_miso: c_uint) void {
+    var c = mmc_spi_transmit_program_get_default_config(sdk, program_offset);
+    sdk.sm_config_set_out_pins(&c, pin_mosi, 1);
+    sdk.sm_config_set_in_pins(&c, pin_miso);
+    sdk.sm_config_set_sideset_pins(&c, pin_sck);
+
+    sdk.sm_config_set_out_shift(&c, false, true, 8);
+    sdk.sm_config_set_in_shift(&c, false, true, 8);
+    sdk.sm_config_set_clkdiv(&c, clkdiv);
+
+    const sck = @as(c_ulonglong, 1) << @intCast(pin_sck);
+    const mosi = @as(c_ulonglong, 1) << @intCast(pin_mosi);
+    const miso = @as(c_ulonglong, 1) << @intCast(pin_miso);
+    sdk.pio_sm_set_pins_with_mask64(pio, sm, 0, sck | mosi);
+    sdk.pio_sm_set_pindirs_with_mask64(pio, sm, sck | mosi, sck | mosi | miso);
+
+    sdk.pio_gpio_init(pio, pin_sck);
+    sdk.pio_gpio_init(pio, pin_mosi);
+    sdk.pio_gpio_init(pio, pin_miso);
+
+    sdk.gpio_set_slew_rate(pin_sck, sdk.GPIO_SLEW_RATE_FAST);
+    sdk.gpio_set_slew_rate(pin_mosi, sdk.GPIO_SLEW_RATE_FAST);
+    sdk.gpio_set_slew_rate(pin_miso, sdk.GPIO_SLEW_RATE_FAST);
+
+    sdk.gpio_set_drive_strength(pin_sck, sdk.GPIO_DRIVE_STRENGTH_2MA);
+    sdk.gpio_set_drive_strength(pin_mosi, sdk.GPIO_DRIVE_STRENGTH_2MA);
+    sdk.gpio_set_drive_strength(pin_miso, sdk.GPIO_DRIVE_STRENGTH_2MA);
+
+    sdk.hw_set_bits(&pio.*.input_sync_bypass, @as(c_uint, 1) << @intCast(pin_miso % 32));
+
+    _ = sdk.pio_sm_init(pio, sm, program_offset, &c);
+    sdk.pio_sm_set_enabled(pio, sm, true);
+}
+%}

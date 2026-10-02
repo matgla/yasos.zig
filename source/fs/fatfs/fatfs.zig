@@ -63,7 +63,7 @@ fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
 
 /// How many FAT volumes may be mounted at once. Must match `fat_volume_count`
 /// in build.zig, which is what FatFs itself is configured with.
-pub const max_volumes: u8 = 4;
+pub const max_volumes: u8 = 8;
 
 /// Which volume numbers are taken. A `FatFs` claims one at `init` and releases
 /// it at `delete`.
@@ -105,7 +105,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         fatfs.rtc_hook = &fat_now_unix_seconds;
         const volume = claim_volume() orelse return error.OutOfMemory;
         errdefer volume_in_use[volume] = false;
-        var wrapper = DiskWrapper{ .device = try device.clone() };
+        var wrapper = DiskWrapper{ .device = try device.clone(), .id = volume };
         // Safe to do before the wrapper reaches its final address: it holds the
         // cache by slice, so moving the struct carries the reference along.
         wrapper.attach_cache(allocator);
@@ -208,6 +208,21 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         };
     }
 
+    /// rename(2) through FatFs's own f_rename. FAT has no atomic replace, so a
+    /// destination that already exists is removed first -- which is what
+    /// rename(2) promises a caller, even if the two steps are not indivisible
+    /// here.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        fs_lock.acquire();
+        defer fs_lock.release();
+        const old_volume = try self.volume_path(old_path);
+        defer self._allocator.free(old_volume);
+        const new_volume = try self.volume_path(new_path);
+        defer self._allocator.free(new_volume);
+        fatfs.unlink(new_volume) catch {};
+        try fatfs.rename(old_volume, new_volume);
+    }
+
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         fs_lock.acquire();
         defer fs_lock.release();
@@ -286,6 +301,10 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         defer fs_lock.release();
         _ = follow_symlinks;
         initialize_stat_identity(data, path);
+        // One device per volume: with a shared st_dev every FAT mount looked
+        // like the same filesystem, and `df` (which folds duplicates) showed
+        // one of four partitions.
+        data.st_dev = @truncate(std.hash.Wyhash.hash(self._volume, "fatfs") | 1);
         if (std.mem.eql(u8, path, "/") or path.len == 0) {
             data.st_mode = c.S_IFDIR;
             data.st_blksize = 512;
@@ -382,13 +401,54 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return false;
     }
 
-    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
+    /// Clusters are the unit: FAT allocates nothing smaller. The first call
+    /// on a FAT32 volume may scan the whole FAT when the FSInfo sector's free
+    /// count is not trusted -- seconds on a large card -- after which FatFs
+    /// keeps the count up to date itself.
+    pub fn statvfs(self: *Self) anyerror!kernel.fs.FsStats {
         fs_lock.acquire();
         defer fs_lock.release();
+        var prefix: [3:0]u8 = undefined;
+        var free_clusters: u32 = 0;
+        var volume: ?*@TypeOf(self._fs.raw) = null;
+        const result = fatfs.api.getfree(self.volume_prefix(&prefix).ptr, &free_clusters, @ptrCast(&volume));
+        if (result != 0 or volume == null) return kernel.errno.ErrnoSet.InputOutputError;
+        const cluster_bytes: u32 = @as(u32, volume.?.csize) * 512;
+        return .{
+            .block_size = cluster_bytes,
+            .total_blocks = volume.?.n_fatent - 2,
+            .free_blocks = free_clusters,
+            .name_max = 255,
+        };
+    }
+
+    /// No permission bits or owners on this filesystem: accepted, ignored.
+    pub fn chmod(self: *Self, path: []const u8, mode: u32, follow_links: bool) anyerror!void {
         _ = self;
         _ = path;
+        _ = mode;
+        _ = follow_links;
+    }
+
+    pub fn chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = uid;
+        _ = gid;
+        _ = follow_links;
+    }
+
+    /// FAT has no symbolic links, so an existing node answers EINVAL -- but a
+    /// missing one must answer ENOENT, as on any other filesystem. Path walkers
+    /// tell "a new last component" from "a broken path" by exactly that:
+    /// toybox's xabspath, which tar runs on every entry before creating it,
+    /// failed every extraction onto FAT ("bad symlink") while this said EINVAL
+    /// for everything. Unlocked, like `access`: `get` takes the lock itself.
+    pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
         _ = buffer;
-        return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
+        var node = try self.get(path);
+        node.delete();
+        return kernel.errno.ErrnoSet.InvalidArgument; // exists, not a symbolic link
     }
 
     /// Deliberately unlocked: a pure composition of `get`, `filetype` and
@@ -397,13 +457,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     /// call inside it is.
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
+        _ = mode;
+        // Every node is readable, writable and, a directory, searchable
+        // (X_OK on a directory is search permission): existence is the answer.
         var node = try self.get(path);
         node.delete();
-        if ((mode & c.W_OK) != 0 or (mode & c.X_OK) != 0) {
-            if (node.filetype() == kernel.fs.FileType.Directory) {
-                return kernel.errno.ErrnoSet.IsADirectory;
-            }
-        }
     }
 
     const DiskWrapper = struct {
@@ -448,43 +506,46 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             base: fatfs.LBA = 0,
             sectors: u32 = 0,
             used: u32 = 0,
+            /// Volume number of the wrapper the line caches for.
+            owner: u8 = 0,
         };
 
-        device: kernel.fs.IFile,
-        /// Held by reference, never inline: the kernel's MSP stack is 16 KB
-        /// (see the linker script) and a `FatFs` is built as a value before it
-        /// reaches the allocator, so an inline buffer of any useful size
-        /// overflows that stack during boot -- which it did, silently, as a
-        /// double fault before the console was up.
+        /// The cache and the combining buffer, shared by every mounted volume.
         ///
-        /// Both are empty when the cache is configured away, and also when the
-        /// kernel heap could not spare the room -- 76 KB is all of it. A
-        /// filesystem that reads a little slower is a far better outcome than
-        /// one that refuses to mount.
-        lines: []Line = &.{},
-        cache: []u8 = &.{},
+        /// They used to be per volume: 20 KiB each out of a 76 KB kernel heap,
+        /// which the SD card's four partitions (plus /mnt on QEMU) cannot all
+        /// have -- the later mounts silently read through uncached. One pool,
+        /// with each line tagged by the volume it belongs to, costs one
+        /// volume's worth however many are mounted, and the hot metadata of
+        /// whichever volume is busy gets all of it.
+        ///
+        /// Safe to share because every entry point below holds `dev_lock`,
+        /// one global lock over all the devices.
+        const Shared = struct {
+            lines: []Line = &.{},
+            cache: []u8 = &.{},
+            combine: []u8 = &.{},
+            /// Whose run `combine` holds. A heap-resident wrapper: runs only
+            /// start from `write`, which is reached through a mounted
+            /// instance, and a wrapper flushes before it is freed.
+            combine_owner: ?*DiskWrapper = null,
+            combine_base: fatfs.LBA = 0,
+            combine_count: u32 = 0,
+            /// Counter standing in for time in the LRU choice; nothing here
+            /// needs a real clock, only an order. It wraps; a wrap costs one
+            /// poorly chosen eviction, never a wrong answer: a line is matched
+            /// on the sectors it holds, and this only decides which one to
+            /// give up.
+            clock: u32 = 0,
+            /// Volumes holding the pool; the last to let go frees it.
+            users: u8 = 0,
+        };
+        var shared: Shared = .{};
 
-        // ── Write combining ────────────────────────────────────────────────
-        //
-        // FatFs hands the block layer one sector at a time, and a single-block
-        // write costs ~875 us against ~113 us a block inside a multi-block one:
-        // the card's program cycle is paid per command. A compile's writes are
-        // contiguous runs with rewrites of the same sector, so buffering one run
-        // turns three commands into one and a rewrite into none.
-        //
-        // Safe only because FatFs asks: sync_fs() ends in disk_ioctl(CTRL_SYNC)
-        // and runs from f_close, f_sync, f_unlink, f_mkdir and f_rename --
-        // every point at which the medium is supposed to be consistent.
-        combine: []u8 = &.{},
-        combine_base: fatfs.LBA = 0,
-        combine_count: u32 = 0,
-        /// Counter standing in for time in the LRU choice; nothing here needs a
-        /// real clock, only an order. It is 32 bits and wraps, which keeps this
-        /// struct 4-byte aligned so `@fieldParentPtr` can reach it from the disk
-        /// interface below. A wrap costs one poorly chosen eviction, never a
-        /// wrong answer: a line is matched on the sectors it holds, and this
-        /// only decides which one to give up.
-        clock: u32 = 0,
+        device: kernel.fs.IFile,
+        /// The volume number, which tags this wrapper's lines in the shared
+        /// cache.
+        id: u8 = 0,
         /// Filled on first use. Zero means "not known yet", which is also what
         /// a device that cannot report its size leaves it as -- lines are then
         /// never shortened, which is correct for every device that can.
@@ -512,10 +573,17 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             return getStatus(&self.interface);
         }
 
-        /// Attach a cache, or leave the wrapper reading straight through when
-        /// the configuration asks for none or the heap cannot spare it.
+        /// Make sure the shared cache exists. Allocated by the first volume,
+        /// freed after the last one lets go. Held by reference, never inline:
+        /// the kernel's MSP stack is 16 KB and a `FatFs` is built as a value
+        /// before it reaches the allocator. Left empty when the configuration
+        /// asks for no cache or the heap cannot spare it -- 76 KB is all of
+        /// it, and a filesystem that reads a little slower is a far better
+        /// outcome than one that refuses to mount.
         pub fn attach_cache(self: *DiskWrapper, allocator: std.mem.Allocator) void {
-            if (!configured) return;
+            _ = self;
+            shared.users += 1;
+            if (!configured or shared.lines.len != 0) return;
             const cache = allocator.alloc(u8, line_count * line_bytes) catch {
                 log.warn("no room for the {d} KiB FAT cache; reading through", .{(line_count * line_bytes) / 1024});
                 return;
@@ -525,36 +593,53 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                 return;
             };
             @memset(lines, .{});
-            self.cache = cache;
-            self.lines = lines;
+            shared.cache = cache;
+            shared.lines = lines;
             // Write combining is independent of the read cache; without the
             // buffer every write simply goes through as before.
-            self.combine = allocator.alloc(u8, combine_bytes) catch &.{};
+            shared.combine = allocator.alloc(u8, combine_bytes) catch &.{};
         }
 
+        /// This volume is going away: put its buffered run on the medium and
+        /// give its lines back. The pool itself stays.
         pub fn release_cache(self: *DiskWrapper, allocator: std.mem.Allocator) void {
-            // Anything still buffered belongs on the medium before the buffer
-            // holding it goes away.
-            self.flush_combined() catch |err| {
-                log.err("failed to flush combined writes on release: {s}", .{@errorName(err)});
-            };
-            allocator.free(self.cache);
-            allocator.free(self.lines);
-            allocator.free(self.combine);
-            self.cache = &.{};
-            self.lines = &.{};
-            self.combine = &.{};
+            dev_lock.acquire();
+            defer dev_lock.release();
+            if (shared.combine_owner == self) {
+                flush_combined() catch |err| {
+                    log.err("failed to flush combined writes on release: {s}", .{@errorName(err)});
+                };
+                shared.combine_owner = null;
+            }
+            self.drop_lines();
+            shared.users -|= 1;
+            if (shared.users == 0) {
+                allocator.free(shared.cache);
+                allocator.free(shared.lines);
+                allocator.free(shared.combine);
+                shared.cache = &.{};
+                shared.lines = &.{};
+                shared.combine = &.{};
+            }
         }
 
-        /// Issue whatever the combining buffer holds, as one write.
-        fn flush_combined(self: *DiskWrapper) fatfs.Disk.Error!void {
-            if (self.combine_count == 0) return;
-            const count = self.combine_count;
-            const base = self.combine_base;
+        fn drop_lines(self: *DiskWrapper) void {
+            for (shared.lines) |*line| {
+                if (line.owner == self.id) line.sectors = 0;
+            }
+        }
+
+        /// Issue whatever the combining buffer holds, as one write, to the
+        /// device of whichever volume it belongs to.
+        fn flush_combined() fatfs.Disk.Error!void {
+            if (shared.combine_count == 0) return;
+            const count = shared.combine_count;
+            const base = shared.combine_base;
+            const owner = shared.combine_owner orelse return;
             // Cleared first: a failed write must not leave the run queued for
             // a later flush to retry against a device that already rejected it.
-            self.combine_count = 0;
-            try self.write_through(self.combine.ptr, base, count);
+            shared.combine_count = 0;
+            try owner.write_through(shared.combine.ptr, base, count);
         }
 
         /// Take a write into the combining buffer, issuing whatever it has to
@@ -570,62 +655,69 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         ///   - it goes somewhere else, so the buffer is issued and the new
         ///     write starts a fresh run.
         fn write_combined(self: *DiskWrapper, from: [*]const u8, sector: fatfs.LBA, count: u32) fatfs.Disk.Error!void {
-            if (self.combine.len == 0 or count >= combine_sectors) {
-                try self.flush_combined();
+            if (shared.combine.len == 0 or count >= combine_sectors) {
+                try flush_combined();
                 return self.write_through(from, sector, count);
             }
 
             const length = sector_size * count;
 
-            if (self.combine_count != 0) {
-                const base = self.combine_base;
-                const held = self.combine_count;
-                if (sector == base + held and held + count <= combine_sectors) {
-                    @memcpy(self.combine[held * sector_size ..][0..length], from[0..length]);
-                    self.combine_count = held + count;
-                    return;
+            if (shared.combine_count != 0) {
+                if (shared.combine_owner == self) {
+                    const base = shared.combine_base;
+                    const held = shared.combine_count;
+                    if (sector == base + held and held + count <= combine_sectors) {
+                        @memcpy(shared.combine[held * sector_size ..][0..length], from[0..length]);
+                        shared.combine_count = held + count;
+                        return;
+                    }
+                    if (sector >= base and sector + count <= base + held) {
+                        const at: usize = @intCast(sector - base);
+                        @memcpy(shared.combine[at * sector_size ..][0..length], from[0..length]);
+                        return;
+                    }
                 }
-                if (sector >= base and sector + count <= base + held) {
-                    const at: usize = @intCast(sector - base);
-                    @memcpy(self.combine[at * sector_size ..][0..length], from[0..length]);
-                    return;
-                }
-                try self.flush_combined();
+                // Somewhere else, or another volume's run: out it goes.
+                try flush_combined();
             }
 
-            @memcpy(self.combine[0..length], from[0..length]);
-            self.combine_base = sector;
-            self.combine_count = count;
+            @memcpy(shared.combine[0..length], from[0..length]);
+            shared.combine_owner = self;
+            shared.combine_base = sector;
+            shared.combine_count = count;
         }
 
-        /// True when *sector*..+*count* overlaps what is buffered but not yet
-        /// written, which a read has to resolve before going to the device.
+        /// True when *sector*..+*count* of this volume overlaps what is
+        /// buffered but not yet written, which a read has to resolve before
+        /// going to the device.
         fn overlaps_combined(self: *const DiskWrapper, sector: fatfs.LBA, count: u32) bool {
-            if (self.combine_count == 0) return false;
-            return sector < self.combine_base + self.combine_count and
-                self.combine_base < sector + count;
+            if (shared.combine_count == 0 or shared.combine_owner != self) return false;
+            return sector < shared.combine_base + shared.combine_count and
+                shared.combine_base < sector + count;
         }
 
         fn caching(self: *const DiskWrapper) bool {
-            return self.lines.len != 0;
+            _ = self;
+            return shared.lines.len != 0;
         }
 
-        /// Drop everything cached, for when what is on the card stops being
-        /// what we last saw it as: a mount, or a reformat.
+        /// Drop everything cached for this volume, for when what is on the
+        /// card stops being what we last saw it as: a mount, or a reformat.
         pub fn invalidate(self: *DiskWrapper) void {
-            for (self.lines) |*line| {
-                line.sectors = 0;
-            }
+            self.drop_lines();
             // Dropped rather than flushed: this runs at mount and reformat,
             // where whatever is buffered describes a volume that is no longer
             // the one on the card.
-            self.combine_count = 0;
+            if (shared.combine_owner == self) {
+                shared.combine_count = 0;
+                shared.combine_owner = null;
+            }
             self.sectors_on_disk = 0;
         }
 
-        fn tick(self: *DiskWrapper) u32 {
-            self.clock +%= 1;
-            return self.clock;
+        fn tick() u32 {
+            shared.clock +%= 1;
+            return shared.clock;
         }
 
         fn disk_sectors(self: *DiskWrapper) fatfs.LBA {
@@ -639,7 +731,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
 
         fn line_data(self: *const DiskWrapper, index: usize) []u8 {
-            return self.cache[index * line_bytes .. (index + 1) * line_bytes];
+            _ = self;
+            return shared.cache[index * line_bytes .. (index + 1) * line_bytes];
         }
 
         /// The device I/O itself. The seek and the transfer have to stay
@@ -675,13 +768,13 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             if (!configured or !self.caching()) return error.IoError;
             const base = sector - (sector % line_sectors);
             var victim: usize = 0;
-            for (0..self.lines.len) |index| {
-                const line = self.lines[index];
-                if (line.sectors != 0 and line.base == base and sector - base < line.sectors) {
-                    self.lines[index].used = self.tick();
+            for (0..shared.lines.len) |index| {
+                const line = shared.lines[index];
+                if (line.sectors != 0 and line.owner == self.id and line.base == base and sector - base < line.sectors) {
+                    shared.lines[index].used = tick();
                     return index;
                 }
-                if (line.used < self.lines[victim].used) {
+                if (line.used < shared.lines[victim].used) {
                     victim = index;
                 }
             }
@@ -693,9 +786,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             }
             // Marked empty across the read so a failure cannot leave a line
             // that claims to hold sectors it never received.
-            self.lines[victim].sectors = 0;
+            shared.lines[victim].sectors = 0;
             try self.read_through(self.line_data(victim).ptr, base, sectors);
-            self.lines[victim] = .{ .base = base, .sectors = sectors, .used = self.tick() };
+            shared.lines[victim] = .{ .base = base, .sectors = sectors, .used = tick(), .owner = self.id };
             return victim;
         }
 
@@ -707,7 +800,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             // any of it has to make it real first: a line-cache miss goes
             // straight to the card.
             if (self.overlaps_combined(sector, @intCast(count))) {
-                try self.flush_combined();
+                try flush_combined();
             }
             // A run this long already amortises the per-command cost the cache
             // exists to remove, and filling lines for it would evict more than
@@ -720,7 +813,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             while (done < count) {
                 const wanted = sector + done;
                 const index = try self.line_for(wanted);
-                const line = self.lines[index];
+                const line = shared.lines[index];
                 const offset: u32 = @intCast(wanted - line.base);
                 if (offset >= line.sectors) {
                     // Past the end of the disk; the device is the one entitled
@@ -748,9 +841,9 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             // writes a directory entry into the sectors it has just searched,
             // and invalidating there would make the next creation re-read the
             // run we still have -- which is exactly the cost being removed.
-            for (0..self.lines.len) |index| {
-                const line = self.lines[index];
-                if (line.sectors == 0) continue;
+            for (0..shared.lines.len) |index| {
+                const line = shared.lines[index];
+                if (line.sectors == 0 or line.owner != self.id) continue;
                 const first = @max(line.base, sector);
                 const last = @min(line.base + line.sectors, sector + count);
                 if (first >= last) continue;
@@ -769,7 +862,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                 // Was a no-op, which was correct only while every write went
                 // straight to the card. Writes are now combined, so this is
                 // what makes FatFs's "the volume is consistent" true.
-                .sync => try self.flush_combined(),
+                .sync => if (shared.combine_owner == self) try flush_combined(),
                 .get_sector_count => {
                     const size = self.device.interface.size();
                     @as(*align(1) fatfs.LBA, @ptrCast(buff)).* = @intCast(size >> 9);
@@ -1103,11 +1196,10 @@ test "FatFs.ShouldAccessDirectory" {
     // Test directory access
     try fs.interface.access("/testdir", c.F_OK, 0);
 
-    // Test write access on directory should fail with IsADirectory
-    try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, fs.interface.access("/testdir", c.W_OK, 0));
-
-    // Test execute access on directory should fail with IsADirectory
-    try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, fs.interface.access("/testdir", c.X_OK, 0));
+    // A directory is writable (files can be made in it) and, for X_OK,
+    // searchable.
+    try fs.interface.access("/testdir", c.W_OK, 0);
+    try fs.interface.access("/testdir", c.X_OK, 0);
 }
 
 test "FatFs.ShouldRejectLinkOperation" {
@@ -1122,6 +1214,26 @@ test "FatFs.ShouldRejectLinkOperation" {
 
     // Link operation should not be supported
     try std.testing.expectError(error.NotSupported, fs.interface.link("/old.txt", "/new.txt"));
+}
+
+test "FatFs.ReadlinkTellsAMissingPathFromANodeThatIsNoLink" {
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    try fs.interface.create("/file.txt", 0o644);
+    try fs.interface.mkdir("/dir", 0o755);
+
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, fs.interface.readlink("/file.txt", &buffer));
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, fs.interface.readlink("/dir", &buffer));
+    // tar resolves each entry's path before creating it; a missing last
+    // component has to read as ENOENT or the extraction is refused.
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, fs.interface.readlink("/new.c", &buffer));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, fs.interface.readlink("/dir/new.c", &buffer));
 }
 
 fn traverse_directory(fs: *kernel.fs.IFileSystem, path: []const u8, expectations: []const kernel.fs.DirectoryEntry) !void {

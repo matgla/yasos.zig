@@ -119,9 +119,16 @@ static int rx_zdle_byte(void) {
 
 /* ---- frame helpers ---- */
 
+/* The sender also escapes \n and \r. The receiver's frames are a handful of
+   header bytes, but a sender's are file contents, and a tty that still
+   translates line endings on its way out (every UART file has termios of its
+   own) would turn each \n into \r\n and break the CRC. Escaped, they cross as
+   printable bytes; the host decodes any ZDLE pair. */
+static bool escape_line_endings;
+
 static int buf_zdle_encode(uint8_t *buf, int pos, uint8_t b) {
-  if (b == ZDLE || b == 0x11 || b == 0x13 ||
-      (b < 0x20 && b != 0x0a && b != 0x0d)) {
+  if (b == ZDLE || b == 0x11 || b == 0x13 || b == 0x91 || b == 0x93 ||
+      (b < 0x20 && (escape_line_endings || (b != 0x0a && b != 0x0d)))) {
     buf[pos++] = ZDLE;
     buf[pos++] = b ^ 0x40;
   } else {
@@ -383,6 +390,51 @@ static int parent_dir_length(const char *path) {
   return last_slash;
 }
 
+/* All of *len* bytes into *fd*, or -1: a short write is retried, a failing
+   one (ENOSPC on a full filesystem, EIO) is reported. */
+static int write_all(int fd, const uint8_t *data, int len) {
+  while (len > 0) {
+    ssize_t n = write(fd, data, (size_t)len);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      return -1;
+    data += n;
+    len -= (int)n;
+  }
+  return 0;
+}
+
+/* What has arrived of the current file but is not in it yet. A sub-packet is
+   under a kilobyte, and on ext4 every write() is a flush of its own -- the
+   data block, the inode, the bitmaps -- so a file goes out in one write() of
+   up to this much rather than one per sub-packet. */
+#define ZMODEM_WRITE_BUF_SIZE (16 * 1024)
+static uint8_t pending[ZMODEM_WRITE_BUF_SIZE];
+static uint32_t pending_length;
+
+static int flush_pending(int fd, uint32_t total_received) {
+  uint32_t length = pending_length;
+  pending_length = 0;
+  if (length == 0 || write_all(fd, pending, (int)length) == 0)
+    return 0;
+  fprintf(stderr, "\nERROR: write failed at offset %u: %s\n",
+          total_received - length, strerror(errno));
+  return -1;
+}
+
+/* Back to *offset*: inside the unwritten tail is only a shorter tail. */
+static int rewind_pending(int fd, uint32_t total_received, uint32_t offset) {
+  if (offset <= total_received && total_received - offset <= pending_length) {
+    pending_length -= total_received - offset;
+    return 0;
+  }
+  pending_length = offset < total_received ? 0 : pending_length;
+  if (flush_pending(fd, total_received) < 0)
+    return -1;
+  return rewind_transfer(fd, offset);
+}
+
 /* Receive one file body: ZDATA sub-packets into *fd* until the sender's ZEOF
    agrees with what we wrote. Returns 0 with *out_received* set, or -1 when the
    retry budget ran out (the caller closes the file and ends the session). */
@@ -395,6 +447,7 @@ static int receive_file_body(int fd, uint32_t *out_received) {
   uint32_t total_received = 0;
   int type;
 
+  pending_length = 0;
   for (;;) {
     type = recv_header(f);
     if (type < 0) {
@@ -411,7 +464,7 @@ static int receive_file_body(int fd, uint32_t *out_received) {
     if (type == ZDATA) {
       uint32_t data_offset = header_offset(f);
       if (data_offset != total_received) {
-        if (rewind_transfer(fd, data_offset) < 0) {
+        if (rewind_pending(fd, total_received, data_offset) < 0) {
           return -1;
         }
         total_received = data_offset;
@@ -434,7 +487,7 @@ static int receive_file_body(int fd, uint32_t *out_received) {
             fprintf(stderr, "RZDBG giving up: max retries\n");
             return -1;
           }
-          if (rewind_transfer(fd, total_received) < 0) {
+          if (rewind_pending(fd, total_received, total_received) < 0) {
             fprintf(stderr, "RZDBG giving up: rewind failed\n");
             return -1;
           }
@@ -448,15 +501,28 @@ static int receive_file_body(int fd, uint32_t *out_received) {
           break;
         }
 
-        total_received += data_len;
-        retries = 0;
-
         /* Write BEFORE sending ZACK.  Flash erase/program disables
            interrupts on RP2350 (shared SPI bus), so bytes arriving
            during the write overflow the 32-byte HW FIFO.  Sending
            ZACK after the write ensures the host waits and the UART
-           is ready to receive the next chunk. */
-        write(fd, data_buf, data_len);
+           is ready to receive the next chunk -- so whatever write() a
+           sub-packet causes, a full buffer or the last of the file, happens
+           before its ZACK.  A failed write ends the session (the caller
+           sends ZFIN): ACKing data that never reached the file would leave
+           the sender reporting success over empty or truncated files. */
+        if (pending_length + (uint32_t)data_len > sizeof(pending) &&
+            flush_pending(fd, total_received) < 0) {
+          return -1;
+        }
+        memcpy(pending + pending_length, data_buf, (size_t)data_len);
+        pending_length += (uint32_t)data_len;
+        total_received += data_len;
+        retries = 0;
+
+        if ((term == ZCRCW || term == ZCRCE) &&
+            flush_pending(fd, total_received) < 0) {
+          return -1;
+        }
 
         send_offset_header(ZACK, total_received);
 
@@ -479,6 +545,8 @@ static int receive_file_body(int fd, uint32_t *out_received) {
         continue;
       }
 
+      if (flush_pending(fd, total_received) < 0)
+        return -1;
       *out_received = total_received;
       return 0;
     } else if (type == ZFIN) {
@@ -632,4 +700,157 @@ int zmodem_receive(const char *filename) {
 
 int zmodem_receive_batch(void) {
   return zmodem_session(NULL);
+}
+
+/* ---- sending ---- */
+
+/* One data sub-packet in a single write(), like the headers: the kernel log is
+   quiet, but a split write is still two chances for something to land between
+   the halves. */
+static void send_data_subpacket(const uint8_t *data, int len, uint8_t term) {
+  static uint8_t buf[2 * ZMODEM_DATA_BUF_SIZE + 16];
+  int pos = 0;
+  uint16_t crc = 0;
+  for (int i = 0; i < len; i++) {
+    crc = crc16_ccitt_update(crc, data[i]);
+    pos = buf_zdle_encode(buf, pos, data[i]);
+  }
+  crc = crc16_ccitt_update(crc, term);
+  buf[pos++] = ZDLE;
+  buf[pos++] = term;
+  pos = buf_zdle_encode(buf, pos, (crc >> 8) & 0xff);
+  pos = buf_zdle_encode(buf, pos, crc & 0xff);
+  write(STDOUT_FILENO, buf, pos);
+}
+
+/* Send one file's body from *offset*, answering the receiver's ZRPOS rewinds,
+   until it answers our ZEOF with ZRINIT (ready for the next file). Every
+   sub-packet asks for a ZACK: the link is lockstep, so a lost byte costs one
+   sub-packet, never the file. */
+static int send_file_body(int fd, uint32_t size, uint32_t offset) {
+  uint8_t f[4];
+  uint8_t data[ZMODEM_DATA_BUF_SIZE];
+  int retries = 0;
+
+  for (;;) {
+    bool rewound = false;
+    if (offset < size) {
+      if (lseek(fd, (off_t)offset, SEEK_SET) < 0)
+        return -1;
+      send_offset_header(ZDATA, offset);
+      while (offset < size) {
+        uint32_t want = size - offset;
+        if (want > sizeof(data))
+          want = sizeof(data);
+        int got = (int)read(fd, data, want);
+        if (got <= 0)
+          return -1;
+        uint32_t end = offset + (uint32_t)got;
+        send_data_subpacket(data, got, end == size ? ZCRCW : ZCRCQ);
+        int type = recv_header(f);
+        if (type == ZACK && header_offset(f) == end) {
+          offset = end;
+          retries = 0;
+          continue;
+        }
+        if (++retries > ZMODEM_MAX_RETRIES)
+          return -1;
+        if (type == ZRPOS && header_offset(f) <= size)
+          offset = header_offset(f);
+        rewound = true; /* resend from the receiver's position, new ZDATA */
+        break;
+      }
+      if (rewound)
+        continue;
+    }
+    send_offset_header(ZEOF, size);
+    int type = recv_header(f);
+    if (type == ZRINIT)
+      return 0;
+    if (++retries > ZMODEM_MAX_RETRIES)
+      return -1;
+    if (type == ZRPOS && header_offset(f) <= size)
+      offset = header_offset(f);
+  }
+}
+
+int zmodem_send_batch(const char *const *paths, int count, const char *strip) {
+  uint8_t f[4];
+  int retries = 0;
+  uint32_t files_sent = 0;
+  uint32_t bytes_sent = 0;
+  size_t strip_length = strip != NULL ? strlen(strip) : 0;
+
+  escape_line_endings = true;
+  flush_stdin();
+  rx_discard_buffered();
+  klog_ctl(0);
+
+  /* Ask for the receiver until it says ZRINIT. */
+  for (;;) {
+    send_header(ZRQINIT, 0, 0, 0, 0);
+    int type = recv_header(f);
+    if (type == ZRINIT)
+      break;
+    if (++retries > ZMODEM_MAX_RETRIES)
+      return -1;
+  }
+
+  for (int i = 0; i < count; i++) {
+    const char *path = paths[i];
+    int fd = open(path, O_RDONLY);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) < 0) {
+      if (fd >= 0)
+        close(fd);
+      send_header(ZFIN, 0, 0, 0, 0);
+      fprintf(stderr, "ERROR: cannot read %s\n", path);
+      return -1;
+    }
+    const char *name = path;
+    if (strip_length && strncmp(path, strip, strip_length) == 0)
+      name = path + strip_length;
+
+    /* ZFILE: name\0size\0mtime\0mode\0, then wait for the ZRPOS that says
+       where to start (or ZSKIP). */
+    uint8_t info[ZMODEM_PATH_MAX + 48];
+    int info_len = snprintf((char *)info, ZMODEM_PATH_MAX, "%s", name) + 1;
+    info_len += snprintf((char *)info + info_len, 32, "%lu", (unsigned long)st.st_size) + 1;
+    info[info_len++] = '0';
+    info[info_len++] = '\0';
+    info[info_len++] = '0';
+    info[info_len++] = '\0';
+
+    int type = -1;
+    for (retries = 0; retries <= ZMODEM_MAX_RETRIES; retries++) {
+      send_header(ZFILE, 0, 0, 0, 0);
+      send_data_subpacket(info, info_len, ZCRCW);
+      type = recv_header(f);
+      if (type == ZRPOS || type == ZSKIP)
+        break;
+    }
+    if (type == ZSKIP) {
+      close(fd);
+      continue;
+    }
+    if (type != ZRPOS || send_file_body(fd, (uint32_t)st.st_size, header_offset(f)) < 0) {
+      close(fd);
+      send_header(ZFIN, 0, 0, 0, 0);
+      fprintf(stderr, "\nERROR: sending %s failed\n", path);
+      return -1;
+    }
+    close(fd);
+    files_sent++;
+    bytes_sent += (uint32_t)st.st_size;
+  }
+
+  for (retries = 0; retries <= ZMODEM_MAX_RETRIES; retries++) {
+    send_header(ZFIN, 0, 0, 0, 0);
+    if (recv_header(f) == ZFIN)
+      break;
+  }
+  /* "Over and out", as the protocol ends a session. */
+  write(STDOUT_FILENO, "OO", 2);
+  fprintf(stderr, "\nOK %u files %u bytes\n", files_sent, bytes_sent);
+  return 0;
 }

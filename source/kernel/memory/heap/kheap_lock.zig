@@ -14,11 +14,12 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // The kernel heap lock -- `__malloc_lock` / `__malloc_unlock`, rank `kheap`.
-// The kernel heap is newlib malloc: the dynamic loader allocates through it
-// during execve and lazy PLT resolve, and so does every kernel structure.
+// The kernel heap is libc's malloc (libs/libc/noos/malloc.c): the dynamic
+// loader allocates through it during execve and lazy PLT resolve, and so does
+// every kernel structure.
 //
-// Recursive because newlib's API forces it: `realloc` takes `__malloc_lock` and
-// then calls the also-locking `_malloc_r` / `_free_r`.
+// Recursive because the Zig allocator in malloc.zig holds it around its own
+// bookkeeping *and* the `malloc` call inside, which takes `__malloc_lock` again.
 //
 // A spinlock, not the sleeping mutex, for two independent reasons: the lazy PLT
 // resolver runs in exception context where `RankedMutex` refuses to block, and
@@ -33,15 +34,12 @@ const locks = @import("../../sync/locks.zig");
 /// what lets the allocator log without inverting the hierarchy.
 var lock: locks.RecursiveRanked(.kheap) = .{};
 
-/// `__malloc_lock`. Exported under a stable C name because the rp2350 build must
-/// define `__malloc_lock` from a C object linked ahead of `libc_nano.a` -- the
-/// pico-sdk pulls newlib's strong `mlock.o` in before the Zig unit is scanned.
-/// That C file forwards here rather than carrying a second copy.
-pub export fn yasos_kheap_lock() callconv(.c) void {
+/// `__malloc_lock`, exported from system_stubs.zig.
+pub fn yasos_kheap_lock() callconv(.c) void {
     lock.lock_irqsave();
 }
 
-pub export fn yasos_kheap_unlock() callconv(.c) void {
+pub fn yasos_kheap_unlock() callconv(.c) void {
     lock.unlock_irqrestore();
 }
 
@@ -65,9 +63,9 @@ test "Sync.KernelHeapLock.NestsTheWayReallocNeeds" {
     locks.reset();
     defer locks.reset();
 
-    // newlib's realloc takes the lock and then calls _malloc_r, which takes it
-    // again. A non-recursive lock deadlocks the kernel heap on the first
-    // realloc; this is that exact sequence.
+    // malloc.zig takes the lock and then calls malloc, which takes it again. A
+    // non-recursive lock deadlocks the kernel heap on the first allocation;
+    // this is that exact sequence.
     yasos_kheap_lock();
     try testing.expect(held_by_current());
     yasos_kheap_lock();

@@ -188,6 +188,19 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         }
     }
 
+    /// rename(2). littlefs moves the entry itself (and replaces the
+    /// destination, as rename(2) requires), so this is a straight forward.
+    pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        const old_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{old_path}, 0);
+        defer self._allocator.free(old_c);
+        const new_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{new_path}, 0);
+        defer self._allocator.free(new_c);
+        const result = littlefs.lfs_rename(&self._lfs, old_c, new_c);
+        if (result < 0) {
+            return errno_converter.lfs_error_to_errno(result);
+        }
+    }
+
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
         log.debug("Removing file or directory at path: {s}", .{path});
         const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
@@ -283,6 +296,34 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return false;
     }
 
+    pub fn statvfs(self: *Self) anyerror!kernel.fs.FsStats {
+        const used = littlefs.lfs_fs_size(&self._lfs);
+        if (used < 0) return kernel.errno.ErrnoSet.InputOutputError;
+        const total: u64 = self._lfs_config.block_count;
+        return .{
+            .block_size = @intCast(self._lfs_config.block_size),
+            .total_blocks = total,
+            .free_blocks = total -| @as(u64, @intCast(used)),
+            .name_max = littlefs.LFS_NAME_MAX,
+        };
+    }
+
+    /// No permission bits or owners on this filesystem: accepted, ignored.
+    pub fn chmod(self: *Self, path: []const u8, mode: u32, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = mode;
+        _ = follow_links;
+    }
+
+    pub fn chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_links: bool) anyerror!void {
+        _ = self;
+        _ = path;
+        _ = uid;
+        _ = gid;
+        _ = follow_links;
+    }
+
     pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
         _ = self;
         _ = path;
@@ -293,14 +334,11 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
 
+        _ = mode;
+        // Every node is readable, writable and, a directory, searchable
+        // (X_OK on a directory is search permission): existence is the answer.
         var node = try self.get(path);
-        defer node.delete();
-
-        if ((mode & c.W_OK) != 0 or (mode & c.X_OK) != 0) {
-            if (node.filetype() == kernel.fs.FileType.Directory) {
-                return kernel.errno.ErrnoSet.IsADirectory;
-            }
-        }
+        node.delete();
     }
 });
 

@@ -60,7 +60,7 @@ else
 
 extern fn switch_to_next_task() void;
 extern fn switch_to_the_first_task(with_fpu: usize) void;
-extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: *const anyopaque) i32;
+extern fn call_main(argc: i32, argv: [*c][*c]u8, address: usize, got: usize) i32;
 extern fn arch_push_hardware_registers_on_stack(lr: usize, pc: usize) void;
 
 extern fn process_vfork_child(sp: usize, got: usize, lr: usize, is_fpu_used: usize) i32;
@@ -87,6 +87,26 @@ const wnohang: i32 = 0x1;
 /// through `Process.deinit` into the page pool and the kernel heap, and the
 /// fault handler's module-map dump alone wants a 4 KB buffer.
 const idle_stack_size: u32 = 8 * 1024;
+
+/// A YAFF image's stack_size when it declares none: run with the OS default.
+const no_stack_hint: u32 = 0xFFFFFFFF;
+
+/// The RLIMIT_STACK an exec'd image starts with, or null to keep `cur`.
+///
+/// An explicit limit -- raised or lowered via setrlimit/ulimit -- is inherited
+/// across exec and wins, so the tcc suite's deep-recursion tests still get
+/// their raise. Anything else is replaced by the new image's hint, or by the
+/// default when it has none. That includes a limit that is only the *previous*
+/// image's hint: toybox runs in 16 KiB, and treating its hint as a user's limit
+/// handed it to every program the shell started, so make got 16 KiB instead of
+/// the default and overflowed in its 8 KiB-frame parser.
+fn exec_stack_limit(cur: c.rlimit, from_image: bool, default_stack: u32, hint: u32) ?c.rlimit {
+    if (cur.rlim_cur != default_stack and !from_image) return null;
+    var limit = cur;
+    limit.rlim_cur = if (hint != no_stack_hint) hint else default_stack;
+    limit.rlim_max = @max(limit.rlim_max, limit.rlim_cur);
+    return limit;
+}
 
 /// The body of every core's idle process. A process rather than a bare WFI loop
 /// because `reap_terminated` must run in thread context -- it frees to the
@@ -209,6 +229,14 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         _scheduler: SchedulerType,
         _process_memory_pool: kernel.memory.heap.ProcessMemoryPool,
         _pid_map: std.StaticBitSet(config.process.max_pid_value),
+        /// Who still owns each allocated pid: the process itself until it is
+        /// reaped, plus its exit record until the parent collects it (a
+        /// zombie keeps its pid). The pid returns to `_pid_map` at zero. Handing
+        /// a pid out again while its old exit record waited let the parent's
+        /// waitpid(new child) collect the old record and return at once --
+        /// toysh never waits for a `$(...)` child, and after one, every
+        /// following command in a script ran without being waited for.
+        _pid_holds: [config.process.max_pid_value]u8,
         core: [hal.cpu.number_of_cores()]*ProcessType,
         /// What each core runs when the table holds nothing runnable. Not in
         /// `processes`, because everything that walks that list -- `ps`,
@@ -232,6 +260,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 ._scheduler = SchedulerType.init(),
                 ._process_memory_pool = processes_memory_pool,
                 ._pid_map = std.StaticBitSet(config.process.max_pid_value).full,
+                ._pid_holds = @splat(0),
                 .core = undefined,
                 .idle = @splat(null),
                 .terminate_list = .{},
@@ -343,10 +372,25 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 // with 32 KiB stacks and became reproducible at `ulimit -s 1024`
                 // (tests2/119_random_stuff), where freeing and re-zeroing a 1 MiB
                 // PSRAM stack stretches both sides of the window by ~40 ms each.
+                // Its own children's uncollected exits die with it.
+                p.release_exited_children(self);
                 p.deinit();
                 self.release_pid(dead_pid);
                 log.info("reap: reaped pid={d} kernel_used={d} process_pages={d} alloc_count={d}", .{ dead_pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
             }
+        }
+
+        /// Whether any live process works inside, or has a descriptor open
+        /// under, `prefix`. See `Process.uses_path_under`.
+        pub fn path_in_use(self: *Self, prefix: []const u8) bool {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            var next = self.processes.first;
+            while (next) |node| : (next = node.next) {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (p.uses_path_under(prefix)) return true;
+            }
+            return false;
         }
 
         pub fn deinit(self: *Self) void {
@@ -387,17 +431,30 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             const maybe_index = self._pid_map.findFirstSet();
             if (maybe_index) |index| {
                 self._pid_map.unset(index);
+                self._pid_holds[index] = 1;
                 return @intCast(index + 1);
             }
             log.err("No more PIDs available", .{});
             return null;
         }
 
-        fn release_pid(self: *Self, pid: c.pid_t) void {
+        /// One more owner of `pid`: its exit record, until collected.
+        fn hold_pid(self: *Self, pid: c.pid_t) void {
             const flags = pidmap_lock.lock_irqsave();
             defer pidmap_lock.unlock_irqrestore(flags);
-            if (pid > 0 and pid < config.process.max_pid_value) {
-                self._pid_map.set(@intCast(pid - 1));
+            if (pid > 0 and pid <= config.process.max_pid_value) {
+                self._pid_holds[@intCast(pid - 1)] +|= 1;
+            }
+        }
+
+        /// Drop one owner of `pid`; the last one frees it for reuse.
+        pub fn release_pid(self: *Self, pid: c.pid_t) void {
+            const flags = pidmap_lock.lock_irqsave();
+            defer pidmap_lock.unlock_irqrestore(flags);
+            if (pid > 0 and pid <= config.process.max_pid_value) {
+                const index: usize = @intCast(pid - 1);
+                if (self._pid_holds[index] > 0) self._pid_holds[index] -= 1;
+                if (self._pid_holds[index] == 0) self._pid_map.set(index);
             }
         }
 
@@ -549,11 +606,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         // Leave the status where waitpid can find it. This is the
                         // one funnel every exit path comes through.
                         if (p._parent) |parent| {
+                            self.hold_pid(pid);
                             parent.record_child_exit(pid, return_code);
                         }
                         p.unblock_parent();
                         p.schedule_removal();
                         p.unblock_all(return_code);
+                        self.orphan_children_locked(p);
 
                         self.processes.remove(&p.node);
                         self.terminate_list.append(&p.node);
@@ -838,7 +897,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         // TODO: exec on currently running process is not supported yet
-        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator) !i32 {
+        /// `argv_scratch`, when given, is a block from `path_allocator` backing
+        /// `argv` (a `#!` rewrite, see sys_execve): freed here once the arguments are
+        /// copied -- this function may not return -- and set to null so the
+        /// caller frees it only when the exec failed before that point.
+        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator, argv_scratch: ?*?[]usize) !i32 {
             const current_process = self.get_current_process();
 
             // Restore parent's writable sections that may have been corrupted
@@ -862,7 +925,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
 
             // TODO: move loader to struct, pass allocator to loading functions
-            const executable = try dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid);
+            // Not a YAFF image (a script without "#!", data, ...) is ENOEXEC,
+            // which is what a shell falls back on to run it itself.
+            const executable = dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid) catch |err| {
+                return if (err == error.IncorrectSignature) kernel.errno.ErrnoSet.ExecFormatError else err;
+            };
             // Taken from inside the loader, not measured around this call: on a
             // profiling build the loader's own trace lines are written before
             // it returns, and billing those to the load overstated it 6x.
@@ -884,6 +951,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 perf.reset();
             }
 
+            // Record what is now running before the path goes away: this is
+            // what /proc/<pid>/exe reports, and readlink on it is how a
+            // Linux-shaped program locates its own binary.
+            current_process.set_executable_path(path) catch |err| {
+                log.warn("pid={d}: could not record exe path: {s}", .{ current_process.pid, @errorName(err) });
+            };
+
             // Free the path now — it's no longer needed, and this function may
             // not return normally (process_get_back_to_parent_vfork bypasses
             // all defers in the caller).
@@ -894,6 +968,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // argv_copy holds argv and envp contiguously (see clone_exec_args);
             // crt1 recovers `environ` from &argv[argc + 1].
             const argv_copy = try clone_exec_args(exec_allocator, argv, envp);
+            if (argv_scratch) |scratch| {
+                if (scratch.*) |block| {
+                    if (path_allocator) |alloc| alloc.free(block);
+                }
+                scratch.* = null;
+            }
             const argc = argv_copy.argc;
 
             var symbol: SymbolEntry = undefined;
@@ -905,28 +985,23 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 return -1;
             }
 
+            // The exec has succeeded: drop the close-on-exec descriptors. Here,
+            // before the preemption window below, because closing a file may
+            // take the sleeping fs_lock.
+            current_process.close_on_exec_fds();
+
             // An exec'd image is a user program and must run unprivileged so the
             // MPU keeps it out of the kernel heap and stack.
             current_process.privileged = false;
 
             // Apply the per-image stack hint from the YAFF header so an applet
             // sizes its stack to what it declared (e.g. shell tools want far
-            // less than the 32 KiB default that tcc needs). 0xFFFFFFFF means
-            // "OS default". An *explicit* RLIMIT_STACK (raised/lowered via
-            // setrlimit/ulimit, i.e. differing from the default) always wins so
-            // dynamic raises — e.g. the tcc suite's deep-recursion tests,
-            // inherited across exec — still take effect. Otherwise the header
-            // hint overrides the inherited default.
-            const stack_hint = executable.module.stack_size;
-            if (stack_hint != 0xFFFFFFFF) {
-                const default_stack = self.runtime_configuration.default_stack_size;
-                const cur = try current_process.get_resource_limit(c.RLIMIT_STACK);
-                if (cur.rlim_cur == default_stack) {
-                    var limit = cur;
-                    limit.rlim_cur = stack_hint;
-                    limit.rlim_max = @max(limit.rlim_max, stack_hint);
-                    try current_process.set_resource_limit(c.RLIMIT_STACK, limit);
-                }
+            // less than the 32 KiB default that tcc needs); see
+            // `exec_stack_limit` for when an inherited limit wins instead.
+            const cur_stack = try current_process.get_resource_limit(c.RLIMIT_STACK);
+            if (exec_stack_limit(cur_stack, current_process.stack_limit_from_image, self.runtime_configuration.default_stack_size, executable.module.stack_size)) |limit| {
+                try current_process.set_resource_limit(c.RLIMIT_STACK, limit);
+                current_process.stack_limit_from_image = executable.module.stack_size != no_stack_hint;
             }
 
             // The window starts here, not at the top: what follows rewrites this
@@ -977,9 +1052,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     // `update_current`, and its frame is freshly built and
                     // marked uninitialised, so the switch away enters the new
                     // image rather than storing over it.
+                    // An orphan has no parent to name; the core's idle process
+                    // serves the same purpose -- some process other than this
+                    // one to switch to, so the switch enters the new image.
                     .none => {
-                        self._scheduler.set_next(&current_process._parent.?.node);
-                        self.core[hal.cpu.coreid()] = current_process._parent.?;
+                        const next_process = current_process._parent orelse self.idle[hal.cpu.coreid()].?;
+                        self._scheduler.set_next(&next_process.node);
+                        self.core[hal.cpu.coreid()] = next_process;
                     },
                     // A parked, unresumable parent. Naming it here is the bug
                     // this split exists to prevent -- the claim would hand it to
@@ -1071,6 +1150,25 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         /// Does this process still have a child that could be waited for?
+        /// A process's children outlive it: once it is freed nothing may still
+        /// reach it through `_parent`. A background job whose shell exited
+        /// first recorded its exit into the freed parent's list, through an
+        /// allocator read out of freed memory (a jump to 0xAAAAAAAA). Its
+        /// exit now goes unrecorded -- nobody is left to collect it. Caller
+        /// holds `proctable_lock`.
+        fn orphan_children_locked(self: *Self, parent: *const Process) void {
+            var next = self.processes.first;
+            while (next) |node| : (next = node.next) {
+                const q: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (q._parent == parent) q._parent = null;
+            }
+            next = self.terminate_list.first;
+            while (next) |node| : (next = node.next) {
+                const q: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (q._parent == parent) q._parent = null;
+            }
+        }
+
         pub fn has_live_child(self: *Self, parent: *const Process) bool {
             const flags = proctable_lock.lock_irqsave();
             defer proctable_lock.unlock_irqrestore(flags);
@@ -1116,6 +1214,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 // A child that has already finished is collected without
                 // blocking, whichever form of the call this is.
                 if (current_process.take_exited_child(pid)) |exited| {
+                    self.release_pid(exited.pid);
                     status.* = exited.status;
                     return exited.pid;
                 }
@@ -1130,12 +1229,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     // wakes this process (`Process.record_child_exit`).
                     current_process.block_on(current_process.any_child_blocker());
                 } else {
-                    const maybe_process = self.get_process_for_pid_locked(pid);
-                    if (maybe_process == null) {
-                        status.* = current_process.child_exit_code;
-                        return pid;
-                    }
-                    const p = maybe_process.?;
+                    // Not in the table and not among the collected exits above:
+                    // nothing by that pid is left to wait for (it was collected
+                    // already, or never existed), so ECHILD. Answering `pid`
+                    // with a stale status told the caller it had just collected
+                    // it -- toysh's `wait`, which asked again for the pid it
+                    // last reaped, spun on that answer forever.
+                    const p = self.get_process_for_pid_locked(pid) orelse return kernel.errno.ErrnoSet.NoChildProcesses;
                     if (p.state == Process.State.Terminated) {
                         status.* = current_process.child_exit_code;
                         return pid;
@@ -1165,6 +1265,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // record it left, so `waitpid(-1)` reports the pid it collected.
             // Falling past this means the exit could not be recorded at all.
             if (current_process.take_exited_child(pid)) |exited| {
+                self.release_pid(exited.pid);
                 status.* = exited.status;
                 return exited.pid;
             }
@@ -1602,7 +1703,37 @@ test "ProcessManager.ShouldReactCorrectlyWhenIsEmpty" {
     try std.testing.expectEqual(config.process.max_pid_value - 1, sut.get_pidmap().count());
 }
 
+test "ProcessManager.PidIsNotReusedWhileItsExitIsUncollected" {
+    var sut = ProcessManagerGenerator(StubScheduler).init(std.testing.allocator);
+    defer sut.deinit();
+
+    const child = sut.get_next_pid().?;
+    sut.hold_pid(child); // the child exited: its record waits for the parent
+    sut.release_pid(child); // ... and the child itself has been reaped
+    const next = sut.get_next_pid().?;
+    try std.testing.expect(next != child);
+    sut.release_pid(child); // the parent collected it: now it is free
+    try std.testing.expectEqual(child, sut.get_next_pid().?);
+    sut.release_pid(next);
+}
+
 fn test_entry() void {}
+
+test "ProcessManager.ExitingParentLeavesNoPointerInItsChildren" {
+    var sut = ProcessManagerGenerator(StubScheduler).init(std.testing.allocator);
+    defer sut.deinit();
+
+    const arg = "argument";
+    try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
+    try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/test");
+    const parent = sut.get_process_for_pid(1).?;
+    const child = sut.get_process_for_pid(2).?;
+    child._parent = parent; // a background job of the shell at pid 1
+
+    // The shell exits first; the job's own exit must not reach back into it.
+    sut.orphan_children_locked(parent);
+    try std.testing.expectEqual(null, child._parent);
+}
 
 test "ProcessManager.ShouldCreateProcesses" {
     var sut = ProcessManagerGenerator(StubScheduler).init(std.testing.allocator);
@@ -1848,10 +1979,45 @@ test "ProcessManager.ShouldForkProcess" {
     _ = sut.schedule_next();
     _ = process_set_next_task();
 
-    _ = try sut.prepare_exec("/test", argv, envp, null);
+    _ = try sut.prepare_exec("/test", argv, envp, null, null);
 
     const p = sut.get_process_for_pid(4).?;
     p.unblock_parent();
+}
+
+test "ProcessManager.ExecStackLimitReplacesTheLastImagesHintButKeepsAnExplicitLimit" {
+    const default_stack: u32 = 32 * 1024;
+    const unlimited: c.rlim_t = c.RLIM_INFINITY;
+    // Default limit: the image's hint applies, or the default stays.
+    const at_default: c.rlimit = .{ .rlim_cur = default_stack, .rlim_max = unlimited };
+    try std.testing.expectEqual(16 * 1024, exec_stack_limit(at_default, false, default_stack, 16 * 1024).?.rlim_cur);
+    try std.testing.expectEqual(default_stack, exec_stack_limit(at_default, false, default_stack, no_stack_hint).?.rlim_cur);
+    // The shell's own 16 KiB hint, inherited: replaced, not handed on.
+    const shell_hint: c.rlimit = .{ .rlim_cur = 16 * 1024, .rlim_max = unlimited };
+    try std.testing.expectEqual(default_stack, exec_stack_limit(shell_hint, true, default_stack, no_stack_hint).?.rlim_cur);
+    try std.testing.expectEqual(64 * 1024, exec_stack_limit(shell_hint, true, default_stack, 64 * 1024).?.rlim_cur);
+    // The same number set by ulimit: kept, whatever the image says.
+    try std.testing.expectEqual(null, exec_stack_limit(shell_hint, false, default_stack, no_stack_hint));
+    try std.testing.expectEqual(null, exec_stack_limit(shell_hint, false, default_stack, 64 * 1024));
+}
+
+test "ProcessManager.WaitingForAPidThatIsGoneFailsWithNoChildProcesses" {
+    kernel.dynamic_loader.init(std.testing.allocator);
+    initialize_process_manager(std.testing.allocator);
+    defer deinitialize_process_manager();
+    var sut = &instance;
+
+    const arg = "argument";
+    try sut.create_process(4096, &test_entry, @ptrCast(&arg), "/proc/0");
+    try std.testing.expectEqual(.StoreAndSwitch, sut.schedule_next());
+    _ = process_set_next_task();
+
+    var status: i32 = 3;
+    // A pid nobody has -- one already collected, say -- must not report back
+    // as collected, in either form of the call.
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoChildProcesses, sut.waitpid(1234, &status, 0));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoChildProcesses, sut.waitpid(1234, &status, wnohang));
+    try std.testing.expectEqual(3, status);
 }
 
 test "ProcessManager.ShouldWaitForProcess" {

@@ -42,12 +42,17 @@ PREFIX=$1 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t make install
 if [ -f "$1/bin/cal" ]; then
   mv "$1/bin/cal" "$(dirname "$1")/bin/cal"
 fi
-# Applets declared TOYFLAG_USR (ulimit, prlimit, clear, ...) are installed by
+# Applets declared TOYFLAG_USR (ulimit, prlimit, clear, and most of what a
+# configure script runs: awk, expr, tr, sort, head, find, ...) are installed by
 # "make install --long" under $PREFIX/usr/bin.  $PREFIX is already rootfs/usr
 # here, so they land in rootfs/usr/usr/bin, which is not on the target's PATH.
-# Link them into rootfs/usr/bin, skipping any name a standalone app already
-# installed there (apps/sha ships its own sha256sum).
-for applet in ulimit prlimit clear; do
+# Link every one of them into rootfs/usr/bin, skipping any name a standalone
+# app already installed there (apps/sha ships its own sha256sum).
+for path in "$1"/usr/bin/*; do
+    applet=$(basename "$path")
+    # cal is placed by the step above; linking it here too would make that
+    # step's mv fail on the next build (rootfs/bin can be rootfs/usr/bin).
+    [ "$applet" = cal ] && continue
     if [ ! -e "$1/bin/$applet" ]; then
         ln -sf toybox "$1/bin/$applet"
     fi

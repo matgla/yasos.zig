@@ -32,12 +32,21 @@ const RomFs = @import("fs/romfs/romfs.zig").RomFs;
 const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 const RamFsTier = @import("fs/ramfs/ramfs.zig").Tier;
 const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
+const mounter = @import("fs/mounter.zig");
 
 const panic_helper = @import("arch").panic;
 const arch = @import("arch");
 
 const mpu_kernel_protection = if (@hasDecl(config.process, "use_mpu_kernel_protection"))
     config.process.use_mpu_kernel_protection
+else
+    false;
+
+// Off unless a config asks for it: the whole-PSRAM write/read-back was a
+// bring-up check and costs about half the boot (see the Kconfig help).
+const external_memory_post = if (@hasDecl(config, "instrumentation") and
+    @hasDecl(config.instrumentation, "external_memory_post"))
+    config.instrumentation.external_memory_post
 else
     false;
 
@@ -144,7 +153,8 @@ const tmpfs = struct {
     const page_size: usize = if (has_config) config.tmpfs.page_size else 256;
     const max_file_size: usize = if (has_config) config.tmpfs.max_file_size else 64 * 1024;
     const arena_reserve: usize = if (has_config) config.tmpfs.arena_reserve else 8 * 1024;
-    const spill_directory: []const u8 = if (has_config) config.tmpfs.spill_directory else "/root/tmp";
+    /// Only a default now: /etc/fstab's `spill=` on the tmpfs line wins.
+    const spill_directory: []const u8 = if (has_config) config.tmpfs.spill_directory else "/var/tmp";
 };
 
 const TmpMemoryPoolType = kernel.memory.heap.TmpMemoryPool(tmpfs.page_size);
@@ -153,6 +163,33 @@ const TmpPageAllocatorType = kernel.memory.heap.TmpPageAllocator(TmpMemoryPoolTy
 var tmp_memory_pool: ?TmpMemoryPoolType = null;
 var tmp_page_allocator: ?TmpPageAllocatorType = null;
 var tmp_tier: ?RamFsTier = null;
+
+/// The spill directory comes off with its mount (`umount /var`) once no /tmp
+/// file has its body there, and is used again when a mount covers it.
+var tmp_spill_user: kernel.fs.mount_api.User = undefined;
+
+fn release_tmp_spill() anyerror!void {
+    try tmp_tier.?.detach();
+}
+
+fn reattach_tmp_spill() void {
+    mounter.mkdir_parents(tmp_tier.?.directory) catch |err| {
+        kernel.log.warn("/tmp: can't create spill directory {s}: {s}", .{ tmp_tier.?.directory, @errorName(err) });
+    };
+    tmp_tier.?.reattach();
+}
+
+/// The kernel log lets go of /var the same way, and logs to it again once it
+/// is real storage -- a RAM /var would grow the kernel heap without bound.
+const log_user: kernel.fs.mount_api.User = .{
+    .path = kernel.file_log.directory,
+    .release = &kernel.file_log.release,
+    .reattach = &reattach_file_log,
+};
+
+fn reattach_file_log() void {
+    if (mounter.is_persistent("/var")) kernel.file_log.reattach();
+}
 
 /// Read by /proc/meminfo (source/kernel/process/meminfo_file.zig) through the
 /// root module, so a target without a /tmp arena simply reports zero.
@@ -190,7 +227,7 @@ fn find_temp_memory_region() ?struct { start: usize, size: usize } {
 
 /// Set up the arena over the board's Temp region, or return null when the board
 /// has none — /tmp still mounts in that case, it just holds nothing in memory.
-fn prepare_tmp_arena(kernel_allocator: std.mem.Allocator) ?std.mem.Allocator {
+fn prepare_tmp_arena(kernel_allocator: std.mem.Allocator, spill_directory: []const u8) ?std.mem.Allocator {
     const region = find_temp_memory_region() orelse return null;
 
     const start = std.mem.alignForward(usize, region.start, tmpfs.page_size);
@@ -210,20 +247,40 @@ fn prepare_tmp_arena(kernel_allocator: std.mem.Allocator) ?std.mem.Allocator {
         (end - start) / 1024,
         start,
         tmpfs.max_file_size,
-        tmpfs.spill_directory,
+        spill_directory,
     });
     return tmp_page_allocator.?.allocator();
 }
 
-fn mount_tmp_filesystem(kernel_allocator: std.mem.Allocator) !void {
-    const maybe_arena = prepare_tmp_arena(kernel_allocator);
+/// Where the tiered /tmp spills. Copied here because the fstab text it came
+/// from is freed once boot has mounted everything.
+var tmp_spill_buffer: [64]u8 = undefined;
+
+/// The mounter's `tmpfs` type: the hybrid RAM/disk /tmp over the board's Temp
+/// region. There is one arena and one tier, so there is at most one tmpfs.
+/// Without CONFIG_TMPFS_ENABLE it is a plain RamFs -- /tmp is still writable,
+/// it just lives on the kernel heap.
+fn make_tmp_filesystem(kernel_allocator: std.mem.Allocator, requested_spill: []const u8) anyerror!kernel.fs.IFileSystem {
+    if (comptime !tmpfs.enabled) {
+        @import("fs/ramfs/ramfs_data.zig").kernel_heap_headroom = &kernel.memory.heap.malloc.headroom;
+        return try (try RamFs.InstanceType.init(kernel_allocator)).interface.new(kernel_allocator);
+    }
+    if (tmp_tier != null) return kernel.errno.ErrnoSet.DeviceOrResourceBusy;
+    const spill = if (requested_spill.len != 0) requested_spill else tmpfs.spill_directory;
+    if (spill.len > tmp_spill_buffer.len) return kernel.errno.ErrnoSet.NameTooLong;
+    @memcpy(tmp_spill_buffer[0..spill.len], spill);
+    const spill_directory = tmp_spill_buffer[0..spill.len];
+
+    const maybe_arena = prepare_tmp_arena(kernel_allocator, spill_directory);
     // Without an arena every body spills on its first write, which is exactly
     // what /tmp did when it was a symlink into the spill directory — only the
     // tree stays in memory, and that is a few dozen bytes per file.
     const allocator = maybe_arena orelse kernel_allocator;
     const max_file_size: usize = if (maybe_arena == null) 0 else tmpfs.max_file_size;
 
-    tmp_tier = RamFsTier.init(kernel.fs.get_ivfs(), tmpfs.spill_directory, max_file_size);
+    tmp_tier = RamFsTier.init(kernel.fs.get_ivfs(), spill_directory, max_file_size);
+    tmp_spill_user = .{ .path = spill_directory, .release = &release_tmp_spill, .reattach = &reattach_tmp_spill };
+    kernel.fs.mount_api.register_user(&tmp_spill_user) catch {};
     if (maybe_arena != null) {
         tmp_tier.?.set_arena(.{
             .context = &tmp_memory_pool.?,
@@ -231,8 +288,7 @@ fn mount_tmp_filesystem(kernel_allocator: std.mem.Allocator) !void {
         }, tmpfs.arena_reserve);
     }
 
-    const filesystem = try allocate_filesystem(allocator, RamFs.InstanceType.init_tiered(allocator, &tmp_tier.?));
-    try kernel.fs.get_vfs().mount_filesystem("/tmp", filesystem);
+    return try (try RamFs.InstanceType.init_tiered(allocator, &tmp_tier.?)).interface.new(allocator);
 }
 
 fn initialize_board() void {
@@ -321,7 +377,7 @@ fn initialize_board() void {
 
         if (hal.external_memory.enable()) {
             hal.external_memory.dump_configuration();
-            if (hal.external_memory.perform_post()) {} else {
+            if (external_memory_post and !hal.external_memory.perform_post()) {
                 kernel.log.err("External memory post test failed", .{});
             }
         } else {
@@ -366,74 +422,19 @@ fn mount_filesystem(ifs: kernel.fs.IFileSystem, comptime point: []const u8) !voi
     };
 }
 
-fn mount_fatdisk(allocator: std.mem.Allocator) !void {
-    const fat_driver_base = try kernel.driver.FlashDriver(@TypeOf(board.flash.fatdisk0)).InstanceType.create(allocator, board.flash.fatdisk0, "fatdisk0");
+/// The QEMU host-exchange window as a disk, `/dev/fatdisk0`. Whether it holds
+/// one FAT volume (the usual /mnt image) or a partitioned SD card image is for
+/// the block layer to find out; /etc/fstab decides what gets mounted.
+fn add_fatdisk(allocator: std.mem.Allocator, driverfs: *kernel.driver.fs.DriverFs) !void {
+    const name = "fatdisk0";
+    const fat_driver_base = try kernel.driver.FlashDriver(@TypeOf(board.flash.fatdisk0)).InstanceType.create(allocator, board.flash.fatdisk0, name);
     var fat_driver = try fat_driver_base.interface.new(allocator);
-    var fnode = try fat_driver.interface.node();
-    defer fnode.delete();
-    var maybe_file = fnode.as_file();
-    if (maybe_file) |*file| {
-        // `as_file()` hands back a borrowed copy of the node's interface -- same
-        // refcount, no acquire -- and `FatFs.init` deep-clones it. Releasing
-        // this copy as well as `fnode.delete()` double-releases the node's
-        // single reference, and the second decrement lands on freed memory that
-        // is by then a newlib free-list `next` pointer.
-        var fatdisk = try allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*));
-        // The window only holds a FAT image when the host pre-loaded one into
-        // the RAM backing file (memory-backend-file launch, see
-        // scripts/qemu_fatdisk_run.py). A plain `-kernel` launch
-        // (scripts/run_qemu.sh) starts with the window zeroed, so there is no
-        // filesystem to mount — format it so /mnt is a usable (guest-local)
-        // scratch disk there too. A host-provided image mounts on the first
-        // try, so this never wipes one.
-        if (fatdisk.interface.mount() < 0) {
-            fatdisk.interface.format() catch |err| {
-                kernel.log.err("can't format fatdisk: {s}", .{@errorName(err)});
-                fatdisk.interface.delete();
-                return;
-            };
-            // Logged at error level so it is visible under the default QEMU
-            // config (only `log_error` is on) — the preceding "Failed to mount"
-            // line would otherwise read as an unexplained failure.
-            kernel.log.err("fatdisk had no filesystem, formatted it", .{});
-        }
-        try mount_filesystem(fatdisk, "/mnt");
-    }
-}
-
-fn add_mmc_partition_drivers(mmcfile: *kernel.fs.IFile, allocator: std.mem.Allocator, driverfs: anytype) !void {
-    var buffer: [1024]u8 = @splat(0x00);
-    _ = mmcfile.interface.read(buffer[0..]);
-    const mbr = kernel.fs.MBR.create(buffer[0..]);
-    if (mbr.is_valid()) {
-        kernel.log.debug("MBR is valid, partition count: {d}", .{mbr.partitions.len});
-        comptime var i: i32 = 0;
-        inline for (mbr.partitions) |part| {
-            if (part.size_in_sectors != 0) {
-                kernel.log.debug("Mounting partition {d}:\n  boot_indicator: {x}\n  start_chs: {d}\n  partition_type: {x}\n  end_chs: {d}\n  start_lba: {x}\n  size: {x} sectors", .{
-                    i,
-                    part.boot_indicator,
-                    part.start_chs,
-                    part.partition_type,
-                    part.end_chs,
-                    part.start_lba,
-                    part.size_in_sectors,
-                });
-                const partname = std.fmt.comptimePrint("mmc{d}p{d}", .{ 0, i });
-                const partition_driver_data = try kernel.driver.MmcPartitionDriver.InstanceType.create(allocator, mmcfile.*, partname, part.start_lba, part.size_in_sectors);
-                const partition_driver = partition_driver_data.interface.new(allocator) catch |err| {
-                    kernel.log.err("Can't create partition driver: {s}", .{@errorName(err)});
-                    return;
-                };
-                driverfs.data().append(partition_driver, partname) catch |err| {
-                    kernel.log.err("Can't append partition driver: {s}", .{@errorName(err)});
-                    return;
-                };
-            }
-            i += 1;
-        }
-    } else {
-        kernel.log.err("Invalid MBR found", .{});
+    try driverfs.data().append(fat_driver, name);
+    var node = try fat_driver.interface.node();
+    defer node.delete();
+    // `as_file()` lends the node's interface; the block layer clones it.
+    if (node.as_file()) |file| {
+        try kernel.driver.block.add_disk(name, file);
     }
 }
 
@@ -457,6 +458,8 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     try driverfs.data().append(try uart_driver.clone(), "stdin");
     try driverfs.data().append(try uart_driver.clone(), "stdout");
     try driverfs.data().append(try uart_driver.clone(), "stderr");
+    try driverfs.data().append(try (try kernel.driver.MemoryDeviceDriver.InstanceType.create(allocator, .null, "null")).interface.new(allocator), "null");
+    try driverfs.data().append(try (try kernel.driver.MemoryDeviceDriver.InstanceType.create(allocator, .zero, "zero")).interface.new(allocator), "zero");
 
     const flash0name = "flash0";
     const flash_driver_base = try kernel.driver.FlashDriver(@TypeOf(board.flash.flash0)).InstanceType.create(allocator, board.flash.flash0, flash0name);
@@ -478,92 +481,73 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
     } else {
         kernel.log.debug("Board has no mmc interfaces", .{});
     }
+
+    // Display, when the board has one. Registered as /dev/fb0. On the QEMU
+    // host-test target this is the shared-memory framebuffer that
+    // scripts/fbview.py renders into a window; on a real board it will be the
+    // VGA/DVI extension panel behind the same hal interface.
+    if (@hasDecl(board, "display")) {
+        inline for (@typeInfo(board.display).@"struct".decl_names, 0..) |decl_name, i| {
+            const name = std.fmt.comptimePrint("fb{d}", .{i});
+            const display = &@field(board.display, decl_name);
+            const display_driver = try (try kernel.driver.DisplayDriver(@TypeOf(display.*)).InstanceType.create(allocator, display, name)).interface.new(allocator);
+            driverfs.data().append(display_driver, name) catch {};
+            kernel.log.info("adding display driver: {s}", .{name});
+        }
+    } else {
+        kernel.log.debug("Board has no display interfaces", .{});
+    }
+
     try driverfs.data().load_all();
 
+    // Disks: publish their partitions as /dev/<disk>p<N>.
+    kernel.driver.block.init(driverfs, allocator);
     if (maybe_mmcnode) |*mmcnode| {
-        var maybe_mmcfile = mmcnode.as_file();
-        if (maybe_mmcfile) |*file| {
-            try add_mmc_partition_drivers(file, allocator, &driverfs);
+        if (mmcnode.as_file()) |file| {
+            kernel.driver.block.add_disk("mmc0", file) catch |err| {
+                kernel.log.err("mmc0: {s}", .{@errorName(err)});
+            };
         }
         mmcnode.delete();
     }
-
-    var node = try flash_driver.interface.node();
-    const maybe_flashfile = node.as_file();
-    if (maybe_flashfile) |flash| {
-        // On the rp2350 board the rootfs lives 1 MB into flash; boards may
-        // override this (e.g. the QEMU build embeds the romfs at the mapping base).
-        const romfs_offset: usize = if (@hasDecl(board, "romfs_offset")) board.romfs_offset else 0x100000;
-        try mount_filesystem(try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, romfs_offset)), "/");
-        var root_mounted = false;
-        var maybe_mmcpart0 = driverfs.data().get("mmc0p0") catch null;
-        if (maybe_mmcpart0) |*mmcnode| {
-            var maybe_file = mmcnode.as_file();
-            if (maybe_file) |*file| {
-                // Same borrowed-copy rule as mount_fatdisk: `mmcnode.delete()`
-                // below owns the single reference, so releasing it here too
-                // would decrement a freed refcount.
-                const maybe_rootfs: ?kernel.fs.IFileSystem = allocate_filesystem(allocator, FatFs.InstanceType.init(allocator, file.*)) catch null;
-                if (maybe_rootfs) |rootfs| {
-                    if (mount_filesystem(rootfs, "/root")) |_| {
-                        root_mounted = true;
-                    } else |err| {
-                        kernel.log.err("can't mount mmc rootfs at /root: {s}", .{@errorName(err)});
-                    }
-                }
-
-                mmcnode.delete();
-            }
-        }
-
-        // Boards without a persistent MMC-backed rootfs (e.g. the QEMU
-        // mps2-an505 host-test target) leave /root as a read-only romfs
-        // directory, which breaks anything that needs to write there (the tcc
-        // smoke suite uploads sources into /root/ci). Fall back to a writable
-        // RamFs so /root is usable; it is volatile across resets, which is fine
-        // because the smoke harness re-uploads its sources after each relaunch.
-        if (!root_mounted) {
-            mount_filesystem(try allocate_filesystem(allocator, RamFs.InstanceType.init(allocator)), "/root") catch |err| {
-                kernel.log.err("can't mount fallback RamFs at /root: {s}", .{@errorName(err)});
-            };
-        }
-        // Where the hybrid /tmp puts the bodies it cannot keep in memory. Create
-        // it on whichever filesystem backs /root (SD FatFs or the RamFs
-        // fallback) before mounting /tmp, since the first spill needs it.
-        kernel.fs.get_ivfs().interface.mkdir(tmpfs.spill_directory, 0o777) catch |err| {
-            if (err != kernel.errno.ErrnoSet.FileExists) {
-                kernel.log.err("can't create '{s}': {s}", .{ tmpfs.spill_directory, @errorName(err) });
-            }
+    // Host-readable FAT window (QEMU host-test targets only). The host
+    // pre-loads an image into it (scripts/qemu_fatdisk_run.py) -- a plain FAT
+    // volume for /mnt, or a whole partitioned SD image.
+    if (@hasDecl(board.flash, "fatdisk0")) {
+        add_fatdisk(allocator, &driverfs) catch |err| {
+            kernel.log.err("fatdisk0: {s}", .{@errorName(err)});
         };
-        if (comptime tmpfs.enabled) {
-            mount_tmp_filesystem(allocator) catch |err| {
-                kernel.log.err("can't mount /tmp: {s}", .{@errorName(err)});
-            };
-        }
-        try mount_filesystem(try allocate_filesystem(allocator, driverfs), "/dev");
-        try mount_filesystem(try allocate_filesystem(allocator, kernel.process.ProcFs.InstanceType.init(allocator)), "/proc");
-
-        // Persist the kernel log to the SD card (only when /root is the real
-        // MMC-backed rootfs; on the volatile RamFs fallback we skip it to avoid
-        // growing the kernel heap without bound).
-        if (root_mounted) {
-            kernel.file_log.init();
-        }
-
-        // Host-readable FAT block device (QEMU host-test target only). When the
-        // guest runs under a host-mmap'd RAM the host pre-loads a FAT image into
-        // the `fatdisk0` window, so this mounts at /mnt and the host can exchange
-        // files with the guest (test sources in, compiled binaries out) without
-        // a kernel rebuild. Under a plain-RAM launch the window is garbage so the
-        // FatFs mount fails; that is caught and /mnt is simply left unmounted.
-        if (@hasDecl(board.flash, "fatdisk0")) {
-            mount_fatdisk(allocator) catch |err| {
-                kernel.log.info("fatdisk not mounted at /mnt: {s}", .{@errorName(err)});
-            };
-        }
     }
 
-    return;
+    // Not released: RomFs keeps using the flash file it is handed without
+    // taking a reference of its own, for as long as the system runs.
+    var node = try flash_driver.interface.node();
+    const flash = node.as_file() orelse return error.NoRootFilesystem;
+    // On the rp2350 board the rootfs lives 1 MB into flash; boards may
+    // override this (e.g. the QEMU build embeds the romfs at the mapping base).
+    const romfs_offset: usize = if (@hasDecl(board, "romfs_offset")) board.romfs_offset else 0x100000;
+    const romfs = try allocate_filesystem(allocator, RomFs.InstanceType.init(allocator, flash, romfs_offset));
+    try kernel.fs.get_vfs().mount_filesystem_with_info("/", romfs, kernel.fs.MountInfo.init("/dev/flash0", "romfs", "ro"));
+    // /dev before anything else: fstab sources are device paths.
+    try kernel.fs.get_vfs().mount_filesystem_with_info("/dev", try allocate_filesystem(allocator, driverfs), kernel.fs.MountInfo.init("devfs", "devfs", "rw"));
+
+    // Everything else comes from /etc/fstab (source/fs/mounter.zig), or from
+    // a RAM-only default when the image has none.
+    mounter.init(allocator, &make_tmp_filesystem, &kernel.memory.heap.malloc.headroom);
+    if (mounter.read_file(allocator, "/etc/fstab")) |fstab| {
+        defer allocator.free(fstab);
+        mounter.mount_all(fstab);
+    } else {
+        kernel.log.err("no /etc/fstab, mounting RAM-only defaults", .{});
+        mounter.mount_all(mounter.default_fstab);
+    }
+
+    // Persist the kernel log -- only onto real storage; on a RAM fallback it
+    // would just grow the kernel heap without bound.
+    if (mounter.is_persistent("/var")) {
+        kernel.file_log.init();
+    }
+    kernel.fs.mount_api.register_user(&log_user) catch {};
 }
 
 fn attach_default_filedescriptors_to_root_process(process: *kernel.process.Process) !void {
@@ -600,6 +584,13 @@ export fn kernel_process() void {
     const sh = kernel.dynamic_loader.load_executable("/bin/sh", process.get_process_memory_allocator(), pid) catch |err| {
         kernel.log.err("Executable loading failed with error: {s}", .{@errorName(err)});
         return;
+    };
+    // The root process is loaded here, never exec'd, so nothing else records
+    // what it runs. Without this /proc/self/exe has no target, and a NOMMU
+    // shell that re-execs itself for $(...) and ( ) cannot: pid 1 and every
+    // shell vforked from it inherit the (missing) path.
+    process.set_executable_path("/bin/sh") catch |err| {
+        kernel.log.warn("pid={d}: could not record exe path: {s}", .{ pid, @errorName(err) });
     };
 
     var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };

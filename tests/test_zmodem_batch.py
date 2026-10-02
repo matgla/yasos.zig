@@ -192,6 +192,28 @@ def test_batch_writes_every_file_with_its_own_path(receiver_binary, tmp_path):
     assert session.sent_bytes == sum(len(c) for c in payloads.values())
 
 
+def test_batch_files_larger_than_the_write_buffer(receiver_binary, tmp_path):
+    # The receiver holds a file back and writes it in 16 KiB pieces: one well
+    # past that, one exactly at it, and an empty one after both, so a tail
+    # left in the buffer would show up in the next file.
+    root = tmp_path / "target"
+    payloads = {
+        "big.bin": bytes((i * 7 + i // 251) & 0xFF for i in range(40 * 1024 + 123)),
+        "exact.bin": bytes(range(256)) * 64,
+        "empty.bin": b"",
+    }
+    transfers = []
+    for name, content in payloads.items():
+        local = tmp_path / name
+        local.write_bytes(content)
+        transfers.append((str(local), f"{root}/{name}"))
+
+    _run_batch(receiver_binary, transfers, tmp_path)
+
+    for name, content in payloads.items():
+        assert (root / name).read_bytes() == content
+
+
 def test_batch_of_one_file_still_completes(receiver_binary, tmp_path):
     root = tmp_path / "target"
     local = tmp_path / "only.c"

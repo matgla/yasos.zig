@@ -30,3 +30,8 @@ int zmodem_receive(const char *filename);
    the sender sends ZFIN. One spawn and one handshake for the whole set, which
    is what makes uploading a few thousand small sources practical. */
 int zmodem_receive_batch(void);
+
+/* Send files to a receiver on the other end of stdin/stdout, all in one
+   session. Each file is named by its path with *strip* removed from the front
+   (NULL keeps it whole). Ends with ZFIN. */
+int zmodem_send_batch(const char *const *paths, int count, const char *strip);

@@ -37,6 +37,8 @@ comptime {
     _ = @import("process/tests.zig");
     _ = @import("time.zig");
     _ = @import("interrupts/kernel_semaphore.zig");
+    _ = @import("interrupts/syscall_handlers.zig");
+    _ = @import("interrupts/system_call.zig");
 }
 
 test {
