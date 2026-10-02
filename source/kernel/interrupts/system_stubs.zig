@@ -59,6 +59,13 @@ fn get_file_from_process(fd: u16) ?*kernel.fs.IFile {
     return null;
 }
 
+// The no-OS libc has no abort(), and newlib's went with it, but libgcc's ARM
+// unwinder (pulled in by the kernel's C in ReleaseSafe) calls one. Inside the
+// kernel there is nothing to abort but the kernel.
+pub export fn abort() noreturn {
+    @panic("abort()");
+}
+
 pub export fn _exit(code: c_int) void {
     var status: c_int = code;
     _ = trigger_syscall(c.sys_exit, &status);
