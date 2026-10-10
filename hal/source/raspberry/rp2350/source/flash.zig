@@ -53,7 +53,7 @@ pub fn Flash(comptime mapping_address: usize, comptime size: usize) type {
 
         pub fn get_number_of_blocks(self: Self) u32 {
             _ = self;
-            return 1024;
+            return size;
         }
 
         pub fn get_physical_address(self: Self) []const u8 {

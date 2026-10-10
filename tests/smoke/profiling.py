@@ -99,6 +99,30 @@ def extract_profile_lines(lines: list[str]) -> list[str]:
     return [line for line in lines if line.startswith("# ")]
 
 
+def write_results_line(test_id: str, compile_ms: float, compile_status, profile_lines: list[str],
+                       pass_lines: list[str]) -> None:
+    """Append one compile's results to $YASOS_SMOKE_RESULTS_DIR/<worker>.jsonl.
+
+    The timing and profile summaries aggregate in-process, so under pytest-xdist
+    they never reach the controller; a line per compile per worker survives any
+    number of workers.  scripts/board_model.py reads these (the bench rows carry
+    the guest's own clock, which is board time under the rp2350 model)."""
+    out_dir = os.environ.get("YASOS_SMOKE_RESULTS_DIR")
+    if not out_dir:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    record = {
+        "test_id": test_id,
+        "host_compile_ms": round(compile_ms, 2),
+        "status": compile_status,
+        "bench": profile_lines,
+        "passes": pass_lines,
+    }
+    with open(os.path.join(out_dir, f"{worker}.jsonl"), "a") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
 def record_profile(test_id: str, profile_lines: list[str]) -> None:
     """Parse and store profiling data from a single test compilation."""
     entry = TestProfile(test_id=test_id, raw_lines=list(profile_lines))

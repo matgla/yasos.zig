@@ -98,6 +98,14 @@ pub fn build(b: *std.Build) !void {
     const romfs_img_path = try std.fs.path.join(b.allocator, &.{ repo_root, "rootfs.img" });
     const romfs_bytes = std.Io.Dir.cwd().readFileAlloc(b.graph.io, romfs_img_path, b.allocator, .limited(256 * 1024 * 1024)) catch &[_]u8{};
     const romfs_hash = std.hash.Wyhash.hash(0, romfs_bytes);
+    // Build time of the image: mtime of rootfs.img, 0 when there is none.
+    const romfs_epoch: u64 = blk: {
+        const st = std.Io.Dir.cwd().statFile(b.graph.io, "rootfs.img", .{}) catch break :blk 0;
+        const secs: i64 = @intCast(@divFloor(st.mtime.nanoseconds, std.time.ns_per_s));
+        break :blk if (secs > 0) @intCast(secs) else 0;
+    };
+    const romfs_epoch_lo: u32 = @truncate(romfs_epoch);
+    const romfs_epoch_hi: u32 = @truncate(romfs_epoch >> 32);
     std.debug.print("[romfs-embed] {s}: {d} bytes, hash 0x{x}\n", .{ romfs_img_path, romfs_bytes.len, romfs_hash });
     const romfs_wf = b.addWriteFiles();
     const rootfs_s = romfs_wf.add("rootfs.S", b.fmt(
@@ -111,7 +119,20 @@ pub fn build(b: *std.Build) !void {
         \\.global __romfs_blob_end
         \\__romfs_blob_end:
         \\
-    , .{romfs_hash}));
-    hal.addAssemblyFile(rootfs_s);
+        \\// When the image was built (Unix seconds, little-endian i64), read by
+        \\// the kernel at boot; data here so the kernel's C does not change.
+        \\.section .rodata.yasos_build_epoch, "a"
+        \\.align 3
+        \\.global __yasos_build_epoch_seconds
+        \\__yasos_build_epoch_seconds:
+        \\.word {d}
+        \\.word {d}
+        \\
+    , .{ romfs_hash, romfs_epoch_lo, romfs_epoch_hi }));
+    // Not part of the `hal` module: the root build attaches it to the kernel
+    // executable instead.  Anything in hal's graph is an input of the kernel's
+    // Zig C-backend step, whose output differs run to run, so a new rootfs.img
+    // made tcc recompile all of kernel.c.
+    b.addNamedLazyPath("rootfs_s", rootfs_s);
     hal.addIncludePath(.{ .cwd_relative = repo_root });
 }

@@ -108,7 +108,10 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         if (perf.enabled) perf.vfs_mount(t_fsget -% t_mount);
         if (maybe_node) |*node| {
             defer if (perf.enabled) perf.vfs_fsget(perf.read_cycles() -% t_fsget);
-            return try node.point.filesystem.interface.get(node.left);
+            var result = try node.point.filesystem.interface.get(node.left);
+            result.immutable_backing = node.point.info.read_only() and
+                std.mem.eql(u8, node.point.info.fstype(), "romfs");
+            return result;
         }
         return kernel.errno.ErrnoSet.NoEntry;
     }
@@ -423,6 +426,10 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
             }
             return err;
         };
+    }
+
+    pub fn immutable_token(self: *Self, path: []const u8) ?u64 {
+        return self.mount_points.immutable_token(path);
     }
 
     /// Whether `path` lies on a mount made with `ro`. `open` asks before it
@@ -895,4 +902,48 @@ test "VirtualFileSystem.GetShouldFailIfNoFilesystemMounted" {
     defer vfs_deinit();
 
     try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.get("/file.txt"));
+}
+
+test "VirtualFileSystem.SymlinkFallbackUsesActualBackingLifetime" {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    const Callbacks = struct {
+        fn stat(_: ?*const anyopaque, args: @Tuple(&.{ []const u8, *c.struct_stat, bool })) anyerror!anyerror!void {
+            args[1].* = std.mem.zeroes(c.struct_stat);
+            args[1].st_mode = c.S_IFLNK;
+        }
+        fn readlink(_: ?*const anyopaque, args: @Tuple(&.{ []const u8, []u8 })) anyerror!anyerror!usize {
+            const target = "/var/file";
+            @memcpy(args[1][0..target.len], target);
+            return target.len;
+        }
+    };
+    var root = try FileSystemMock.create(std.testing.allocator);
+    var mutable = try FileSystemMock.create(std.testing.allocator);
+    vfs_init(std.testing.allocator);
+    defer vfs_deinit();
+    const sut = get_vfs();
+    try sut.mount_filesystem_with_info("/", root.get_interface(), kernel.fs.MountInfo.init("root", "romfs", "ro"));
+    var mount_point_mock = try FileMock.create(std.testing.allocator);
+    const mount_point = kernel.fs.Node.create_file(mount_point_mock.get_interface());
+    _ = root.expectCall("get").withArgs(.{"var"}).willReturn(mount_point);
+    _ = mutable.expectCall("mount").willReturn(@as(u32, 0));
+    try sut.mount_filesystem_with_info("/var", mutable.get_interface(), kernel.fs.MountInfo.init("ram", "ramfs", "rw"));
+    var file_mock = try FileMock.create(std.testing.allocator);
+    // The filesystem cannot supply a false lifetime guarantee: VFS replaces it.
+    var supplied = kernel.fs.Node.create_file(file_mock.get_interface());
+    supplied.immutable_backing = true;
+    _ = root.expectCall("get").withArgs(.{"alias"}).willReturn(kernel.errno.ErrnoSet.NoEntry);
+    _ = root.expectCall("supports_symlinks").willReturn(true);
+    _ = root.expectCall("stat").withArgs(.{ "alias", interface.mock.any{}, false }).invoke(&Callbacks.stat, null);
+    _ = root.expectCall("readlink").withArgs(.{ "alias", interface.mock.any{} }).invoke(&Callbacks.readlink, null);
+    _ = mutable.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(false);
+    _ = mutable.expectCall("get").withArgs(.{"file"}).willReturn(supplied);
+    try std.testing.expect(sut.immutable_token("/alias") != null);
+    var node = try sut.get("/alias");
+    defer node.delete();
+    try std.testing.expect(!node.immutable_backing);
+    var shared = node.share();
+    defer shared.delete();
+    try std.testing.expect(!shared.immutable_backing);
 }

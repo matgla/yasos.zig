@@ -153,7 +153,8 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
     }
 
     pub fn size(self: *const Self) u64 {
-        return @intCast(@sizeOf(RamFsData) + self._data.len());
+        // File length is the readable payload, not the allocation footprint.
+        return @intCast(self._data.len());
     }
 
     pub fn truncate(self: *Self, length: u64) anyerror!void {
@@ -172,7 +173,7 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
 
     pub fn ioctl(self: *Self, cmd: i32, data: ?*anyopaque) i32 {
         switch (cmd) {
-            @intFromEnum(IoctlCommonCommands.GetMemoryMappingStatus) => {
+            @backingInt(IoctlCommonCommands.GetMemoryMappingStatus) => {
                 if (data == null) {
                     return -1;
                 }
@@ -272,7 +273,7 @@ test "RamFsFile.ShouldSeekFile" {
     try std.testing.expectEqual(132, try file.interface.seek(132, c.SEEK_SET));
     try std.testing.expectEqual(132, file.interface.tell());
 
-    try std.testing.expectEqual(132 + @sizeOf(RamFsData), file.interface.size());
+    try std.testing.expectEqual(132, file.interface.size());
 }
 
 test "RamFsFile.ShouldTruncateFile" {
@@ -287,7 +288,7 @@ test "RamFsFile.ShouldTruncateFile" {
 
     // Truncate to shorter length
     try file.interface.truncate(5);
-    try std.testing.expectEqual(5 + @sizeOf(RamFsData), file.interface.size());
+    try std.testing.expectEqual(5, file.interface.size());
 
     // Read back truncated data
     _ = try file.interface.seek(0, c.SEEK_SET);
@@ -297,7 +298,7 @@ test "RamFsFile.ShouldTruncateFile" {
 
     // Truncate to larger length (extends with zeros)
     try file.interface.truncate(8);
-    try std.testing.expectEqual(8 + @sizeOf(RamFsData), file.interface.size());
+    try std.testing.expectEqual(8, file.interface.size());
     _ = try file.interface.seek(0, c.SEEK_SET);
     try std.testing.expectEqual(8, file.interface.read(&buf));
     try std.testing.expectEqualStrings("hello", buf[0..5]);
@@ -307,6 +308,6 @@ test "RamFsFile.ShouldTruncateFile" {
 
     // Truncate to zero
     try file.interface.truncate(0);
-    try std.testing.expectEqual(@sizeOf(RamFsData), file.interface.size());
+    try std.testing.expectEqual(@as(u64, 0), file.interface.size());
     try std.testing.expectEqual(0, file.interface.tell());
 }

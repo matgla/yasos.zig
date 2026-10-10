@@ -210,6 +210,17 @@ choice CONFIG_MMC_BUS_MODE
       help
         Use native SDIO mode for SD card communication (4-bit DAT bus via PIO)
 endchoice
+
+config CONFIG_MMC_SDIO_OVERCLOCK
+    bool "Overclock the SDIO bus past 50 MHz (out of spec)"
+    depends on CONFIG_MMC_BUS_MODE_SDIO
+    default n
+    help
+      Run the 4-bit bus above the 50 MHz high-speed limit once the card
+      has switched to high speed: the RP2350 driver asks for 75 MHz and
+      gets the next whole divider of the system clock below it (66.5 MHz
+      at 532 MHz). Card dependent. CRC errors or lost responses drop the
+      bus back to 50 MHz on their own.
 endmenu
 
 endmenu

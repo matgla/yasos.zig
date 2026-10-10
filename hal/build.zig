@@ -215,6 +215,10 @@ pub const Builder = struct {
             exe.root_module.sanitize_c = .trap;
             exe.root_module.addImport("board", boardModule);
             exe.root_module.addImport("hal", mcu.module("hal"));
+            // The romfs blob goes on the executable, not into the hal module's
+            // graph (see the board's build.zig): anything in that graph is an
+            // input of the kernel's Zig C-backend step.
+            if (mcu.builder.named_lazy_paths.get("rootfs_s")) |rootfs_s| exe.root_module.addAssemblyFile(rootfs_s);
 
             const config_zig = b.dupe(config_file);
             const config_without_ext = std.mem.trimEnd(u8, config_zig, ".json");

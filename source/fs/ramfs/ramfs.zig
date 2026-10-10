@@ -531,8 +531,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
                     file.as(RamFsFile).data()._data.share(),
                     filename,
                 );
-            } else
-                return kernel.errno.ErrnoSet.InvalidArgument,
+            } else return kernel.errno.ErrnoSet.InvalidArgument,
             .list_node = std.DoublyLinkedList.Node{},
             .name = filename,
         };
@@ -634,7 +633,7 @@ const TieredFixture = struct {
         var node = try self.sut.interface.get(path);
         defer node.delete();
         var file = node.as_file() orelse return error.NotAFile;
-        try std.testing.expectEqual(@as(u64, expected.len + @sizeOf(RamFsData)), file.interface.size());
+        try std.testing.expectEqual(@as(u64, expected.len), file.interface.size());
         const buffer = try std.testing.allocator.alloc(u8, expected.len + 8);
         defer std.testing.allocator.free(buffer);
         _ = try file.interface.seek(0, c.SEEK_SET);
@@ -1404,7 +1403,7 @@ test "RamFsFile.ShouldReturnNotMemoryMappedForIoctl" {
 
     var status: kernel.fs.FileMemoryMapAttributes = undefined;
     try std.testing.expectEqual(-1, file.?.interface.ioctl(-1, &status));
-    try std.testing.expectEqual(0, file.?.interface.ioctl(@intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus), &status));
+    try std.testing.expectEqual(0, file.?.interface.ioctl(@backingInt(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus), &status));
     try std.testing.expectEqual(false, status.is_memory_mapped);
     try std.testing.expectEqual(@as(?*const anyopaque, null), status.mapped_address_r);
 }

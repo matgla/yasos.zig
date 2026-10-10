@@ -7,6 +7,7 @@
         .yasld = .{ .path = "dynamic_loader" },
         .@"modules/oop" = .{ .path = "libs/oop" },
         .@"modules/fatfs" = .{ .path = "libs/zfat" },
+        .yasboot = .{ .path = "yasboot" },
     },
     .paths = .{
         "build.zig",

@@ -62,9 +62,18 @@ const inline_name_max = 31;
 pub const FileHeader = struct {
     _reader: FileReader,
     _device_file: IFile,
+    /// The image mapped at its base, or null when the device cannot map. While
+    /// the filesystem is mounted the image is immutable, and the mapping is
+    /// held by the device for as long as the system runs (see `main.zig`), so
+    /// header bytes behind this pointer are plain memory -- `load` reads them
+    /// with neither the shared device position nor its lock.
     _mapped_memory: ?*const anyopaque,
     _allocator: std.mem.Allocator,
     _filesystem_offset: c.off_t,
+    /// Size of the whole image in bytes, from the volume header. The mapped
+    /// reader bounds every access by it, so a corrupt `next` pointer cannot
+    /// walk a header read off the image into whatever is mapped behind it.
+    _image_size: u32,
     _filetype: kernel.fs.FileType,
     /// Inline storage for the name, valid for `_name_len` bytes when
     /// `_name_heap` is null. See `name()`.
@@ -81,10 +90,19 @@ pub const FileHeader = struct {
     /// constructs one of these per entry it steps over. A single 32-byte read
     /// parsed in place, with the name left in the header rather than copied onto
     /// the kernel heap for the caller to compare and free.
-    pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) !FileHeader {
+    ///
+    /// Everything but the entry offset is session state, stored here once:
+    /// `load` and `step_to_next` then take an offset only, instead of passing
+    /// the device file and mapping by value on every step of a directory scan.
+    pub fn init(device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, image_size: u32, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) !FileHeader {
         var self: FileHeader = undefined;
+        self._device_file = device_file;
+        self._mapped_memory = mapped_address;
+        self._allocator = allocator;
+        self._filesystem_offset = filesystem_offset;
+        self._image_size = image_size;
         self._name_heap = null;
-        try self.load(device_file, start_offset, filesystem_offset, mapped_address, allocator);
+        try self.load(start_offset);
         return self;
     }
 
@@ -92,25 +110,42 @@ pub const FileHeader = struct {
     /// already here rather than returning a new one. The struct is ~120 bytes,
     /// and returning it by value made the directory scan copy it two or three
     /// times per entry stepped over.
-    pub fn load(self: *FileHeader, device_file: IFile, start_offset: c.off_t, filesystem_offset: c.off_t, mapped_address: ?*const anyopaque, allocator: std.mem.Allocator) !void {
+    pub fn load(self: *FileHeader, start_offset: c.off_t) !void {
         const t_start = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         var buffer: [first_read_bytes]u8 = undefined;
-        var df = device_file;
+        const entry_offset: i64 = start_offset - self._filesystem_offset;
 
-        // The seek and the read are one operation and the device position they
-        // share is global: split them and the other core's romfs read lands in
-        // between, so this returns bytes from elsewhere in the image and parses
-        // them as a header.
-        //
-        // Scoped to the pair, and it has to be: the long-name path below calls
-        // `FileReader.read_string`, which takes this same lock, and
-        // `RankedMutex` does not recurse.
-        {
-            dev_lock.acquire();
-            defer dev_lock.release();
-            kernel.perf.romfs_read();
-            _ = try df.interface.seek(@intCast(start_offset), c.SEEK_SET);
-            _ = df.interface.read(buffer[0..]);
+        // The mapped image: the bytes are already memory, so neither the shared
+        // device position nor the lock around it is needed. Every access is
+        // bounded by the image size -- an offset past the end means a corrupt
+        // chain and stops here rather than reading what maps behind the image.
+        const image: ?[]const u8 = if (self._mapped_memory) |base|
+            @as([*]const u8, @ptrCast(base))[0..self._image_size]
+        else
+            null;
+
+        if (image) |img| {
+            if (entry_offset < 0) return kernel.errno.ErrnoSet.InputOutputError;
+            const at: usize = @intCast(entry_offset);
+            if (at + first_read_bytes > img.len) return kernel.errno.ErrnoSet.InputOutputError;
+            @memcpy(buffer[0..], img[at..][0..first_read_bytes]);
+        } else {
+            var df = self._device_file;
+            // The seek and the read are one operation and the device position they
+            // share is global: split them and the other core's romfs read lands in
+            // between, so this returns bytes from elsewhere in the image and parses
+            // them as a header.
+            //
+            // Scoped to the pair, and it has to be: the long-name path below calls
+            // `FileReader.read_string`, which takes this same lock, and
+            // `RankedMutex` does not recurse.
+            {
+                dev_lock.acquire();
+                defer dev_lock.release();
+                kernel.perf.romfs_read();
+                _ = try df.interface.seek(@intCast(start_offset), c.SEEK_SET);
+                _ = df.interface.read(buffer[0..]);
+            }
         }
 
         const fileheader = std.mem.bigToNative(u32, std.mem.bytesToValue(u32, buffer[0..4]));
@@ -118,10 +153,6 @@ pub const FileHeader = struct {
         const size_data = std.mem.bigToNative(u32, std.mem.bytesToValue(u32, buffer[8..12]));
         const ft = FileHeader.convert_filetype(@enumFromInt(fileheader & 0x7));
 
-        self._device_file = device_file;
-        self._mapped_memory = mapped_address;
-        self._allocator = allocator;
-        self._filesystem_offset = filesystem_offset;
         self._filetype = ft;
         self._name_len = 0;
         self._name_heap = null;
@@ -135,12 +166,30 @@ pub const FileHeader = struct {
             // The common case: the whole name arrived in the read above.
             self._name_len = @intCast(end);
             @memcpy(self._name_storage[0..end], first_chunk[0..end]);
+        } else if (image) |img| {
+            // A long name, with its bytes already in the mapped image: scan for
+            // the terminator instead of reading the device. The name is
+            // NUL-terminated and padded to the next 16-byte boundary, so the
+            // terminator is what decides where data starts.
+            const at: usize = @intCast(entry_offset);
+            const name_area = img[at + fixed_header_bytes ..];
+            const end = std.mem.indexOfScalar(u8, name_area, 0) orelse
+                return kernel.errno.ErrnoSet.InputOutputError;
+            data_offset = fixed_header_bytes +
+                std.mem.alignForward(u64, end + 1, name_chunk);
+            if (end <= inline_name_max) {
+                self._name_len = @intCast(end);
+                @memcpy(self._name_storage[0..end], name_area[0..end]);
+            } else {
+                kernel.perf.romfs_name_alloc();
+                self._name_heap = self._allocator.dupe(u8, name_area[0..end]) catch null;
+            }
         } else {
             // A name of 16 bytes or more. Keep reading 16-byte chunks until the
             // terminator turns up, which is also what finds the data offset.
-            var reader = FileReader.init_at(device_file, @intCast(start_offset), first_read_bytes);
+            var reader = FileReader.init_at(self._device_file, @intCast(start_offset), first_read_bytes);
             kernel.perf.romfs_name_alloc();
-            const maybe_name: ?[]u8 = reader.read_string(allocator, fixed_header_bytes) catch null;
+            const maybe_name: ?[]u8 = reader.read_string(self._allocator, fixed_header_bytes) catch null;
             if (maybe_name) |heap_name| {
                 // The name is NUL-terminated and padded to the next 16-byte
                 // boundary, so the terminator is what decides where data starts.
@@ -149,14 +198,14 @@ pub const FileHeader = struct {
                 if (heap_name.len <= inline_name_max) {
                     self._name_len = @intCast(heap_name.len);
                     @memcpy(self._name_storage[0..heap_name.len], heap_name);
-                    if (heap_name.len != 0) allocator.free(heap_name);
+                    if (heap_name.len != 0) self._allocator.free(heap_name);
                 } else {
                     self._name_heap = heap_name;
                 }
             }
         }
 
-        self._reader = FileReader.init_at(device_file, @intCast(start_offset), data_offset);
+        self._reader = FileReader.init_at(self._device_file, @intCast(start_offset), data_offset);
         if (kernel.perf.enabled) kernel.perf.romfs_header(kernel.perf.read_cycles() -% t_start);
     }
 
@@ -167,12 +216,8 @@ pub const FileHeader = struct {
             return false;
         }
         const next_offset: c.off_t = @as(c.off_t, @intCast(self._next)) + self._filesystem_offset;
-        const device_file = self._device_file;
-        const filesystem_offset = self._filesystem_offset;
-        const mapped_memory = self._mapped_memory;
-        const allocator = self._allocator;
         self.deinit();
-        try self.load(device_file, next_offset, filesystem_offset, mapped_memory, allocator);
+        try self.load(next_offset);
         return true;
     }
 
@@ -247,7 +292,7 @@ pub const FileHeader = struct {
         if (next_file_header == 0) {
             return null;
         }
-        return try FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, self._mapped_memory, self._allocator);
+        return try FileHeader.init(self._device_file, next_file_header + self._filesystem_offset, self._filesystem_offset, self._image_size, self._mapped_memory, self._allocator);
     }
 
     fn filetype_to_mode(ftype: FileType) c.mode_t {
@@ -284,7 +329,12 @@ pub const FileHeader = struct {
         buf.st_ctim = timestamp;
     }
 
+    /// Device offset of this entry's header.
+    pub fn image_offset(self: *const FileHeader) c.off_t {
+        return self._reader.get_offset();
+    }
+
     pub fn dupe(self: *const FileHeader) !FileHeader {
-        return try FileHeader.init(self._device_file, self._reader.get_offset(), self._filesystem_offset, self._mapped_memory, self._allocator);
+        return try FileHeader.init(self._device_file, self._reader.get_offset(), self._filesystem_offset, self._image_size, self._mapped_memory, self._allocator);
     }
 };

@@ -37,17 +37,20 @@ pub const config_macros = [_][2][]const u8{
     .{ "CONFIG_EXTENTS_ENABLE", "1" },
     .{ "CONFIG_HAVE_OWN_OFLAGS", "0" },
     .{ "CONFIG_HAVE_OWN_ERRNO", "0" },
-    .{ "CONFIG_BLOCK_DEV_ENABLE_STATS", "0" },
     // Blocks in each mounted volume's cache: 8 is lwext4's own floor for the
     // operations that hold several blocks at once. 8 KiB a volume at 1 KiB
-    // blocks.
+    // blocks. The floor: `ext4fs.use_cache_memory` raises it at boot when the
+    // board has memory to give the cache (PSRAM).
     .{ "CONFIG_BLOCK_DEV_CACHE_SIZE", "8" },
     // Blocks nobody references, kept cached across all volumes together (the
     // fork's ext4_bcache.c). Without it every mounted volume holds its last 8
     // blocks for good -- ~27 KiB of kernel heap for the card's three, most of
     // it for volumes nothing is touching. The busy volume can still keep all
-    // 8 of its own.
+    // 8 of its own. Also a floor, raised with the cache size.
     .{ "CONFIG_BLOCK_DEV_CACHE_IDLE_BUDGET", "8" },
+    // Cache buffers come from ext4fs.zig's ext4_user_bcache_alloc, which can
+    // put them somewhere other than the kernel heap.
+    .{ "CONFIG_BLOCK_DEV_CACHE_USER_ALLOC", "1" },
     // Four ext4 volumes at once: the card's three plus one mounted by hand.
     // Each mount point is ~2 KiB of static RAM (it holds the superblock).
     .{ "CONFIG_EXT4_BLOCKDEVS_COUNT", "4" },
@@ -81,7 +84,7 @@ const sources = [_][]const u8{
     "src/ext4_xattr.c",
 };
 
-pub fn build_lwext4(b: *std.Build, optimize: std.builtin.OptimizeMode, target: std.Build.ResolvedTarget, link_libc: bool) *std.Build.Step.Compile {
+pub fn build_lwext4(b: *std.Build, optimize: std.builtin.OptimizeMode, target: std.Build.ResolvedTarget, link_libc: bool, profiling: bool) *std.Build.Step.Compile {
     const lib = b.addLibrary(.{
         .name = "lwext4",
         .linkage = .static,
@@ -96,6 +99,8 @@ pub fn build_lwext4(b: *std.Build, optimize: std.builtin.OptimizeMode, target: s
     for (config_macros) |macro| {
         flags.append(b.allocator, b.fmt("-D{s}={s}", .{ macro[0], macro[1] })) catch @panic("OOM");
     }
+    flags.append(b.allocator, b.fmt("-DCONFIG_BLOCK_DEV_ENABLE_STATS={d}", .{@intFromBool(profiling)})) catch @panic("OOM");
+    flags.append(b.allocator, b.fmt("-DCONFIG_BLOCK_DEV_STATS_HOOK={d}", .{@intFromBool(profiling)})) catch @panic("OOM");
     var files: [sources.len][]const u8 = undefined;
     inline for (sources, 0..) |source, index| files[index] = lwext4_path ++ source;
     lib.root_module.addCSourceFiles(.{ .files = &files, .flags = flags.items });
@@ -104,7 +109,7 @@ pub fn build_lwext4(b: *std.Build, optimize: std.builtin.OptimizeMode, target: s
 }
 
 /// ext4.h and friends translated for Zig, with the same configuration.
-pub fn headers(b: *std.Build, optimize: std.builtin.OptimizeMode, target: std.Build.ResolvedTarget, link_libc: bool) *std.Build.Step.TranslateC {
+pub fn headers(b: *std.Build, optimize: std.builtin.OptimizeMode, target: std.Build.ResolvedTarget, link_libc: bool, profiling: bool) *std.Build.Step.TranslateC {
     const translate = b.addTranslateC(.{
         .root_source_file = b.path("source/fs/ext4/lwext4_c.h"),
         .target = target,
@@ -113,5 +118,7 @@ pub fn headers(b: *std.Build, optimize: std.builtin.OptimizeMode, target: std.Bu
     });
     translate.addIncludePath(b.path(lwext4_path ++ "include"));
     for (config_macros) |macro| translate.defineCMacro(macro[0], macro[1]);
+    translate.defineCMacro("CONFIG_BLOCK_DEV_ENABLE_STATS", if (profiling) "1" else "0");
+    translate.defineCMacro("CONFIG_BLOCK_DEV_STATS_HOOK", if (profiling) "1" else "0");
     return translate;
 }

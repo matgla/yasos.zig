@@ -59,6 +59,16 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         const CTRL_TX_ENABLE: u32 = 1 << 0;
         const CTRL_RX_ENABLE: u32 = 1 << 1;
 
+        // Bound on the per-byte TX-full poll, in iterations. A full buffer
+        // clears in about one character time, so the bound only bites when the
+        // sink behind the UART stopped accepting bytes: QEMU's chardev applies
+        // backpressure once the host stops reading the console, and hardware
+        // flow control can hold TX off indefinitely. A caller printing from a
+        // fault handler runs with everything on this core masked, so an
+        // unbounded poll there is a wedged CPU. ~100M iterations is on the
+        // order of seconds, far past any legitimate drain yet finite.
+        const tx_poll_limit: usize = 100_000_000;
+
         pub fn init(_: Self, config: interface.uart.Config) interface.uart.InitializeError!void {
             _ = config;
             // QEMU ignores the actual rate but requires BAUDDIV >= 16.
@@ -87,7 +97,11 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
 
         pub fn write(self: Self, data: []const u8) !usize {
             for (data) |byte| {
-                while (!self.is_writable()) {}
+                var polls: usize = 0;
+                while (!self.is_writable()) {
+                    polls += 1;
+                    if (polls == tx_poll_limit) return error.WriteTimedOut;
+                }
                 DATA.* = byte;
             }
             return data.len;

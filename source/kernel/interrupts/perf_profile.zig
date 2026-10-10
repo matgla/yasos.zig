@@ -436,6 +436,98 @@ pub fn disk_summary() DiskSummary {
     return result;
 }
 
+/// Cache traffic in the same system-wide window as diskprof. Static u32
+/// atomics stay in SRAM (exclusive accesses cannot target PSRAM). Individual
+/// counters are atomic; a snapshot/reset is not a transaction across them.
+/// Wrapping is intentional: these are short measurement windows, not uptime
+/// totals. No storage or updates survive a non-profiling build.
+pub const CacheCounter = enum {
+    fat_hits,
+    fat_misses,
+    fat_bypass_requests,
+    fat_bypass_sectors,
+    romfs_hits,
+    romfs_misses,
+    romfs_overflow,
+    romfs_len16,
+    romfs_len32,
+    romfs_len54,
+    romfs_len96,
+    romfs_len128,
+    romfs_len_long,
+    ext4_hits,
+    ext4_misses,
+    ext4_read_requests,
+    ext4_read_sectors,
+    ext4_cached_sectors,
+};
+const CACHE_SLOTS = if (enabled) @typeInfo(CacheCounter).@"enum".field_names.len else 0;
+var cache_counts: [CACHE_SLOTS]std.atomic.Value(u32) = @splat(.init(0));
+
+pub inline fn cache_record(counter: CacheCounter, count: u32) void {
+    if (!enabled) return;
+    _ = cache_counts[@backingInt(counter)].fetchAdd(count, .monotonic);
+}
+
+pub fn cache_summary() [CACHE_SLOTS]u32 {
+    var result: [CACHE_SLOTS]u32 = undefined;
+    for (&result, &cache_counts) |*value, *counter| value.* = counter.load(.monotonic);
+    return result;
+}
+
+pub fn dump_cache(pid: c.pid_t) void {
+    if (!enabled) return;
+    var counts: [CACHE_SLOTS]u32 = undefined;
+    // A waiting parent may exit without another exec/reset. Drain these
+    // counters so that its exit cannot report the child's traffic twice.
+    for (&counts, &cache_counts) |*value, *counter| value.* = counter.swap(0, .monotonic);
+    dump_cache_counts(pid, "run", counts);
+}
+
+/// Loader traffic is otherwise discarded by the exec-time reset. Record a
+/// delta for the loader body, apart from the process's runtime window.
+pub fn dump_load_cache(pid: c.pid_t, before: [CACHE_SLOTS]u32) void {
+    if (!enabled) return;
+    var counts = cache_summary();
+    for (&counts, before) |*value, old| value.* -%= old;
+    dump_cache_counts(pid, "load", counts);
+}
+
+fn dump_cache_counts(pid: c.pid_t, phase: []const u8, counts: [CACHE_SLOTS]u32) void {
+    // Separate lines keep UART records short and permit adding backend fields
+    // without changing the other parsers. Emit zeros too: no traffic is data.
+    trace("cacheprof pid={d} phase={s} fat_hits={d} fat_misses={d} fat_bypass_requests={d} fat_bypass_sectors={d}", .{
+        pid,
+        phase,
+        counts[@backingInt(CacheCounter.fat_hits)],
+        counts[@backingInt(CacheCounter.fat_misses)],
+        counts[@backingInt(CacheCounter.fat_bypass_requests)],
+        counts[@backingInt(CacheCounter.fat_bypass_sectors)],
+    });
+    trace("cacheprof pid={d} phase={s} romfs_hits={d} romfs_misses={d} romfs_overflow={d} romfs_len16={d} romfs_len32={d} romfs_len54={d} romfs_len96={d} romfs_len128={d} romfs_len_long={d}", .{
+        pid,
+        phase,
+        counts[@backingInt(CacheCounter.romfs_hits)],
+        counts[@backingInt(CacheCounter.romfs_misses)],
+        counts[@backingInt(CacheCounter.romfs_overflow)],
+        counts[@backingInt(CacheCounter.romfs_len16)],
+        counts[@backingInt(CacheCounter.romfs_len32)],
+        counts[@backingInt(CacheCounter.romfs_len54)],
+        counts[@backingInt(CacheCounter.romfs_len96)],
+        counts[@backingInt(CacheCounter.romfs_len128)],
+        counts[@backingInt(CacheCounter.romfs_len_long)],
+    });
+    trace("cacheprof pid={d} phase={s} ext4_hits={d} ext4_misses={d} ext4_read_requests={d} ext4_read_sectors={d} ext4_cached_sectors={d}", .{
+        pid,
+        phase,
+        counts[@backingInt(CacheCounter.ext4_hits)],
+        counts[@backingInt(CacheCounter.ext4_misses)],
+        counts[@backingInt(CacheCounter.ext4_read_requests)],
+        counts[@backingInt(CacheCounter.ext4_read_sectors)],
+        counts[@backingInt(CacheCounter.ext4_cached_sectors)],
+    });
+}
+
 pub fn romfs_walk(cycles: u32) void {
     if (!enabled) return;
     if (cycles < implausible_cycles) romfs_walk_cycles +|= cycles;
@@ -585,6 +677,7 @@ pub fn summary() Summary {
 
 pub fn reset() void {
     if (!enabled) return;
+    for (&cache_counts) |*counter| counter.store(0, .monotonic);
     for (0..POOL_SLOTS) |i| pool_cycles[i] = 0;
     for (0..POOL_TIERS) |i| {
         pool_tier_allocs[i] = 0;

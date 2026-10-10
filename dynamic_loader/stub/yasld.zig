@@ -19,6 +19,7 @@
 //
 
 const std = @import("std");
+pub const IntegerHashMap = std.AutoHashMap;
 
 pub const Executable = @import("executable.zig").Executable;
 pub const Module = @import("module.zig").Module;
@@ -41,3 +42,7 @@ pub fn loader_deinit() void {
 }
 
 pub const set_load_map_logging = loader.set_load_map_logging;
+
+pub const Image = @import("loader.zig").Image;
+
+pub const header_size: usize = 132;

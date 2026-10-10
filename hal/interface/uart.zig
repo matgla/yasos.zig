@@ -48,9 +48,11 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
 
         pub fn write_some_opaque(self: *const anyopaque, buffer: []const u8) anyerror!usize {
             const realSelf: *const Self = @ptrCast(@alignCast(self));
-            return realSelf.*.impl.write(buffer) catch {
-                return 0;
-            };
+            // Errors propagate rather than degrade to "wrote 0": the sink
+            // behind this (stdout.zig) maps a zero return into an endless
+            // no-progress retry, which is exactly the wedge the TX timeout
+            // exists to prevent.
+            return realSelf.*.impl.write(buffer);
         }
 
         pub fn read(self: Self, buffer: []u8) !usize {

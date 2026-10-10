@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 const MemoryInfo = @import("hal_interface").memory.MemoryInfo;
+const time = @import("time.zig");
 
 // QEMU MPS2-AN505 RAM (see linker_script.ld): the fast "process_ram" user pool
 // is the tail of the ssram-0 bank (0x10100000, after the 1 MB code "flash"); the
@@ -80,4 +81,29 @@ pub const Memory = struct {
         _ = self;
         return memory_layout[selector];
     }
+
+    /// Under the RP2350 board model (tools/board_model) a PSRAM page is cleared
+    /// the way the rp2350 clears it -- around its XIP cache, through the
+    /// uncached mirror -- by word stores the plugin recognises by their PC
+    /// (yasos_uncached_zero).  Otherwise a plain memset.
+    pub fn zero_pages(self: Memory, slice: []u8) void {
+        _ = self;
+        const start = @intFromPtr(slice.ptr);
+        const modeled = @as(*volatile u64, &time.yasos_modeled_clock_ns).* != 0;
+        if (modeled and start >= @intFromPtr(&__psram_start__) and
+            start + slice.len <= @intFromPtr(&__psram_end__) and (start & 3) == 0 and (slice.len & 3) == 0)
+        {
+            yasos_uncached_zero(@ptrCast(@alignCast(slice.ptr)), slice.len / 4);
+            return;
+        }
+        @memset(slice, 0);
+    }
 };
+
+/// The board model's uncached page clear: kept out of line so its stores have
+/// one PC range the rp2350_timing plugin can tell apart.
+export fn yasos_uncached_zero(words: [*]volatile u32, count: usize) callconv(.c) void {
+    @setRuntimeSafety(false);
+    var i: usize = 0;
+    while (i < count) : (i += 1) words[i] = 0;
+}

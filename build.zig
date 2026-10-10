@@ -23,6 +23,7 @@ var gcc: ?[]const u8 = null;
 
 const littlefs = @import("source/fs/littlefs/build.zig");
 const lwext4 = @import("source/fs/ext4/build.zig");
+const kernel_tcc = @import("build/kernel_tcc.zig");
 
 fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
     const create_venv_args = [_][]const u8{ "python3", "-m", "venv", "yasos_venv" };
@@ -87,17 +88,6 @@ fn load_config(b: *std.Build, config_file: []const u8) !Config {
 /// `source/fs/fatfs/fatfs.zig`'s `max_volumes`.
 const fat_volume_count: u5 = 8;
 
-/// `rootfs.img`'s modification time in seconds since the Unix epoch, or 0 when
-/// there is no image yet (a first build, or a tree that was cleaned). Zero
-/// means "no better idea than 1970", which is what the clock did before.
-fn rootfs_build_epoch(b: *std.Build) i64 {
-    const stat = std.Io.Dir.cwd().statFile(b.graph.io, "rootfs.img", .{}) catch return 0;
-    // `mtime` is an `Io.Timestamp`, whose nanoseconds are an i96 -- wide enough
-    // that the seconds always fit an i64 for any date this can hold.
-    const seconds: i64 = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_s));
-    return if (seconds > 0) seconds else 0;
-}
-
 /// The `.version` build.zig.zon declares, which is what uname(2) reports as the
 /// release. Read out of the manifest rather than repeated here, so bumping the
 /// version is one edit.
@@ -154,22 +144,48 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
 
-    // What the wall clock reads before anything sets it.
-    //
-    // There is no RTC on these boards, so the kernel's clock is the boot
-    // counter plus an offset -- and with no offset it starts at 1970, which is
-    // the date every file created before `settimeofday` then carries. The mount
-    // points are created at boot, so `/tmp` and `/root` were permanently dated
-    // 1970 no matter what the clock was set to afterwards.
-    //
-    // The image's own build time is a better zero: plausible, ordered before
-    // everything written since, and free. It is taken from `rootfs.img`'s mtime
-    // rather than from "now" deliberately -- "now" would change on every
-    // invocation and invalidate the build cache each time, where the image's
-    // timestamp only moves when the image does, which is exactly when the
-    // kernel is relinked anyway (it embeds the thing).
+    // Which compiler builds the kernel.  tcc: Zig's C backend, then the cross
+    // tinycc for that and every C/asm unit, linked by tcc (build/kernel_tcc.zig)
+    // -- the toolchain the device itself has.  llvm: Zig's LLVM backend.
+    const KernelCc = enum { tcc, llvm };
+    const kernel_cc = b.option(KernelCc, "kernel_cc", "Kernel compiler: tcc (default, Zig C backend + tinycc) or llvm") orelse .tcc;
+    const kernel_tcc_path = b.option([]const u8, "kernel_tcc", "Cross tcc for -Dkernel_cc=tcc (default libs/tinycc/bin/armv8m-tcc)") orelse "libs/tinycc/bin/armv8m-tcc";
+
+    // The bootloader (yasboot/, its own repository), always built the way the
+    // device builds code: Zig's C backend, then this same cross tcc.  Two
+    // modes of one loader: the bare-metal bootloader, and the same logic as a
+    // YasOS program to try in a running kernel before flashing it.
+    const yasboot_tcc: std.Build.LazyPath = if (std.fs.path.isAbsolute(kernel_tcc_path)) .{ .cwd_relative = kernel_tcc_path } else b.path(kernel_tcc_path);
+    const yasboot_bm = b.dependency("yasboot", .{ .tcc = yasboot_tcc, .mode = .baremetal });
+    const yasboot_app = b.dependency("yasboot", .{ .tcc = yasboot_tcc, .mode = .yasos });
+    const yasboot_step = b.step("yasboot", "Build yasboot with tcc: zig-out/boot/yasboot (bootloader ELF) and zig-out/usr/bin/yasboot (YasOS program)");
+    yasboot_step.dependOn(&b.addInstallFile(yasboot_bm.namedLazyPath("yasboot"), "boot/yasboot").step);
+    yasboot_step.dependOn(&b.addInstallFile(yasboot_bm.namedLazyPath("yasboot.c"), "boot/yasboot.c").step);
+    yasboot_step.dependOn(&b.addInstallFile(yasboot_app.namedLazyPath("yasboot"), "usr/bin/yasboot").step);
+    yasboot_step.dependOn(&b.addInstallFile(yasboot_app.namedLazyPath("yasboot.c"), "usr/bin/yasboot.c").step);
+
+    const yasboot_qemu = b.addSystemCommand(&.{ "qemu-system-arm", "-machine", "mps3-an524", "-nographic", "-semihosting-config", "enable=on,target=native", "-kernel" });
+    yasboot_qemu.addFileArg(yasboot_bm.namedLazyPath("yasboot"));
+    b.step("yasboot-qemu", "Boot the bare-metal yasboot on QEMU mps3-an524").dependOn(&yasboot_qemu.step);
+
+    // The program in a kernel: its directory at /mnt (scripts/qemu_mount.py),
+    // copied off FAT and run.  -Dyasboot_kernel picks the an524 kernel.
+    const yasboot_kernel = b.option([]const u8, "yasboot_kernel", "an524 kernel for yasboot-test (default zig-out/bin/yasos_kernel)");
+    const yasboot_dir = b.addWriteFiles();
+    _ = yasboot_dir.addCopyFile(yasboot_app.namedLazyPath("yasboot"), "yasboot");
+    const yasboot_test = b.addSystemCommand(&.{ "yasos_venv/bin/python3", "scripts/qemu_mount.py" });
+    yasboot_test.setCwd(b.path("."));
+    yasboot_test.addDirectoryArg(yasboot_dir.getDirectory());
+    if (yasboot_kernel) |k| yasboot_test.addArgs(&.{ "--kernel", k });
+    yasboot_test.addArgs(&.{ "-c", "cp /mnt/yasboot /tmp/yasboot && chmod +x /tmp/yasboot && /tmp/yasboot" });
+    yasboot_test.has_side_effects = true;
+    b.step("yasboot-test", "Run the yasboot program inside an an524 kernel on QEMU").dependOn(&yasboot_test.step);
+
+    // What the wall clock reads before anything sets it is the image's build
+    // time (rootfs.img's mtime). It is data in the generated rootfs.S, not an
+    // option here: a compile-time constant would change the kernel's C, and
+    // tcc would recompile all of it, with every new image.
     const build_info = b.addOptions();
-    build_info.addOption(i64, "default_epoch_seconds", rootfs_build_epoch(b));
     build_info.addOption([]const u8, "release", manifest_version());
     const build_info_module = build_info.createModule();
 
@@ -383,8 +399,8 @@ pub fn build(b: *std.Build) !void {
     // lwext4 on the host, against the host's C library: same configuration
     // as the kernel's (source/fs/ext4/build.zig), so the driver under test is
     // the one that ships.
-    fs_tests.root_module.linkLibrary(lwext4.build_lwext4(b, optimize, target, true));
-    fs_tests.root_module.addImport("lwext4", lwext4.headers(b, optimize, target, true).createModule());
+    fs_tests.root_module.linkLibrary(lwext4.build_lwext4(b, optimize, target, true, false));
+    fs_tests.root_module.addImport("lwext4", lwext4.headers(b, optimize, target, true, false).createModule());
 
     kernel_module_for_tests.addImport("interface", oop.module("interface"));
     kernel_module_for_tests.addImport("libc_imports", libc_imports_for_tests);
@@ -452,8 +468,8 @@ pub fn build(b: *std.Build) !void {
                 .name = @as([]const u8, "yasos_kernel"),
                 .config_file = @as([]const u8, config_path),
             });
-            b.installArtifact(boardDep.artifact("yasos_kernel"));
             const kernel_exec = boardDep.artifact("yasos_kernel");
+            if (kernel_cc == .llvm) b.installArtifact(kernel_exec);
             kernel_exec.root_module.addIncludePath(b.path("source/sys/include"));
             kernel_exec.root_module.addIncludePath(b.path("."));
             kernel_exec.root_module.addIncludePath(b.path("libs/littlefs"));
@@ -462,6 +478,7 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
                 .target = kernel_exec.root_module.resolved_target.?,
                 .cpu_arch = @as([]const u8, config.cpu_arch),
+                .verify_templates = b.option(bool, "verify_templates", "Verify loader templates against relocation") orelse false,
             });
 
             const kernel_module = b.addModule("kernel", .{
@@ -580,14 +597,15 @@ pub fn build(b: *std.Build) !void {
             // ext4 (source/fs/ext4): lwext4 against the kernel's C library.
             // Small, and without the UB traps: 36 KB less text than building it
             // like the kernel, and the library is covered by the host tests.
-            const lwext4_lib = lwext4.build_lwext4(b, .ReleaseSmall, kernel_exec.root_module.resolved_target.?, false);
+            const lwext4_profiling = config.instrumentation_perf_profiling orelse false;
+            const lwext4_lib = lwext4.build_lwext4(b, .ReleaseSmall, kernel_exec.root_module.resolved_target.?, false, lwext4_profiling);
             // yasos libc's headers and nothing else -- not the kernel's system
             // include paths, which may be a toolchain libc (newlib) whose
             // errno numbers and prototypes are not the kernel's.
             lwext4_lib.root_module.addSystemIncludePath(b.path("libs/libc"));
             lwext4_lib.root_module.sanitize_c = .off;
             kernel_exec.root_module.linkLibrary(lwext4_lib);
-            const lwext4_headers = lwext4.headers(b, optimize, kernel_target, false);
+            const lwext4_headers = lwext4.headers(b, optimize, kernel_target, false, lwext4_profiling);
             lwext4_headers.addIncludePath(b.path("libs/libc"));
             lwext4_headers.addIncludePath(b.path("."));
             kernel_exec.root_module.addImport("lwext4", lwext4_headers.createModule());
@@ -633,6 +651,20 @@ pub fn build(b: *std.Build) !void {
             kernel_exec.root_module.addImport("zfat", zfat_module);
 
             _ = boardDep.module("board");
+
+            // After every import is attached: the tcc build reads the module
+            // graph the LLVM kernel is configured with.
+            if (kernel_cc == .tcc) {
+                std.Io.Dir.cwd().access(b.graph.io, kernel_tcc_path, .{}) catch {
+                    std.log.err("-Dkernel_cc=tcc needs the cross tcc at '{s}': run ./build_rootfs.sh first, or build with -Dkernel_cc=llvm", .{kernel_tcc_path});
+                    return error.MissingCrossTcc;
+                };
+                const built = kernel_tcc.build(b, kernel_exec, .{ .tcc = kernel_tcc_path });
+                b.getInstallStep().dependOn(&b.addInstallBinFile(built.elf, "yasos_kernel").step);
+                // The same commands as data, for scripts/kernel_tcc/device.py.
+                const plan_step = b.step("kernel-tcc-plan", "Write zig-out/kernel_tcc_plan.json: the tcc kernel build for the device to replay");
+                plan_step.dependOn(&b.addInstallFile(built.plan, "kernel_tcc_plan.json").step);
+            }
         } else {
             std.log.err("'config/config.json' not found. Please call 'zig build menuconfig' before compilation", .{});
         }

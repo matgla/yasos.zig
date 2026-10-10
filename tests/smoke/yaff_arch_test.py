@@ -146,3 +146,18 @@ def test_rejects_hard_float_abi(request):
     struct.pack_into("<B", image, section + SEC_FLOAT_ABI, YAFF_FLOAT_ABI_HARD)
     output = _run_image(session, image, "yaff_abi")
     _assert_refused(output, "UnsupportedFloatAbi")
+
+
+@pytest.mark.parametrize("offset,value", [(80, 0), (84, 0xfffffffc), (36, 0xffffffff), (92, 0xfffffffc)])
+def test_rejects_malformed_tables(request, offset, value):
+    session = request.node.stash[session_key]
+    image = _read_donor()
+    struct.pack_into("<I", image, offset, value)
+    output = _run_image(session, image, f"yaff_table_{offset}")
+    _assert_refused(output, "InvalidImageLayout")
+
+
+def test_rejects_truncated_payload(request):
+    session = request.node.stash[session_key]
+    output = _run_image(session, _read_donor()[:-16], "yaff_short")
+    _assert_refused(output, "InvalidImageLayout")

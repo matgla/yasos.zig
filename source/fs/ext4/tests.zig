@@ -27,6 +27,7 @@ const kernel = @import("kernel");
 const c = @import("libc_imports").c;
 
 const Ext4Fs = @import("ext4fs.zig").Ext4Fs;
+const lwext4 = @import("ext4fs.zig").lwext4;
 const FatFsDeviceFileStub = @import("../fatfs/tests/device_stub.zig").FatFsDeviceFileStub;
 
 fn create_formatted() !kernel.fs.IFileSystem {
@@ -194,7 +195,6 @@ test "Ext4.TwoVolumesStayApart" {
 }
 
 test "Ext4.VolumesShareOneIdleBlockBudget" {
-    const lwext4 = @import("ext4fs.zig").lwext4;
     var volumes: [3]kernel.fs.IFileSystem = undefined;
     for (&volumes) |*volume| volume.* = try create_formatted();
     defer for (&volumes) |*volume| volume.interface.delete();
@@ -284,6 +284,141 @@ test "Ext4.CreatingFilesInADeepDirectoryStaysCheap" {
 
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &data, try read_file(&fs, "/root/ci/sources/gcc/execute/pr000123-1.c", &buffer));
+}
+
+// A file being written holds write-back on its volume from its first write to
+// its close, so a run of small write() calls writes the data and nothing else:
+// the inode, block bitmap, group descriptor and extent changes go out once,
+// when the last writer closes. Write-through, each call also wrote its inode.
+test "Ext4.SmallWritesDeferMetadataUntilClose" {
+    const io = @import("../fatfs/tests/device_stub.zig").io;
+    var fs = try create_formatted();
+    defer fs.interface.delete();
+    try fs.interface.create("/log", 0o644);
+    var node = try fs.interface.get("/log");
+    var file = node.as_file().?;
+    const chunk = "0123456789abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqr";
+    const calls = 200;
+    io.reset();
+    for (0..calls) |_| try std.testing.expectEqual(@as(isize, chunk.len), file.interface.write(chunk));
+    // One read-modify-write of the sector each call lands in, a second when it
+    // straddles two: ~240 for 20000 bytes.
+    const data_writes = io.writes;
+    try std.testing.expect(data_writes <= calls + calls * chunk.len / 512 + 2);
+    node.delete();
+    try std.testing.expect(io.writes > data_writes);
+    try std.testing.expect(io.writes <= data_writes + 12);
+
+    try std.testing.expectEqual(@as(i32, 0), fs.interface.umount());
+    try std.testing.expectEqual(@as(i32, 0), fs.interface.mount());
+    var buffer: [calls * chunk.len + 1]u8 = undefined;
+    const back = try read_file(&fs, "/log", &buffer);
+    try std.testing.expectEqual(@as(usize, calls * chunk.len), back.len);
+    for (0..calls) |n| try std.testing.expectEqualStrings(chunk, back[n * chunk.len ..][0..chunk.len]);
+}
+
+/// A bare block cache of 1 KiB blocks holding `lbas`, each up to date, dirty
+/// unless `clean`, and filled with `fill`. The buffers come back in `bufs`.
+fn cache_blocks(bc: *lwext4.struct_ext4_bcache, lbas: []const u64, fill: u8, clean: bool, bufs: []*lwext4.struct_ext4_buf) !void {
+    const IsNew = @typeInfo(@typeInfo(@TypeOf(lwext4.ext4_bcache_alloc)).@"fn".param_types[2].?).pointer.child;
+    for (lbas, 0..) |lba, index| {
+        var block = std.mem.zeroes(lwext4.struct_ext4_block);
+        block.lb_id = lba;
+        var is_new: IsNew = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), lwext4.ext4_bcache_alloc(bc, &block, &is_new));
+        @memset(block.data[0..1024], fill);
+        block.buf.*.flags |= @as(c_int, 1) << lwext4.BC_UPTODATE;
+        if (!clean) block.buf.*.flags |= @as(c_int, 1) << lwext4.BC_DIRTY;
+        bufs[index] = block.buf;
+    }
+}
+
+fn has_flag(buf: *lwext4.struct_ext4_buf, flag: c_int) bool {
+    return (buf.flags >> @intCast(flag)) & 1 != 0;
+}
+
+// Freeing blocks invalidates their cached copies, so a dirty one is never
+// flushed over whatever the block holds next. A range used to start from an
+// exact lookup of its first block: when that one was not cached, nothing in
+// the range was invalidated.
+test "Ext4.InvalidatingARangeReachesBlocksPastAnUncachedFirst" {
+    var fs = try create_formatted(); // lwext4's allocator hook
+    defer fs.interface.delete();
+    var bc = std.mem.zeroes(lwext4.struct_ext4_bcache);
+    try std.testing.expectEqual(@as(c_int, 0), lwext4.ext4_bcache_init_dynamic(&bc, 8, 1024));
+    defer _ = lwext4.ext4_bcache_fini_dynamic(&bc);
+    var bufs: [2]*lwext4.struct_ext4_buf = undefined;
+    try cache_blocks(&bc, &.{ 5, 6 }, 'A', false, &bufs);
+    defer for (bufs) |buf| lwext4.ext4_bcache_drop_buf(&bc, buf);
+
+    lwext4.ext4_bcache_invalidate_lba(&bc, 4, 3);
+    for (bufs) |buf| {
+        try std.testing.expect(!has_flag(buf, lwext4.BC_DIRTY));
+        try std.testing.expect(!has_flag(buf, lwext4.BC_UPTODATE));
+    }
+}
+
+// Device I/O past the cache (file data, the byte helpers) agrees with it: a
+// read takes dirty cached bytes over the device's, a write refreshes every
+// cached copy it overlaps, and the cache's own fill or flush is left alone.
+test "Ext4.DirectIoAgreesWithTheBlockCache" {
+    var fs = try create_formatted();
+    defer fs.interface.delete();
+    var bc = std.mem.zeroes(lwext4.struct_ext4_bcache);
+    try std.testing.expectEqual(@as(c_int, 0), lwext4.ext4_bcache_init_dynamic(&bc, 8, 1024));
+    defer _ = lwext4.ext4_bcache_fini_dynamic(&bc);
+    var dirty: [1]*lwext4.struct_ext4_buf = undefined;
+    var clean: [1]*lwext4.struct_ext4_buf = undefined;
+    try cache_blocks(&bc, &.{2}, 'A', false, &dirty);
+    defer lwext4.ext4_bcache_drop_buf(&bc, dirty[0]);
+    try cache_blocks(&bc, &.{3}, 'C', true, &clean);
+    defer lwext4.ext4_bcache_drop_buf(&bc, clean[0]);
+
+    // Bytes 1536..4608: half of block 1, blocks 2 and 3, half of block 4.
+    var device: [3072]u8 = @splat('D');
+    lwext4.ext4_bcache_direct_io(&bc, &device, 1536, 1536 + device.len, false);
+    try std.testing.expect(std.mem.allEqual(u8, device[0..512], 'D'));
+    try std.testing.expect(std.mem.allEqual(u8, device[512..1536], 'A'));
+    try std.testing.expect(std.mem.allEqual(u8, device[1536..], 'D'));
+
+    // A write straddling blocks 2 and 3 lands in both cached copies.
+    var written: [1024]u8 = @splat('N');
+    lwext4.ext4_bcache_direct_io(&bc, &written, 2048 + 512, 2048 + 512 + written.len, true);
+    try std.testing.expect(std.mem.allEqual(u8, dirty[0].data[0..512], 'A'));
+    try std.testing.expect(std.mem.allEqual(u8, dirty[0].data[512..1024], 'N'));
+    try std.testing.expect(std.mem.allEqual(u8, clean[0].data[0..512], 'N'));
+    try std.testing.expect(std.mem.allEqual(u8, clean[0].data[512..1024], 'C'));
+
+    // The cache flushing its own buffer copies nothing onto itself.
+    lwext4.ext4_bcache_direct_io(&bc, dirty[0].data, 2048, 3072, true);
+    try std.testing.expect(std.mem.allEqual(u8, dirty[0].data[512..1024], 'N'));
+}
+
+// With memory of its own (PSRAM on the board) the cache grows past the 8
+// blocks a volume it gets on the kernel heap, and a tree walk stops re-reading
+// the device.
+test "Ext4.ACacheWithItsOwnMemoryStopsRereading" {
+    const ext4fs = @import("ext4fs.zig");
+    const io = @import("../fatfs/tests/device_stub.zig").io;
+    var backing = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer backing.deinit();
+    ext4fs.use_cache_memory(backing.allocator(), 128, 128);
+    defer ext4fs.release_cache_memory();
+
+    var fs = try create_formatted();
+    defer fs.interface.delete();
+    for ([_][]const u8{ "/a", "/a/b", "/a/b/c", "/a/b/c/d" }) |dir| try fs.interface.mkdir(dir, 0o755);
+    var path_buffer: [64]u8 = undefined;
+    for (0..50) |index| {
+        try write_file(&fs, try std.fmt.bufPrint(&path_buffer, "/a/b/c/d/f{d}", .{index}), "x");
+    }
+    io.reset();
+    var buffer: [8]u8 = undefined;
+    for (0..50) |index| {
+        try std.testing.expectEqualStrings("x", try read_file(&fs, try std.fmt.bufPrint(&path_buffer, "/a/b/c/d/f{d}", .{index}), &buffer));
+    }
+    // The file's own data block is read past the cache; the walk to it is not.
+    try std.testing.expect(io.reads <= 50 + 2);
 }
 
 // Every directory lwext4 makes is indexed, and the index does not cover "."

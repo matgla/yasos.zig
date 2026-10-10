@@ -571,6 +571,14 @@ class Session:
 
         self.serial.write(b"\n")
         recovered = self._read_until(Session.prompt, timeout=2)
+        if recovered.endswith(Session.prompt):
+            return True
+        # A truncation that cut an `if ...; then ...; fi` in half leaves the
+        # shell at PS2, where a newline only earns another "> ". Ctrl-C at the
+        # line editor drops the whole pending command and returns to PS1.
+        if recovered.endswith("\n> ") or buffered.endswith("\n> "):
+            self.serial.write(b"\x03")
+            recovered = self._read_until(Session.prompt, timeout=2)
         return recovered.endswith(Session.prompt)
 
     def _prepare_target(self):

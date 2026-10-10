@@ -58,6 +58,20 @@ var slot_in_use: [max_volumes]bool = @splat(false);
 
 pub const sector_size = 512;
 
+/// Called only by a profiling lwext4 build, under the filesystem lock. The
+/// aggregate atomics live in the kernel's SRAM, never in a volume's PSRAM.
+export fn ext4_user_block_stats(event: c_uint, value: u32) void {
+    const counter: kernel.perf.CacheCounter = switch (event) {
+        lwext4.EXT4_STATS_CACHE_HIT => .ext4_hits,
+        lwext4.EXT4_STATS_CACHE_MISS => .ext4_misses,
+        lwext4.EXT4_STATS_READ_REQUEST => .ext4_read_requests,
+        lwext4.EXT4_STATS_READ_SECTORS => .ext4_read_sectors,
+        lwext4.EXT4_STATS_CACHED_SECTORS => .ext4_cached_sectors,
+        else => return,
+    };
+    kernel.perf.cache_record(counter, value);
+}
+
 /// lwext4's error codes are errno values.
 pub fn to_error(rc: c_int) anyerror {
     return kernel.errno.from_errno(@intCast(rc));
@@ -115,6 +129,126 @@ export fn ext4_user_realloc(pointer: ?*anyopaque, size: usize) ?*anyopaque {
     @memcpy(fresh[0..keep], old_block[header_size..][0..keep]);
     ext4_user_free(old);
     return @ptrCast(fresh);
+}
+
+// ── Block cache buffers ───────────────────────────────────────────────────
+//
+// lwext4 is built with CONFIG_BLOCK_DEV_CACHE_USER_ALLOC, so each block cache
+// buffer -- descriptor and one filesystem block in a single piece -- comes from
+// here. Until `use_cache_memory` is called that is the kernel allocator above,
+// and the cache stays at its build-time 8 blocks a volume. The kernel calls it
+// at boot when the board has PSRAM: the buffers then come from the process
+// pool's slow end and the cache grows to fit, so the walks every path lookup
+// and allocation make (inode table, htree root and leaf, bitmaps, group
+// descriptors) stop re-reading the card, at no cost to the kernel heap.
+//
+// The backing is taken in chunks and carved into equal slots, one size class
+// per filesystem block size in use. Freed slots go back on their class's list;
+// chunks are never returned, so what the cache holds is its high-water mark,
+// bounded by the limits handed to lwext4.
+
+const buffer_header = 16;
+const buffer_alignment: std.mem.Alignment = .@"16";
+const buffer_chunk_size = 16 * 1024;
+/// Header tag of a buffer that came from the kernel allocator.
+const heap_buffer: u8 = 0xff;
+
+var cache_backing: ?std.mem.Allocator = null;
+var buffer_classes: [2]BufferClass = .{ .{}, .{} };
+
+const BufferClass = struct {
+    const FreeSlot = struct { next: ?*FreeSlot };
+
+    slot_size: usize = 0,
+    free: ?*FreeSlot = null,
+
+    fn take(self: *BufferClass, backing: std.mem.Allocator) ?[*]u8 {
+        if (self.free == null) self.grow(backing);
+        const slot = self.free orelse return null;
+        self.free = slot.next;
+        return @ptrCast(slot);
+    }
+
+    fn grow(self: *BufferClass, backing: std.mem.Allocator) void {
+        const chunk = backing.alignedAlloc(u8, buffer_alignment, @max(buffer_chunk_size, self.slot_size)) catch return;
+        var offset: usize = 0;
+        while (offset + self.slot_size <= chunk.len) : (offset += self.slot_size) {
+            self.give(chunk.ptr + offset);
+        }
+    }
+
+    fn give(self: *BufferClass, memory: [*]u8) void {
+        const slot: *FreeSlot = @ptrCast(@alignCast(memory));
+        slot.next = self.free;
+        self.free = slot;
+    }
+};
+
+/// Give the block cache its own memory and let it grow: `cache_blocks` per
+/// mounted volume, `idle_blocks` unreferenced ones across all of them. Call
+/// before mounting -- a volume sizes its cache when it mounts.
+pub fn use_cache_memory(backing: std.mem.Allocator, cache_blocks: u32, idle_blocks: u32) void {
+    lock.lock();
+    defer lock.unlock();
+    cache_backing = backing;
+    lwext4.ext4_bcache_set_limits(cache_blocks, idle_blocks);
+}
+
+/// Back to the kernel heap and the build-time sizes, forgetting the slots
+/// carved from the old backing. Only with nothing mounted (the host tests).
+pub fn release_cache_memory() void {
+    lock.lock();
+    defer lock.unlock();
+    cache_backing = null;
+    buffer_classes = .{ .{}, .{} };
+    lwext4.ext4_bcache_set_limits(0, 0);
+}
+
+fn buffer_class_for(slot_size: usize) ?u8 {
+    for (&buffer_classes, 0..) |*class, index| {
+        if (class.slot_size == slot_size) return @intCast(index);
+    }
+    for (&buffer_classes, 0..) |*class, index| {
+        if (class.slot_size == 0) {
+            class.slot_size = slot_size;
+            return @intCast(index);
+        }
+    }
+    return null;
+}
+
+export fn ext4_user_bcache_alloc(size: usize) ?*anyopaque {
+    const slot_size = std.mem.alignForward(usize, size + buffer_header, buffer_alignment.toByteUnits());
+    var tag: u8 = heap_buffer;
+    var memory: ?[*]u8 = null;
+    if (cache_backing) |backing| {
+        if (buffer_class_for(slot_size)) |index| {
+            memory = buffer_classes[index].take(backing);
+            if (memory != null) tag = index;
+        }
+    }
+    // No backing, a third block size, or the backing is full: the kernel heap,
+    // which is where every buffer came from before.
+    const base = memory orelse allocate(slot_size) orelse return null;
+    base[0] = tag;
+    return @ptrCast(base + buffer_header);
+}
+
+export fn ext4_user_bcache_free(pointer: ?*anyopaque) void {
+    const base = @as([*]u8, @ptrCast(pointer orelse return)) - buffer_header;
+    if (base[0] == heap_buffer) {
+        ext4_user_free(base);
+    } else {
+        buffer_classes[base[0]].give(base);
+    }
+}
+
+/// Hold (or release) write-back on the volume mounted at `mount_point`. lwext4
+/// counts holders; dirty blocks are written when the last one lets go, or by a
+/// flush. The caller holds `lock`.
+pub fn hold_write_back(mount_point: [*:0]const u8, on: bool) void {
+    const WriteBack = @typeInfo(@TypeOf(lwext4.ext4_cache_write_back)).@"fn".param_types[1].?;
+    _ = lwext4.ext4_cache_write_back(mount_point, c_bool(WriteBack, on));
 }
 
 /// lwext4's clock: the kernel's wall clock, in the 32-bit seconds ext4 keeps.
@@ -318,9 +452,8 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         defer self._allocator.free(full);
         // One flush for the lot: each call below otherwise writes the new
         // inode's table block (and the group descriptor) on its own.
-        const WriteBack = @typeInfo(@TypeOf(lwext4.ext4_cache_write_back)).@"fn".param_types[1].?;
-        _ = lwext4.ext4_cache_write_back(self.mount_point(), c_bool(WriteBack, true));
-        defer _ = lwext4.ext4_cache_write_back(self.mount_point(), c_bool(WriteBack, false));
+        hold_write_back(self.mount_point(), true);
+        defer hold_write_back(self.mount_point(), false);
         var file: lwext4.ext4_file = undefined;
         try check(lwext4.ext4_fopen(&file, full.ptr, "a"));
         _ = lwext4.ext4_fclose(&file);

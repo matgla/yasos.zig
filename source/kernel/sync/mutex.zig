@@ -217,7 +217,7 @@ test "Sync.Mutex.ParticipatesInTheLockHierarchy" {
     const flags = inner.lock_irqsave();
     inner.unlock_irqrestore(flags);
     mutex.unlock();
-    try testing.expectEqual(@as(u16, 0), locks.held_ranks());
+    try testing.expectEqual(@as(locks.HeldSet, 0), locks.held_ranks());
 }
 
 test "Sync.Mutex.BootContextTakesItWithoutAProcess" {
