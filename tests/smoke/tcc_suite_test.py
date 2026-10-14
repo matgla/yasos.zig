@@ -190,6 +190,7 @@ is_xfail_o1_test = _gcc_conftest.is_xfail_o1_test
 # lack of subnormal support at the bottom of the table.
 NATIVE_TARGET_SKIP_TESTS = {
     "849_tu_modref_memcpy_result_indirect_call": "inline asm .word of a symbol in .text: YAFF rejects R_ARM_ABS32 outside data",
+    "bug_asm_label_static_toplevel_asm": "top-level asm .word of a symbol in .text: YAFF rejects R_ARM_ABS32 outside data",
     # the host test builds abi_hfa_b.c with arm-none-eabi-gcc; no gcc on the device
     "abi_hfa_main": "gcc-built companion object (HFA interop)",
     # naked asm returning in s0-s3: AAPCS-VFP only; device userspace is softfp
