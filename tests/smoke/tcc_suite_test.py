@@ -239,6 +239,12 @@ NATIVE_TARGET_SKIP_TESTS = {
     # libs/tinycc/lib/fp/arm/rp2350/d2f_subnormal.c.
     "20190901-1": "RP2350 DCP compare flushes subnormals: a subnormal double reads == 0.0",
     "ieee/cdivchkd": "RP2350 DCP compare flushes subnormals; vectors are full of subnormal doubles",
+    # ---- privileged peripherals ----
+    # These ir_tests program SysTick (SYST_CSR/RVR/CVR at 0xE000E010..18) and
+    # read COUNTFLAG; YasOS user processes run unprivileged, so the first SCS
+    # access is a precise BusFault (BFAR=0xE000E010) at every opt level.
+    "bug_dead_trail_volatile_access": "SysTick (SCS) access needs privileged bare metal",
+    "bug_narrow_volatile_load_dead_local": "SysTick (SCS) access needs privileged bare metal",
 }
 
 IGNORE_NATIVE_TARGET_SKIP_TESTS = os.environ.get("YASOS_SMOKE_RERUN_FAILED", "").strip().lower() in {
