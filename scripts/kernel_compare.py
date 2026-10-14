@@ -19,8 +19,11 @@ Every workload runs in its own fresh boot and is counted with the gated icount
 TCG plugin (the docs/kernel_bench_insn_2026-10-08.md methodology): the plugin
 counts guest instructions between @@PROFILE_BEGIN@@ / @@PROFILE_END@@ UART
 markers printed by a workload script, under `-icount shift=0,align=off,
-sleep=off` on the board_model QEMU.  Counts are deterministic, so a comparison
-is exact: no repetitions, no noise margins.  Each workload records its exit
+sleep=off` on the board_model QEMU.  The counter is exact, but the work inside
+the markers can vary between boots: process reaping can enter or leave the
+window, and userspace malloc scans can vary with heap layout.  Repeat small
+differences and compare executed work before attributing them to codegen (see
+docs/kernel_inlining_investigation_2026-10-11.md).  Each workload records its exit
 status, its instruction count (the per-PC CSV is kept under <work>/insns/ for
 hotspot analysis) and the sha256 of its output.  A `noop` workload measures the
 marker harness itself.
@@ -28,7 +31,7 @@ marker harness itself.
 `--store PATH` (default .cache/kernel_compare/baseline.json) saves the run as
 the baseline.  Without it the run is compared against the stored baseline:
 exit statuses and output hashes must match (a mismatch is a failure), and
-instruction deltas are reported exactly (a warning beyond --count-warn, a
+instruction deltas are reported as observed (a warning beyond --count-warn, a
 failure only with --fail-on-count).  The tcc-vs-llvm table of the current run
 is always printed; a workload whose output differs between the two kernels is
 a failure there too -- that is a kernel miscompile until proven otherwise.

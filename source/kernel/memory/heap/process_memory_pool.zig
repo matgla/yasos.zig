@@ -211,6 +211,17 @@ pub const ProcessMemoryPool = struct {
         }
     }
 
+    inline fn advance_free_hint(region: *Region) usize {
+        const masks = region.page_bitmap.unmanaged.masks;
+        const page_count = region.page_count;
+        var hint = region.first_free_hint;
+        while (hint < page_count and (masks[hint / bits_per_word] & (@as(MaskInt, 1) << @intCast(hint % bits_per_word))) != 0) {
+            hint += 1;
+        }
+        region.first_free_hint = hint;
+        return hint;
+    }
+
     /// Lowest index in `[from, limit)` starting `pages` consecutive free pages,
     /// or null. Scans each candidate window from its top: a used page at offset
     /// k rules out every start below k+1, so the next candidate resumes there
@@ -401,13 +412,9 @@ pub const ProcessMemoryPool = struct {
             // is the common case once fast SRAM fills and every subsequent
             // allocation is spilling to PSRAM.
             if (region.used_pages + region_pages_usize > region.page_count) continue;
-            // Everything below the hint is occupied, so no run can start there
-            // and skipping it costs nothing in placement: this still returns the
-            // same slot a scan from page zero would have.
-            while (region.first_free_hint < region.page_count and region.page_bitmap.isSet(region.first_free_hint)) {
-                region.first_free_hint += 1;
-            }
-            const slot_start = find_free_run(region, region_pages_usize, region.first_free_hint, region.page_count) orelse continue;
+            // Hold the scan state locally: TCC otherwise reloads these fields on every probe.
+            const first_free = advance_free_hint(region);
+            const slot_start = find_free_run(region, region_pages_usize, first_free, region.page_count) orelse continue;
             const t_mark = if (perf.enabled) perf.read_cycles() else 0;
             perf.pool_record(.scan, t_mark -% t_scan);
             const end_index: usize = slot_start + region_pages_usize;
@@ -1170,6 +1177,33 @@ test "ProcessMemoryPool.UsedCountTracksBitmapAcrossAllocAndFree" {
     pool.release_pages_for(pid);
     try expect_counts_match_bitmap(&pool);
     try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+}
+
+test "ProcessMemoryPool.AdvancesHintAcrossWordsAndStopsAtBound" {
+    const Pool = ProcessMemoryPool;
+    const lengths = [_]usize{ 0, 1, Pool.bits_per_word - 1, Pool.bits_per_word, Pool.bits_per_word + 1, 2 * Pool.bits_per_word + 3 };
+    for (lengths) |length| {
+        var bitmap = try std.DynamicBitSet.initFull(std.testing.allocator, length);
+        defer bitmap.deinit();
+        var region: Pool.Region = .{
+            .start_address = 0,
+            .page_count = length,
+            .page_size = Pool.page_size,
+            .page_bitmap = bitmap,
+        };
+        try std.testing.expectEqual(length, Pool.advance_free_hint(&region));
+        try std.testing.expectEqual(length, region.first_free_hint);
+        try std.testing.expectEqual(length, Pool.advance_free_hint(&region));
+        for (0..length) |hole| {
+            bitmap.unset(hole);
+            region.first_free_hint = 0;
+            try std.testing.expectEqual(hole, Pool.advance_free_hint(&region));
+            try std.testing.expectEqual(hole, region.first_free_hint);
+            try std.testing.expectEqual(hole, Pool.advance_free_hint(&region));
+            try std.testing.expectEqual(length - 1, bitmap.count());
+            bitmap.set(hole);
+        }
+    }
 }
 
 test "ProcessMemoryPool.FreeHintStaysALowerBound" {

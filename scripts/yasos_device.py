@@ -138,8 +138,10 @@ def build_fat_image(image: Path, sources, excludes=()) -> int:
                 total += local.stat().st_size
                 count += 1
     # Clusters round every file up; 4 KiB each is the worst case at this size.
+    # The reserve covers the FATs, root and subdirectory entries; fatimg still
+    # fails loudly if the files do not fit.
     needed = total + count * 4096
-    if needed > window * 0.97:
+    if needed > window - 160 * 1024:
         raise DeviceError(
             f"{count} files, {total / 1048576:.1f} MiB (~{needed / 1048576:.1f} MiB on FAT) do not "
             f"fit the {window // 1048576} MiB fatdisk window; use the UART transfer or a subset")
