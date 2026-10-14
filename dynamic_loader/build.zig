@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) !void {
     const maybe_cpu_arch = b.option([]const u8, "cpu_arch", "CPU architecture to build for") orelse null;
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{}) orelse .debug;
     const target = b.standardTargetOptions(.{});
     const options = b.addOptions();
     options.addOption(bool, "verify_templates", b.option(bool, "verify_templates", "Compare template replay against full relocation") orelse false);

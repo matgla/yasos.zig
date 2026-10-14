@@ -194,7 +194,7 @@ fn generate_pio(b: *std.Build, pioasm: *std.Build.Step.Compile, file: []const u8
 }
 
 pub fn build(b: *std.Build) !void {
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{}) orelse .debug;
     const target = b.resolveTargetQuery(targetOptions);
 
     const hal = b.addModule("hal", .{

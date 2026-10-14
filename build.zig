@@ -141,7 +141,7 @@ pub fn build(b: *std.Build) !void {
         generate.step.dependOn(&configure.step);
     }
 
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{}) orelse .debug;
     const target = b.standardTargetOptions(.{});
 
     // Which compiler builds the kernel.  tcc: Zig's C backend, then the cross

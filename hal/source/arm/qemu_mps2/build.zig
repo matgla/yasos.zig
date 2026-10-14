@@ -34,7 +34,7 @@ pub const targetOptions = std.Target.Query{
 };
 
 pub fn build(b: *std.Build) !void {
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{}) orelse .debug;
     const target = b.resolveTargetQuery(targetOptions);
 
     const hal = b.addModule("hal", .{
