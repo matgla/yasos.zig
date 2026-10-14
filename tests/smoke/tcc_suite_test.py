@@ -194,6 +194,8 @@ NATIVE_TARGET_SKIP_TESTS = {
     "abi_hfa_main": "gcc-built companion object (HFA interop)",
     # naked asm returning in s0-s3: AAPCS-VFP only; device userspace is softfp
     "fp_hard_hfa_ret_regs_exec": "hard-float ABI test; device userspace is softfp",
+    # cpsid/msr PRIMASK/BASEPRI are ignored (and mrs reads 0) in unprivileged thread mode
+    "894_asm_machine_call": "needs privileged PRIMASK/BASEPRI access; userspace is unprivileged",
     # compile/ tests — resource exhaustion on the embedded target
     "compile/20001226-1": "compile-time OOM: emits 'memory full'",
     "compile/pr46534": "compile-time OOM: emits 'memory full'",
