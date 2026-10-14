@@ -917,6 +917,16 @@ IR_MULTI_FILE_SOURCES = {
     "bug_weak_inferred_noreturn.c": ("bug_weak_inferred_noreturn.c", "bug_weak_inferred_noreturn+.c"),
     "bug_weak_pure_via_sret.c": ("bug_weak_pure_via_sret.c", "bug_weak_pure_via_sret+.c"),
     "bug_func_write_summary_deref_param.c": ("bug_func_write_summary_deref_param.c", "bug_func_write_summary_deref_param+.c"),
+    # test_qemu.py test_regpair_extern_inline_gnu89 / test_regpair_asm_global_in_body
+    "bug_regpair_extern_inline.c": ("bug_regpair_extern_inline.c", "bug_regpair_extern_inline+.c"),
+    "bug_regpair_asm_global_in_body.c": ("bug_regpair_asm_global_in_body.c", "bug_regpair_asm_global_in_body+.c"),
+}
+
+
+# Extra flags for IR tests, mirroring how test_qemu.py builds them.
+IR_EXTRA_CFLAGS = {
+    # the GNU extern inline semantics the test exercises need gnu89 inline
+    "bug_regpair_extern_inline.c": ("-fgnu89-inline",),
 }
 
 
@@ -967,7 +977,8 @@ def build_ir_test_cases():
                     ))
             continue
 
-        for test_id, cflags in _opt_level_variants(f"ir_tests/{filename}"):
+        for test_id, cflags in _opt_level_variants(f"ir_tests/{filename}",
+                                                   IR_EXTRA_CFLAGS.get(filename, ())):
             opt_level = cflags[0] if cflags else "-O0"
             test_cases.append(TccTestCase(
                 test_id=test_id,
