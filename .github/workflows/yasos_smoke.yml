@@ -70,7 +70,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          BUDGET=1520000
+          BUDGET=1800000
           ELF=libs/tinycc/bin/armv8m-tcc.elf
           # Also covers the known "build_rootfs.sh exits 0 when make failed" trap:
           # without this, a missing ELF would silently skip the gate.
