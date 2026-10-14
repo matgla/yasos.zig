@@ -1,12 +1,13 @@
 .{
     .name = .yasos,
     .version = "0.0.1",
-    .minimum_zig_version = "0.17.0-dev.1640+2597da025",
+    .minimum_zig_version = "0.18.0-dev.253+16d31ceed",
     .dependencies = .{
         .yasos_hal = .{ .path = "hal" },
         .yasld = .{ .path = "dynamic_loader" },
         .@"modules/oop" = .{ .path = "libs/oop" },
         .@"modules/fatfs" = .{ .path = "libs/zfat" },
+        .yasboot = .{ .path = "yasboot" },
     },
     .paths = .{
         "build.zig",

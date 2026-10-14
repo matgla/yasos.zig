@@ -901,7 +901,16 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         /// `argv` (a `#!` rewrite, see sys_execve): freed here once the arguments are
         /// copied -- this function may not return -- and set to null so the
         /// caller frees it only when the exec failed before that point.
-        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator, argv_scratch: ?*?[]usize) !i32 {
+        ///
+        /// `node`, when given, is the already-resolved file for `path`: `sys_execve`
+        /// looked it up to sniff the `#!` line and hands it over so the image is
+        /// installed from the same directory entry the sniff read. It is consumed
+        /// (released) by `load_executable_node` on every exit of that call.
+        /// `load_start_us` is when the caller started resolving the path, so the
+        /// reported load window still covers the lookup.
+        pub fn prepare_exec(self: *Self, path: []const u8, argv: [*c][*c]u8, envp: [*c][*c]u8, path_allocator: ?std.mem.Allocator, argv_scratch: ?*?[]usize, node: ?*kernel.fs.Node, load_start_us: u64) !i32 {
+            var owns_path = path_allocator != null;
+            errdefer if (owns_path) path_allocator.?.free(path);
             const current_process = self.get_current_process();
 
             // Restore parent's writable sections that may have been corrupted
@@ -927,7 +936,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // TODO: move loader to struct, pass allocator to loading functions
             // Not a YAFF image (a script without "#!", data, ...) is ENOEXEC,
             // which is what a shell falls back on to run it itself.
-            const executable = dynamic_loader.load_executable(path, current_process.get_process_memory_allocator(), current_process.pid) catch |err| {
+            const load_allocator = current_process.get_process_memory_allocator();
+            const loaded = blk: {
+                if (node) |resolved| break :blk dynamic_loader.load_executable_node(resolved, path, load_allocator, current_process.pid, load_start_us);
+                break :blk dynamic_loader.load_executable(path, load_allocator, current_process.pid);
+            };
+            const executable = loaded catch |err| {
                 return if (err == error.IncorrectSignature) kernel.errno.ErrnoSet.ExecFormatError else err;
             };
             // Taken from inside the loader, not measured around this call: on a
@@ -963,6 +977,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // all defers in the caller).
             if (path_allocator) |alloc| {
                 alloc.free(path);
+                owns_path = false;
             }
             const exec_allocator = current_process.get_process_memory_allocator();
             // argv_copy holds argv and envp contiguously (see clone_exec_args);
@@ -1950,7 +1965,7 @@ test "ProcessManager.ShouldForkProcess" {
     const IoctlCallback = struct {
         pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
             const cmd = args[0];
-            try std.testing.expectEqual(cmd, @as(i32, @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
+            try std.testing.expectEqual(cmd, @as(i32, @backingInt(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
 
             const a = args[1];
             var attr: *kernel.fs.FileMemoryMapAttributes = @ptrCast(@alignCast(a.?));
@@ -1962,6 +1977,7 @@ test "ProcessManager.ShouldForkProcess" {
 
     var data: i32 = 10;
     const filemock = try FileMock.create(std.testing.allocator);
+    _ = filemock.expectCall("size").willReturn(@as(u64, 512));
     _ = filemock.expectCall("ioctl")
         .invoke(&IoctlCallback.call, &data)
         .willReturn(@as(i32, 0));
@@ -1979,7 +1995,7 @@ test "ProcessManager.ShouldForkProcess" {
     _ = sut.schedule_next();
     _ = process_set_next_task();
 
-    _ = try sut.prepare_exec("/test", argv, envp, null, null);
+    _ = try sut.prepare_exec("/test", argv, envp, null, null, null, 0);
 
     const p = sut.get_process_for_pid(4).?;
     p.unblock_parent();

@@ -47,7 +47,7 @@ const log = kernel.log;
 /// plain two-word read can tear across a `settimeofday` on the other core and
 /// hand back an instant that never existed. `Seq64`'s writer is wait-free, so a
 /// reader in an interrupt handler cannot be held up by one.
-var realtime_offset_us: kernel.sync.Seq64 = .init(default_epoch_us);
+var realtime_offset_us: kernel.sync.Seq64 = .init(0);
 
 /// Where the clock starts: the build time of the image this kernel embeds, from
 /// `rootfs.img`'s mtime at build time (see `rootfs_build_epoch` in build.zig).
@@ -61,10 +61,29 @@ var realtime_offset_us: kernel.sync.Seq64 = .init(default_epoch_us);
 /// told one.
 ///
 /// Zero when the build had no image to read, which puts it back at 1970.
-const default_epoch_us: u64 = blk: {
-    const seconds = @import("build_info").default_epoch_seconds;
-    break :blk if (seconds > 0) @as(u64, @intCast(seconds)) * 1_000_000 else 0;
-};
+///
+/// Data, not a compile-time constant: the value lives in the generated
+/// `rootfs.S` next to the image it describes (hal board build.zig), so a new
+/// image does not change the kernel's own C and tcc does not recompile it.
+/// `init_default_clock` applies it at boot, before anything is mounted.
+extern const __yasos_build_epoch_seconds: i64;
+
+/// Unix seconds at which this image was built; 0 when unknown (and in host
+/// unit tests, which have no image).
+pub fn build_epoch_seconds() i64 {
+    if (@import("builtin").is_test) return 0;
+    return __yasos_build_epoch_seconds;
+}
+
+fn epoch_us_from_seconds(seconds: i64) u64 {
+    return if (seconds > 0) @as(u64, @intCast(seconds)) * 1_000_000 else 0;
+}
+
+/// Start the wall clock at the image's build time. Called once early in boot,
+/// before the mount points are created.
+pub fn init_default_clock() void {
+    realtime_offset_us.store(epoch_us_from_seconds(build_epoch_seconds()));
+}
 
 /// Whether `settimeofday` has ever run. Only advisory -- `realtime_us` answers
 /// either way -- but it lets a caller tell "1970 because nobody said" from
@@ -163,20 +182,18 @@ test "Time.WallClockIsTheBootCounterPlusWhateverTheOffsetHolds" {
 }
 
 test "Time.DefaultOffsetIsTheImageBuildTimeRatherThanTheEpoch" {
-    // What the offset actually starts at, which is what keeps `/tmp` and
-    // `/root` -- mounted during boot, before anything can set the clock -- from
-    // carrying a 1970 date for the rest of the boot.
-    const configured = @import("build_info").default_epoch_seconds;
-    if (configured <= 0) {
-        // A tree with no rootfs.img yet. Nothing to assert beyond the fallback.
-        try std.testing.expectEqual(@as(u64, 0), default_epoch_us);
-        return;
-    }
-    try std.testing.expectEqual(@as(u64, @intCast(configured)) * 1_000_000, default_epoch_us);
+    // What the offset starts at, which is what keeps `/tmp` and `/root` --
+    // mounted during boot, before anything can set the clock -- from carrying
+    // a 1970 date for the rest of the boot.
+    try std.testing.expectEqual(@as(u64, 1_790_000_000_000_000), epoch_us_from_seconds(1_790_000_000));
+    // No image to read: back to 1970.
+    try std.testing.expectEqual(@as(u64, 0), epoch_us_from_seconds(0));
+    try std.testing.expectEqual(@as(u64, 0), epoch_us_from_seconds(-5));
 
-    // And it is a real date rather than a placeholder: after the Unix epoch by
-    // a margin no plausible build time is inside.
-    try std.testing.expect(configured > 1_000_000_000);
+    // Host tests have no image, so the boot-time start is the epoch.
+    realtime_offset_us.store(123);
+    init_default_clock();
+    try std.testing.expectEqual(@as(u64, 0), realtime_offset_us.load());
 }
 
 test "Time.SettingTheClockShiftsItWithoutDisturbingTheMonotonicOne" {

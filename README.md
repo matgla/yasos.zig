@@ -36,7 +36,15 @@ zig build menuconfig
 
 Then select `Board selection` -> `MSPC v2/Pimoroni Pico Plus2` since they are only supported board right now.
 
-After configuration use:
+After configuration build the root filesystem image first. It also builds the
+cross compiler (`libs/tinycc/bin/armv8m-tcc`) the kernel is compiled with, and
+then rebuilds the kernel with the fresh image embedded:
+
+```
+./build_rootfs.sh -c -o rootfs.img
+```
+
+To rebuild only the kernel afterwards:
 
 ```
 zig build -Doptimize=ReleaseFast
@@ -44,10 +52,8 @@ or for debug build:
 zig build -Doptimize=Debug
 ```
 
-To create rootfs image use:
-```
-./build_rootfs.sh -c -o rootfs.img
-```
+The kernel builds with tinycc by default (`-Dkernel_cc=tcc`); `-Dkernel_cc=llvm`
+builds it with Zig's LLVM backend and needs no cross compiler.
 
 # Flashing
 After successful building of kernel and rootfs.img, flash the locally attached board with:

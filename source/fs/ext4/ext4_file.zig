@@ -36,6 +36,12 @@ pub const Ext4File = interface.DeriveFromBase(kernel.fs.IFile, struct {
     _file: lwext4.ext4_file,
     _allocator: std.mem.Allocator,
     _is_open: bool,
+    /// Holding write-back on the volume: taken by the first write or
+    /// truncate, let go at close. Without it every write() call wrote its metadata through on its own --
+    /// inode, block bitmap, group descriptor, extent node -- a few blocks per
+    /// call; held, they are written once, when the last writer on the volume
+    /// closes, at fsync, or when the cache needs the slot.
+    _write_back: bool,
     _name: []const u8,
     /// "/eN/": what ext4_cache_flush wants. lwext4's mount point struct is
     /// opaque out here.
@@ -56,6 +62,7 @@ pub const Ext4File = interface.DeriveFromBase(kernel.fs.IFile, struct {
             ._file = file,
             ._allocator = allocator,
             ._is_open = true,
+            ._write_back = false,
             ._name = filename,
             ._mount_point = mount_point,
         });
@@ -77,9 +84,17 @@ pub const Ext4File = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn write(self: *Self, data: []const u8) isize {
         ext4fs.lock.lock();
         defer ext4fs.lock.unlock();
+        self.hold_write_back();
         var count: usize = 0;
         if (lwext4.ext4_fwrite(&self._file, data.ptr, data.len, &count) != 0 and count == 0) return -1;
         return @intCast(count);
+    }
+
+    /// The caller holds `ext4fs.lock`.
+    fn hold_write_back(self: *Self) void {
+        if (self._write_back) return;
+        ext4fs.hold_write_back(&self._mount_point, true);
+        self._write_back = true;
     }
 
     pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {
@@ -148,6 +163,8 @@ pub const Ext4File = interface.DeriveFromBase(kernel.fs.IFile, struct {
         if (!self._is_open) return;
         self._is_open = false;
         _ = lwext4.ext4_fclose(&self._file);
+        // The last holder letting go writes the volume's dirty blocks.
+        if (self._write_back) ext4fs.hold_write_back(&self._mount_point, false);
         self._allocator.free(self._name);
     }
 
@@ -162,6 +179,7 @@ pub const Ext4File = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn truncate(self: *Self, length: u64) anyerror!void {
         ext4fs.lock.lock();
         defer ext4fs.lock.unlock();
+        self.hold_write_back();
         const current = lwext4.ext4_fsize(&self._file);
         if (length <= current) {
             try ext4fs.check(lwext4.ext4_ftruncate(&self._file, length));

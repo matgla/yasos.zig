@@ -241,3 +241,36 @@ def test_vfork_child_keeps_its_callers_frame(request):
     session.write_command("rm -f /tmp/prun_batch.txt /tmp/0.log /tmp/1.log")
     session.read_until_prompt()
     assert "Hello, World!" in log
+
+
+# Call execv directly: a shell may interpret scripts itself and hide a broken
+# kernel shebang path. The child must return the interpreter's status, and an
+# ENOENT must return to the child without preventing a subsequent exec.
+_DIRECT_EXEC_PROBE = [
+    "#include <stdio.h>",
+    "#include <unistd.h>",
+    "#include <sys/wait.h>",
+    "#include <errno.h>",
+    "int main(void) {",
+    "FILE *f = fopen(\"/tmp/exec-script\", \"w\");",
+    "if (!f) return 1;",
+    'fputs("#!/bin/sh --\\necho SCRIPT_ARG:$1\\nexit 7\\n", f); fclose(f);',
+    "int pid = vfork();",
+    "if (!pid) { char *a[] = {\"/tmp/exec-script\", \"kept\", 0}; execv(a[0], a); _exit(99); }",
+    "int status; waitpid(pid, &status, 0);",
+    "printf(\"SCRIPT_STATUS:%d\\n\", WEXITSTATUS(status));",
+    'f = fopen("/tmp/exec-script", "w"); fputs("#!/missing/interpreter\\n", f); fclose(f);',
+    "pid = vfork();",
+    'if (!pid) { char *a[] = {"/tmp/exec-script", 0}; for (int i=0; i<64; ++i) { execv(a[0], a); if (errno != ENOENT) _exit(97); } a[0] = "/bin/true"; execv(a[0], a); _exit(98); }',
+    "waitpid(pid, &status, 0); printf(\"RETRY_STATUS:%d\\n\", WEXITSTATUS(status));",
+    "unlink(\"/tmp/exec-script\"); return 0;",
+    "}",
+]
+
+
+def test_direct_exec_preserves_script_arguments_and_recovers_after_error(request):
+    session = request.node.stash[session_key]
+    output = _compile_and_run(session, _DIRECT_EXEC_PROBE, "direct_exec")
+    assert "SCRIPT_ARG:kept" in output, output
+    assert "SCRIPT_STATUS:7" in output, output
+    assert "RETRY_STATUS:0" in output, output

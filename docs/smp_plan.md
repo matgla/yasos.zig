@@ -1786,6 +1786,7 @@ lockdep-style per-CPU `held_lock_ranks` bitmask that panics on a violation.
 | 55 | `p->fd_lock` | spin_irq | yes | yes | per-process `_fds` |
 | 60 | `rq_lock[cpu]` | spin_irq | yes | no | per-core runqueue, `Thread.state` transitions |
 | 70 | `pidmap_lock` | spin_irq | yes | yes | `_pid_map` |
+| 78 | `loader_cache` | spin_irq | yes | yes | yasld's relocated-image cache list; taken by the pool's reclaim, so below `pagepool`, and nothing allocates or frees under it |
 | 80 | `pagepool_lock` | spin_irq | yes | yes | `ProcessMemoryPool` |
 | 90 | `kheap_lock` | spin_irq | yes | yes | newlib free list + `malloc.zig` accounting + `_sbrk` |
 | 95 | `console_lock` | spin, **not** irqsave | no | yes | `stdout.zig`, UART TX, `file_log` ring — see below |

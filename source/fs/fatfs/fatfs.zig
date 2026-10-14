@@ -771,6 +771,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             for (0..shared.lines.len) |index| {
                 const line = shared.lines[index];
                 if (line.sectors != 0 and line.owner == self.id and line.base == base and sector - base < line.sectors) {
+                    kernel.perf.cache_record(.fat_hits, 1);
                     shared.lines[index].used = tick();
                     return index;
                 }
@@ -779,6 +780,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                 }
             }
 
+            kernel.perf.cache_record(.fat_misses, 1);
             var sectors: u32 = line_sectors;
             const total = self.disk_sectors();
             if (total != 0 and base + sectors > total) {
@@ -806,6 +808,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             // exists to remove, and filling lines for it would evict more than
             // it saves. File data arrives here.
             if (!self.caching() or count >= line_sectors) {
+                kernel.perf.cache_record(.fat_bypass_requests, 1);
+                kernel.perf.cache_record(.fat_bypass_sectors, @intCast(count));
                 return self.read_through(buff, sector, @intCast(count));
             }
 

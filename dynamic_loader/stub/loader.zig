@@ -59,10 +59,13 @@ pub const ImageError = error{
     UnsupportedFloatAbi,
     UnsupportedCpuFeatures,
     InvalidDataAlignment,
+    InvalidImageLayout,
 };
 
+pub const Image = []align(4) const u8;
+
 pub const Loader = struct {
-    pub const FileResolver = *const fn (name: []const u8) ?*const anyopaque;
+    pub const FileResolver = *const fn (name: []const u8) ?Image;
     file_resolver: FileResolver,
     allocator: std.mem.Allocator,
     machine: MachineProfile,
@@ -89,8 +92,9 @@ pub const Loader = struct {
         self.load_error = null;
     }
 
-    pub fn load_executable(self: *Loader, module: *const anyopaque, process_allocator: std.mem.Allocator) !Executable {
+    pub fn load_executable(self: *Loader, module: Image, process_allocator: std.mem.Allocator, stable: bool) !Executable {
         _ = module;
+        _ = stable;
         if (self.load_error) |err| {
             self.load_error = null;
             return err;
@@ -100,8 +104,9 @@ pub const Loader = struct {
         };
     }
 
-    pub fn load_library(self: *Loader, module: *const anyopaque, process_allocator: std.mem.Allocator) !*Module {
+    pub fn load_library(self: *Loader, module: Image, process_allocator: std.mem.Allocator, stable: bool) !*Module {
         _ = module;
+        _ = stable;
         if (self.load_error) |err| {
             self.load_error = null;
             return err;

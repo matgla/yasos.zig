@@ -28,16 +28,25 @@ build_rootfs.sh configures the native (stage 2) compiler, and built there with
 the cross. That build's log gives every compile command; the payload carries
 the sources those commands read (from the cross's own -MD dependency lists), a
 listfile of flags per command, the host-cross objects as a reference, and two
-shell scripts.
+shell scripts. The reference objects are compiled by the cross from the very
+command lines the device runs (relative paths, the same -I spelling), not taken
+from make: a path is part of an object (STT_FILE, __FILE__), so only then is
+every remaining host-vs-device difference a compiler difference. The FP runtime
+linkage is pinned (-mfp-lib=static, the cross's default) because the native tcc
+defaults to the shared runtime, which changes code (an R9 reload after each
+__aeabi_ call).
 
 Device side (selfhost.sh):
   stage 2   the rootfs tcc compiles every TU and links a new tcc; each object is
-            compared with the host cross's (differences are reported but are
-            not a failure: host and device may break ties differently), and the
-            new tcc must compile and run a hello world.
+            compared with the host cross's, and the new tcc must compile and
+            run a hello world.
   stage 3   the NEW tcc compiles everything again and links itself; every object
-            and the linked compiler must be byte-identical to stage 2. That
-            fixpoint is the pass criterion.
+            and the linked compiler must be byte-identical to stage 2 (the
+            fixpoint), and every object identical to the host cross's.
+The last stage run must match the host cross object for object: the compiler
+is the same source on both, so any difference is a host-vs-device miscompile
+or nondeterminism. With --stages 2 that stage is the rootfs tcc, which has to be
+built from these sources (build_rootfs.sh, or tcc_selfhost_an524.sh).
 
 The run is long: one stage is roughly 45 minutes under QEMU.
 """
@@ -64,6 +73,9 @@ DEVICE_LIBTCC1 = "/usr/lib/armv8m-libtcc1.a"
 # tcc writes an executable's own file name into it, so every compiler this
 # test links is called what make calls it; only then can two of them compare.
 EXE = "armv8m-tcc"
+# The cross links the FP runtime statically by default, the native tcc shared;
+# both compile and link with the cross's choice spelled out.
+FP_LIB_FLAG = "-mfp-lib=static"
 
 # What the private copy of tinycc leaves out: build outputs, and trees the
 # native compiler build never reads.
@@ -193,6 +205,8 @@ def parse_log(log: Path, tree: Path):
                     flags.append("-I" + _to_tree(path, cwd, tree))
                 continue
             flags.append(arg)
+        if not any(f.startswith("-mfp-lib=") for f in flags):
+            flags.append(FP_LIB_FLAG)
         leak = [f for f in flags if str(REPO_ROOT) in f]
         if leak:
             raise SelfhostError(f"host path left in the flags of {source}: {leak}")
@@ -233,7 +247,30 @@ def link_plan(link, tree: Path):
             tail.append("@LIBTCC1@")
         else:
             tail.append(arg)
+    if not any(t.startswith("-mfp-lib=") for t in tail):
+        tail.append(FP_LIB_FLAG)
     return first, whole, arm, tail
+
+
+def host_flags(flags):
+    """A unit's device flags as the cross on the host takes them."""
+    return [f if f != "-I/usr/include" else f"-I{ROOTFS_INCLUDE}" for f in flags]
+
+
+def build_reference(units, tree: Path, ref: Path, env):
+    """The host cross's objects, from the device's own command lines.
+
+    Run in *tree*, as build.sh runs in the unpacked src.tar: the same relative
+    source and -I paths, so an object differs from the device's only where the
+    compilers do."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def compile_one(u):
+        sh(["armv8m-tcc"] + host_flags(u.flags) + ["-o", str(ref / os.path.basename(u.obj)), "-c", u.source],
+           cwd=tree, env=env)
+
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        list(pool.map(compile_one, units))
 
 
 def dependencies(units, tree: Path, env) -> set:
@@ -301,12 +338,19 @@ cd "$W/ref" && tar xf "$P/ref.tar" || fail "unpacking ref.tar"
 cd /
 echo "SELFHOST stage 2: $(command -v tcc || echo tcc) compiles $(wc -l < $W/src/objects.txt) TUs"
 sh "$W/src/build.sh" "$W/src" tcc "$W/s2" || fail "stage 2 build"
-same=0; differ=0
-for o in $(cat "$W/src/objects.txt"); do
-  if cmp -s "$W/s2/$o" "$W/ref/$o"; then same=$((same+1)); else differ=$((differ+1)); echo "SELFHOST host-vs-device differs $o"; fi
-done
-echo "SELFHOST stage 2 vs host cross: $same identical, $differ differ"
-if [ "$LINK" = 0 ]; then echo "SELFHOST RESULT PASS compile-only"; exit 0; fi
+# vs_host STAGE: compare that stage's objects with the host cross's; sets hdiffer.
+vs_host() {
+  hsame=0; hdiffer=0
+  for o in $(cat "$W/src/objects.txt"); do
+    if cmp -s "$W/s$1/$o" "$W/ref/$o"; then hsame=$((hsame+1)); else hdiffer=$((hdiffer+1)); echo "SELFHOST stage $1 host-vs-device differs $o"; fi
+  done
+  echo "SELFHOST stage $1 vs host cross: $hsame identical, $hdiffer differ"
+}
+vs_host 2
+if [ "$LINK" = 0 ]; then
+  [ $hdiffer = 0 ] || fail "stage 2 objects differ from the host cross"
+  echo "SELFHOST RESULT PASS compile-only"; exit 0
+fi
 if cmp -s "$W/s2/armv8m-tcc" "$W/ref/armv8m-tcc"; then echo "SELFHOST stage 2 tcc identical to the host-cross link"; else echo "SELFHOST stage 2 tcc differs from the host-cross link"; fi
 echo '#include <stdio.h>' > "$W/hello.c"
 echo 'int main(void) { printf("selfhost hello %d\n", 6 * 7); return 0; }' >> "$W/hello.c"
@@ -314,7 +358,10 @@ echo 'int main(void) { printf("selfhost hello %d\n", 6 * 7); return 0; }' >> "$W
 out=$("$W/hello")
 [ "$out" = "selfhost hello 42" ] || fail "hello printed '$out'"
 echo "SELFHOST new tcc builds a working hello"
-if [ "$STAGES" = 2 ]; then echo "SELFHOST RESULT PASS stage 2"; exit 0; fi
+if [ "$STAGES" = 2 ]; then
+  [ $hdiffer = 0 ] || fail "stage 2 objects differ from the host cross"
+  echo "SELFHOST RESULT PASS stage 2"; exit 0
+fi
 echo "SELFHOST stage 3: the new tcc compiles itself"
 sh "$W/src/build.sh" "$W/src" "$W/s2/armv8m-tcc" "$W/s3" || fail "stage 3 build"
 same=0; differ=0
@@ -322,14 +369,11 @@ for o in $(cat "$W/src/objects.txt") armv8m-tcc; do
   if cmp -s "$W/s2/$o" "$W/s3/$o"; then same=$((same+1)); else differ=$((differ+1)); echo "SELFHOST fixpoint differs $o"; fi
 done
 echo "SELFHOST fixpoint: $same identical, $differ differ"
-# The stage-3 compiler is the current sources, as the host cross is; the rootfs
-# tcc that ran stage 2 may be older. This says which the stage-2 differences were.
-hsame=0; hdiffer=0
-for o in $(cat "$W/src/objects.txt"); do
-  if cmp -s "$W/s3/$o" "$W/ref/$o"; then hsame=$((hsame+1)); else hdiffer=$((hdiffer+1)); fi
-done
-echo "SELFHOST stage 3 vs host cross: $hsame identical, $hdiffer differ"
+# Stage 3 runs the current sources, as the host cross does; the rootfs tcc of
+# stage 2 may be older, so only stage 3 has to match the host.
+vs_host 3
 [ $differ = 0 ] || fail "stage 3 is not a fixpoint"
+[ $hdiffer = 0 ] || fail "stage 3 objects differ from the host cross"
 echo "SELFHOST RESULT PASS fixpoint"
 '''
 
@@ -353,23 +397,28 @@ def prepare(args) -> Path:
     shutil.rmtree(ref, ignore_errors=True)
     payload.mkdir()
     ref.mkdir()
-    for u in units:
-        shutil.copy2(u.obj, ref / os.path.basename(u.obj))
-    shutil.copy2(tree / EXE, ref / EXE)
-
-    # Prove the device's link recipe on the host first: the same objects, the
-    # same archive step and link line through the cross must give the very
-    # binary make produced.
     env = dict(os.environ, PATH=f"{args.tinycc.resolve() / 'bin'}:{os.environ['PATH']}")
+
+    def link_with_recipe(objs: Path, out: Path):
+        sh(["armv8m-tcc", "-ar", "rcs", str(out / "libarm.a")] + [str(objs / m) for m in arm], env=env)
+        sh(["armv8m-tcc", "-o", str(out / EXE)] + [str(objs / m) for m in [first] + whole]
+           + [str(out / "libarm.a")] + [t if t != "@LIBTCC1@" else str(HOST_LIBTCC1) for t in tail], env=env)
+
+    # Prove the device's link recipe on the host first: make's objects through
+    # the same archive step and link line must give the very binary make produced.
     check = work / "linkcheck"
     shutil.rmtree(check, ignore_errors=True)
-    check.mkdir()
-    sh(["armv8m-tcc", "-ar", "rcs", str(check / "libarm.a")] + [str(ref / m) for m in arm], env=env)
-    sh(["armv8m-tcc", "-o", str(check / EXE)] + [str(ref / m) for m in [first] + whole]
-       + [str(check / "libarm.a")] + [t if t != "@LIBTCC1@" else str(HOST_LIBTCC1) for t in tail], env=env)
-    if (check / EXE).read_bytes() != (ref / EXE).read_bytes():
+    (check / "objs").mkdir(parents=True)
+    for u in units:
+        shutil.copy2(u.obj, check / "objs" / os.path.basename(u.obj))
+    link_with_recipe(check / "objs", check)
+    if (check / EXE).read_bytes() != (tree / EXE).read_bytes():
         raise SelfhostError(f"the device link recipe does not reproduce make's armv8m-tcc ({check})")
     shutil.rmtree(check)
+
+    build_reference(units, tree, ref, env)
+    link_with_recipe(ref, ref)
+    (ref / "libarm.a").unlink()
 
     selected = units
     link = True

@@ -74,7 +74,17 @@ pub const ProcessMemoryPool = struct {
     // Distinguishes user heap (mmap/malloc) allocations from loader-managed
     // ones (image data/bss/got, stack, thunks). Profiling only — lets the
     // per-pid dump attribute the footprint to reducible heap vs fixed image.
-    pub const AllocSource = enum { loader, heap };
+    /// `cache` is the dynamic loader's relocated-image cache (yasld
+    /// template.zig): memory that is only worth having while nobody else wants
+    /// it, so it fills the pool from the slow end and gives way on demand --
+    /// see `reclaim_hook`.
+    pub const AllocSource = enum { loader, heap, cache };
+
+    /// Asked to free about `bytes` of reclaimable memory when an allocation
+    /// finds no room; returns how much it freed, 0 when it has nothing left.
+    /// Called without `pagepool_lock` -- what it frees comes back through
+    /// `free_pages` -- and from whatever context the failing allocation ran in.
+    pub var reclaim_hook: ?*const fn (bytes: usize) usize = null;
 
     const ProcessMemoryEntity = struct {
         address: []u8,
@@ -84,7 +94,7 @@ pub const ProcessMemoryPool = struct {
         node: std.DoublyLinkedList.Node,
     };
     const ProcessMemoryList = std.DoublyLinkedList;
-    const ProcessMemoryMap = std.AutoHashMap(c.pid_t, ProcessMemoryList);
+    const ProcessMemoryMap = @import("yasld").IntegerHashMap(c.pid_t, ProcessMemoryList);
 
     // A single contiguous backing region with its own page bitmap. Regions are
     // probed in order, so earlier (faster) regions are preferred.
@@ -119,6 +129,66 @@ pub const ProcessMemoryPool = struct {
         first_free_hint: usize = 0,
     };
 
+    const MaskInt = std.bit_set.Dynamic.MaskInt;
+    const bits_per_word = @bitSizeOf(MaskInt);
+
+    /// Ones in bits `[lo, hi)` of a single bitmap word. Both shifts stay in
+    /// range by construction (`0 <= lo < hi <= bits_per_word`): `hi` is
+    /// bits_per_word exactly when the word is fully covered, which shifts by
+    /// zero, never by the word size.
+    fn wordRangeMask(lo: usize, hi: usize) MaskInt {
+        const ones: MaskInt = ~@as(MaskInt, 0);
+        return (ones << @intCast(lo)) & (ones >> @intCast(bits_per_word - hi));
+    }
+
+    /// Population count of one bitmap word. Hand-rolled rather than @popCount
+    /// because on this target @popCount survives Zig's C backend as a
+    /// `__builtin_popcount` call, and tcc lowers that to a call into
+    /// `__popcountsi2` -- a per-word function call in the allocator's hottest
+    /// loop. This SWAR sequence is the same arithmetic tcc's own runtime and
+    /// LLVM use for the builtin, and costs ~12 inline ALU ops, word size
+    /// independent (the divisor constants are the classic 3/5/17/255 ones).
+    /// The final multiply must wrap: the byte sums carry into the top byte
+    /// only mod 2^bits_per_word, and Zig's checked `*` would trap on that.
+    fn popcountWord(x: MaskInt) usize {
+        const ones: MaskInt = ~@as(MaskInt, 0);
+        const v1 = x - ((x >> 1) & (ones / 3));
+        const v2 = (v1 & (ones / 5)) + ((v1 >> 2) & (ones / 5));
+        const v3 = (v2 + (v2 >> 4)) & (ones / 17);
+        return @as(usize, v3 *% (ones / 255)) >> (bits_per_word - 8);
+    }
+
+    /// Flip `[from, to)` in `region`'s bitmap (clamped to the region, since
+    /// free_pages tolerates caller lengths that run past the region end) and
+    /// return how many pages actually changed state. One word per iteration:
+    /// the masks pointer is read once, and `used_pages` is committed by the
+    /// caller in a single store -- a page-at-a-time loop re-read the nested
+    /// pointers and bumped the counter in memory for every page (6.2% of a
+    /// warm launch, kernel-page-bitmap-per-page-work.md).
+    fn markRange(region: *Region, from: usize, to: usize, comptime used: bool) usize {
+        const masks = region.page_bitmap.unmanaged.masks;
+        const end = @min(to, region.page_count);
+        if (from >= end) return 0;
+        const first_word = from / bits_per_word;
+        const last_word = (end - 1) / bits_per_word;
+        var transitions: usize = 0;
+        var w = first_word;
+        while (w <= last_word) : (w += 1) {
+            const lo = if (w == first_word) from % bits_per_word else 0;
+            const hi = if (w == last_word) (end - 1) % bits_per_word + 1 else bits_per_word;
+            const mask = wordRangeMask(lo, hi);
+            const old = masks[w];
+            const new = if (used) old | mask else old & ~mask;
+            if (new != old) {
+                masks[w] = new;
+                // Most claims touch a single page: the changed bits are then
+                // exactly one, no matter how wide the mask word is.
+                transitions += if (mask & (mask -% 1) == 0) 1 else popcountWord(old ^ new);
+            }
+        }
+        return transitions;
+    }
+
     /// Claim `[from, to)` in `region`. Counts only pages that actually change
     /// state, so a caller that overlaps an existing allocation cannot skew
     /// used_pages away from the bitmap's popcount.
@@ -127,12 +197,7 @@ pub const ProcessMemoryPool = struct {
         // the phase-3 completion item: it catches a caller that was *believed*
         // to hold the lock, which no amount of review reliably does.
         pagepool_lock.assert_held();
-        for (from..to) |index| {
-            if (!region.page_bitmap.isSet(index)) {
-                region.page_bitmap.set(index);
-                region.used_pages += 1;
-            }
-        }
+        region.used_pages += markRange(region, from, to, true);
     }
 
     /// Release `[from, to)` in `region`. Same transition-counting as mark_used:
@@ -140,15 +205,21 @@ pub const ProcessMemoryPool = struct {
     /// inside a region reaches it), and that must not drive the count negative.
     fn mark_free(region: *Region, from: usize, to: usize) void {
         pagepool_lock.assert_held();
-        for (from..to) |index| {
-            if (region.page_bitmap.isSet(index)) {
-                region.page_bitmap.unset(index);
-                region.used_pages -= 1;
-            }
-        }
+        region.used_pages -= markRange(region, from, to, false);
         if (from < region.first_free_hint) {
             region.first_free_hint = from;
         }
+    }
+
+    inline fn advance_free_hint(region: *Region) usize {
+        const masks = region.page_bitmap.unmanaged.masks;
+        const page_count = region.page_count;
+        var hint = region.first_free_hint;
+        while (hint < page_count and (masks[hint / bits_per_word] & (@as(MaskInt, 1) << @intCast(hint % bits_per_word))) != 0) {
+            hint += 1;
+        }
+        region.first_free_hint = hint;
+        return hint;
     }
 
     /// Lowest index in `[from, limit)` starting `pages` consecutive free pages,
@@ -278,7 +349,8 @@ pub const ProcessMemoryPool = struct {
         if (number_of_pages <= 0) {
             return null;
         }
-        const reserved = self.reserve_pages(number_of_pages, pid, source) orelse return null;
+        const reserved = self.reserve_pages(number_of_pages, pid, source) orelse
+            self.reserve_after_reclaim(number_of_pages, pid, source) orelse return null;
 
         // Zeroing happens outside `pagepool_lock`, which is the point of the
         // split: the run is already marked used and recorded against this pid,
@@ -303,6 +375,18 @@ pub const ProcessMemoryPool = struct {
         return reserved.address;
     }
 
+    /// The pool is full: drop cached loader images until the run fits or there
+    /// is nothing left to drop. A cache allocation may evict other cache
+    /// entries, which is how the cache keeps itself to what is free.
+    fn reserve_after_reclaim(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t, source: AllocSource) ?Reserved {
+        const hook = reclaim_hook orelse return null;
+        const bytes = @as(usize, @intCast(number_of_pages)) * page_size;
+        while (hook(bytes) != 0) {
+            if (self.reserve_pages(number_of_pages, pid, source)) |reserved| return reserved;
+        }
+        return null;
+    }
+
     /// Find a free run, mark it used and record it against `pid`. Bitmap and
     /// bookkeeping only -- microseconds -- which is what makes `spin_irq` the
     /// right lock for this pool.
@@ -316,7 +400,11 @@ pub const ProcessMemoryPool = struct {
         // call and this is where it goes. See perf.PoolPhase.
         const t_scan = if (perf.enabled) perf.read_cycles() else 0;
         // Probe regions fast-first; the first region with a contiguous run wins.
-        for (self.regions, 0..) |*region, tier| {
+        // The loader cache goes the other way: it should never be what pushes a
+        // process out of fast SRAM.
+        for (0..self.regions.len) |probe| {
+            const tier = if (source == .cache) self.regions.len - 1 - probe else probe;
+            const region = &self.regions[tier];
             // Round the request up to THIS region's own page grain.
             const region_pages_usize = (requested_bytes + region.page_size - 1) / region.page_size;
             // A region without enough free pages anywhere cannot have them
@@ -324,13 +412,9 @@ pub const ProcessMemoryPool = struct {
             // is the common case once fast SRAM fills and every subsequent
             // allocation is spilling to PSRAM.
             if (region.used_pages + region_pages_usize > region.page_count) continue;
-            // Everything below the hint is occupied, so no run can start there
-            // and skipping it costs nothing in placement: this still returns the
-            // same slot a scan from page zero would have.
-            while (region.first_free_hint < region.page_count and region.page_bitmap.isSet(region.first_free_hint)) {
-                region.first_free_hint += 1;
-            }
-            const slot_start = find_free_run(region, region_pages_usize, region.first_free_hint, region.page_count) orelse continue;
+            // Hold the scan state locally: TCC otherwise reloads these fields on every probe.
+            const first_free = advance_free_hint(region);
+            const slot_start = find_free_run(region, region_pages_usize, first_free, region.page_count) orelse continue;
             const t_mark = if (perf.enabled) perf.read_cycles() else 0;
             perf.pool_record(.scan, t_mark -% t_scan);
             const end_index: usize = slot_start + region_pages_usize;
@@ -642,7 +726,9 @@ pub const ProcessMemoryPool = struct {
                 }
                 switch (entity.source) {
                     .heap => heap_bytes += bytes,
-                    .loader => loader_bytes += bytes,
+                    // Only the cache's own pid has these; count them with the
+                    // loader's, which is what they are a copy of.
+                    .loader, .cache => loader_bytes += bytes,
                 }
                 next = node.next;
             }
@@ -1093,6 +1179,33 @@ test "ProcessMemoryPool.UsedCountTracksBitmapAcrossAllocAndFree" {
     try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
 }
 
+test "ProcessMemoryPool.AdvancesHintAcrossWordsAndStopsAtBound" {
+    const Pool = ProcessMemoryPool;
+    const lengths = [_]usize{ 0, 1, Pool.bits_per_word - 1, Pool.bits_per_word, Pool.bits_per_word + 1, 2 * Pool.bits_per_word + 3 };
+    for (lengths) |length| {
+        var bitmap = try std.DynamicBitSet.initFull(std.testing.allocator, length);
+        defer bitmap.deinit();
+        var region: Pool.Region = .{
+            .start_address = 0,
+            .page_count = length,
+            .page_size = Pool.page_size,
+            .page_bitmap = bitmap,
+        };
+        try std.testing.expectEqual(length, Pool.advance_free_hint(&region));
+        try std.testing.expectEqual(length, region.first_free_hint);
+        try std.testing.expectEqual(length, Pool.advance_free_hint(&region));
+        for (0..length) |hole| {
+            bitmap.unset(hole);
+            region.first_free_hint = 0;
+            try std.testing.expectEqual(hole, Pool.advance_free_hint(&region));
+            try std.testing.expectEqual(hole, region.first_free_hint);
+            try std.testing.expectEqual(hole, Pool.advance_free_hint(&region));
+            try std.testing.expectEqual(length - 1, bitmap.count());
+            bitmap.set(hole);
+        }
+    }
+}
+
 test "ProcessMemoryPool.FreeHintStaysALowerBound" {
     var pool = try ProcessMemoryPool.init(std.testing.allocator);
     defer pool.deinit();
@@ -1144,6 +1257,97 @@ test "ProcessMemoryPool.AllocatesFirstFitAcrossAHoleTooSmallForTheRequest" {
     try expect_hint_is_lower_bound(&pool);
     try expect_counts_match_bitmap(&pool);
     _ = three;
+}
+
+test "ProcessMemoryPool.MarksPartialWholeAndMultiWordRangesExactly" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const pid: c.pid_t = 6;
+    // Keep every run start off a word boundary, so each length below is marked
+    // and freed through two ragged-edged words plus as many whole ones as it
+    // spans. A bitmap word is 32 pages on the target and 64 on the host, so
+    // the lengths straddle a word edge in either width.
+    const divider = pool.allocate_pages(3, pid).?;
+    const lengths = [_]i32{ 1, 5, 31, 32, 33, 63, 64, 65, 127 };
+    for (lengths) |n| {
+        const pages = pool.allocate_pages(n, pid).?;
+        try std.testing.expectEqual(@as(usize, @intCast(n)) * ProcessMemoryPool.page_size, pages.len);
+        try expect_counts_match_bitmap(&pool);
+        try expect_hint_is_lower_bound(&pool);
+
+        pool.free_pages(pages.ptr, n, pid);
+        try expect_counts_match_bitmap(&pool);
+        try expect_hint_is_lower_bound(&pool);
+    }
+    try std.testing.expectEqual(@as(usize, 3 * ProcessMemoryPool.page_size), pool.get_used_size());
+    _ = divider;
+}
+
+test "ProcessMemoryPool.MarkCountsTransitionsNotPages" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    // mark_used/mark_free are file-private, and bitmap surgery is only legal
+    // under the pool lock; both hold here. The numbers pin the contract the
+    // counter depends on: only state *changes* count, so overlapping claims
+    // and repeated frees leave used_pages equal to the bitmap's popcount
+    // (kernel-page-bitmap-per-page-work.md).
+    const flags = pagepool_lock.lock_irqsave();
+    defer pagepool_lock.unlock_irqrestore(flags);
+    const region = &pool.regions[0];
+
+    ProcessMemoryPool.mark_used(region, 10, 40);
+    try std.testing.expectEqual(@as(usize, 30), region.used_pages);
+    try expect_counts_match_bitmap(&pool);
+
+    // Overlap: only the 20 fresh pages count.
+    ProcessMemoryPool.mark_used(region, 20, 60);
+    try std.testing.expectEqual(@as(usize, 50), region.used_pages);
+    try expect_counts_match_bitmap(&pool);
+
+    // Idempotent: every page is already claimed.
+    ProcessMemoryPool.mark_used(region, 20, 60);
+    try std.testing.expectEqual(@as(usize, 50), region.used_pages);
+
+    // Overlapping release: only the 30 set pages come off.
+    ProcessMemoryPool.mark_free(region, 30, 70);
+    try std.testing.expectEqual(@as(usize, 20), region.used_pages);
+    try expect_counts_match_bitmap(&pool);
+
+    // Repeated free of a mostly-free range, running past the region's end:
+    // clamped, never a negative counter.
+    ProcessMemoryPool.mark_free(region, 0, region.page_count + 4096);
+    try std.testing.expectEqual(@as(usize, 0), region.used_pages);
+    try expect_counts_match_bitmap(&pool);
+    try expect_hint_is_lower_bound(&pool);
+}
+
+test "ProcessMemoryPool.RollbackKeepsBitmapAndCounterConsistent" {
+    // Fail each allocation in turn: an init failure skips the pool, but a
+    // failure after mark_used (memory_map insert, entity create) must roll
+    // the bitmap back and leave the counter, the hint and the first-fit
+    // placement exactly as they were.
+    for (0..16) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        var pool = ProcessMemoryPool.init(failing.allocator()) catch continue;
+        defer pool.deinit();
+
+        const pid: c.pid_t = 9;
+        // FailingAllocator keeps failing every allocation once it reaches
+        // fail_index, so there is no "retry succeeds": what must hold at the
+        // point allocate_pages gives up is the rollback itself.
+        const pages = pool.allocate_pages(4, pid) orelse {
+            try expect_counts_match_bitmap(&pool);
+            try expect_hint_is_lower_bound(&pool);
+            try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+            continue;
+        };
+        try expect_counts_match_bitmap(&pool);
+        _ = pages;
+    }
 }
 
 test "ProcessMemoryPool.ShouldPreferFirstRegion" {

@@ -40,6 +40,12 @@ const TIMER_RELOAD: *volatile u32 = @ptrFromInt(TIMER_BASE + 0x08);
 
 const CTRL_ENABLE: u32 = 1 << 0;
 
+/// Board time in nanoseconds, kept current by the rp2350_timing QEMU plugin
+/// (tools/board_model) when the guest runs under the RP2350 board model; the
+/// plugin writes it every few thousand instructions.  Zero without the plugin,
+/// and the hardware timer is used then.
+pub export var yasos_modeled_clock_ns: u64 = 0;
+
 pub const Time = struct {
     pub const SysTick = core.SysTick;
 
@@ -72,6 +78,8 @@ pub const Time = struct {
     }
 
     pub fn get_time_us() u64 {
+        const modeled = @as(*volatile u64, &yasos_modeled_clock_ns).*;
+        if (modeled != 0) return modeled / 1000;
         return now_ticks() / ticks_per_us;
     }
 

@@ -73,6 +73,11 @@ pub const Rank = enum(u8) {
     runqueue = 60,
     /// `_pid_map`.
     pidmap = 70,
+    /// The dynamic loader's cache of relocated images (`yasld` template.zig).
+    /// Taken from inside a page allocation -- the pool asks the cache to give
+    /// pages back when it runs dry -- so it ranks below `pagepool`, and the
+    /// cache never allocates or frees with it held.
+    loader_cache = 78,
     /// `ProcessMemoryPool`.
     pagepool = 80,
     /// malloc's free list + `malloc.zig` accounting + `_sbrk`.
@@ -83,19 +88,25 @@ pub const Rank = enum(u8) {
 
 const ranks = std.enums.values(Rank);
 
+/// One bit per rank, dense. Widen when the enum outgrows it.
+pub const HeldSet = u32;
+comptime {
+    std.debug.assert(ranks.len <= @bitSizeOf(HeldSet));
+}
+
 /// Bit position of `rank` in the held-set -- a dense index, not the sparse enum
 /// value.
-fn bit(comptime rank: Rank) u16 {
+fn bit(comptime rank: Rank) HeldSet {
     inline for (ranks, 0..) |candidate, index| {
-        if (candidate == rank) return @as(u16, 1) << @intCast(index);
+        if (candidate == rank) return @as(HeldSet, 1) << @intCast(index);
     }
     unreachable;
 }
 
 /// Every rank at or above `rank`: the set that must be empty before it may be
 /// acquired. "At" too, since nothing orders two holders of the same rank.
-fn bits_at_or_above(comptime rank: Rank) u16 {
-    comptime var mask: u16 = 0;
+fn bits_at_or_above(comptime rank: Rank) HeldSet {
+    comptime var mask: HeldSet = 0;
     inline for (ranks) |candidate| {
         if (@intFromEnum(candidate) >= @intFromEnum(rank)) mask |= bit(candidate);
     }
@@ -109,16 +120,16 @@ const core_count = percpu.core_count;
 
 /// Ranks currently held, per core. Not atomic: a core only touches its own,
 /// always with interrupts masked by the lock it is taking.
-var held: percpu.PerCpu(u16) = .init(0);
+var held: percpu.PerCpu(HeldSet) = .init(0);
 
 /// The ranks this core holds, as a bitmask. Diagnostics only; always zero when
 /// `checked` is false, which means "unknown" rather than "none".
-pub fn held_ranks() u16 {
+pub fn held_ranks() HeldSet {
     return held.current().*;
 }
 
 /// `rank`'s position in the held-set. Only ever set when `checked`.
-pub fn rank_bit(comptime rank: Rank) u16 {
+pub fn rank_bit(comptime rank: Rank) HeldSet {
     return comptime bit(rank);
 }
 
@@ -153,12 +164,12 @@ pub fn reset() void {
 /// whose holder may block and resume on the other core. These bits travel with
 /// the process across a switch -- see `RoundRobin.update_current`. Every other
 /// rank is a spin_irq, held with interrupts masked, so it cannot migrate.
-pub const migrating_ranks: u16 =
+pub const migrating_ranks: HeldSet =
     bit(.loader) | bit(.block) | bit(.mount) | bit(.fs) | bit(.dev) | bit(.sdio);
 
 /// Detach the migrating ranks from this core, for storing on the process being
 /// switched away from. Leaves the spin ranks, which belong to the core.
-pub fn take_migrating_ranks() u16 {
+pub fn take_migrating_ranks() HeldSet {
     if (comptime !checked) return 0;
     const slot = held.current();
     const taken = slot.* & migrating_ranks;
@@ -167,7 +178,7 @@ pub fn take_migrating_ranks() u16 {
 }
 
 /// Reattach the migrating ranks of the process being switched to.
-pub fn restore_migrating_ranks(mask: u16) void {
+pub fn restore_migrating_ranks(mask: HeldSet) void {
     if (comptime !checked) return;
     const slot = held.current();
     slot.* = (slot.* & ~migrating_ranks) | (mask & migrating_ranks);
@@ -394,7 +405,7 @@ test "Sync.Locks.RanksAreOrderedAndDense" {
         try testing.expect(@intFromEnum(rank) > previous);
         previous = @intFromEnum(rank);
     }
-    try testing.expect(ranks.len <= 16); // held-set is a u16
+    try testing.expect(ranks.len <= @bitSizeOf(HeldSet));
 }
 
 test "Sync.Locks.IncreasingRankIsAllowed" {
@@ -411,7 +422,7 @@ test "Sync.Locks.IncreasingRankIsAllowed" {
     inner.unlock_irqrestore(b);
     outer.unlock_irqrestore(a);
 
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 }
 
 test "Sync.Locks.HeldSetTracksAcquireAndRelease" {
@@ -419,14 +430,14 @@ test "Sync.Locks.HeldSetTracksAcquireAndRelease" {
     defer reset();
 
     var pool = Ranked(.pagepool){};
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 
     const flags = pool.lock_irqsave();
     // The acquire is real in every build; only the bookkeeping is conditional.
     try testing.expect(pool.held_by_current());
     try testing.expectEqual(if (checked) rank_bit(.pagepool) else 0, held_ranks());
     pool.unlock_irqrestore(flags);
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 }
 
 test "Sync.Locks.ASleepingRankTravelsToTheCoreTheHolderResumesOn" {
@@ -458,20 +469,20 @@ test "Sync.Locks.ASleepingRankTravelsToTheCoreTheHolderResumesOn" {
     // Switching away hands the rank to the process...
     const carried = take_migrating_ranks();
     try testing.expectEqual(if (checked) rank_bit(.mount) else 0, carried);
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 
     // ...which resumes on the other core, and only then may release it.
     Cpu.set_coreid(1);
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
     restore_migrating_ranks(carried);
     try testing.expectEqual(if (checked) rank_bit(.mount) else 0, held_ranks());
     leave_rank(.mount);
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 
     // The core it left keeps nothing behind: a bit stranded there is what makes
     // the next `leave` on it report a release with no matching acquire.
     Cpu.set_coreid(0);
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 }
 
 test "Sync.Locks.NoIrqAcquireNeedsAnUnpreemptibleCaller" {
@@ -496,7 +507,7 @@ test "Sync.Locks.NoIrqAcquireNeedsAnUnpreemptibleCaller" {
     console.lock_no_irq();
     try testing.expectEqual(if (checked) rank_bit(.console) else 0, held_ranks());
     console.unlock_no_irq();
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
     preempt.preempt_enable();
     try testing.expectEqual(refused_on_entry, preempt.preempt_disabled());
 }
@@ -514,7 +525,7 @@ test "Sync.Locks.TryLockSkipsTheOrderCheckButStillTracks" {
     try testing.expect(m != null);
     mount.unlock_irqrestore(m.?);
     console.unlock_irqrestore(c);
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 }
 
 test "Sync.Locks.BklNestsAndOnlyReleasesAtDepthZero" {
@@ -536,7 +547,7 @@ test "Sync.Locks.BklNestsAndOnlyReleasesAtDepthZero" {
     try testing.expect(bkl.held_by_current());
     bkl.unlock_irqrestore();
     try testing.expect(!bkl.held_by_current());
-    try testing.expectEqual(@as(u16, 0), held_ranks());
+    try testing.expectEqual(@as(HeldSet, 0), held_ranks());
 }
 
 test "Sync.Locks.BklIsReleasedByOtherCoresSeeingItFree" {

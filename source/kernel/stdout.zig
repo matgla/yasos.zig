@@ -31,6 +31,18 @@ var write_callback: ?WriteCallback = null;
 var write_context: ?*const anyopaque = null;
 var suppressed: bool = false;
 
+// Set when the console backend last refused a write (the UART's bounded TX
+// poll gave up: the sink behind it -- a host no longer reading the console, or
+// flow control -- stopped accepting bytes). While set, writes fail fast
+// instead of burning the poll budget one line at a time; a fault handler
+// dumping a postmortem through here is worth far more as a live kernel than as
+// serial bytes nobody is consuming. One call in `stall_retry_interval` still
+// goes to the backend, and any successful write clears the latch, so a console
+// that recovers resumes logging without a reboot.
+var console_stalled: bool = false;
+var console_stall_retries: usize = 0;
+const stall_retry_interval: usize = 4096;
+
 // Optional secondary sink (e.g. SD-card file log). It mirrors everything
 // written to the primary console. Errors from the secondary are swallowed so a
 // failing log file can never break console output.
@@ -103,9 +115,17 @@ fn drain_sink(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.
     _ = splat;
     _ = io_w;
     if (suppressed) return data[0].len;
+    if (console_stalled) {
+        console_stall_retries +%= 1;
+        if (console_stall_retries % stall_retry_interval != 0) return error.WriteFailed;
+    }
     if (write_context == null) return error.WriteFailed;
     if (write_callback) |callback| {
-        const written = callback(write_context.?, data[0]) catch return error.WriteFailed;
+        const written = callback(write_context.?, data[0]) catch {
+            console_stalled = true;
+            return error.WriteFailed;
+        };
+        console_stalled = false;
         if (secondary_callback) |secondary| {
             _ = secondary(secondary_context orelse undefined, data[0][0..written]) catch {};
         }

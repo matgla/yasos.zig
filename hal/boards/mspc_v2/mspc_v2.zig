@@ -26,7 +26,9 @@ pub const mmc = struct {
     //   SD_DAT3 -> GP37 (CS)
     pub var mmc0 = hal.mmc.Mmc.create(.{
         .bus_width = if (config.mmc.bus_mode_sdio) 4 else 1,
-        .clock_speed = 50 * 1000 * 1000,
+        // Past 50 MHz only with CONFIG_MMC_SDIO_OVERCLOCK: the SDIO driver
+        // then runs its out-of-spec profile once the card is in high speed.
+        .clock_speed = if (@hasDecl(config.mmc, "sdio_overclock") and config.mmc.sdio_overclock) 75 * 1000 * 1000 else 50 * 1000 * 1000,
         .timeout_ms = 1000,
         .use_dma = false,
         .mode = if (config.mmc.bus_mode_sdio) .SDIO else .SPI,

@@ -54,8 +54,13 @@ pub fn ItemTable(comptime ItemType: anytype) type {
             var result: usize = 0;
             var it = self.root;
             for (0..self.number_of_items) |_| {
-                result += it.size(self.alignment);
-                it = it.next(self.alignment);
+                // One stride per item: `next()` is `self + size()`, so computing
+                // both from a single call is what keeps the walk from reading
+                // every name twice. The names are the payload of the stride, so
+                // this is the whole cost of the table scan.
+                const stride = it.size(self.alignment);
+                result += stride;
+                it = @ptrFromInt(@intFromPtr(it) + stride);
             }
             return result;
         }
@@ -113,11 +118,12 @@ pub fn ItemTable(comptime ItemType: anytype) type {
             end: *const ItemType,
             alignment: u8,
             pub fn next(self: Iterator) ?Iterator {
-                if (@intFromPtr(self.data.next(self.alignment)) >= @intFromPtr(self.end)) {
+                const after = self.data.next(self.alignment);
+                if (@intFromPtr(after) >= @intFromPtr(self.end)) {
                     return null;
                 }
                 return .{
-                    .data = self.data.next(self.alignment),
+                    .data = after,
                     .end = self.end,
                     .alignment = self.alignment,
                 };

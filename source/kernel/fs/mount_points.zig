@@ -211,6 +211,25 @@ fn write_mount_lines(root: *const MountPoint, writer: *std.Io.Writer) std.Io.Wri
 pub const MountPoints = struct {
     allocator: std.mem.Allocator,
     root: ?MountPoint = null,
+    generation: u64 = 0,
+
+    /// A stable immutable namespace, copied under the tree lock. Submounts
+    /// below the directory disable caching; unrelated mount changes invalidate it.
+    pub fn immutable_token(self: *MountPoints, path: []const u8) ?u64 {
+        mount_lock.lock();
+        defer mount_lock.unlock();
+        const match = find_locked(self, *const MountPoint, path) orelse return null;
+        if (!match.point.info.read_only() or !std.mem.eql(u8, match.point.info.fstype(), "romfs")) return null;
+        const relative = std.mem.trim(u8, match.left, "/");
+        var next = match.point.children.first;
+        while (next) |node| : (next = node.next) {
+            const child: *const MountPoint = @fieldParentPtr("list_node", node);
+            const child_path = std.mem.trim(u8, child.path, "/");
+            if (relative.len == 0 or (std.mem.startsWith(u8, child_path, relative) and
+                (child_path.len == relative.len or child_path[relative.len] == '/'))) return null;
+        }
+        return self.generation;
+    }
 
     pub fn init(allocator: std.mem.Allocator) MountPoints {
         return .{
@@ -338,6 +357,7 @@ pub const MountPoints = struct {
             defer mount_lock.unlock();
             if (self.root == null) {
                 try self.mount_root(path, filesystem, info);
+                self.generation +%= 1;
                 return;
             }
             if (path.len == 0 or path[0] != '/') {
@@ -379,6 +399,7 @@ pub const MountPoints = struct {
             _ = fs.interface.umount();
             return err;
         };
+        self.generation +%= 1;
     }
 
     /// Whether anything is mounted from `source` (as recorded in its
@@ -438,6 +459,7 @@ pub const MountPoints = struct {
         if (std.mem.eql(u8, path, "/")) {
             self.root = null;
         }
+        self.generation +%= 1;
     }
 };
 
@@ -803,4 +825,25 @@ test "MountPoints.MatchesWholeComponentsOnly" {
             "/dev/mmc0p2 /var vfat rw 0 0\n",
         writer.buffered(),
     );
+}
+
+test "MountPoints.ImmutableTokensTrackNamespaceChanges" {
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    var sut = MountPoints.init(std.testing.allocator);
+    defer sut.deinit();
+    var mock = try FileMock.create(std.testing.allocator);
+    var file = mock.get_interface();
+    defer file.interface.delete();
+    var node = kernel.fs.Node.create_file(file);
+    const context = struct { file: *kernel.fs.Node }{ .file = &node };
+    try sut.mount_filesystem_with_info("/", try create_filesystem_mock(&context), MountInfo.init("rootfs", "romfs", "ro"));
+    const first = sut.immutable_token("/lib").?;
+    try sut.mount_filesystem_with_info("/var", try create_filesystem_mock(&context), MountInfo.init("card", "vfat", "rw"));
+    try std.testing.expect(first != sut.immutable_token("/lib").?);
+    try std.testing.expect(sut.immutable_token("/var") == null);
+    try sut.mount_filesystem_with_info("/lib/sub", try create_filesystem_mock(&context), MountInfo.init("card", "vfat", "rw"));
+    try std.testing.expect(sut.immutable_token("/lib") == null);
+    try std.testing.expect(sut.immutable_token("/library") != null);
+    _ = try sut.umount("/lib/sub");
+    try std.testing.expect(sut.immutable_token("/lib") != null);
 }

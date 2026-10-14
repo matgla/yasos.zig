@@ -33,6 +33,15 @@ once — prefer that when a bug class repeats.
 
 ## Key tooling
 
+- **`scripts/kernel_compare.py`** — A/B the tcc `-O2` kernel against the
+  Zig/LLVM kernel by **guest instruction counts** (gated icount plugin, one
+  QEMU boot per workload; `scripts/board_model.py setup` provides the
+  plugin-enabled QEMU). Runs userland apps, tcc compiles/runs and the on-board
+  zig (`build-obj -ofmt=c`, then tcc compiles the C — the device zig has no
+  ELF linker). `--store` saves a baseline; a bare run diffs rc + output hashes
+  (failure) and instruction deltas (warn at `--count-warn`, fail with
+  `--fail-on-count`). Per-PC CSVs for hotspot work land in
+  `.cache/kernel_compare/insns/`.
 - **`scripts/qemu_fatdisk_run.py`** + **`scripts/fatimg/`** — host-readable FAT
   drive mounted at `/mnt` on the QEMU guest. Drop sources in, pull device-compiled
   binaries out, **no kernel rebuild, no RAM scan**. This is the fast inner loop.
@@ -68,10 +77,24 @@ once — prefer that when a bug class repeats.
   out with `fdisk` + `mkfs.fat`/`mkfs.ext4` (host builds for a PC:
   `make -C apps/fdisk host`, `make -C apps/mkfs host`); `scripts/qemu_mount.py --sdcard`
   boots QEMU with a partitioned card image. No card: `/var` and `/home` are RAM.
+- **`scripts/board_model.py`** ([`docs/board_model.md`](docs/board_model.md)) — profile
+  on-device tcc compiles **at board speed on QEMU**: a TCG plugin
+  (`tools/board_model/rp2350_timing.c`) models the RP2350's XIP cache / flash /
+  PSRAM costs on a board-shaped an524 image and drives the guest clock, so tcc's
+  own `-bench`/`PASS_TIME` read Pico Plus 2 time (within ~3-7% of the board).
+  `setup`, `image NAME --tinycc REV|DIR`, `run IMAGE [-k ...]`, `report`,
+  `compare A B`, `calibrate`. Host and plain-QEMU profiles mis-rank passes for
+  the board — use this before optimising compile time.
 - **`scripts/qemu_capture_yaff.py`** — older RAM-scan capture (slower/flakier;
   prefer the FAT drive).
 - **`scripts/run_qemu_smoke.sh`** — the pytest smoke suite on QEMU (no hardware).
   `--no-build` reuses the current kernel; `-k <name>` selects tests.
+- **`scripts/vfs_cache_baseline.py --kernel ELF`** — FAT/ext4 repeated-read,
+  compile and spawn traffic on a perf-profiling kernel. Keeps raw UART logs,
+  cache counters and hashes; `--board-model` uses a board-shaped kernel with
+  the RP2350 timing plugin (the disk remains RAM-backed). For the boards'
+  cache-off FAT path, configure `configs/qemu_mps3_an524_nofatcache_defconfig`,
+  build, then use the smoke runner's `--no-build` so it retains that config.
 
 ## Build / run
 
@@ -98,6 +121,14 @@ rm -rf .zig-cache && zig build -Doptimize=ReleaseSafe   # kernel (re-embeds root
   Never write `until ! pgrep -f qemu_fatdisk_run; …` — the loop never exits.
 - **Stale ARM objects break the x86 cross link** ("file in wrong format"):
   `rm -rf libs/tinycc/{armv8m-arch,armv8m-ir,armv8m-*.o,*.o}` before a cross build.
+- **Never hand-build the cross with plain `make`** (e.g. for a private-copy
+  self-host cross): a bare make over an old `config.mak` drops
+  `-DTARGETOS_YasOS=1` and the rootfs sysroot paths from `build_rootfs.sh`'s
+  cross configure. Without the YasOS target define the cross reports
+  "(ARM Linux)", its target predefines change, and its objects differ from
+  the device compiler's by 8-byte stack-frame shifts — every host-vs-device
+  comparison then "fails" without any miscompile. Always build crosses
+  through `./build_rootfs.sh` (or replicate its exact configure line).
 - **`-O0`-native shifts the bug** elsewhere — not a clean bisector.
 - The bump commit is **not** automatically the cause — verify by reverting.
 

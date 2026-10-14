@@ -19,7 +19,35 @@
 #include "hardware/regs/clocks.h"
 #include "hardware/regs/qmi.h"
 #include "hardware/sync.h"
+#include "hardware/regs/addressmap.h"
 #include "pico/bootrom.h"
+
+/* The bootrom's flash_flush_cache invalidates every XIP cache line by set/way,
+ * and the cache is write-back for PSRAM (QMI M1): a line still holding a PSRAM
+ * store is dropped, not written. enable_continuous_read runs after storage is
+ * mounted, when the ext4 block cache and the loader's cache already live in
+ * PSRAM -- their newest bytes vanished and the cache read back whatever the
+ * chip held from before (a hard fault walking a block-cache tree full of
+ * text). Clean first, as the SDK's flash_range_* do before the same ROM call.
+ * A macro, not an inline function: the callers run from RAM and must not
+ * fetch from flash here, and tcc outlines `always_inline` helpers into flash.
+ * Clean by set/way addressed at the top of the XIP window (RP2350-E11), as
+ * the SDK's xip_cache_clean_all. */
+#define XIP_CACHE_BYTES      (16u * 1024u)
+#define XIP_CACHE_LINE_BYTES 8u
+#define XIP_OP_CLEAN_BY_SET_WAY 1u
+
+#define xip_clean_then_flush(flush)                                             \
+    do {                                                                        \
+        uintptr_t clean_start_ = XIP_END - XIP_BASE - XIP_CACHE_BYTES;          \
+        for (uintptr_t clean_off_ = clean_start_;                               \
+             clean_off_ < clean_start_ + XIP_CACHE_BYTES;                       \
+             clean_off_ += XIP_CACHE_LINE_BYTES)                                \
+            *(volatile uint8_t *)(XIP_MAINTENANCE_BASE + clean_off_ +           \
+                                  XIP_OP_CLEAN_BY_SET_WAY) = 0;                 \
+        __asm volatile("dsb\n\tisb" ::: "memory");                              \
+        (flush)();                                                              \
+    } while (0)
 
 /* ---- POWMAN registers (not exposed by SDK) ---- */
 #define POWMAN_VREG_CTRL  (*(volatile uint32_t *)0x40100004)
@@ -242,7 +270,7 @@ uint32_t __no_inline_not_in_flash_func(overclock_calibrate_flash_rxdelay)(
      * fetch happens before the cache is clean. */
     rom_flash_flush_cache_fn flush =
         (rom_flash_flush_cache_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_FLUSH_CACHE);
-    flush();
+    xip_clean_then_flush(flush);
 
     return chosen;
 }
@@ -313,7 +341,7 @@ void __no_inline_not_in_flash_func(overclock_flash_probe_read_cost)(
 
     rom_flash_flush_cache_fn flush =
         (rom_flash_flush_cache_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_FLUSH_CACHE);
-    flush();
+    xip_clean_then_flush(flush);
 
     const uint32_t miss = qmi_read_cycles(FLASH_CACHED_BASE, 512u, count);
     const uint32_t seq = qmi_read_cycles(FLASH_UNCACHED_BASE, 4u, count);
@@ -371,16 +399,16 @@ void __no_inline_not_in_flash_func(overclock_flash_probe_deselect)(
         if (qmi_flash_region_crc(probe_words) == reference)
             mask |= (1u << d);
         if (d == 0) {
-            flush();
+            xip_clean_then_flush(flush);
             cycles_lo = qmi_read_cycles(FLASH_CACHED_BASE, 512u, count) / count;
         }
     }
 
     qmi_hw->m[0].timing = saved;
     __asm volatile("dsb\n\tisb" ::: "memory");
-    flush();
+    xip_clean_then_flush(flush);
     const uint32_t cycles_hi = qmi_read_cycles(FLASH_CACHED_BASE, 512u, count) / count;
-    flush();
+    xip_clean_then_flush(flush);
     restore_interrupts(irq);
 
     if (out_cycles_lo) *out_cycles_lo = cycles_lo;
@@ -449,7 +477,7 @@ int __no_inline_not_in_flash_func(overclock_flash_enable_continuous_read)(void) 
 
     rom_flash_flush_cache_fn flush =
         (rom_flash_flush_cache_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_FLUSH_CACHE);
-    flush();
+    xip_clean_then_flush(flush);
 
     return ok ? 0 : -1;
 }

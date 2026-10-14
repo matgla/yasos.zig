@@ -33,6 +33,7 @@ const RamFs = @import("fs/ramfs/ramfs.zig").RamFs;
 const RamFsTier = @import("fs/ramfs/ramfs.zig").Tier;
 const FatFs = @import("fs/fatfs/fatfs.zig").FatFs;
 const mounter = @import("fs/mounter.zig");
+const ext4fs = @import("fs/ext4/ext4fs.zig");
 
 const panic_helper = @import("arch").panic;
 const arch = @import("arch");
@@ -567,6 +568,58 @@ fn attach_default_filedescriptors_to_root_process(process: *kernel.process.Proce
         _ = try process.attach_file_with_fd(2, "/dev/stderr", stderr);
     }
 }
+
+/// The ext4 block cache's memory: pages from the slow end of the process pool,
+/// owned by `pid` -- the loader cache's scheme (kernel/modules.zig), minus the
+/// reclaim, since dropping cached blocks needs the ext4 lock.
+const Ext4CachePages = struct {
+    const Pool = kernel.memory.heap.ProcessMemoryPool;
+    const pid = -3;
+    /// Per mounted volume, and unreferenced across all of them: at 1 KiB
+    /// blocks ~140 KiB at most, against the 8 MiB of PSRAM it comes from.
+    const cache_blocks = 128;
+    const idle_blocks = 128;
+
+    fn pool() *Pool {
+        return kernel.process.process_manager.instance.get_process_memory_pool();
+    }
+
+    fn pages_for(len: usize) i32 {
+        return @intCast((len + Pool.page_size - 1) / Pool.page_size);
+    }
+
+    fn alloc(_: *anyopaque, len: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+        const memory = pool().allocate_pages_from(pages_for(len), pid, .cache) orelse return null;
+        return memory.ptr;
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(_: *anyopaque, memory: []u8, _: std.mem.Alignment, _: usize) void {
+        pool().free_pages(memory.ptr, pages_for(memory.len), pid);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+    const allocator: std.mem.Allocator = .{ .ptr = undefined, .vtable = &vtable };
+
+    /// Only with PSRAM: without it the pool's slow end is the processes' own
+    /// SRAM, and the cache stays at its 8 blocks a volume on the kernel heap.
+    fn install() void {
+        for (hal.memory.get_memory_layout()) |region| {
+            if (region.memory_type == .PSRAM and region.size > 0) {
+                ext4fs.use_cache_memory(allocator, cache_blocks, idle_blocks);
+                return;
+            }
+        }
+    }
+};
+
 const KernelAllocator = kernel.memory.heap.malloc.KernelAllocatorType;
 
 fn get_current_pid() i32 {
@@ -574,8 +627,15 @@ fn get_current_pid() i32 {
     return @intCast(process.pid);
 }
 
+/// Whether the root process's stack came from /bin/sh's YAFF hint (see the
+/// root_process call in main). Recorded on the process so exec treats that
+/// limit as an image hint, replaced by the next image's own, and not as a
+/// limit the user set, which every child would inherit.
+var root_stack_from_image = false;
+
 export fn kernel_process() void {
     const process = kernel.process.process_manager.instance.get_current_process();
+    process.stack_limit_from_image = root_stack_from_image;
     attach_default_filedescriptors_to_root_process(process) catch {
         kernel.log.err("Can't attach default streams to root process", .{});
     };
@@ -615,6 +675,8 @@ pub export fn main() void {
     {
         const allocator = kernel_allocator.allocator();
         initialize_board();
+        // Before anything is mounted: the mount points are dated from it.
+        kernel.time.init_default_clock();
         // After the board, because the PSRAM window's size is only known once
         // external memory has been probed, and that is what the placement
         // assertion checks against.
@@ -641,6 +703,8 @@ pub export fn main() void {
         kernel.irq.system_call.init(kernel_allocator.allocator());
         kernel.dynamic_loader.init(allocator);
         defer kernel.dynamic_loader.deinit();
+        // Before anything mounts: a volume sizes its block cache at mount.
+        Ext4CachePages.install();
         initialize_filesystem(allocator) catch |err| {
             kernel.log.err("Filesystem initialization failed: {s}", .{@errorName(err)});
             return;
@@ -663,7 +727,15 @@ pub export fn main() void {
         // lifetime earlier. The second return needs r4-r11 back, because the
         // compiler parks `root_process`'s value in r4 across the call -- see
         // `switch_to_the_first_task` in source/arch/armv8-m/context_switch.S.
-        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, kernel.process.process_manager.instance.get_default_stack_size() }) catch |err| {
+        // The root process runs /bin/sh's main on the stack it is created
+        // with (kernel_process never exec()s), so size that stack from the
+        // shell's own YAFF hint, as exec would for any other image: with a
+        // small default (8 KiB on the Pico 2) the shell otherwise overflowed
+        // as soon as a vforked child walked the VFS.
+        const root_hint = kernel.dynamic_loader.executable_stack_hint("/bin/sh");
+        root_stack_from_image = root_hint != null;
+        const root_stack = root_hint orelse kernel.process.process_manager.instance.get_default_stack_size();
+        @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, root_stack }) catch |err| {
             kernel.log.err("Cannot start root process: {s}", .{@errorName(err)});
         };
         kernel.log.warn("Root process died", .{});

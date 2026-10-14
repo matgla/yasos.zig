@@ -56,6 +56,11 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         const CTRL_TX_ENABLE: u32 = 1 << 0;
         const CTRL_RX_ENABLE: u32 = 1 << 1;
 
+        // Bound on the per-byte TX-full poll; see the MPS3 driver for why this
+        // must not spin forever (chardev backpressure / flow control vs a
+        // fault handler that runs with interrupts masked).
+        const tx_poll_limit: usize = 100_000_000;
+
         pub fn init(_: Self, config: interface.uart.Config) interface.uart.InitializeError!void {
             _ = config;
             // QEMU ignores the actual rate but requires BAUDDIV >= 16.
@@ -84,7 +89,11 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
 
         pub fn write(self: Self, data: []const u8) !usize {
             for (data) |byte| {
-                while (!self.is_writable()) {}
+                var polls: usize = 0;
+                while (!self.is_writable()) {
+                    polls += 1;
+                    if (polls == tx_poll_limit) return error.WriteTimedOut;
+                }
                 DATA.* = byte;
             }
             return data.len;

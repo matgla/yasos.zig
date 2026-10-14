@@ -71,8 +71,7 @@ pub const Flash = struct {
     }
 
     pub fn get_number_of_blocks(self: Flash) u32 {
-        _ = self;
-        return 1024;
+        return @intCast(self.memory.len);
     }
 
     pub fn get_physical_address(self: *const Flash) []const u8 {

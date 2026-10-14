@@ -67,7 +67,16 @@ pub const FileSystemHeader = struct {
             mapped_memory_address = @ptrFromInt(@intFromPtr(address) + @as(usize, @intCast(offset)));
         }
         var reader = try FileReader.init(df, @intCast(offset));
-        const filesize = try reader.read(u32, 8);
+        // The size the volume header claims, capped by what the device can
+        // actually back: the mapped header reader bounds its accesses by this,
+        // and a corrupt claimed size must not reach past the end of the device.
+        const claimed_size = try reader.read(u32, 8);
+        const device_size = df.interface.size();
+        const backed: u64 = if (device_size > @as(u64, @intCast(offset)))
+            device_size - @as(u64, @intCast(offset))
+        else
+            0;
+        const filesize: u32 = @intCast(@min(@as(u64, claimed_size), backed));
         return .{
             ._allocator = allocator,
             ._reader = reader,
@@ -117,7 +126,14 @@ pub const FileSystemHeader = struct {
     }
 
     pub fn create_file_header_with_offset(self: *FileSystemHeader, offset: c.off_t) !FileHeader {
-        return try FileHeader.init(self._device_file, self._reader.get_offset() + offset, @intCast(self._offset), self._mapped_memory, self._allocator);
+        return try FileHeader.init(self._device_file, self._reader.get_offset() + offset, @intCast(self._offset), self._size, self._mapped_memory, self._allocator);
+    }
+
+    /// Where `header` sits in the image, as `create_file_header_with_offset`
+    /// takes it back.
+    pub fn offset_of(self: *const FileSystemHeader, header: *const FileHeader) !u32 {
+        return std.math.cast(u32, header.image_offset() - self._reader.get_offset()) orelse
+            kernel.errno.ErrnoSet.InvalidArgument;
     }
 
     pub fn first_file_header(self: *FileSystemHeader) !?FileHeader {

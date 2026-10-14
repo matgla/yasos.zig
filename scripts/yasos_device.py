@@ -138,8 +138,10 @@ def build_fat_image(image: Path, sources, excludes=()) -> int:
                 total += local.stat().st_size
                 count += 1
     # Clusters round every file up; 4 KiB each is the worst case at this size.
+    # The reserve covers the FATs, root and subdirectory entries; fatimg still
+    # fails loudly if the files do not fit.
     needed = total + count * 4096
-    if needed > window * 0.97:
+    if needed > window - 160 * 1024:
         raise DeviceError(
             f"{count} files, {total / 1048576:.1f} MiB (~{needed / 1048576:.1f} MiB on FAT) do not "
             f"fit the {window // 1048576} MiB fatdisk window; use the UART transfer or a subset")
@@ -185,7 +187,15 @@ def run(session, command: str, silence: float = 600.0, echo=True, on_line=None) 
         return False
 
     session.write_command(f"{command}; echo {_RC_MARK}$?")
-    session.wait_for_prompt_streaming(on_line=line, timeout=silence)
+    # A HardFault postmortem for a *user-process* fault carries the same crash
+    # marker as a dead kernel, but the kernel survives it and the prompt comes
+    # back. Letting the marker abort the read wedges the guest in QEMU: reading
+    # stops, the PTY fills, the UART model stops draining TX, and the CPU stuck
+    # printing the postmortem at HardFault priority spins forever on TX-full.
+    # Keep reading through it; a genuinely dead kernel still fails on *silence*
+    # ("Prompt not found"), just a little later.
+    with session.expect_process_fault():
+        session.wait_for_prompt_streaming(on_line=line, timeout=silence)
     if rc is None:
         raise DeviceError(f"no exit status seen for: {command}")
     return rc

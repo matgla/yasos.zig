@@ -31,6 +31,7 @@ const FileSystemHeader = @import("file_system_header.zig").FileSystemHeader;
 const FileHeader = @import("file_header.zig").FileHeader;
 const RomFsDirectoryIterator = @import("romfs_directory_iterator.zig").RomFsDirectoryIterator;
 const RomFsDirectory = @import("romfs_directory.zig").RomFsDirectory;
+const LookupCache = @import("lookup_cache.zig").LookupCache;
 
 const interface = @import("interface");
 
@@ -63,6 +64,7 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     /// real instant a few seconds into this boot, and still sorts before every
     /// file written since.
     mount_uptime_us: u64,
+    lookups: LookupCache,
 
     pub fn name(self: *const Self) []const u8 {
         _ = self;
@@ -82,22 +84,23 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             .allocator = allocator,
             .device_file = device_file,
             .mount_uptime_us = kernel.time.uptime_us(),
+            .lookups = LookupCache{},
         });
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         const t_walk = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         var header = try self.get_file_header(path, true);
-        defer header.deinit();
+        // The node takes the header over; it is only ours to free if that fails.
+        errdefer header.deinit();
         const t_node = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         if (kernel.perf.enabled) kernel.perf.romfs_walk(t_node -% t_walk);
         defer if (kernel.perf.enabled) kernel.perf.romfs_node(kernel.perf.read_cycles() -% t_node);
         if (header.filetype() != FileType.Directory) {
-            return try RomFsFile.InstanceType.create_node(self.allocator, try header.dupe());
+            return try RomFsFile.InstanceType.create_node(self.allocator, header);
         } else {
-            return try RomFsDirectory.InstanceType.create_node(self.allocator, try header.dupe(), &self.root);
+            return try RomFsDirectory.InstanceType.create_node(self.allocator, header, &self.root);
         }
-        return kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -148,7 +151,19 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return n;
     }
 
-    fn get_file_header(self: *Self, path: []const u8, resolve_link: bool) !FileHeader {
+    /// The entry `path` names, from the lookup cache when this path was found
+    /// before. See LookupCache.
+    fn get_file_header(self: *Self, path: []const u8, resolve_link: bool) anyerror!FileHeader {
+        if (self.lookups.find(path, resolve_link)) |offset| {
+            return self.create_file_header(offset);
+        }
+        var header = try self.walk(path, resolve_link);
+        errdefer header.deinit();
+        self.lookups.insert(path, resolve_link, try self.root.offset_of(&header));
+        return header;
+    }
+
+    fn walk(self: *Self, path: []const u8, resolve_link: bool) anyerror!FileHeader {
         const path_without_trailing_separator = std.mem.trimEnd(u8, path, "/");
         var it = std.fs.path.componentIterator(path);
         var component = it.first();
@@ -267,6 +282,20 @@ fn load_test_romfs() !kernel.fs.IFileSystem {
     var device = try RomfsDeviceStubFile.InstanceType.create_node(std.testing.allocator, "source/fs/romfs/tests/test.romfs", null);
     var romfs = try RomFs.InstanceType.init(std.testing.allocator, device.as_file().?, 0);
     return try romfs.interface.new(std.testing.allocator);
+}
+
+/// The test image as a block of memory, standing in for what XIP flash maps
+/// for the real rootfs: pass `buffer.ptr` as the stub's mapped address and
+/// `FileHeader.load` takes the mapped fast path.
+fn read_test_image(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var io: std.Io.Threaded = .init_single_threaded;
+    var file = try std.Io.Dir.cwd().openFile(io.io(), path, .{ .mode = .read_only });
+    defer file.close(io.io());
+    const length: usize = @intCast(try file.length(io.io()));
+    const buffer = try allocator.alloc(u8, length);
+    errdefer allocator.free(buffer);
+    if (try file.readPositionalAll(io.io(), buffer, 0) != length) return error.UnexpectedEof;
+    return buffer;
 }
 
 test "Romfs.ShouldParseFilesystem" {
@@ -406,6 +435,47 @@ test "RomFs.ReadlinkReturnsTheTargetAndNothingElse" {
     var buffer: [64]u8 = undefined;
     const written = try ifs.interface.readlink("/subdir/other_dir/dir", buffer[0..]);
     try std.testing.expectEqual(@as(usize, @intCast(info.st_size)), written);
+}
+
+test "RomFs.RepeatedLookupsAgreeWithTheFirst" {
+    // The second of each pair is answered by the lookup cache, the first by a
+    // walk. A link must stay a link without following and its target with.
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+
+    const paths = [_][]const u8{
+        "/file.txt",
+        "/subdir",
+        "/subdir/dir/f1.txt",
+        "/subdir/other_dir/dir",
+        "/subdir/other_dir/dir/test.txt",
+        "/dev/fc1",
+    };
+    for (paths) |path| {
+        for ([_]bool{ false, true }) |follow| {
+            var first: c.struct_stat = undefined;
+            var second: c.struct_stat = undefined;
+            try ifs.interface.stat(path, &first, follow);
+            try ifs.interface.stat(path, &second, follow);
+            try std.testing.expectEqual(first.st_ino, second.st_ino);
+            try std.testing.expectEqual(first.st_mode, second.st_mode);
+            try std.testing.expectEqual(first.st_size, second.st_size);
+        }
+    }
+
+    var link: c.struct_stat = undefined;
+    var target: c.struct_stat = undefined;
+    try ifs.interface.stat("/subdir/other_dir/dir", &link, false);
+    try ifs.interface.stat("/subdir/other_dir/dir", &target, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFLNK), link.st_mode);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFDIR), target.st_mode);
+
+    // A node from a cached lookup reads the same bytes as one from a walk.
+    for (0..2) |_| {
+        try test_file(ifs, "/subdir/other_dir/dir/test.txt", 36, "This is test file\nWith some content\n", kernel.fs.FileType.File);
+    }
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, ifs.interface.stat("/subdir/missing", &link, true));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, ifs.interface.stat("/subdir/missing", &link, true));
 }
 
 test "RomFs.RefusesToSetTimestamps" {
@@ -696,8 +766,12 @@ test "RomFs.ShouldRejectGettingNonExistentPathFromDirectory" {
 }
 
 test "RomFs.ShouldReportMappedMemory" {
+    // A real mapping, not a sentinel: with headers read straight from the
+    // mapped image, the lookup itself dereferences this address.
+    const image = try read_test_image(std.testing.allocator, "source/fs/romfs/tests/test.romfs");
+    defer std.testing.allocator.free(image);
     const RomfsDeviceStubFile = @import("tests/romfs_device_stub.zig").RomfsDeviceStubFile;
-    var device = try RomfsDeviceStubFile.InstanceType.create_node(std.testing.allocator, "source/fs/romfs/tests/test.romfs", 0xfeedface);
+    var device = try RomfsDeviceStubFile.InstanceType.create_node(std.testing.allocator, "source/fs/romfs/tests/test.romfs", @intFromPtr(image.ptr));
     var romfs = try RomFs.InstanceType.init(std.testing.allocator, device.as_file().?, 0);
     var sut = try romfs.interface.new(std.testing.allocator);
     defer sut.interface.delete();
@@ -718,9 +792,117 @@ test "RomFs.ShouldReportMappedMemory" {
         try std.testing.expect(status.mapped_address_r != null);
         const file_offset = 0x350;
         if (status.mapped_address_r) |addr| {
-            try std.testing.expectEqual(@as(*anyopaque, @ptrFromInt(0xfeedface + file_offset)), addr);
+            try std.testing.expectEqual(@as(*anyopaque, @ptrFromInt(@intFromPtr(image.ptr) + file_offset)), addr);
         }
 
         try std.testing.expectEqual(null, status.mapped_address_w);
+    }
+}
+
+test "RomFs.MappedImageAnswersLikeTheDevice" {
+    // FileHeader.load's mapped fast path must answer exactly what the locked
+    // seek/read fallback answers: same names, same data, same link and error
+    // behavior -- only the read of the header bytes differs.
+    const image = try read_test_image(std.testing.allocator, "source/fs/romfs/tests/test.romfs");
+    defer std.testing.allocator.free(image);
+    const RomfsDeviceStubFile = @import("tests/romfs_device_stub.zig").RomfsDeviceStubFile;
+    var device = try RomfsDeviceStubFile.InstanceType.create_node(std.testing.allocator, "source/fs/romfs/tests/test.romfs", @intFromPtr(image.ptr));
+    var romfs = try RomFs.InstanceType.init(std.testing.allocator, device.as_file().?, 0);
+    var ifs = try romfs.interface.new(std.testing.allocator);
+    defer ifs.interface.delete();
+
+    const verify_directory_content = @import("../tests/directory_traverser.zig").verify_directory_content;
+    try verify_directory_content(&ifs, "/", &.{
+        .{ .name = ".", .kind = .Directory },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "dev", .kind = .Directory },
+        .{ .name = "subdir", .kind = .Directory },
+        .{ .name = "file.txt", .kind = .File },
+    });
+    try verify_directory_content(&ifs, "/subdir", &.{
+        .{ .name = ".", .kind = .HardLink },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "f1.txt", .kind = .File },
+        .{ .name = "f2.txt", .kind = .File },
+        .{ .name = "other_dir", .kind = .Directory },
+        .{ .name = "dir", .kind = .Directory },
+    });
+    try verify_directory_content(&ifs, "/subdir/other_dir", &.{
+        .{ .name = ".", .kind = .HardLink },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "a.txt", .kind = .File },
+        .{ .name = "b.txt", .kind = .File },
+        .{ .name = "dir", .kind = .SymbolicLink },
+    });
+
+    try test_file(ifs, "/file.txt", 34, "THis is testing file\nwith content\n", kernel.fs.FileType.File);
+    // A hardlink resolved from the mapped image to its target's data.
+    try test_file(ifs, "/subdir/dir/f1.txt", 10, "1 2 3 4 5\n", kernel.fs.FileType.File);
+    try test_file(ifs, "/subdir/other_dir/dir/test.txt", 36, "This is test file\nWith some content\n", kernel.fs.FileType.File);
+
+    // A symlink stays itself without following and reaches its target with.
+    var link: c.struct_stat = undefined;
+    var target: c.struct_stat = undefined;
+    try ifs.interface.stat("/subdir/other_dir/dir", &link, false);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFLNK), link.st_mode);
+    try ifs.interface.stat("/subdir/other_dir/dir", &target, true);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFDIR), target.st_mode);
+
+    // Missing paths miss on both the walk and the cached retry.
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, ifs.interface.stat("/subdir/missing", &link, true));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, ifs.interface.stat("/subdir/missing", &link, true));
+
+    // Repeated lookups, walk then cache, read the same bytes.
+    for (0..2) |_| {
+        try test_file(ifs, "/subdir/other_dir/dir/test.txt", 36, "This is test file\nWith some content\n", kernel.fs.FileType.File);
+    }
+}
+
+fn load_longname_romfs(mapped_address: ?usize) !kernel.fs.IFileSystem {
+    const RomfsDeviceStubFile = @import("tests/romfs_device_stub.zig").RomfsDeviceStubFile;
+    var device = try RomfsDeviceStubFile.InstanceType.create_node(std.testing.allocator, "source/fs/romfs/tests/test_longname.romfs", mapped_address);
+    var romfs = try RomFs.InstanceType.init(std.testing.allocator, device.as_file().?, 0);
+    return try romfs.interface.new(std.testing.allocator);
+}
+
+fn verify_longname_image(ifs: *kernel.fs.IFileSystem) !void {
+    const verify_directory_content = @import("../tests/directory_traverser.zig").verify_directory_content;
+    try verify_directory_content(ifs, "/", &.{
+        .{ .name = ".", .kind = .Directory },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "short.txt", .kind = .File },
+        .{ .name = "a_very_long_name.txt", .kind = .File },
+        .{ .name = "this_name_is_way_longer_than_thirtyone.txt", .kind = .File },
+        .{ .name = "dir_with_a_long_name", .kind = .Directory },
+    });
+    try verify_directory_content(ifs, "/dir_with_a_long_name", &.{
+        .{ .name = ".", .kind = .HardLink },
+        .{ .name = "..", .kind = .HardLink },
+        .{ .name = "also_a_long_entry_name.txt", .kind = .File },
+    });
+    // The content reads go through the device in both boots, so agreeing
+    // bytes also pin the data offset the long-name parse computed.
+    try test_file(ifs.*, "/short.txt", 11, "short file\n", kernel.fs.FileType.File);
+    try test_file(ifs.*, "/a_very_long_name.txt", 16, "long but inline\n", kernel.fs.FileType.File);
+    try test_file(ifs.*, "/this_name_is_way_longer_than_thirtyone.txt", 24, "this one needs the heap\n", kernel.fs.FileType.File);
+    try test_file(ifs.*, "/dir_with_a_long_name/also_a_long_entry_name.txt", 15, "nested content\n", kernel.fs.FileType.File);
+}
+
+test "RomFs.LongNamesParseTheSameFromImageAndDevice" {
+    // Names of 16+ bytes spill past the first 32-byte header read, and past
+    // 31 bytes they no longer fit the header's inline storage. The mapped
+    // scan and the device's locked chunked reads must agree on the name and
+    // on the data offset behind it.
+    {
+        var ifs = try load_longname_romfs(null);
+        defer ifs.interface.delete();
+        try verify_longname_image(&ifs);
+    }
+    {
+        const image = try read_test_image(std.testing.allocator, "source/fs/romfs/tests/test_longname.romfs");
+        defer std.testing.allocator.free(image);
+        var ifs = try load_longname_romfs(@intFromPtr(image.ptr));
+        defer ifs.interface.delete();
+        try verify_longname_image(&ifs);
     }
 }

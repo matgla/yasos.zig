@@ -51,6 +51,9 @@ DISKPROF_RE = re.compile(
     r" cardwait=(?P<card_wait_us>\d+)us"
     r" reads=(?P<reads>\d+)/(?P<read_blocks>\d+)blk/(?P<read_us>\d+)us"
 )
+# One record per backend; every field names its backend so aggregation stays
+# unambiguous. Older kernels simply have no cacheprof records.
+CACHEPROF_RE = re.compile(r"\bcacheprof pid=(?P<pid>\d+) (?:phase=(?P<phase>run|load) )?(?P<counts>(?:(?:fat|romfs|ext4)_\w+=\d+ ?)+)")
 # mmap/munmap: pages taken from the page pool and the time spent clearing them,
 # which is the part that scales with bytes rather than with calls.
 POOLPROF_RE = re.compile(
@@ -152,6 +155,9 @@ class KernelProfile:
     disk_read_blocks: int = 0
     disk_read_us: int = 0
 
+    caches: dict = field(default_factory=dict)
+    load_caches: dict = field(default_factory=dict)
+
     # page pool (mmap/munmap)
     pool_allocs: int = 0
     pool_pages: int = 0
@@ -178,6 +184,10 @@ class KernelProfile:
         self.write_bytes += other.write_bytes
         self.write_us += other.write_us
         self.dropped += other.dropped
+        for name, value in other.caches.items():
+            self.caches[name] = self.caches.get(name, 0) + value
+        for name, value in other.load_caches.items():
+            self.load_caches[name] = self.load_caches.get(name, 0) + value
         for name, entry in other.syscalls.items():
             bucket = self.syscalls.setdefault(name, {"calls": 0, "us": 0})
             bucket["calls"] += entry["calls"]
@@ -225,6 +235,8 @@ class KernelProfile:
                 "read_blocks": self.disk_read_blocks,
                 "read_ms": round(self.disk_read_us / 1000.0, 3),
             },
+            "caches": dict(self.caches),
+            "load_caches": dict(self.load_caches),
             "pool": {
                 "allocs": self.pool_allocs,
                 "pages": self.pool_pages,
@@ -283,6 +295,14 @@ def parse_lines(lines):
             profile.disk_reads += int(match.group("reads"))
             profile.disk_read_blocks += int(match.group("read_blocks"))
             profile.disk_read_us += int(match.group("read_us"))
+            continue
+
+        match = CACHEPROF_RE.search(line)
+        if match is not None:
+            counters = profile.load_caches if match.group("phase") == "load" else profile.caches
+            for item in match.group("counts").split():
+                name, value = item.split("=")
+                counters[name] = counters.get(name, 0) + int(value)
             continue
 
         match = POOLPROF_RE.search(line)

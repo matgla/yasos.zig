@@ -28,6 +28,9 @@ pub const Node = struct {
         directory: kernel.fs.IDirectory,
     };
     instance: InstanceType,
+    /// Set by VFS from the mount that actually returned this node, including
+    /// symlink fallback. A lexical path alone cannot prove backing lifetime.
+    immutable_backing: bool = false,
 
     pub fn create_file(file: kernel.fs.IFile) Node {
         return .{
@@ -102,17 +105,21 @@ pub const Node = struct {
     }
 
     pub fn share(self: *Self) Node {
-        return switch (self.instance) {
+        var result: Node = switch (self.instance) {
             .file => Node.create_file(self.instance.file.share()),
             .directory => Node.create_directory(self.instance.directory.share()),
         };
+        result.immutable_backing = self.immutable_backing;
+        return result;
     }
 
     pub fn clone(self: *const Self) !Node {
-        return switch (self.instance) {
+        var result: Node = switch (self.instance) {
             .file => Node.create_file(try self.instance.file.clone()),
             .directory => Node.create_directory(try self.instance.directory.clone()),
         };
+        result.immutable_backing = self.immutable_backing;
+        return result;
     }
 
     pub fn sync(self: *Self) anyerror!void {
