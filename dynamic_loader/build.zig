@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) !void {
     const prelink_target = b.resolveTargetQuery(.{ .cpu_arch = .x86, .os_tag = .linux });
     const prelink_yaff = b.addTranslateC(.{
         .root_source_file = b.path("../libs/tinycc/source/obj/tccyaff.h"),
-        .target = prelink_target,
+        .target = freestandingHeaderTarget(b, prelink_target),
         .optimize = .ReleaseSafe,
         .link_libc = false,
     });
@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) !void {
             yasld.addAssemblyFile(b.path(b.fmt("source/arch/{s}/indirect_call_thunk.S", .{cpu_arch})));
             const tccyaff_headers = b.addTranslateC(.{
                 .root_source_file = b.path("../libs/tinycc/source/obj/tccyaff.h"),
-                .target = target,
+                .target = freestandingHeaderTarget(b, target),
                 .optimize = optimize,
                 .link_libc = false,
             });
@@ -90,4 +90,21 @@ pub fn build(b: *std.Build) !void {
             yasld.addOptions("yasld_options", options);
         }
     }
+}
+
+/// The target to translate tccyaff.h for: `target` with the OS set to
+/// freestanding. The header only needs <stdint.h>, and since Zig 0.18
+/// `translate-c` searches the host's /usr/include for any non-freestanding OS
+/// even without -lc, so the builtin <stdint.h>'s `#include_next` reaches the
+/// host libc: with no 32-bit glibc headers installed (the CI image) the
+/// translation fails on gnu/stubs-32.h. The CPU and ABI, and so the C types,
+/// are unchanged.
+fn freestandingHeaderTarget(b: *std.Build, target: std.Build.ResolvedTarget) std.Build.ResolvedTarget {
+    var query = target.query;
+    query.os_tag = .freestanding;
+    query.os_version_min = null;
+    query.os_version_max = null;
+    query.glibc_version = null;
+    query.android_api_level = null;
+    return b.resolveTargetQuery(query);
 }
