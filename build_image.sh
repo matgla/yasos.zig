@@ -14,30 +14,32 @@ fi
 # CI legs exercise different kernels and a safety-check regression can only ever
 # be caught by one of them. Override with YASOS_KERNEL_OPTIMIZE for a size- or
 # speed-sensitive build.
-#
-# Exported, not just local: build_rootfs.sh below re-embeds rootfs.img and
-# rebuilds the kernel itself, and it reads the same variable. Without the export
-# it would fall back to its own default and quietly replace the kernel built
-# here with one at a different optimize level — the packaged ELF would not be
-# the one this line asked for.
 export KERNEL_OPTIMIZE="${YASOS_KERNEL_OPTIMIZE:-ReleaseSafe}"
 export YASOS_KERNEL_OPTIMIZE="$KERNEL_OPTIMIZE"
+
+# Root filesystem first, kernel second -- the same order as
+# scripts/run_qemu_smoke.sh. The kernel is compiled by the cross tcc by default
+# (build.zig -Dkernel_cc=tcc), and build_rootfs.sh is what builds that cross
+# (libs/tinycc/bin/armv8m-tcc), so a kernel build before it fails at configure
+# time on a fresh checkout with MissingCrossTcc. The kernel also .incbin's
+# rootfs.img, so building it first only produced a kernel the rootfs step then
+# had to rebuild anyway. --no-kernel: the kernel is built once, below, where a
+# failure stops the package instead of being one of build_rootfs.sh's skips.
+echo "Building root filesystem..."
+./build_rootfs.sh -c -o rootfs.img --no-kernel
+if [ $? -ne 0 ]; then
+    echo "Failed to build root filesystem. Please check build_rootfs.sh output."
+    exit 1
+fi
+echo "Root filesystem build completed successfully."
+
 echo "Building kernel with -Doptimize=$KERNEL_OPTIMIZE"
 zig build -Doptimize="$KERNEL_OPTIMIZE"
 if [ $? -ne 0 ]; then
     echo "Failed to build project. Please check build output."
     exit 1
 fi
-
 echo "Kernel build completed successfully."
-
-echo "Building root filesystem..."
-./build_rootfs.sh -c -o rootfs.img
-if [ $? -ne 0 ]; then
-    echo "Failed to build root filesystem. Please check build_rootfs.sh output."
-    exit 1
-fi
-echo "Root filesystem build completed successfully."
 
 echo "Creating package..."
 rm -rf $SCRIPT_DIR/output/target_package/
