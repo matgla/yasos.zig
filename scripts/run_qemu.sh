@@ -4,12 +4,16 @@
 # with the Zig compiler in the image.
 #
 # Usage: scripts/run_qemu.sh [options] [path/to/kernel.elf] [extra qemu args...]
+#   --build        Rebuild the rootfs image and the kernel before booting (or
+#                  set RUN_QEMU_BUILD=1). Without it the existing
+#                  zig-out/bin/yasos_kernel is booted as-is.
 #   --debug        Build the kernel Debug instead of ReleaseSafe (or set
-#                  YASOS_QEMU_OPTIMIZE to any zig optimize mode).
+#                  YASOS_QEMU_OPTIMIZE to any zig optimize mode). Implies --build.
 #   --zig DIR      Build the Zig compiler from the Zig tree DIR into the image
-#                  (build_rootfs.sh --zig). Default: $YASOS_ZIG_SOURCE, else a
-#                  sibling ../zig-mem checkout when there is one.
-#   --no-zig       Leave the Zig compiler out.
+#                  (build_rootfs.sh --zig). Implies --build. Default with
+#                  --build: $YASOS_ZIG_SOURCE, else a sibling ../zig-mem
+#                  checkout when there is one.
+#   --no-zig       Leave the Zig compiler out of a --build.
 #   --an505        Boot the older mps2-an505 board. Its 5 MB romfs window
 #                  cannot hold the Zig compiler, so this implies --no-zig.
 #   --mount DIR    The host directory the guest sees at /mnt (default:
@@ -24,15 +28,13 @@
 #   guest's copy is kept beside it as <file>.target. Quit with Ctrl-A x only
 #   after the guest's commands have finished writing. (scripts/qemu_mnt.py)
 #
-#   With NO ELF argument the script first (re)builds the userspace rootfs image
-#   and then the kernel that embeds it, so the run always reflects the current
-#   sources, before booting zig-out/bin/yasos_kernel.
-#   Pass an explicit ELF path to skip the build and boot that image as-is.
+#   With NO ELF argument the script boots zig-out/bin/yasos_kernel. With
+#   --build it first (re)builds the userspace rootfs image and then the kernel
+#   that embeds it, so the run reflects the current sources. An explicit ELF
+#   path is always booted as-is (--build is ignored).
 #
 #   The kernel is built -Doptimize=ReleaseSafe by default (matches the smoke
 #   suite).
-#
-# To skip the rootfs/kernel rebuild set RUN_QEMU_SKIP_BUILD=1.
 #
 # The first build with Zig takes several minutes (a host Zig, zig.c, then the
 # cross); apps/zig/build_zig.sh caches each step in .cache/zig-build, so later
@@ -43,8 +45,8 @@
 # whatever board is currently configured (e.g. a real RP2350 / pimoroni board),
 # and QEMU then faults at boot:
 #   qemu: fatal: Lockup: can't escalate 3 to HardFault (current priority -1)
-# Override the defconfig with QEMU_DEFCONFIG=... ; with RUN_QEMU_SKIP_BUILD=1
-# no rebuild (and no reconfigure) happens and the existing ELF is booted as-is.
+# Override the defconfig with QEMU_DEFCONFIG=... ; without --build no rebuild
+# (and no reconfigure) happens and the existing ELF is booted as-is.
 #
 # UART0 is wired to stdio. Quit QEMU with Ctrl-A x.
 #
@@ -66,14 +68,16 @@ QEMU_BOARD_ARGS="-global sse-200.CPU0_FPU=on -global sse-200.CPU1_FPU=on -global
 OPTIMIZE="${YASOS_QEMU_OPTIMIZE:-ReleaseSafe}"
 ZIG_SOURCE="${YASOS_ZIG_SOURCE:-}"
 MOUNT_DIR="${YASOS_QEMU_MNT:-$REPO_ROOT/.cache/qemu_mnt}"
+BUILD="${RUN_QEMU_BUILD:-0}"
 WITH_ZIG=1
 ZIG_ASKED=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --debug) OPTIMIZE="Debug"; shift ;;
+        --build) BUILD=1; shift ;;
+        --debug) OPTIMIZE="Debug"; BUILD=1; shift ;;
         --zig)
             [ "$#" -ge 2 ] || { echo "error: --zig needs a Zig source directory" >&2; exit 1; }
-            ZIG_SOURCE="$2"; WITH_ZIG=1; ZIG_ASKED=1; shift 2 ;;
+            ZIG_SOURCE="$2"; WITH_ZIG=1; ZIG_ASKED=1; BUILD=1; shift 2 ;;
         --no-zig) WITH_ZIG=0; shift ;;
         --mount)
             [ "$#" -ge 2 ] || { echo "error: --mount needs a directory" >&2; exit 1; }
@@ -100,7 +104,7 @@ if [ "$#" -gt 0 ]; then
     shift
 fi
 
-if [ -z "$ELF" ] && [ "${RUN_QEMU_SKIP_BUILD:-0}" != "1" ] && [ "$WITH_ZIG" = "1" ]; then
+if [ -z "$ELF" ] && [ "$BUILD" = "1" ] && [ "$WITH_ZIG" = "1" ]; then
     if [ -z "$ZIG_SOURCE" ] && [ -f "$REPO_ROOT/../zig-mem/build.zig" ]; then
         ZIG_SOURCE="$REPO_ROOT/../zig-mem"
     fi
@@ -117,9 +121,7 @@ else
 fi
 
 if [ -z "$ELF" ]; then
-    if [ "${RUN_QEMU_SKIP_BUILD:-0}" = "1" ]; then
-        echo "RUN_QEMU_SKIP_BUILD=1 set, skipping rootfs/kernel build."
-    else
+    if [ "$BUILD" = "1" ]; then
         # Select the QEMU board before anything is built, so the rootfs's kernel
         # rebuild and the `zig build` below both target the machine we boot. Skipping this
         # leaves a previously-configured board (e.g. pimoroni_pico_plus2) active
@@ -142,13 +144,15 @@ if [ -z "$ELF" ]; then
         fi
         echo "==> Building kernel (zig build -Doptimize=$OPTIMIZE)..."
         ( cd "$REPO_ROOT" && zig build -Doptimize="$OPTIMIZE" )
+    else
+        echo "==> Booting the existing kernel (--build to rebuild rootfs + kernel first)."
     fi
     ELF="$REPO_ROOT/zig-out/bin/yasos_kernel"
 fi
 
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF" >&2
-    echo "build it with: zig build (after selecting the $DEFCONFIG defconfig)" >&2
+    echo "build it with: $0 --build" >&2
     exit 1
 fi
 

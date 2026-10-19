@@ -281,6 +281,13 @@ COMPILE_STACK_KIB_TESTS = {
     # Deep expression recursion: host cross-tcc needs ~64 KiB for both.
     "unroll-1": 128,
     "builtins/strcat-chk": 128,
+    # Nested functions four deep (outer2 -> f2 -> g -> h): every level is
+    # compiled from inside its parent's -O2 backend pipeline
+    # (finalize_nested_functions -> compile_nested_functions -> gen_function),
+    # so the parents' frames stay live. Measured on-device at -O2: depth 3 needs
+    # 26 KiB, depth 4 needs 36 KiB, so the 32 KiB default STKOFs; -O1 stays at
+    # 24 KiB at any depth.
+    "711_nested_funcs_grow_while_compiling": 64,
     # Still skipped (NATIVE_TARGET_SKIP_TESTS): limits-exprparen and
     # limits-structnest need ~8 MiB of compiler stack on the host, far above
     # the 1 MiB CONFIG_PROCESS_MAX_STACK_SIZE hard limit; limits-declparen
@@ -995,6 +1002,7 @@ def build_ir_test_cases():
                 skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
                 xfail_reason=IR_TESTS_XFAIL.get((filename, opt_level)),
                 timeout=COMPILE_TIMEOUT_TESTS.get(filename),
+                compile_stack_kib=_compile_stack_kib(Path(ir_tests_path) / filename),
                 run_stack_kib=LARGE_STACK_TESTS.get(filename),
             ))
 

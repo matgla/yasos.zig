@@ -108,6 +108,14 @@ while true; do
 done
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
 
+# genromfs packs the image; check before spending minutes on the toolchain.
+# Without it the image is never written and the kernel's `.incbin "rootfs.img"`
+# fails much later with "can't find .incbin file".
+if $BUILD_IMAGE && ! command -v genromfs >/dev/null 2>&1; then
+  echo "ERROR: genromfs not found in PATH (needed for -o $OUTPUT_FILE). Install it, e.g. 'sudo apt install genromfs'."
+  exit 1
+fi
+
 PREFIX=$SCRIPT_DIR/rootfs/usr
 TARGET_BUILD_EXTRA_CFLAGS=""
 if ! $DEBUG_TCC; then
@@ -747,6 +755,13 @@ build_gnumake()
       exit -1;
     fi
   fi
+  # `src/mkconfig.h: src/mkconfig.h.in config.status` -- config.status leaves
+  # mkconfig.h alone when its contents are unchanged, so after any reconfigure
+  # make regenerates it, and relinks make, on every later run.  Regenerate it
+  # once and bring its timestamp up to date.
+  if [ config.status -nt src/mkconfig.h ]; then
+    ./config.status --header=src/mkconfig.h && touch src/mkconfig.h
+  fi
   make -j$JOBS $GNUMAKE_MAKE_ARGS
   if [ $? -ne 0 ]; then
     exit -1;
@@ -1125,7 +1140,10 @@ if $BUILD_IMAGE; then
   else
     echo "yasld-prelink did not build; building the image without a loader precache"
   fi
-  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
+  if ! genromfs -f "$OUTPUT_FILE" -d rootfs -V rootfs; then
+    echo "ERROR: genromfs failed; $OUTPUT_FILE was not written."
+    exit 1
+  fi
 fi
 
 # Re-embed the freshly built rootfs image into the kernel. The kernel pulls the
