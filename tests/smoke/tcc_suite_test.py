@@ -315,6 +315,8 @@ COMPILE_TIMEOUT_TESTS = {
     # ir_tests: -O1/-O2 compile takes 6-18 s at 532 MHz
     "bug_overflow_builtins_mixed_operand_types.c": 40,
     "bug_sso_be_runtime_byte_order.c": 30,
+    # 73 macro-generated functions; no single hot pass, -O2 just overruns ~6 s
+    "886_struct_arg_copy_live_regs.c": 30,
     # gcc-torture compile: macro/argument-count stress files
     "limits-fnargs": 60,
     "limits-stringlit": 30,
@@ -789,6 +791,11 @@ SHA256_LINE_PATTERN = re.compile(r"^(?P<digest>[0-9a-f]{64})(?:\s+.+)?$", re.IGN
 LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
 EXIT_MARKER_PREFIX = "__EXIT_STATUS__:"
 COMPILE_MARKER_PREFIX = "__COMPILE_STATUS__:"
+# Expected output above this many bytes is captured to a file on the device and
+# read back LARGE_OUTPUT_READBACK_LINES lines at a time (see compile_testcase).
+# Every test under it (largest ~7 KB) streams intact.
+LARGE_OUTPUT_READBACK_BYTES = 16 * 1024
+LARGE_OUTPUT_READBACK_LINES = 100
 temp_source_reuse_plan_key = pytest.StashKey()
 
 
@@ -2458,14 +2465,50 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
                 return True
             return False
 
-        session.write_command(f"{run_command}; echo {EXIT_MARKER_PREFIX}$?")
-        _t_execute = start_timer()
-        data_lines, run_aborted = session.wait_for_prompt_streaming(
-            _validate_run_line, timeout=testcase.timeout
-        )
-        if timing is not None:
-            timing.execute_ms = elapsed_ms(_t_execute)
-            attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
+        expected_output_bytes = sum(len(line) + 1 for line in runtime_expected_lines)
+        if expected_output_bytes > LARGE_OUTPUT_READBACK_BYTES:
+            # One uninterrupted burst this size loses bytes on the rig's UART
+            # bridge (bug_u64_zero_high_shift, 30 KB: chunks missing mid-line;
+            # the board's TX path blocks and never drops). Capture on the device
+            # and read it back in prompt-paced chunks, which arrive intact.
+            capture_path = f"{output_binary}.out"
+            cleanup_paths.append(capture_path)
+            session.write_command(
+                f"{run_command} > {shlex.quote(capture_path)}; echo {EXIT_MARKER_PREFIX}$?"
+            )
+            _t_execute = start_timer()
+            data_lines, run_aborted = session.wait_for_prompt_streaming(
+                _validate_run_line, timeout=testcase.timeout
+            )
+            if timing is not None:
+                timing.execute_ms = elapsed_ms(_t_execute)
+                attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
+            assert not run_aborted, run_state["reason"]
+            output_lines = []
+            # One chunk past the expected count, so extra output still fails.
+            last = len(runtime_expected_lines) + LARGE_OUTPUT_READBACK_LINES
+            for first in range(1, last + 1, LARGE_OUTPUT_READBACK_LINES):
+                end = first + LARGE_OUTPUT_READBACK_LINES - 1
+                command = f"sed -n '{first},{end}p' {shlex.quote(capture_path)}"
+                session.write_command(command)
+                output_lines.extend(
+                    line for line in session.wait_for_prompt_except_logs(timeout=COMPILE_TIMEOUT)
+                    if line != command
+                )
+            for line in output_lines:
+                if _validate_run_line(line):
+                    break
+            data_lines = output_lines + [line for line in data_lines if line.startswith(EXIT_MARKER_PREFIX)]
+            run_aborted = run_state["reason"] is not None
+        else:
+            session.write_command(f"{run_command}; echo {EXIT_MARKER_PREFIX}$?")
+            _t_execute = start_timer()
+            data_lines, run_aborted = session.wait_for_prompt_streaming(
+                _validate_run_line, timeout=testcase.timeout
+            )
+            if timing is not None:
+                timing.execute_ms = elapsed_ms(_t_execute)
+                attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
 
         assert not run_aborted, run_state["reason"]
 
