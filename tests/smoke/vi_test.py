@@ -154,32 +154,34 @@ def test_vi_detects_terminal_size_via_cpr(request):
 
     session.serial.write(b"vi /tmp/vi_cpr.txt\n")
     session.serial.flush()
-    session.serial.timeout = 0.1
-    buf = bytearray()
-    answered = False
-    deadline = time.time() + 4.0
-    while time.time() < deadline:
-        try:
-            chunk = session.serial.read(128)
-        except OSError:
-            break
-        if chunk:
-            buf += chunk
-            if not answered and b"\x1b[6n" in buf:
-                session.serial.write(b"\x1b[15;50R")  # rows=15, cols=50
-                session.serial.flush()
-                answered = True
-                deadline = time.time() + 1.5  # let it repaint at the new size
-    assert answered, "vi never emitted ESC[6n -- terminal-size probe not firing"
+    # Poll in 0.1 s steps for the probe; restored on exit, or every later test
+    # inherits a 0.1 s silence timeout (yaff_arch_test lost its prompt).
+    with session.timeout(0.1):
+        buf = bytearray()
+        answered = False
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            try:
+                chunk = session.serial.read(128)
+            except OSError:
+                break
+            if chunk:
+                buf += chunk
+                if not answered and b"\x1b[6n" in buf:
+                    session.serial.write(b"\x1b[15;50R")  # rows=15, cols=50
+                    session.serial.flush()
+                    answered = True
+                    deadline = time.time() + 1.5  # let it repaint at the new size
+        assert answered, "vi never emitted ESC[6n -- terminal-size probe not firing"
 
-    # Repaint the status bar (its per-key indicator reveals the geometry).
-    session.serial.write(b"x")
-    session.serial.flush()
-    time.sleep(0.8)
-    try:
-        buf += session.serial.read(session.serial.in_waiting or 1)
-    except OSError:
-        pass
+        # Repaint the status bar (its per-key indicator reveals the geometry).
+        session.serial.write(b"x")
+        session.serial.flush()
+        time.sleep(0.8)
+        try:
+            buf += session.serial.read(session.serial.in_waiting or 1)
+        except OSError:
+            pass
     text = buf.decode("utf-8", "ignore")
     # cursor-move rows, excluding the 999;999 probe vi itself emits
     rows = [int(r) for r in re.findall(r"\x1b\[(\d+);\d+H", text) if int(r) < 900]
