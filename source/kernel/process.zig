@@ -19,6 +19,7 @@
 //
 
 const std = @import("std");
+const IntegerHashMap = @import("yasld").IntegerHashMap;
 
 const c = @import("libc_imports").c;
 
@@ -193,7 +194,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// token rather than `?*const Semaphore`, so the sleeping mutex can
         /// reuse the same machinery; its identity is all the wake-up scan needs.
         waiting_for: ?*const anyopaque = null,
-        _fds: std.AutoHashMap(u16, FileHandle),
+        _fds: IntegerHashMap(u16, FileHandle),
         /// See `clear_fds`: it runs at exit *and* from `deinit`, and must not
         /// tear the map down twice.
         _fds_cleared: bool = false,
@@ -244,7 +245,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// `spin_irq` locks but wrong for a `RankedMutex`, whose holder can
         /// block and resume on the other core. Saved and restored by
         /// `RoundRobin.update_current`; see `sync/locks.zig:migrating_ranks`.
-        _held_lock_ranks: u16 = 0,
+        _held_lock_ranks: kernel.sync.locks.HeldSet = 0,
         _start_time: u64,
         // Wall-clock (us) captured right after this process's exec'd image is
         // loaded and relocated. Used to separate dynamic-load time from real
@@ -290,7 +291,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .current_core = 0,
                 .privileged = is_root,
                 .resume_privileged = is_root,
-                ._fds = std.AutoHashMap(u16, FileHandle).init(kernel_allocator),
+                ._fds = IntegerHashMap(u16, FileHandle).init(kernel_allocator),
                 .cwd = cwd_handle,
                 // No image yet: exec() fills this in once one has loaded.
                 .exe_path = null,
@@ -338,8 +339,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .cloexec = handle.cloexec,
             };
         }
-        fn dupe_fds(self: *Self) !std.AutoHashMap(u16, FileHandle) {
-            var fds = std.AutoHashMap(u16, FileHandle).init(self._kernel_allocator);
+        fn dupe_fds(self: *Self) !IntegerHashMap(u16, FileHandle) {
+            var fds = IntegerHashMap(u16, FileHandle).init(self._kernel_allocator);
             var it = self._fds.iterator();
             while (it.next()) |*n| {
                 try fds.put(n.key_ptr.*, try dupe_filehandle(n.value_ptr));

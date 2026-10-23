@@ -26,6 +26,8 @@ const Header = @import("header.zig").Header;
 const Parser = @import("parser.zig").Parser;
 // Temporary load-phase accounting; see load_profile.zig.
 const profile = @import("load_profile.zig");
+// The copy runs and the zeroed thunk tail a relocated-image load starts with.
+const template = @import("template.zig");
 
 const get_loader = @import("loader.zig").get_loader;
 
@@ -39,13 +41,36 @@ pub const GotEntry = extern struct {
 pub const SymbolEntry = struct {
     target_got_address: usize,
     address: usize,
+    /// Which module resolved it: 0 the module asked, k + 1 its k-th direct
+    /// dependency. With `in_region`, what a relocated-image template needs to
+    /// know which base the two addresses move with (template.zig).
+    owner: u8 = 0,
+    /// `address` is in the owner's per-process region rather than its image.
+    in_region: bool = false,
+};
+
+/// An exported symbol's runtime address, and whether it lives in the
+/// per-process region (data/bss) rather than the image (code, shared rodata).
+pub const LocalSymbol = struct {
+    address: usize,
+    in_region: bool,
 };
 
 extern const indirect_call_thunk_template_size: usize;
 extern fn indirect_call_thunk_template_start() void;
 /// Where the template keeps the callee's GOT base and address (indirect_call_thunk.S).
-const thunk_r9_offset: usize = 8;
-const thunk_fn_offset: usize = 12;
+pub const thunk_r9_offset = template.thunk_r9_offset;
+pub const thunk_fn_offset = template.thunk_fn_offset;
+pub const thunk_size = template.thunk_size;
+
+/// One thunk slot as the template lays it out: code, then {r9, fn}.
+pub fn thunk_code() *const [thunk_size]u8 {
+    // Keep this check in ReleaseFast too: replay and allocation rely on the
+    // fixed layout, rather than an arbitrary runtime assembly data symbol.
+    if (indirect_call_thunk_template_size != thunk_size) @panic("indirect call thunk layout mismatch");
+    const start: [*]const u8 = @ptrFromInt(@intFromPtr(&indirect_call_thunk_template_start) & ~@as(usize, 1));
+    return start[0..thunk_size];
+}
 
 /// No reference count, deliberately. The block comes from the process pool,
 /// whose tier 1 is PSRAM, and an exclusive store there never succeeds (see
@@ -57,25 +82,28 @@ pub const ThunkHolderData = struct {
     data: []u8,
     generated: bool,
 
-    pub fn create(allocator: std.mem.Allocator, size: usize) !*ThunkHolderData {
+    pub fn create(allocator: std.mem.Allocator, size: usize, zero_from_slot: usize) !*ThunkHolderData {
         // One allocation: [ThunkHolderData header][thunk data]. The process
         // pool is page-granular, so a separate header struct would burn a whole
         // 4 KiB page for ~16 bytes. The header lives at the block head; the
         // thunk bytes (which the process executes) follow in the same RWX page.
         const hdr = @sizeOf(ThunkHolderData);
-        const block = try allocator.alloc(u8, hdr + size * indirect_call_thunk_template_size);
+        const block = try allocator.alloc(u8, hdr + size * thunk_size);
         const self: *ThunkHolderData = @ptrCast(@alignCast(block.ptr));
         self.* = .{
             .data = block[hdr..],
             .generated = false,
         };
         // Zeroed so that a slot which never gets generated reads back as an
-        // all-zero {r9, fn} descriptor. Slots are packed by a counter that only
-        // advances on a real generate_thunk(), while the pool is sized from the
-        // relocation count, so an unresolved weak function pointer leaves a hole
+        // all-zero {r9, fn} descriptor. Each relocation phase reserves a range,
+        // and unresolved weak references or reuse can leave interior holes
         // -- and find_thunk() must not match one, nor may a stray branch land in
-        // one and execute whatever the allocator last left there.
-        @memset(self.data, 0);
+        // one and execute whatever the allocator last left there. A load from a
+        // relocated-image template names the slots it does fill (`zero_from_slot`
+        // is past their complete leading prefix). Clear the rest, including later
+        // replayed slots and any interior holes.
+        const zero_at = @min(zero_from_slot, size) * thunk_size;
+        @memset(self.data[zero_at..], 0);
         return self;
     }
 
@@ -144,8 +172,12 @@ pub const LoadedUniqueData = struct {
     /// (nearly all of them) needs no padding in front of its region.
     const region_base_alignment = 8;
 
-    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *const Header, parser: *const Parser) !*LoadedUniqueData {
+    /// `from_image` false leaves data and GOT for the caller to fill (from a
+    /// relocated-image template); bss is cleared either way. `copy_view` says
+    /// which words of [data][got] the image still owns; null means all of them.
+    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *const Header, parser: *const Parser, from_image: bool, copy_view: ?template.View) !*LoadedUniqueData {
         const self = try allocator.create(LoadedUniqueData);
+        errdefer allocator.destroy(self);
         // RELRO: the first const_rodata_length bytes of the data region are
         // pure-const .rodata, shared XIP (borrowed by LoadedSharedData) — they
         // are NOT allocated or copied per process. The per-process data segment
@@ -181,7 +213,6 @@ pub const LoadedUniqueData = struct {
         };
         if (data_part > 0) {
             self.data = region[0..data_part];
-            @memcpy(self.data.?, parser.get_process_data());
         }
 
         if (header.bss_length > 0) {
@@ -191,29 +222,38 @@ pub const LoadedUniqueData = struct {
 
         if (header.got_length > 0) {
             self.got = got_pointer[0 .. header.got_length / @sizeOf(GotEntry)];
-            @memcpy(region[data_part + header.bss_length ..], parser.get_got());
         }
 
-        // copy data
+        if (from_image) {
+            // The image's own words: every one of them for a plain load, only
+            // the runs a template left alone for a replay. Words a store covers
+            // are copied too and then overwritten, so the runs are exactly what
+            // the copy may skip -- and that is most of a typical image's data,
+            // which the old full copy handed over twice.
+            const data_bytes = region[0..data_part];
+            const got_bytes = region[data_part + header.bss_length ..][0..header.got_length];
+            template.copy_from_image(data_bytes, got_bytes, parser.get_process_data(), parser.get_got(), if (copy_view) |view| view.copy_runs else &.{}, if (copy_view) |view| view.copy_all else true);
+        }
 
         return self;
     }
 
-    pub fn allocate_thunks(self: *LoadedUniqueData, size: usize) !void {
+    /// `zero_from_slot` is past the slots a relocated-image template fills:
+    /// clear the remainder, including interior holes between later replayed slots.
+    /// Zero for any other load.
+    pub fn allocate_thunks(self: *LoadedUniqueData, size: usize, zero_from_slot: usize) !void {
         if (self.thunks == null) {
-            self.thunks = try ThunkHolderData.create(self.process_allocator, size);
+            self.thunks = try ThunkHolderData.create(self.process_allocator, size, zero_from_slot);
         }
     }
 
     pub fn generate_thunk(self: *LoadedUniqueData, index: usize, r9: usize, symbol: usize) !usize {
         if (self.thunks) |thunks| {
-            const position = index * indirect_call_thunk_template_size;
-            if (position + indirect_call_thunk_template_size > thunks.data.len) {
+            const position = index * thunk_size;
+            if (position + thunk_size > thunks.data.len) {
                 return error.IndexOutOfBounds;
             }
-            const thunk_template: [*]const u8 = @ptrFromInt(@intFromPtr(&indirect_call_thunk_template_start) - 1);
-            const thunk_slice: []const u8 = thunk_template[0..indirect_call_thunk_template_size];
-            @memcpy(thunks.data[position .. position + indirect_call_thunk_template_size], thunk_slice[0..]);
+            @memcpy(thunks.data[position..][0..thunk_size], thunk_code());
             // Patch the per-slot {r9, fn} descriptor the template's two literal
             // loads read, at +8/+12 (indirect_call_thunk.S).
             @memcpy(thunks.data[position + thunk_r9_offset .. position + thunk_r9_offset + @sizeOf(usize)], std.mem.asBytes(&r9));
@@ -239,8 +279,8 @@ pub const LoadedUniqueData = struct {
         if (self.thunks) |thunks| {
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const position = i * indirect_call_thunk_template_size;
-                if (position + indirect_call_thunk_template_size > thunks.data.len) {
+                const position = i * thunk_size;
+                if (position + thunk_size > thunks.data.len) {
                     break;
                 }
                 var slot_r9: usize = 0;
@@ -257,8 +297,8 @@ pub const LoadedUniqueData = struct {
 
     pub fn get_thunk_address(self: *LoadedUniqueData, index: usize) !usize {
         if (self.thunks) |thunks| {
-            const position = index * indirect_call_thunk_template_size;
-            if (position + indirect_call_thunk_template_size > thunks.data.len) {
+            const position = index * thunk_size;
+            if (position + thunk_size > thunks.data.len) {
                 return error.IndexOutOfBounds;
             }
             return @intFromPtr(&thunks.data[position]) | 1;
@@ -304,6 +344,10 @@ pub const Module = struct {
     // region (0 = none). A DATA relocation offset below this lives in the
     // shared rodata; at or above it, in the per-process data buffer.
     const_rodata_length: u32 = 0,
+    // YAFF_ARCH_FLAG_EXACT_THUMB: the image's code addresses (exported
+    // symbols, data relocation values) already carry their Thumb bit, clear
+    // for a data object in an executable section -- trust it as written.
+    exact_thumb: bool = false,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -320,6 +364,7 @@ pub const Module = struct {
             .stack_size = 0xFFFFFFFF,
             .heap_size = 0xFFFFFFFF,
             .const_rodata_length = 0,
+            .exact_thumb = false,
         };
         return module;
     }
@@ -342,6 +387,23 @@ pub const Module = struct {
             return @intFromPtr(unique.region.ptr) + (offset - self.const_rodata_length);
         }
         return 0;
+    }
+
+    /// Whether `address_in_section(section, offset)` lands in this module's
+    /// per-process region (data, bss) rather than its image (code, init, the
+    /// shared rodata). Mirrors `resolve_data_offset`.
+    pub fn section_in_region(self: Module, section: Section, offset: usize) bool {
+        return switch (section) {
+            .Data => !self.in_shared_rodata(offset),
+            .Bss => true,
+            else => false,
+        };
+    }
+
+    fn in_shared_rodata(self: Module, offset: usize) bool {
+        if (self.const_rodata_length == 0 or offset >= self.const_rodata_length) return false;
+        const shared = self.shared_data orelse return false;
+        return shared.rodata != null;
     }
 
     // Runtime address of (section, offset). DATA goes through the rodata-aware
@@ -429,11 +491,11 @@ pub const Module = struct {
         return error.UnknownSection;
     }
 
-    pub fn find_local_symbol(self: Module, name: []const u8) ?usize {
+    pub fn find_local_symbol(self: Module, name: []const u8) ?LocalSymbol {
         if (self.shared_data) |shared_data| {
             const maybe_symbol = shared_data.exported_symbols.element_by_name(name);
             if (maybe_symbol) |symbol| {
-                const section: Section = @enumFromInt(symbol.section);
+                const section: Section = @fromBackingInt(@intCast(symbol.section));
                 // RELRO-aware: an exported pure-const symbol in .rodata (DATA
                 // offset < const_rodata_length) resolves to the shared XIP rodata
                 // so cross-module importers see the one shared copy.
@@ -441,10 +503,10 @@ pub const Module = struct {
                 // Cortex-M only supports Thumb mode. Code addresses used with
                 // BX/BLX must have bit 0 set to stay in Thumb state; an even
                 // address causes an INVSTATE HardFault.
-                if ((section == .Code or section == .Init) and (address & 1 == 0)) {
+                if ((section == .Code or section == .Init) and !self.exact_thumb and (address & 1 == 0)) {
                     address |= 1;
                 }
-                return address;
+                return .{ .address = address, .in_region = self.section_in_region(section, symbol.offset) };
             }
             // var it = shared_data.exported_symbols.iter();
             // while (it) |symbol| : (it = symbol.next()) {
@@ -463,23 +525,31 @@ pub const Module = struct {
             if (data.*.got) |got| {
                 if (maybe_local_symbol) |symbol| {
                     return .{
-                        .address = symbol,
+                        .address = symbol.address,
                         .target_got_address = @intFromPtr(got.ptr),
+                        .owner = 0,
+                        .in_region = symbol.in_region,
                     };
                 }
             }
         }
 
         var it = self.children.first;
-        while (it) |child_node| : (it = child_node.next) {
+        var owner: u8 = 1;
+        while (it) |child_node| : ({
+            it = child_node.next;
+            owner +%= 1;
+        }) {
             const module: *const Module = @fieldParentPtr("child_list_node", child_node);
             const maybe_child_symbol = module.find_local_symbol(name);
             if (module.unique_data) |*data| {
                 if (data.*.got) |*got| {
                     if (maybe_child_symbol) |symbol| {
                         return .{
-                            .address = symbol,
+                            .address = symbol.address,
                             .target_got_address = @intFromPtr(got.ptr),
+                            .owner = owner,
+                            .in_region = symbol.in_region,
                         };
                     }
                 }

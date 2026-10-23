@@ -17,4 +17,5 @@ comptime {
     _ = @import("heap/process_memory_pool.zig");
     _ = @import("heap/process_page_allocator.zig");
     _ = @import("heap/malloc.zig");
+    _ = @import("heap/tmp_memory_pool.zig");
 }

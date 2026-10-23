@@ -43,6 +43,11 @@ pub const MmcSdio = struct {
         standard_25mhz,
         standard_16mhz,
         standard_12mhz,
+        /// Out of spec: the driver's SDIO_HIGHSPEED_OVERCLOCK, 75 MHz asked
+        /// for, which the integer divider turns into sys_clk / 8 = 66.5 MHz
+        /// at 532 MHz. Only used when the board's `clock_speed` asks for more
+        /// than 50 MHz; CRC errors or lost responses drop it to 50 MHz.
+        highspeed_overclock,
         highspeed_50mhz,
         highspeed_33mhz,
     };
@@ -50,6 +55,7 @@ pub const MmcSdio = struct {
     _config: hal.mmc.MmcConfig,
     _initialized: bool,
     _timing_profile: TimingProfile,
+    _data_clk_divider: u16,
     _crc_window_start_us: u64,
     _crc_failures_in_window: u8,
     _crc_logs_in_window: u8,
@@ -64,6 +70,7 @@ pub const MmcSdio = struct {
             ._config = config,
             ._initialized = false,
             ._timing_profile = .init_300khz,
+            ._data_clk_divider = 0,
             ._crc_window_start_us = 0,
             ._crc_failures_in_window = 0,
             ._crc_logs_in_window = 0,
@@ -146,10 +153,11 @@ pub const MmcSdio = struct {
             .mmc_20mhz, .mmc_10mhz, .mmc_5mhz => sdio.rp2350_sdio_get_timing(sdio.SDIO_MMC),
             .standard_25mhz, .standard_16mhz, .standard_12mhz => sdio.rp2350_sdio_get_timing(sdio.SDIO_STANDARD),
             .highspeed_50mhz, .highspeed_33mhz => sdio.rp2350_sdio_get_timing(sdio.SDIO_HIGHSPEED),
+            .highspeed_overclock => sdio.rp2350_sdio_get_timing(sdio.SDIO_HIGHSPEED_OVERCLOCK),
         };
 
         switch (profile) {
-            .init_300khz, .mmc_20mhz, .standard_25mhz, .highspeed_50mhz => {},
+            .init_300khz, .mmc_20mhz, .standard_25mhz, .highspeed_50mhz, .highspeed_overclock => {},
             .mmc_10mhz => {
                 timing.cmd_clk_divider *= 2;
                 timing.data_clk_divider *= 2;
@@ -175,6 +183,7 @@ pub const MmcSdio = struct {
         sdio.rp2350_sdio_init(timing);
         sdio.sdio_busy_wait_us_impl(10_000);
         self._timing_profile = profile;
+        self._data_clk_divider = @intCast(timing.data_clk_divider);
     }
 
     fn timing_profile_label(profile: TimingProfile) []const u8 {
@@ -188,11 +197,13 @@ pub const MmcSdio = struct {
             .standard_12mhz => "12.5 MHz",
             .highspeed_50mhz => "50 MHz",
             .highspeed_33mhz => "33 MHz",
+            .highspeed_overclock => "overclock",
         };
     }
 
     fn degrade_timing_profile(self: *MmcSdio) void {
         const next_profile = switch (self._timing_profile) {
+            .highspeed_overclock => .highspeed_50mhz,
             .highspeed_50mhz => .highspeed_33mhz,
             .highspeed_33mhz => .standard_25mhz,
             .standard_25mhz => .standard_16mhz,
@@ -646,11 +657,15 @@ pub const MmcSdio = struct {
         } else {
             if (speed_hz <= 33_000_000) {
                 self.apply_timing_profile(.highspeed_33mhz);
+            } else if (self._config.clock_speed > 50_000_000) {
+                // The card layer asks for 50 MHz once CMD6 has switched it to
+                // high speed; the board's `clock_speed` is what may go past it.
+                self.apply_timing_profile(.highspeed_overclock);
             } else {
                 self.apply_timing_profile(.highspeed_50mhz);
             }
         }
-        log.info("SDIO speed changed to profile {s}", .{timing_profile_label(self._timing_profile)});
+        log.info("SDIO speed changed to profile {s} (data clock sys_clk / {d})", .{ timing_profile_label(self._timing_profile), self._data_clk_divider });
     }
 
     pub fn is_busy(self: MmcSdio) bool {

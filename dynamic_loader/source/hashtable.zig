@@ -47,7 +47,9 @@ pub const YaffHashTable = struct {
         const h: u32 = yaff_hash_function(name);
         var idx: u32 = hashtable.bucket[h % hashtable.nbucket];
 
-        while (idx != 0) {
+        var remaining = hashtable.nchain;
+        while (idx != 0 and remaining != 0) : (remaining -= 1) {
+            if (idx >= hashtable.nchain) return null;
             const symbol = table.element_at(idx);
             if (symbol == null) {
                 return null;

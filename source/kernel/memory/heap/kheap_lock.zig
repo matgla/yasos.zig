@@ -75,7 +75,7 @@ test "Sync.KernelHeapLock.NestsTheWayReallocNeeds" {
     try testing.expect(held_by_current());
     yasos_kheap_unlock();
     try testing.expect(!held_by_current());
-    try testing.expectEqual(@as(u16, 0), locks.held_ranks());
+    try testing.expectEqual(@as(locks.HeldSet, 0), locks.held_ranks());
 }
 
 test "Sync.KernelHeapLock.IsInnerToTheSleepingLocks" {
@@ -89,5 +89,5 @@ test "Sync.KernelHeapLock.IsInnerToTheSleepingLocks" {
     yasos_kheap_lock();
     yasos_kheap_unlock();
     fs.unlock_irqrestore(flags);
-    try testing.expectEqual(@as(u16, 0), locks.held_ranks());
+    try testing.expectEqual(@as(locks.HeldSet, 0), locks.held_ranks());
 }

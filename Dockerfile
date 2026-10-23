@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ARG TARGETPLATFORM
-ARG ZIG_VERSION="0.17.0-dev.1640+2597da025"
+ARG ZIG_VERSION="0.18.0-dev.253+16d31ceed"
 
 ARG ARM_NONE_EABI_GCC_VERSION="15.2.rel1"
 
@@ -49,9 +49,10 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
 # (infrequent) image build, then assert the package landed so we never publish
 # an image silently missing it.
 #
-# Zig 0.17-dev keeps a fetched package as `p/<hash>.tar.gz`; older Zig unpacked
-# it into a `p/<hash>/` directory. Accept either, so a cache-layout change does
-# not fail the image build with a misleading "the fetch is flaky" symptom.
+# Zig 0.17-dev and later (checked again on 0.18.0-dev.253) keep a fetched
+# package as `p/<hash>.tar.gz`; older Zig unpacked it into a `p/<hash>/`
+# directory. Accept either, so a cache-layout change does not fail the image
+# build with a misleading "the fetch is flaky" symptom.
 RUN FATFS_HASH="N-V-__8AAFQITQCnpmdR7PARImvk-cgb-9lZmjKolexSWkUL" \
     && mkdir -p "$ZIG_GLOBAL_CACHE_DIR" \
     && for i in 1 2 3 4 5; do \

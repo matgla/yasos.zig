@@ -29,12 +29,29 @@ if BOARD_RASPBERRY_PICO_2_DISCARD_IN_CONF
   endchoice
 
   config CONFIG_BUILD_LINKER_SCRIPT_PATH
-    default "${hal_root}/source/raspberry/rp2350/linker_script.ld" 
+    default "${hal_root}/source/raspberry/rp2350/linker_script_pico2.ld" 
 
   config FLASH_MEMORY_ADDRESS
     default "0x10000000"
   
   config FLASH_MEMORY_SIZE
-    default "2MB"
+    default "4MB"
+
+  # No PSRAM on this board: the pin only has to be a valid XIP_CS1 function so
+  # the (failing) probe in the HAL does not touch anything else.
+  config CONFIG_PSRAM_CS_PIN
+    default 8
+
+  # Stock clock: the Pico 2 has no PSRAM and no reason to overclock.
+  config CONFIG_CPU_CLOCK_FREQUENCY_MHZ
+    default 150
+
+  # 1.10 V cannot hold PLL_USB's 1200 MHz VCO on every chip, which mis-sets
+  # the console baud (yasos-low-clock-vreg-breaks-pll-usb).
+  config CONFIG_CPU_CORE_VOLTAGE_MV
+    default 1200
+
+  config CONFIG_FLASH_XIP_MAX_FREQUENCY_HZ
+    default 133000000
 endif
 

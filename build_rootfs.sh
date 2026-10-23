@@ -15,6 +15,8 @@ else
 GETOPT_CMD="/usr/bin/getopt"
 HOST_AR="ar"
 fi
+# Parallelism for every make below (YASOS_JOBS overrides).
+JOBS="${YASOS_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 OPTIONS=co:d
 LONGOPTIONS=clear,output:,debug-regalloc,debug,tcc-ab-knobs,no-kernel,with-pch,zig:
 
@@ -105,6 +107,14 @@ while true; do
     esac
 done
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
+
+# genromfs packs the image; check before spending minutes on the toolchain.
+# Without it the image is never written and the kernel's `.incbin "rootfs.img"`
+# fails much later with "can't find .incbin file".
+if $BUILD_IMAGE && ! command -v genromfs >/dev/null 2>&1; then
+  echo "ERROR: genromfs not found in PATH (needed for -o $OUTPUT_FILE). Install it, e.g. 'sudo apt install genromfs'."
+  exit 1
+fi
 
 PREFIX=$SCRIPT_DIR/rootfs/usr
 TARGET_BUILD_EXTRA_CFLAGS=""
@@ -324,12 +334,19 @@ tinycc_sources_newer_than()
 
   # Compare real source files against the stamp written after a successful
   # build.  Exclude directories and files that are generated during the
-  # build itself (config.h, config.mak, conftest.c, include/, .yasos-build/).
+  # build itself (config.h, config.mak, conftest.c, include/, .yasos-build/,
+  # and the generated tccdefs_*_.h: configure rewrites config.mak, which the
+  # Makefile regenerates tccdefs_table_.h from, so counting them made every
+  # run look stale).  tests/ is pruned: nothing in it feeds the compiler and
+  # its generated trees hold hundreds of thousands of files.
   find "$TINYCC_DIR" \
     \( -path "$TINYCC_DIR/.git" \
        -o -path "$TINYCC_DIR/.github" \
        -o -path "$TINYCC_DIR/.pytest_cache" \
+       -o -path "$TINYCC_DIR/.claude" \
        -o -path "$TINYCC_DIR/.venv" \
+       -o -path "$TINYCC_DIR/venv" \
+       -o -path "$TINYCC_DIR/tests" \
        -o -path "$TINYCC_DIR/.yasos-build" \
        -o -path "$TINYCC_DIR/bin" \
        -o -path "$TINYCC_DIR/build" \
@@ -346,6 +363,7 @@ tinycc_sources_newer_than()
     ! -name 'config.h' \
     ! -name 'config.mak' \
     ! -name 'conftest.c' \
+    ! -name '*_.h' \
     -newer "$stamp_file" -print -quit | grep -q . && return 0
 
   # lib/ is pruned above because the build copies headers and archives into it,
@@ -454,13 +472,13 @@ build_cross_compiler()
   # reorg) — dropping only armv8m-arch/armv8m-ir would reuse the other stage's
   # objects and fail the link with "unrecognized file type".
   rm -rf armv8m-arch armv8m-ir armv8m-source armv8m-*.o *.o
-  make -j8 AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
+  make -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
-  make install AR="$HOST_AR" INC-armv8m="$YASOS_SYSINCLUDES"
+  make install AR="$HOST_AR" MRI_AR="$HOST_AR" INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -543,7 +561,7 @@ build_c_compiler()
   else
     ./configure --cc=tcc --cpu=armv8m \
       --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
-      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
+      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
       --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
       --disable-asan \
       $NATIVE_TCC_DEBUG_CONFIG \
@@ -572,7 +590,7 @@ build_c_compiler()
     # ar's MRI batch mode (`ar -M`), which tcc's built-in archiver does not
     # support.  Archiving is target-agnostic, so the host ar handles the ARM
     # objects fine.
-    VERBOSE=1 make armv8m-tcc -j8 AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
+    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
 
     if [ $? -ne 0 ]; then
       exit -1;
@@ -607,7 +625,7 @@ build_c_compiler()
   else
     ./configure --cc=tcc --cpu=armv8m \
       --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
-      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
+      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
       --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
       --disable-asan \
       $NATIVE_TCC_DEBUG_CONFIG \
@@ -634,7 +652,7 @@ build_c_compiler()
       done
     fi
     # Use the host `ar` for the backend archive (MRI mode); see stage 1 above.
-    VERBOSE=1 make armv8m-tcc -j8 AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
+    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
     if [ $? -ne 0 ]; then
       exit -1;
     fi
@@ -684,6 +702,13 @@ GNUMAKE_MAKE_ARGS="MAKE_CFLAGS= MAKE_MAINTAINER_MODE="
 # PSPLIM) on a Makefile as small as one rule with one prerequisite.
 GNUMAKE_STACK_SIZE=65536
 CTAGS_STACK_SIZE=65536
+# The native tcc's own hint, so a board can run everything else on a small
+# default stack (the Pico 2 defconfig uses 8 KiB).  The expression parser
+# recurses roughly 1 KiB per nesting level: measured on the board (2026-10-06)
+# 8 KiB overflows on hello world, 16 KiB compiles libc's string.c and scanf.c
+# but not 20 nested parentheses + 12 nested blocks + a 20-argument call, which
+# 32 KiB -- the old default it always ran on -- does.
+TCC_NATIVE_STACK_SIZE=32768
 
 build_gnumake()
 {
@@ -730,7 +755,14 @@ build_gnumake()
       exit -1;
     fi
   fi
-  make -j8 $GNUMAKE_MAKE_ARGS
+  # `src/mkconfig.h: src/mkconfig.h.in config.status` -- config.status leaves
+  # mkconfig.h alone when its contents are unchanged, so after any reconfigure
+  # make regenerates it, and relinks make, on every later run.  Regenerate it
+  # once and bring its timestamp up to date.
+  if [ config.status -nt src/mkconfig.h ]; then
+    ./config.status --header=src/mkconfig.h && touch src/mkconfig.h
+  fi
+  make -j$JOBS $GNUMAKE_MAKE_ARGS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -766,7 +798,7 @@ build_makefile()
   if [ $CLEAR = true ]; then
     make clean
   fi
-  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" -j4
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" -j$JOBS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -781,13 +813,13 @@ build_makefile()
 build_zork_makefile()
 {
   cd $1
-  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" CFLAGS="$DEBUG_CFLAGS $TARGET_BUILD_EXTRA_CFLAGS -Wl,-oformat=elf32-littlearm" -j4
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" CFLAGS="$DEBUG_CFLAGS $TARGET_BUILD_EXTRA_CFLAGS -Wl,-oformat=elf32-littlearm" -j$JOBS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   mv zork zork.elf
 
-  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" -j4
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" -j$JOBS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -858,7 +890,14 @@ build_ctags()
       exit -1;
     fi
   fi
-  make -j8 ctags libctags_a_LIBADD="$zig_dir/zig.o" \
+  # automake's `config.h: stamp-h1` rule never updates config.h, so once
+  # stamp-h1 is newer (every configure/config.status run) make treats config.h
+  # as perpetually remade and recompiles every object on every run.  Bring
+  # config.h up to date once; later runs find it newer than stamp-h1.
+  if [ stamp-h1 -nt config.h ]; then
+    touch config.h
+  fi
+  make -j$JOBS ctags libctags_a_LIBADD="$zig_dir/zig.o" \
     EXTRA_libctags_a_DEPENDENCIES="\$(GNULIB_LIBS) $zig_dir/zig.o"
   if [ $? -ne 0 ]; then
     exit -1;
@@ -1090,7 +1129,21 @@ if $BUILD_IMAGE; then
     fi
     rm -rf rootfs/usr/bin/zig rootfs/usr/lib/zig
   fi
-  genromfs -f $OUTPUT_FILE -d rootfs -V rootfs
+  # Loader precache: every image relocated once here, by the device's own
+  # loader built for the host, so the board replays the result from flash
+  # instead of relocating on each exec (dynamic_loader/source/template.zig).
+  # Keyed by image content -- a stale or missing cache only costs speed.
+  rm -f rootfs/lib/yasld.cache
+  if (cd dynamic_loader && zig build prelink); then
+    find rootfs -type f | dynamic_loader/zig-out/bin/yasld-prelink rootfs/lib/yasld.cache rootfs/lib - \
+      || { echo "yasld-prelink failed; building the image without a loader precache"; rm -f rootfs/lib/yasld.cache; }
+  else
+    echo "yasld-prelink did not build; building the image without a loader precache"
+  fi
+  if ! genromfs -f "$OUTPUT_FILE" -d rootfs -V rootfs; then
+    echo "ERROR: genromfs failed; $OUTPUT_FILE was not written."
+    exit 1
+  fi
 fi
 
 # Re-embed the freshly built rootfs image into the kernel. The kernel pulls the

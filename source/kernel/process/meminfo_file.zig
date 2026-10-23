@@ -34,7 +34,7 @@ const MemoryInfo = struct {
     total: usize,
 };
 
-const BufferSize = 768; // 18 lines of fixed-width fields; bufPrint failure here is silent
+const BufferSize = 1024; // 20 lines of fixed-width fields; bufPrint failure here is silent
 const BufferedFileForMeminfo = kernel.fs.BufferedFile(BufferSize);
 pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct {
     const Self = @This();
@@ -93,6 +93,15 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
             buf = vfmt.print(buffer[written_length..], "MemKernelBrk:    {s}\n", .{format_size(kernel.memory.heap.malloc.break_used(), &sizebuf)});
             written_length += buf.len;
             buf = vfmt.print(buffer[written_length..], "MemKernelLimit:  {s}\n", .{format_size(kernel.memory.heap.malloc.break_limit(), &sizebuf)});
+            written_length += buf.len;
+            // Relocated-image templates (yasld template.zig): counted in
+            // MemProcessUsed, but given back whenever the pool runs short.
+            const cache = @import("yasld").template.stats;
+            buf = vfmt.print(buffer[written_length..], "LoaderCache:     {s}\n", .{format_size(cache.bytes, &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "LoaderCacheHits: {d} hit {d} pre {d} miss {d} evicted\n", .{ cache.hits, cache.precache_hits, cache.misses, cache.evicted });
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "LoaderVerified:  {d} checked {d} failed\n", .{ cache.verified, cache.verification_failures });
             written_length += buf.len;
         }
         const alloc_count = kernel.memory.heap.malloc.get_counter();

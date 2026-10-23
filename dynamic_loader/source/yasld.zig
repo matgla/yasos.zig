@@ -19,9 +19,11 @@
 //
 
 pub const Loader = @import("loader.zig").Loader;
+pub const IntegerHashMap = @import("integer_hash_map.zig").IntegerHashMap;
 pub const MachineProfile = @import("loader.zig").MachineProfile;
 pub const ImageError = @import("loader.zig").ImageError;
 pub const Architecture = @import("header.zig").Architecture;
+pub const Header = @import("header.zig").Header;
 pub const FloatAbi = @import("header.zig").FloatAbi;
 pub const Features = @import("header.zig").Features;
 pub const Executable = @import("executable.zig").Executable;
@@ -34,3 +36,12 @@ pub const loader_deinit = @import("loader.zig").deinit;
 pub const set_load_map_logging = @import("loader.zig").set_load_map_logging;
 // Temporary load-phase accounting; see load_profile.zig.
 pub const load_profile = @import("load_profile.zig");
+pub const template = @import("template.zig");
+/// Bytes per function pointer thunk slot, which a precache must agree with.
+pub fn thunk_size() usize {
+    return @import("module.zig").thunk_code().len;
+}
+
+pub const Image = @import("loader.zig").Image;
+
+pub const header_size: usize = @sizeOf(Header);

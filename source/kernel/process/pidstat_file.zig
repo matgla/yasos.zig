@@ -265,11 +265,12 @@ test "PidStatFile.ShouldCreateStatFile" {
     try kernel.fs.get_vfs().mount_filesystem("/", fsmock.interface);
 
     const filemock = try FileMock.create(std.testing.allocator);
+    _ = filemock.expectCall("size").willReturn(@as(u64, 512));
 
     const IoctlCallback = struct {
         pub fn call(ctx: ?*const anyopaque, args: @Tuple(&[_]type{ i32, ?*anyopaque })) !i32 {
             const cmd = args[0];
-            try std.testing.expectEqual(cmd, @as(i32, @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
+            try std.testing.expectEqual(cmd, @as(i32, @backingInt(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus)));
 
             const a = args[1];
             var attr: *kernel.fs.FileMemoryMapAttributes = @ptrCast(@alignCast(a.?));

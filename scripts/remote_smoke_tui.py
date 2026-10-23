@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import curses
 import hashlib
 import importlib.util
@@ -309,6 +310,8 @@ BOARD_PROFILES = {
 }
 
 OPTIMIZE_OPTIONS = ["ReleaseFast", "ReleaseSafe", "Debug", "ReleaseSmall"]
+# Kernel compiler (-Dkernel_cc): Zig's LLVM backend, or the C backend + tinycc.
+KERNEL_CC_OPTIONS = ["tcc", "llvm"]
 
 # tcc -O levels the smoke suites can be run at. The suites iterate whatever is
 # selected (tests2, ir_tests and gcc-torture all read
@@ -386,6 +389,7 @@ DEFAULT_CONFIG = {
     "remote_repo_path": "~/yasos_remote_smoke",
     "serial_device": "",
     "optimize": "ReleaseFast",
+    "kernel_cc": "tcc",
     "smoke_tcc_opt_level": SMOKE_TCC_ALL_OPT_LEVELS,
     "test_retries": 1,
     "with_gcc_torture": True,
@@ -448,6 +452,8 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
         merged["board"] = DEFAULT_CONFIG["board"]
     if merged.get("optimize") not in OPTIMIZE_OPTIONS:
         merged["optimize"] = DEFAULT_CONFIG["optimize"]
+    if merged.get("kernel_cc") not in KERNEL_CC_OPTIONS:
+        merged["kernel_cc"] = DEFAULT_CONFIG["kernel_cc"]
     # Any subset of the supported levels is valid, in any of the accepted
     # spellings, so this normalizes rather than tests for membership. An
     # unparsable cached value falls back to the default instead of aborting the
@@ -694,6 +700,7 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
             ("Remote repo", "remote_repo_path"),
             ("Serial device", "serial_device"),
             ("Optimize", "optimize"),
+            ("Kernel compiler", "kernel_cc"),
             ("Smoke TCC opt lvls", "smoke_tcc_opt_level"),
             ("Test retries", "test_retries"),
             ("Keep remote run dirs", "keep_runs"),
@@ -749,6 +756,8 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     )
                 elif selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), -1)
+                elif selected_key == "kernel_cc":
+                    config[selected_key] = cycle_option(KERNEL_CC_OPTIONS, str(config[selected_key]), -1)
                 elif selected_key == "smoke_tcc_opt_level":
                     config[selected_key] = cycle_smoke_tcc_opt_levels(str(config[selected_key]), -1)
                 elif selected_key == "with_gcc_torture":
@@ -762,6 +771,8 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     )
                 elif selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), 1)
+                elif selected_key == "kernel_cc":
+                    config[selected_key] = cycle_option(KERNEL_CC_OPTIONS, str(config[selected_key]), 1)
                 elif selected_key == "smoke_tcc_opt_level":
                     config[selected_key] = cycle_smoke_tcc_opt_levels(str(config[selected_key]), 1)
                 elif selected_key == "with_gcc_torture":
@@ -792,6 +803,9 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     continue
                 if selected_key == "optimize":
                     config[selected_key] = cycle_option(OPTIMIZE_OPTIONS, str(config[selected_key]), 1)
+                    continue
+                if selected_key == "kernel_cc":
+                    config[selected_key] = cycle_option(KERNEL_CC_OPTIONS, str(config[selected_key]), 1)
                     continue
                 if selected_key == "smoke_tcc_opt_level":
                     config[selected_key] = cycle_smoke_tcc_opt_levels(str(config[selected_key]), 1)
@@ -1644,7 +1658,12 @@ def build_local_artifacts(
         if _set_kconfig_option("CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING"):
             print(_head("Enabled CONFIG_CONFIG_INSTRUMENTATION_PERF_PROFILING for profiling."))
     run_command(
-        ["zig", "build", f"-Doptimize={effective_optimize(config, debug)}"],
+        [
+            "zig",
+            "build",
+            f"-Doptimize={effective_optimize(config, debug)}",
+            f"-Dkernel_cc={config.get('kernel_cc', DEFAULT_CONFIG['kernel_cc'])}",
+        ],
         cwd=REPO_ROOT,
     )
     rootfs_cmd = ["./build_rootfs.sh", "-o", ROOTFS_ARTIFACT.name]
@@ -2641,12 +2660,137 @@ echo "Flash erased; target halted. Reflash with: remote_smoke_tui.py --force" >&
     run_command(cmd, input_text=remote_script)
 
 
-def run_remote_connect(config: dict[str, Any]) -> None:
+CONSOLE_SESSIONS_DIR = REPO_ROOT / ".cache" / "console_sessions"
+
+
+def default_session_path() -> Path:
+    return CONSOLE_SESSIONS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}.cast"
+
+
+def record_tty_session(
+    cmd: list[str],
+    path: Path,
+    *,
+    title: str = "",
+    stdin_fd: int | None = None,
+    stdout_fd: int | None = None,
+) -> int:
+    """Run CMD on a local pty in between this terminal and it, and write both ways down.
+
+    The console is ssh -> miniterm -> UART, and every hop of it is somebody
+    else's program; the one place that sees exactly what was typed, when, and
+    what came back is the terminal it is all running in. So this stands where
+    that terminal stood: keys go from stdin to the pty, output from the pty to
+    stdout, untouched, and each read is written to PATH as it happens.
+
+    PATH is an asciicast v2 (`asciinema play PATH` replays it): `[t, "o", text]`
+    for what the console printed and `[t, "i", text]` for what was typed -- the
+    same file `asciinema rec --stdin` writes, so anything that reads one reads
+    the other. Events are flushed one by one: a session that ends in a wedged
+    board and a killed terminal still leaves everything up to the wedge.
+
+    video_scripter's `utilities/cast-to-take.py` turns it into a typist take,
+    the typos and the long thinks taken out. Returns the command's exit status.
+    """
+    import codecs
+    import fcntl
+    import pty
+    import select
+    import signal
+    import struct
+    import termios
+    import tty
+
+    stdin_fd = sys.stdin.fileno() if stdin_fd is None else stdin_fd
+    stdout_fd = sys.stdout.fileno() if stdout_fd is None else stdout_fd
+    interactive = os.isatty(stdin_fd)
+
+    def window_size() -> bytes:
+        try:
+            return fcntl.ioctl(stdout_fd, termios.TIOCGWINSZ, b"\0" * 8)
+        except OSError:
+            return struct.pack("HHHH", 24, 80, 0, 0)
+
+    rows, cols = struct.unpack("HHHH", window_size())[:2]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout.flush()
+
+    pid, master = pty.fork()
+    if pid == 0:
+        try:
+            os.execvp(cmd[0], cmd)
+        finally:
+            os._exit(127)
+    fcntl.ioctl(master, termios.TIOCSWINSZ, window_size())
+
+    def resized(_signum, _frame) -> None:
+        with contextlib.suppress(OSError):
+            fcntl.ioctl(master, termios.TIOCSWINSZ, window_size())
+
+    previous_winch = signal.signal(signal.SIGWINCH, resized) if interactive else None
+    saved = termios.tcgetattr(stdin_fd) if interactive else None
+    decoders = {"i": codecs.getincrementaldecoder("utf-8")("replace"),
+                "o": codecs.getincrementaldecoder("utf-8")("replace")}
+    start = time.monotonic()
+    with path.open("w", encoding="utf-8") as cast:
+        header = {"version": 2, "width": cols or 80, "height": rows or 24,
+                  "timestamp": int(time.time()), "command": command_string(cmd),
+                  "env": {"TERM": os.environ.get("TERM", "")}}
+        if title:
+            header["title"] = title
+        cast.write(json.dumps(header) + "\n")
+
+        def note(kind: str, data: bytes) -> None:
+            text = decoders[kind].decode(data)
+            if text:
+                cast.write(json.dumps([round(time.monotonic() - start, 6), kind, text]) + "\n")
+                cast.flush()
+
+        try:
+            if interactive:
+                tty.setraw(stdin_fd)
+            watched = [stdin_fd, master]
+            while True:
+                try:
+                    ready, _, _ = select.select(watched, [], [])
+                except InterruptedError:
+                    continue
+                if master in ready:
+                    try:
+                        data = os.read(master, 65536)
+                    except OSError:  # EIO: the far side closed the pty
+                        data = b""
+                    if not data:
+                        break
+                    os.write(stdout_fd, data)
+                    note("o", data)
+                if stdin_fd in ready:
+                    data = os.read(stdin_fd, 4096)
+                    if not data:
+                        watched.remove(stdin_fd)
+                        continue
+                    os.write(master, data)
+                    note("i", data)
+        finally:
+            if saved is not None:
+                termios.tcsetattr(stdin_fd, termios.TCSAFLUSH, saved)
+            if previous_winch is not None:
+                signal.signal(signal.SIGWINCH, previous_winch)
+            os.close(master)
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
+def run_remote_connect(config: dict[str, Any], record: Path | None = None) -> None:
     """Open an interactive serial console to the target over SSH.
 
     No build, flash, or reset — just attach to the board's UART so the user can
     drive the shell. Uses pyserial's miniterm (already a remote dependency) over
     an SSH-allocated TTY. Exit the console with Ctrl-].
+
+    With RECORD the session is also written down, keys and output with their
+    times (`record_tty_session`), for turning a session performed by hand into
+    a take typist can perform again.
     """
     serial_device = str(config.get("serial_device", "")).strip()
     board = BOARD_PROFILES[config.get("board", DEFAULT_CONFIG["board"])]
@@ -2677,7 +2821,16 @@ echo "Connecting to $serial_device @ ${{baud}} baud. Exit with Ctrl-]" >&2
 stty icrnl 2>/dev/null || true
 exec python3 -m serial.tools.miniterm --raw --eol LF "$serial_device" "$baud"
 """
-    run_remote_tty_script(config, script)
+    if record is None:
+        run_remote_tty_script(config, script)
+        return
+    cmd = ssh_tty_base(config) + ["bash", "-lc", script]
+    print(_dim("\n$ ") + _cmd(command_string(cmd)))
+    status = record_tty_session(cmd, record, title=f"yasos console {config.get('board', '')}".strip())
+    print(f"\nSession written to {record}")
+    print(f"Make a take of it: video_scripter/utilities/cast-to-take.py {shlex.quote(str(record))}")
+    if status != 0:
+        raise RunnerError(f"Interactive command failed with exit code {status}: {command_string(cmd)}")
 
 
 def run_remote_power_reset(config: dict[str, Any]) -> None:
@@ -3579,6 +3732,9 @@ def apply_runtime_pytest_overrides(config: dict[str, Any], args: argparse.Namesp
     if getattr(args, "optimize", None):
         runtime_config["optimize"] = args.optimize
 
+    if getattr(args, "kernel_cc", None):
+        runtime_config["kernel_cc"] = args.kernel_cc
+
     if getattr(args, "gcc_test_suite_only", False):
         runtime_config["with_gcc_torture"] = True
         runtime_config["pytest_args"] = "tests/smoke -m gcc_torture"
@@ -3710,12 +3866,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reconfigure", "--configure", dest="reconfigure", action="store_true", help="Open the TUI and update cached settings before running.")
     parser.add_argument("--debug", action="store_true", help="Build the kernel with Zig Debug optimization and pass --debug to build_rootfs.sh.")
     parser.add_argument("--optimize", choices=OPTIMIZE_OPTIONS, default=None, help="Zig optimize mode for the kernel, for this run only (default: the cached 'Optimize' field). Unlike --debug it leaves the rootfs alone, so '--optimize Debug' gives gdb a kernel whose `break main` stops on main rather than on code inlined into it. --debug still wins.")
+    parser.add_argument("--kernel-cc", choices=KERNEL_CC_OPTIONS, default=None, help="Kernel compiler for this run only (default: the cached 'Kernel compiler' field): 'tcc' builds the kernel through Zig's C backend and the cross tinycc, 'llvm' with Zig's own LLVM backend. Passed to zig build as -Dkernel_cc.")
     parser.add_argument("--force", action="store_true", help="Force a clean rootfs rebuild, refresh the remote smoke venv, and reflash kernel/rootfs even if hashes match.")
     parser.add_argument("--gdb", action="store_true", help="Build locally, sync debug artifacts to the remote repository, then start an interactive remote GDB attach session over SSH without flashing. Combine with --reset to reset-halt before attaching.")
     parser.add_argument("--flash-only", action="store_true", help="Upload and flash artifacts on the remote host, then stop without running pytest.")
     parser.add_argument("--reset", action="store_true", help="Reset the configured target through OpenOCD on the remote host before exiting, or reset-halt before attaching when combined with --gdb.")
     parser.add_argument("--rescue", action="store_true", help="Force-recover a wedged RP2350: connect via the rescue debug port, halt, and mass-erase all flash so no auto-running image can re-wedge the QSPI. Use when flashing keeps failing. Wipes kernel AND rootfs; reflash both with --force afterwards.")
     parser.add_argument("--connect", action="store_true", help="Open an interactive serial console to the target over SSH (no build, flash, or reset). Exit the console with Ctrl-].")
+    parser.add_argument("--record", nargs="?", const="auto", default=None, metavar="PATH", help="Record the --connect console session (implies --connect): every key typed and everything the board printed, with times, as an asciicast v2 (`asciinema play` replays it). Default PATH is .cache/console_sessions/<stamp>.cast. video_scripter's utilities/cast-to-take.py turns it into a typist take with the typos and long pauses taken out.")
     parser.add_argument("--power-reset", nargs="?", const="auto", default=None, metavar="HUB", help="Power-cycle the target via uhubctl on the remote host. Pass 'auto' (default) to detect the hub from the debug probe, or a hub path like '1-1'. Useful when the target is hung and OpenOCD cannot connect.")
     parser.add_argument("--power-reset-port", default=None, metavar="PORTS", help="Override which hub port(s) the power-cycle reset switches, as a uhubctl spec (e.g. '1,2' for the debug probe on port 1 plus the target board on port 2, or '1-2'). Defaults to the configured uhubctl port(s); empty means auto-detect the probe's port.")
     parser.add_argument("--test-retries", type=int, help="Retry failing smoke tests this many times. Uses pytest reruns for transient UART noise.")
@@ -3793,9 +3951,13 @@ def main() -> int:
             config = validate_config(cached)
             save_cache(config)
 
-        if args.connect:
+        if args.connect or args.record:
+            record = None
+            if args.record:
+                record = default_session_path() if args.record == "auto" else Path(args.record).expanduser()
+                print(f"Recording the console session to {record}")
             print("Opening interactive serial console to the target (Ctrl-] to exit).")
-            run_remote_connect(config)
+            run_remote_connect(config, record=record)
             return 0
 
         # A changed defconfig must regenerate config/target/.config AND force a

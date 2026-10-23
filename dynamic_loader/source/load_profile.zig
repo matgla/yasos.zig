@@ -41,6 +41,10 @@ pub const Phase = enum(usize) {
     local_relocations,
     data_relocations,
     copy_relocations,
+    /// Loads served from a relocated-image template (template.zig).
+    template_apply,
+    /// Recording a template on a load that relocated.
+    template_capture,
 };
 
 pub var phase_us: [@typeInfo(Phase).@"enum".field_names.len]u64 = @splat(0);

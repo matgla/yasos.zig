@@ -49,3 +49,6 @@
 [submodule "libs/lwext4"]
 	path = libs/lwext4
 	url = git@github.com:matgla/lwext4.git
+[submodule "yasboot"]
+	path = yasboot
+	url = git@github.com:matgla/yasboot.zig.git

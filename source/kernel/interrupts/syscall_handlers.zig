@@ -250,7 +250,7 @@ pub fn sys_semaphore_release(arg: *const anyopaque) !i32 {
     return KernelSemaphore.release(context.object);
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_getpid(arg: *const anyopaque) !i32 {
     const check_parent: *const u8 = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
@@ -272,7 +272,7 @@ pub fn sys_mkdir(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 /// fstat of a pipe. A pipe has no path to stat -- its descriptor is named
 /// "pipe:[read]" / "pipe:[write]" -- so it is described from the open node.
 /// toysh on nommu hands each subshell its state over a pipe on fd 254 and the
@@ -302,7 +302,7 @@ pub fn sys_fstat(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_isatty(arg: *const anyopaque) !i32 {
     const fd: *const c_int = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
@@ -475,7 +475,7 @@ fn close_fd(fd: i32) i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_close(arg: *const anyopaque) !i32 {
     const fd: *const c_int = @ptrCast(@alignCast(arg));
     return close_fd(fd.*);
@@ -505,22 +505,27 @@ pub fn sys_exit(arg: *const anyopaque) !i32 {
         // byte counts are still real.
         perf.trace("syscyc pid={d} cyc={s}", .{ process.pid, if (perf.has_cycle_counter()) "on" else "off" });
         perf.trace("sysprof pid={d} calls={d} us={d} handler_us={d} load_us={d} read={d}/{d} write={d}/{d} dropped={d} top={d}:{d}/{d},{d}:{d}/{d},{d}:{d}/{d}", .{
-            process.pid,        sys.calls,          sys.total_us,
-            sys.handler_us,     process._load_us,   sys.read_bytes,
-            sys.read_us,        sys.write_bytes,    sys.write_us,
-            sys.dropped,        sys.top[0].id,      sys.top[0].calls,
-            sys.top[0].us,      sys.top[1].id,      sys.top[1].calls,
-            sys.top[1].us,      sys.top[2].id,      sys.top[2].calls,
+            process.pid,    sys.calls,        sys.total_us,
+            sys.handler_us, process._load_us, sys.read_bytes,
+            sys.read_us,    sys.write_bytes,  sys.write_us,
+            sys.dropped,    sys.top[0].id,    sys.top[0].calls,
+            sys.top[0].us,  sys.top[1].id,    sys.top[1].calls,
+            sys.top[1].us,  sys.top[2].id,    sys.top[2].calls,
             sys.top[2].us,
         });
         // Where write()/close() time goes: the card, or the filesystem above it.
         const disk_stats = perf.disk_summary();
+        perf.dump_cache(process.pid);
         if (disk_stats.writes != 0 or disk_stats.reads != 0) {
             perf.trace("diskprof pid={d} writes={d}/{d}blk/{d}us cardwait={d}us reads={d}/{d}blk/{d}us", .{
                 process.pid,
-                disk_stats.writes,     disk_stats.write_blocks, disk_stats.write_us,
+                disk_stats.writes,
+                disk_stats.write_blocks,
+                disk_stats.write_us,
                 disk_stats.wait_us,
-                disk_stats.reads,      disk_stats.read_blocks,  disk_stats.read_us,
+                disk_stats.reads,
+                disk_stats.read_blocks,
+                disk_stats.read_us,
             });
         }
         const open_stats = perf.open_summary();
@@ -529,9 +534,9 @@ pub fn sys_exit(arg: *const anyopaque) !i32 {
                 process.pid,
                 open_stats.calls,
                 open_stats.misses,
-                open_stats.us[@intFromEnum(perf.OpenPhase.resolve)],
-                open_stats.us[@intFromEnum(perf.OpenPhase.lookup)],
-                open_stats.us[@intFromEnum(perf.OpenPhase.attach)],
+                open_stats.us[@backingInt(perf.OpenPhase.resolve)],
+                open_stats.us[@backingInt(perf.OpenPhase.lookup)],
+                open_stats.us[@backingInt(perf.OpenPhase.attach)],
                 open_stats.headers,
                 open_stats.reads,
                 open_stats.name_allocs,
@@ -550,21 +555,20 @@ pub fn sys_exit(arg: *const anyopaque) !i32 {
         if (pool_stats.allocs != 0 or pool_stats.frees != 0) {
             perf.trace("poolclear pid={d} sram={d}B/{d}us psram={d}B/{d}us", .{
                 process.pid,
-                pool_stats.clear_bytes[0], pool_stats.clear_us[0],
-                pool_stats.clear_bytes[1], pool_stats.clear_us[1],
+                pool_stats.clear_bytes[0],
+                pool_stats.clear_us[0],
+                pool_stats.clear_bytes[1],
+                pool_stats.clear_us[1],
             });
             perf.trace("poolprof pid={d} allocs={d} frees={d} pages={d} cleared={d} max={d} hits={d} misses={d} sram={d} psram={d} scan_us={d} mark_us={d} book_us={d} clear_us={d} flookup_us={d} fmark_us={d}", .{
-                process.pid,             pool_stats.allocs,
-                pool_stats.frees,        pool_stats.pages,
-                pool_stats.cleared_bytes, pool_stats.max_bytes,
-                pool_stats.cache_hits,   pool_stats.cache_misses,
-                pool_stats.tier_allocs[0], pool_stats.tier_allocs[1],
-                pool_stats.us[@intFromEnum(perf.PoolPhase.scan)],
-                pool_stats.us[@intFromEnum(perf.PoolPhase.mark)],
-                pool_stats.us[@intFromEnum(perf.PoolPhase.book)],
-                pool_stats.us[@intFromEnum(perf.PoolPhase.clear)],
-                pool_stats.us[@intFromEnum(perf.PoolPhase.free_lookup)],
-                pool_stats.us[@intFromEnum(perf.PoolPhase.free_mark)],
+                process.pid,                                            pool_stats.allocs,
+                pool_stats.frees,                                       pool_stats.pages,
+                pool_stats.cleared_bytes,                               pool_stats.max_bytes,
+                pool_stats.cache_hits,                                  pool_stats.cache_misses,
+                pool_stats.tier_allocs[0],                              pool_stats.tier_allocs[1],
+                pool_stats.us[@backingInt(perf.PoolPhase.scan)],        pool_stats.us[@backingInt(perf.PoolPhase.mark)],
+                pool_stats.us[@backingInt(perf.PoolPhase.book)],        pool_stats.us[@backingInt(perf.PoolPhase.clear)],
+                pool_stats.us[@backingInt(perf.PoolPhase.free_lookup)], pool_stats.us[@backingInt(perf.PoolPhase.free_mark)],
             });
         }
         // Peak page usage per tier during this run: psram_pk > 0 means the
@@ -573,8 +577,10 @@ pub fn sys_exit(arg: *const anyopaque) !i32 {
         const pool = process_manager.instance.get_process_memory_pool();
         perf.trace("mem pid={d} sram_pk={d} sram_cap={d} psram_pk={d} psram_cap={d} kheap_now={d} kheap_pk={d} kheap_phys={d}", .{
             process.pid,
-            pool.peak_used_pages(0), pool.region_page_count(0),
-            pool.peak_used_pages(1), pool.region_page_count(1),
+            pool.peak_used_pages(0),
+            pool.region_page_count(0),
+            pool.peak_used_pages(1),
+            pool.region_page_count(1),
             kernel.memory.heap.malloc.get_usage(),
             kernel.memory.heap.malloc.get_peak_usage(),
             system_stubs.kernel_heap_physical_used(),
@@ -748,7 +754,7 @@ pub fn sys_vfork(arg: *const anyopaque) !i32 {
     return try process_manager.instance.vfork(context);
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_unlink(arg: *const anyopaque) !i32 {
     const context: *const c.unlink_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
@@ -789,7 +795,7 @@ pub fn sys_renameat2(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_stat(arg: *const anyopaque) !i32 {
     const context: *const c.stat_context = @ptrCast(@alignCast(arg));
     const out = try user_out(c.struct_stat, context.statbuf);
@@ -808,7 +814,7 @@ pub fn sys_getentropy(arg: *const anyopaque) !i32 {
     return kernel.errno.ErrnoSet.NotImplemented;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_lseek(arg: *const anyopaque) !i32 {
     const context: *const c.lseek_context = @ptrCast(@alignCast(arg));
     const result_out = try user_out(c.off_t, context.result);
@@ -875,7 +881,7 @@ pub fn sys_times(arg: *const anyopaque) !i32 {
     return kernel.errno.ErrnoSet.NotImplemented;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_getdents(arg: *const anyopaque) !i32 {
     const context: *const c.getdents_context = @ptrCast(@alignCast(arg));
 
@@ -917,7 +923,7 @@ fn check_ioctl_arg(op: i32, raw: isize) !void {
         c.TCSETS, c.TCSETSW, c.TCSETSF => .{ .read, @sizeOf(c.termios) },
         c.TIOCGWINSZ => .{ .write, @sizeOf(c.struct_winsize) },
         c.FIONREAD => .{ .write, @sizeOf(c_int) },
-        @intFromEnum(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => .{ .write, @sizeOf(kernel.fs.FileMemoryMapAttributes) },
+        @backingInt(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus) => .{ .write, @sizeOf(kernel.fs.FileMemoryMapAttributes) },
         else => return,
     };
     switch (access) {
@@ -992,7 +998,7 @@ fn resolve_utimens_stamp(entry: c.struct_timespec, now: c.struct_timespec) !?c.s
     return entry;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_utimensat(arg: *const anyopaque) !i32 {
     const context: *const c.utimensat_context = @ptrCast(@alignCast(arg));
     const now = time.now_timespec();
@@ -1019,7 +1025,7 @@ pub fn sys_utimensat(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_readlink(arg: *const anyopaque) !i32 {
     const context: *const c.readlink_context = @ptrCast(@alignCast(arg));
     if (context.bufsiz == 0) return ErrnoSet.InvalidArgument;
@@ -1070,14 +1076,45 @@ const ShebangExec = struct {
 /// Every autoconf `configure` starts with `#! /bin/sh`; without this the
 /// loader rejected them as a bad image. Null for anything that is not a `#!`
 /// file; ENOEXEC for a `#!` line it cannot use.
-fn shebang_exec(path: []const u8, argv: [*c][*c]u8) !?ShebangExec {
-    var node = fs.get_ivfs().interface.get(path) catch return null;
-    defer node.delete();
+///
+/// The head bytes come from the file's mapping when it has one -- every romfs
+/// image does -- so sniffing a YAFF binary costs no I/O at all, and a script
+/// that is resident pays no read either. Ownership: the caller's node is
+/// retained by the caller on every result. On a non-script, the caller
+/// hands it to the loader instead
+/// of looking the same path up a second time. `path` names the script for the
+/// rewritten argv; nothing is looked up with it.
+fn shebang_exec(node: *kernel.fs.Node, path: []const u8, argv: [*c][*c]u8) !?ShebangExec {
     var file = node.as_file() orelse return null;
+    var attr: kernel.fs.FileMemoryMapAttributes = .{
+        .is_memory_mapped = false,
+        .mapped_address_r = null,
+        .mapped_address_w = null,
+    };
+    _ = file.interface.ioctl(@backingInt(kernel.fs.IoctlCommonCommands.GetMemoryMappingStatus), &attr);
     var head: [128]u8 = undefined;
-    const got = file.interface.read(head[0..]);
-    if (got < 3 or head[0] != '#' or head[1] != '!') return null;
-    const text = head[0..@intCast(got)];
+    const text: []const u8 = if (attr.mapped_address_r) |address| blk: {
+        // The mapping is the file's bytes in XIP; only the first line is
+        // wanted, so the length is clamped rather than read from the file.
+        const bytes: [*]const u8 = @ptrCast(address);
+        const size = file.interface.size();
+        const keep: usize = if (size > head.len) head.len else @intCast(size);
+        break :blk bytes[0..keep];
+    } else blk: {
+        var filled: usize = 0;
+        while (filled < head.len) {
+            const got = file.interface.read(head[filled..]);
+            if (got < 0) return ErrnoSet.InputOutputError;
+            if (got == 0) break;
+            const count: usize = @intCast(got);
+            if (count > head.len - filled) return ErrnoSet.InputOutputError;
+            filled += count;
+            if (filled >= 2 and (head[0] != '#' or head[1] != '!')) break;
+            if (std.mem.indexOfScalar(u8, head[0..filled], '\n') != null) break;
+        }
+        break :blk head[0..filled];
+    };
+    if (text.len < 3 or text[0] != '#' or text[1] != '!') return null;
     const line_end = std.mem.indexOfScalar(u8, text, '\n') orelse return ErrnoSet.ExecFormatError;
     const line = std.mem.trim(u8, text[2..line_end], " \t\r");
     const split = std.mem.indexOfAny(u8, line, " \t");
@@ -1130,15 +1167,37 @@ pub fn sys_execve(arg: *const anyopaque) !i32 {
     var path = try resolve_exec_link(try determine_path_for_file(kernel_allocator, context.filename, -1));
     var argv = context.argv;
     var scratch: ?[]usize = null;
-    const maybe_script = shebang_exec(path, context.argv) catch |err| {
+    // One path resolution per exec: this node is what the `#!` sniff reads and
+    // what the loader installs, so a filesystem without a lookup cache (FAT,
+    // MMC) pays one walk per exec instead of two. A script swaps in its
+    // interpreter's node -- the script's own is released first, and the
+    // interpreter is looked up here rather than inside the loader, so a `#!`
+    // exec costs two lookups (script, interpreter) and not three. The node is
+    // released inside `load_executable_node` on every exit, including the ones
+    // that install no image, and `prepare_exec` reaches that load before
+    // anything of its own can fail -- the vfork handoff that skips defers
+    // happens after it.
+    const resolve_start_us = hal.time.get_time_us();
+    var to_load = fs.get_ivfs().interface.get(path) catch |err| {
+        kernel_allocator.free(path);
+        return err;
+    };
+    const maybe_script = shebang_exec(&to_load, path, context.argv) catch |err| {
+        to_load.delete();
         kernel_allocator.free(path);
         return err;
     };
     if (maybe_script) |script| {
+        to_load.delete();
         kernel_allocator.free(path);
         path = script.interpreter;
         argv = script.argv;
         scratch = script.block;
+        to_load = fs.get_ivfs().interface.get(path) catch |err| {
+            kernel_allocator.free(path);
+            kernel_allocator.free(scratch.?);
+            return err;
+        };
     }
     // Path is freed inside prepare_exec after load_executable, because
     // prepare_exec may not return normally (vfork context switch bypasses defers).
@@ -1146,7 +1205,7 @@ pub fn sys_execve(arg: *const anyopaque) !i32 {
     //
     // Neither vector is unwrapped: `execve(path, argv, NULL)` is allowed, and
     // `clone_exec_args` reads a null envp as an empty environment.
-    return process_manager.instance.prepare_exec(path, argv, context.envp, kernel_allocator, &scratch) catch |err| {
+    return process_manager.instance.prepare_exec(path, argv, context.envp, kernel_allocator, &scratch, &to_load, resolve_start_us) catch |err| {
         if (scratch) |block| kernel_allocator.free(block);
         return err;
     };
@@ -1218,9 +1277,9 @@ pub fn sys_nanosleep(arg: *const anyopaque) !i32 {
     }
     return 0;
 }
-    // Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
-    // accounting tag that used to require serialisation is an argument now
-    // rather than a one-shot flag on the pool (`allocate_pages_from`).
+// Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
+// accounting tag that used to require serialisation is an argument now
+// rather than a one-shot flag on the pool (`allocate_pages_from`).
 pub fn sys_mmap(arg: *const anyopaque) !i32 {
     const context: *const c.mmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
@@ -1232,9 +1291,9 @@ pub fn sys_mmap(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
-    // accounting tag that used to require serialisation is an argument now
-    // rather than a one-shot flag on the pool (`allocate_pages_from`).
+// Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
+// accounting tag that used to require serialisation is an argument now
+// rather than a one-shot flag on the pool (`allocate_pages_from`).
 pub fn sys_munmap(arg: *const anyopaque) !i32 {
     const context: *const c.munmap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
@@ -1242,9 +1301,9 @@ pub fn sys_munmap(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
-    // accounting tag that used to require serialisation is an argument now
-    // rather than a one-shot flag on the pool (`allocate_pages_from`).
+// Preemptible: the page pool is behind `pagepool_lock`, and the heap/loader
+// accounting tag that used to require serialisation is an argument now
+// rather than a one-shot flag on the pool (`allocate_pages_from`).
 pub fn sys_mremap(arg: *const anyopaque) !i32 {
     const context: *const c.mremap_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
@@ -1256,7 +1315,7 @@ pub fn sys_mremap(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_getcwd(arg: *const anyopaque) !i32 {
     const context: *const c.getcwd_context = @ptrCast(@alignCast(arg));
     if (context.size == 0) return ErrnoSet.InvalidArgument;
@@ -1275,7 +1334,7 @@ pub fn sys_getcwd(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_chdir(arg: *const anyopaque) !i32 {
     const context: *const c.chdir_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
@@ -1420,7 +1479,7 @@ pub fn sys_time(arg: *const anyopaque) !i32 {
     (try user_out(c.time_t, context.result)).* = now_seconds;
     return 0;
 }
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_fcntl(arg: *const anyopaque) !i32 {
     const context: *const c.fcntl_context = @ptrCast(@alignCast(arg));
     // Descriptor flags belong to the descriptor table, not the open file.
@@ -1563,24 +1622,23 @@ const utsname = struct {
     const nodename = config.board.board;
     /// build.zig.zon's `.version`, handed over by build.zig.
     const release = @import("build_info").release;
-    /// When the image was built -- the same moment `time.zig` starts the clock
-    /// from, so `uname -v` and a fresh file's date agree.
-    const version = build_date(@import("build_info").default_epoch_seconds);
     const machine = config.cpu.arch;
 };
 
-fn build_date(comptime seconds: i64) []const u8 {
-    return comptime blk: {
-        if (seconds <= 0) break :blk "unknown";
-        const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(seconds) };
-        const year_day = epoch.getEpochDay().calculateYearDay();
-        const month_day = year_day.calculateMonthDay();
-        break :blk std.fmt.comptimePrint("{d:0>4}-{d:0>2}-{d:0>2}", .{
-            year_day.year,
-            month_day.month.numeric(),
-            @as(u8, month_day.day_index) + 1,
-        });
-    };
+/// "YYYY-MM-DD" for `seconds` since the Unix epoch, "unknown" when it is not
+/// positive. `buf` holds the result; the image's build time is read at run
+/// time (see `time.build_epoch_seconds`), so the kernel's own code does not
+/// change with the image.
+fn build_date(seconds: i64, buf: *[10]u8) []const u8 {
+    if (seconds <= 0) return "unknown";
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(seconds) };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}", .{
+        year_day.year,
+        month_day.month.numeric(),
+        @as(u8, month_day.day_index) + 1,
+    }) catch "unknown";
 }
 
 /// Copy `value` into a fixed utsname field, truncated to leave room for the
@@ -1597,7 +1655,8 @@ pub fn sys_uname(arg: *const anyopaque) !i32 {
     fill_utsname_field(&buf.sysname, utsname.sysname);
     fill_utsname_field(&buf.nodename, utsname.nodename);
     fill_utsname_field(&buf.release, utsname.release);
-    fill_utsname_field(&buf.version, utsname.version);
+    var date: [10]u8 = undefined;
+    fill_utsname_field(&buf.version, build_date(kernel.time.build_epoch_seconds(), &date));
     fill_utsname_field(&buf.machine, utsname.machine);
     return 0;
 }
@@ -1615,9 +1674,8 @@ pub fn sys_sysconf(arg: *const anyopaque) !i32 {
     }
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_prlimit(arg: *const anyopaque) !i32 {
-
     const context: *const c.prlimit_context = @ptrCast(@alignCast(arg));
     if (context.pid < 0) {
         return kernel.errno.ErrnoSet.InvalidArgument;
@@ -1641,7 +1699,7 @@ pub fn sys_prlimit(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_access(arg: *const anyopaque) !i32 {
     const context: *const c.access_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
@@ -1656,7 +1714,7 @@ pub fn sys_klog_ctl(arg: *const anyopaque) !i32 {
     return 0;
 }
 
-    // Preemptible: see `sys_open`.
+// Preemptible: see `sys_open`.
 pub fn sys_ftruncate(arg: *const anyopaque) !i32 {
     const context: *const c.ftruncate_context = @ptrCast(@alignCast(arg));
     var file = try get_file_from_process(context.fd);
@@ -1696,6 +1754,9 @@ pub fn sys_perf_dump(arg: *const anyopaque) !i32 {
     const process = process_manager.instance.get_current_process();
     perf.dump(context, process._load_us);
     if (context.reset != 0) {
+        // tcc -bench resets before exit. Preserve this window's cache traffic
+        // in the transcript before the ordinary exit report covers the tail.
+        perf.dump_cache(process.pid);
         perf.reset();
     }
     return 0;
@@ -1757,7 +1818,7 @@ test "Uname.FillsEveryFieldTerminated" {
     try std.testing.expectEqualStrings("YasOS", std.mem.sliceTo(&buf.sysname, 0));
     try std.testing.expectEqualStrings(config.board.board, std.mem.sliceTo(&buf.nodename, 0));
     try std.testing.expectEqualStrings(@import("build_info").release, std.mem.sliceTo(&buf.release, 0));
-    try std.testing.expectEqualStrings(utsname.version, std.mem.sliceTo(&buf.version, 0));
+    try std.testing.expectEqualStrings("unknown", std.mem.sliceTo(&buf.version, 0));
     try std.testing.expectEqualStrings(config.cpu.arch, std.mem.sliceTo(&buf.machine, 0));
     // Nothing of what the caller left in the buffer survives past a terminator.
     for (std.mem.asBytes(&buf)) |byte| try std.testing.expect(byte != 0xaa);
@@ -1785,6 +1846,60 @@ test "Uname.TruncatesALongValue" {
 }
 
 test "Uname.BuildDateIsCalendarDate" {
-    try std.testing.expectEqualStrings("2026-09-21", build_date(1790000000));
-    try std.testing.expectEqualStrings("unknown", build_date(0));
+    var buf: [10]u8 = undefined;
+    try std.testing.expectEqualStrings("2026-09-21", build_date(1790000000, &buf));
+    try std.testing.expectEqualStrings("unknown", build_date(0, &buf));
+}
+
+test "Exec.SniffCompletesPartialShebangAndPreservesOneOptionalArgument" {
+    init(std.testing.allocator);
+    const FileMock = @import("../fs/tests/file_mock.zig").FileMock;
+    const mock_api = @import("interface");
+    var mock = try FileMock.create(std.testing.allocator);
+    var node = kernel.fs.Node.create_file(mock.get_interface());
+    defer node.delete();
+    _ = mock.expectCall("ioctl").willReturn(0);
+    const Reader = struct {
+        pos: usize = 0,
+        const text = "#!/bin/sh --arg one\nbody";
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&.{[]u8})) anyerror!isize {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(ctx.?)));
+            const n = @min(@min(args[0].len, 2), text.len - self.pos);
+            @memcpy(args[0][0..n], text[self.pos..][0..n]);
+            self.pos += n;
+            return @intCast(n);
+        }
+    };
+    var reader: Reader = .{};
+    _ = mock.expectCall("read").times(mock_api.mock.any{}).invoke(&Reader.call, &reader);
+    var args = [_]?[*:0]const u8{ "ignored-argv0", "kept", null };
+    const script = (try shebang_exec(&node, "/tmp/script", @ptrCast(@constCast(&args)))).?;
+    defer std.testing.allocator.free(script.interpreter);
+    defer std.testing.allocator.free(script.block);
+    try std.testing.expectEqualStrings("/bin/sh", script.interpreter);
+    for ([_][]const u8{ "/bin/sh", "--arg one", "/tmp/script", "kept" }, 0..) |expected, i| {
+        try std.testing.expectEqualStrings(expected, std.mem.span(script.argv[i]));
+    }
+    try std.testing.expect(script.argv[4] == null);
+}
+
+test "Exec.MappedSniffBoundsShortFilesAndDoesNotRead" {
+    init(std.testing.allocator);
+    const FileMock = @import("../fs/tests/file_mock.zig").FileMock;
+    var mock = try FileMock.create(std.testing.allocator);
+    var node = kernel.fs.Node.create_file(mock.get_interface());
+    defer node.delete();
+    const mapped = [_]u8{'#'};
+    const Map = struct {
+        pub fn call(ctx: ?*const anyopaque, args: @Tuple(&.{ i32, ?*anyopaque })) anyerror!i32 {
+            const attr: *kernel.fs.FileMemoryMapAttributes = @ptrCast(@alignCast(args[1].?));
+            attr.is_memory_mapped = true;
+            attr.mapped_address_r = ctx;
+            return 0;
+        }
+    };
+    _ = mock.expectCall("ioctl").invoke(&Map.call, &mapped);
+    _ = mock.expectCall("size").willReturn(@as(u64, 1));
+    var args = [_]?[*:0]const u8{ "short", null };
+    try std.testing.expect(try shebang_exec(&node, "/short", @ptrCast(@constCast(&args))) == null);
 }

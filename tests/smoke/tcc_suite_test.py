@@ -28,7 +28,7 @@ from .timing import (
     record,
     add as add_timing,
 )
-from .profiling import profiling_enabled, extract_profile_lines, record_profile
+from .profiling import profiling_enabled, extract_profile_lines, record_profile, write_results_line
 import random
 import time
 from dataclasses import dataclass, replace
@@ -189,6 +189,14 @@ is_xfail_o1_test = _gcc_conftest.is_xfail_o1_test
 # hit a property of this hardware -- mostly resource exhaustion, plus the DCP's
 # lack of subnormal support at the bottom of the table.
 NATIVE_TARGET_SKIP_TESTS = {
+    "849_tu_modref_memcpy_result_indirect_call": "inline asm .word of a symbol in .text: YAFF rejects R_ARM_ABS32 outside data",
+    "bug_asm_label_static_toplevel_asm": "top-level asm .word of a symbol in .text: YAFF rejects R_ARM_ABS32 outside data",
+    # the host test builds abi_hfa_b.c with arm-none-eabi-gcc; no gcc on the device
+    "abi_hfa_main": "gcc-built companion object (HFA interop)",
+    # naked asm returning in s0-s3: AAPCS-VFP only; device userspace is softfp
+    "fp_hard_hfa_ret_regs_exec": "hard-float ABI test; device userspace is softfp",
+    # cpsid/msr PRIMASK/BASEPRI are ignored (and mrs reads 0) in unprivileged thread mode
+    "894_asm_machine_call": "needs privileged PRIMASK/BASEPRI access; userspace is unprivileged",
     # compile/ tests — resource exhaustion on the embedded target
     "compile/20001226-1": "compile-time OOM: emits 'memory full'",
     "compile/pr46534": "compile-time OOM: emits 'memory full'",
@@ -231,6 +239,12 @@ NATIVE_TARGET_SKIP_TESTS = {
     # libs/tinycc/lib/fp/arm/rp2350/d2f_subnormal.c.
     "20190901-1": "RP2350 DCP compare flushes subnormals: a subnormal double reads == 0.0",
     "ieee/cdivchkd": "RP2350 DCP compare flushes subnormals; vectors are full of subnormal doubles",
+    # ---- privileged peripherals ----
+    # These ir_tests program SysTick (SYST_CSR/RVR/CVR at 0xE000E010..18) and
+    # read COUNTFLAG; YasOS user processes run unprivileged, so the first SCS
+    # access is a precise BusFault (BFAR=0xE000E010) at every opt level.
+    "bug_dead_trail_volatile_access": "SysTick (SCS) access needs privileged bare metal",
+    "bug_narrow_volatile_load_dead_local": "SysTick (SCS) access needs privileged bare metal",
 }
 
 IGNORE_NATIVE_TARGET_SKIP_TESTS = os.environ.get("YASOS_SMOKE_RERUN_FAILED", "").strip().lower() in {
@@ -267,6 +281,13 @@ COMPILE_STACK_KIB_TESTS = {
     # Deep expression recursion: host cross-tcc needs ~64 KiB for both.
     "unroll-1": 128,
     "builtins/strcat-chk": 128,
+    # Nested functions four deep (outer2 -> f2 -> g -> h): every level is
+    # compiled from inside its parent's -O2 backend pipeline
+    # (finalize_nested_functions -> compile_nested_functions -> gen_function),
+    # so the parents' frames stay live. Measured on-device at -O2: depth 3 needs
+    # 26 KiB, depth 4 needs 36 KiB, so the 32 KiB default STKOFs; -O1 stays at
+    # 24 KiB at any depth.
+    "711_nested_funcs_grow_while_compiling": 64,
     # Still skipped (NATIVE_TARGET_SKIP_TESTS): limits-exprparen and
     # limits-structnest need ~8 MiB of compiler stack on the host, far above
     # the 1 MiB CONFIG_PROCESS_MAX_STACK_SIZE hard limit; limits-declparen
@@ -291,6 +312,11 @@ def _compile_stack_kib(test_path: Path) -> Optional[int]:
 # raises the run-phase silence limit). Keys: directory-prefixed _test_key or
 # plain stem for gcc-torture, full filename for tests2/ir_tests.
 COMPILE_TIMEOUT_TESTS = {
+    # ir_tests: -O1/-O2 compile takes 6-18 s at 532 MHz
+    "bug_overflow_builtins_mixed_operand_types.c": 40,
+    "bug_sso_be_runtime_byte_order.c": 30,
+    # 73 macro-generated functions; no single hot pass, -O2 just overruns ~6 s
+    "886_struct_arg_copy_live_regs.c": 30,
     # gcc-torture compile: macro/argument-count stress files
     "limits-fnargs": 60,
     "limits-stringlit": 30,
@@ -738,21 +764,25 @@ def lines_match_with_float_tolerance(expected, actual, rel_tol):
     return True
 
 
-def _read_stack_size(session):
-    """Read the current stack size limit (in KB) from the target."""
-    session.write_command("ulimit -s")
-    lines = session.wait_for_prompt_except_logs()
-    for line in lines:
-        stripped = line.strip()
-        if stripped.isdigit():
-            return int(stripped)
-    return None
-
-
 def _set_stack_size(session, size_kb):
     """Set the stack size limit (in KB) on the target."""
     session.write_command(f"ulimit -s {size_kb}")
     session.wait_for_prompt_except_logs()
+
+
+def _restore_default_stack_size(session):
+    """Undo a `_set_stack_size` raise.
+
+    Always to DEFAULT_TARGET_STACK_KIB, never to the value `ulimit -s` read
+    before the raise. The shell runs on its own image's stack hint (toybox:
+    16 KiB), and any setrlimit marks the limit as explicit, so writing that
+    16 back makes every later exec inherit 16 KiB instead of taking its own
+    hint (exec_stack_limit in process_manager.zig). The native tcc declares
+    32 KiB; on 16 KiB it hit STKOF on ir_tests 198 -O1 and 711 -O2 in every
+    run after 119_random_stuff. At the default, exec takes the image hint
+    again, as on a fresh shell.
+    """
+    _set_stack_size(session, DEFAULT_TARGET_STACK_KIB)
 
 
 RETURNS_PATTERN = re.compile(r"^\[returns (\d+)\]$")
@@ -761,6 +791,11 @@ SHA256_LINE_PATTERN = re.compile(r"^(?P<digest>[0-9a-f]{64})(?:\s+.+)?$", re.IGN
 LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
 EXIT_MARKER_PREFIX = "__EXIT_STATUS__:"
 COMPILE_MARKER_PREFIX = "__COMPILE_STATUS__:"
+# Expected output above this many bytes is captured to a file on the device and
+# read back LARGE_OUTPUT_READBACK_LINES lines at a time (see compile_testcase).
+# Every test under it (largest ~7 KB) streams intact.
+LARGE_OUTPUT_READBACK_BYTES = 16 * 1024
+LARGE_OUTPUT_READBACK_LINES = 100
 temp_source_reuse_plan_key = pytest.StashKey()
 
 
@@ -895,6 +930,30 @@ IR_TESTS_FLOAT_TOLERANCE = {
 # callees with structs in registers, split and on the stack.
 IR_MULTI_FILE_SOURCES = {
     "abi_mix_main.c": ("abi_mix_main.c", "abi_mix_a.c", "abi_mix_b.c"),
+    # the strong definitions replacing the weak defaults live in the + file
+    "612_weak_default_not_inlined.c": ("612_weak_default_not_inlined.c", "612+_weak_default_not_inlined.c"),
+    "721_tu_function_caches.c": ("721_tu_function_caches.c", "721+_tu_function_caches.c"),
+    "851_weak_callee_modref.c": ("851_weak_callee_modref.c", "851+_weak_callee_modref.c"),
+    "bug_weak_inferred_noreturn.c": ("bug_weak_inferred_noreturn.c", "bug_weak_inferred_noreturn+.c"),
+    "bug_weak_pure_via_sret.c": ("bug_weak_pure_via_sret.c", "bug_weak_pure_via_sret+.c"),
+    "bug_func_write_summary_deref_param.c": ("bug_func_write_summary_deref_param.c", "bug_func_write_summary_deref_param+.c"),
+    # test_qemu.py test_regpair_extern_inline_gnu89 / test_regpair_asm_global_in_body
+    "bug_regpair_extern_inline.c": ("bug_regpair_extern_inline.c", "bug_regpair_extern_inline+.c"),
+    "bug_regpair_asm_global_in_body.c": ("bug_regpair_asm_global_in_body.c", "bug_regpair_asm_global_in_body+.c"),
+}
+
+
+# Extra flags for IR tests, mirroring how test_qemu.py builds them.
+IR_EXTRA_CFLAGS = {
+    # the GNU extern inline semantics the test exercises need gnu89 inline
+    "bug_regpair_extern_inline.c": ("-fgnu89-inline",),
+}
+
+
+# IR tests whose .expect is split into [TAG] sections, each built with -DTAG.
+IR_TAGGED_TESTS = {
+    "bug_union_cast_member_type_errors.c",
+    "bug_union_fam_init_shared_struct_type_errors.c",
 }
 
 
@@ -921,7 +980,25 @@ def build_ir_test_cases():
         if not os.path.exists(expect_path):
             continue
 
-        for test_id, cflags in _opt_level_variants(f"ir_tests/{filename}"):
+        if filename in IR_TAGGED_TESTS:
+            for tag, expectation in parse_tagged_expect_file(filename, ir_tests_path).items():
+                for test_id, cflags in _opt_level_variants(f"ir_tests/{filename}[{tag}]", (f"-D{tag}",)):
+                    test_cases.append(TccTestCase(
+                        test_id=test_id,
+                        name=filename,
+                        sources=(filename,),
+                        cflags=cflags,
+                        source_dir=ir_tests_path,
+                        expected_lines=tuple(expectation["lines"]),
+                        expected_exit_code=expectation["exit_code"],
+                        expected_compile_failure=expectation["expected_compile_failure"],
+                        expected_error_patterns=tuple(expectation["expected_error_patterns"]),
+                        compile_only=expectation.get("compile_only", False),
+                    ))
+            continue
+
+        for test_id, cflags in _opt_level_variants(f"ir_tests/{filename}",
+                                                   IR_EXTRA_CFLAGS.get(filename, ())):
             opt_level = cflags[0] if cflags else "-O0"
             test_cases.append(TccTestCase(
                 test_id=test_id,
@@ -932,6 +1009,7 @@ def build_ir_test_cases():
                 skip_reason=_native_skip_reason(Path(ir_tests_path) / filename),
                 xfail_reason=IR_TESTS_XFAIL.get((filename, opt_level)),
                 timeout=COMPILE_TIMEOUT_TESTS.get(filename),
+                compile_stack_kib=_compile_stack_kib(Path(ir_tests_path) / filename),
                 run_stack_kib=LARGE_STACK_TESTS.get(filename),
             ))
 
@@ -1055,8 +1133,8 @@ def load_expect_file(source_name, source_dir=None):
     return tuple(expected_lines), expected_exit_code
 
 
-def parse_tagged_expect_file(source_name):
-    expect = os.path.join(path, source_name.replace(".c", ".expect"))
+def parse_tagged_expect_file(source_name, base_dir=None):
+    expect = os.path.join(base_dir or path, source_name.replace(".c", ".expect"))
     assert os.path.exists(expect), f"expect file not found: {expect}"
 
     tags = {}
@@ -2295,6 +2373,9 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
 
         assert compile_status is not None, f"missing compile status in output: {compile_lines}"
 
+        write_results_line(testcase.test_id, timing.compile_ms if timing is not None else 0.0, compile_status,
+                           profile_lines, [line for line in filtered_compile_lines if line.startswith("PASS_TIME ")])
+
         expected_lines = testcase.expected_lines
         expected_exit_code = testcase.expected_exit_code
         if expected_lines is None:
@@ -2384,14 +2465,50 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
                 return True
             return False
 
-        session.write_command(f"{run_command}; echo {EXIT_MARKER_PREFIX}$?")
-        _t_execute = start_timer()
-        data_lines, run_aborted = session.wait_for_prompt_streaming(
-            _validate_run_line, timeout=testcase.timeout
-        )
-        if timing is not None:
-            timing.execute_ms = elapsed_ms(_t_execute)
-            attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
+        expected_output_bytes = sum(len(line) + 1 for line in runtime_expected_lines)
+        if expected_output_bytes > LARGE_OUTPUT_READBACK_BYTES:
+            # One uninterrupted burst this size loses bytes on the rig's UART
+            # bridge (bug_u64_zero_high_shift, 30 KB: chunks missing mid-line;
+            # the board's TX path blocks and never drops). Capture on the device
+            # and read it back in prompt-paced chunks, which arrive intact.
+            capture_path = f"{output_binary}.out"
+            cleanup_paths.append(capture_path)
+            session.write_command(
+                f"{run_command} > {shlex.quote(capture_path)}; echo {EXIT_MARKER_PREFIX}$?"
+            )
+            _t_execute = start_timer()
+            data_lines, run_aborted = session.wait_for_prompt_streaming(
+                _validate_run_line, timeout=testcase.timeout
+            )
+            if timing is not None:
+                timing.execute_ms = elapsed_ms(_t_execute)
+                attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
+            assert not run_aborted, run_state["reason"]
+            output_lines = []
+            # One chunk past the expected count, so extra output still fails.
+            last = len(runtime_expected_lines) + LARGE_OUTPUT_READBACK_LINES
+            for first in range(1, last + 1, LARGE_OUTPUT_READBACK_LINES):
+                end = first + LARGE_OUTPUT_READBACK_LINES - 1
+                command = f"sed -n '{first},{end}p' {shlex.quote(capture_path)}"
+                session.write_command(command)
+                output_lines.extend(
+                    line for line in session.wait_for_prompt_except_logs(timeout=COMPILE_TIMEOUT)
+                    if line != command
+                )
+            for line in output_lines:
+                if _validate_run_line(line):
+                    break
+            data_lines = output_lines + [line for line in data_lines if line.startswith(EXIT_MARKER_PREFIX)]
+            run_aborted = run_state["reason"] is not None
+        else:
+            session.write_command(f"{run_command}; echo {EXIT_MARKER_PREFIX}$?")
+            _t_execute = start_timer()
+            data_lines, run_aborted = session.wait_for_prompt_streaming(
+                _validate_run_line, timeout=testcase.timeout
+            )
+            if timing is not None:
+                timing.execute_ms = elapsed_ms(_t_execute)
+                attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
 
         assert not run_aborted, run_state["reason"]
 
@@ -2581,14 +2698,11 @@ def test_run_tcc_test_suite(request, testcase):
 
     progress = ProgressLine(testcase.test_id)
 
-    original_stack_size = None
     required_stack_kb = LARGE_STACK_TESTS.get(testcase.name)
     if required_stack_kb is not None:
         with record("setup_ms"):
-            original_stack_size = _read_stack_size(session)
             logger.info(
-                "Stack size for %s: current=%s, required=%s",
-                testcase.name, original_stack_size, required_stack_kb,
+                "Stack size for %s: required=%s", testcase.name, required_stack_kb,
             )
             _set_stack_size(session, required_stack_kb)
 
@@ -2600,9 +2714,9 @@ def test_run_tcc_test_suite(request, testcase):
         progress.finish("failed")
         raise
     finally:
-        if original_stack_size is not None:
+        if required_stack_kb is not None:
             with record("cleanup_ms"):
-                _set_stack_size(session, original_stack_size)
+                _restore_default_stack_size(session)
         end_case()
         timing_results.append(timing)
     progress.finish("ok")
@@ -2627,11 +2741,9 @@ def test_run_ir_test_suite(request, testcase):
 
     progress = ProgressLine(testcase.test_id)
 
-    original_stack_size = None
     required_stack_kb = testcase.run_stack_kib
     if required_stack_kb is not None:
         with record("setup_ms"):
-            original_stack_size = _read_stack_size(session)
             _set_stack_size(session, required_stack_kb)
 
     try:
@@ -2642,9 +2754,9 @@ def test_run_ir_test_suite(request, testcase):
         progress.finish("failed")
         raise
     finally:
-        if original_stack_size is not None:
+        if required_stack_kb is not None:
             with record("cleanup_ms"):
-                _set_stack_size(session, original_stack_size)
+                _restore_default_stack_size(session)
         end_case()
         timing_results.append(timing)
     progress.finish("ok")
@@ -2709,11 +2821,9 @@ def test_run_gcc_execute_torture_suite(request, testcase):
     # (large main() locals, STACK_SIZE-sized arrays). The violation is only
     # detected when an interrupt stacks while SP is below PSPLIM, so without
     # the raise these fail intermittently (more often under parallel load).
-    original_stack_size = None
     required_stack_kb = testcase.run_stack_kib
     if required_stack_kb is not None:
         with record("setup_ms"):
-            original_stack_size = _read_stack_size(session)
             _set_stack_size(session, required_stack_kb)
 
     try:
@@ -2724,9 +2834,9 @@ def test_run_gcc_execute_torture_suite(request, testcase):
         progress.finish("failed")
         raise
     finally:
-        if original_stack_size is not None:
+        if required_stack_kb is not None:
             with record("cleanup_ms"):
-                _set_stack_size(session, original_stack_size)
+                _restore_default_stack_size(session)
         end_case()
         timing_results.append(timing)
     progress.finish("ok")

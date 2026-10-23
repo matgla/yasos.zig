@@ -27,6 +27,7 @@ pub const Header = c.YaffHeader;
 
 /// Machine requirements of the image, found at Header.arch_section_offset.
 pub const ArchSection = c.YaffArchSection;
+pub const arch_flag_exact_thumb: u8 = c.YAFF_ARCH_FLAG_EXACT_THUMB;
 
 /// The only on-disk layout this loader understands. An image written by an
 /// older or newer toolchain is refused rather than guessed at.

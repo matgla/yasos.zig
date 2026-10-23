@@ -523,6 +523,47 @@ def test_remote_connect_script_survives_bash():
     assert "command not found" not in completed.stderr
 
 
+
+def test_record_tty_session_writes_keys_and_output(tmp_path):
+    """Both directions land in the cast, in order, and the session still works."""
+    import json
+
+    keys_r, keys_w = os.pipe()
+    screen_r, screen_w = os.pipe()
+    os.write(keys_w, b"hello\r")
+    os.close(keys_w)
+    cast = tmp_path / "sessions" / "s.cast"
+    status = remote_smoke_tui.record_tty_session(
+        ["sh", "-c", 'read x; echo "got $x"'], cast, title="t",
+        stdin_fd=keys_r, stdout_fd=screen_w)
+    os.close(screen_w)
+    shown = os.read(screen_r, 65536).decode()
+    os.close(keys_r)
+    os.close(screen_r)
+
+    assert status == 0
+    assert "got hello" in shown
+    header, *events = [json.loads(line) for line in cast.read_text(encoding="utf-8").splitlines()]
+    assert header["version"] == 2 and header["title"] == "t"
+    assert [e[2] for e in events if e[1] == "i"] == ["hello\r"]
+    printed = "".join(e[2] for e in events if e[1] == "o")
+    assert printed == shown
+    assert [e[0] for e in events] == sorted(e[0] for e in events)
+
+
+def test_connect_with_record_goes_through_the_recorder(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(remote_smoke_tui, "record_tty_session",
+                        lambda cmd, path, **kw: seen.update(cmd=cmd, path=path) or 0)
+    monkeypatch.setattr(remote_smoke_tui, "run_remote_tty_script",
+                        lambda *a: pytest.fail("the plain console ran instead"))
+    config = {"serial_device": "/dev/ttyACM0", "ssh_port": 22, "ssh_identity_file": "",
+              "ssh_target": "pi"}
+    remote_smoke_tui.run_remote_connect(config, record=tmp_path / "s.cast")
+    assert seen["path"] == tmp_path / "s.cast"
+    assert seen["cmd"][:2] == ["ssh", "-t"] and "miniterm" in seen["cmd"][-1]
+
+
 @pytest.fixture
 def colour_off():
     """Leave the module's colour flag as it was; every test here sets it."""

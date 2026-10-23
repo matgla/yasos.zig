@@ -9,6 +9,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from smoke.kernel_profile import KernelProfile, parse_lines, parse_windows, window
 
 
+def test_cache_windows_keep_load_separate_and_preserve_dump_before_reset():
+    lines = [
+        "[ERR][tprof] cacheprof pid=3 phase=load romfs_hits=2 romfs_misses=1 romfs_overflow=0\n",
+        "[ERR][tprof] cacheprof pid=3 phase=run fat_hits=8 fat_misses=2 fat_bypass_requests=1 fat_bypass_sectors=4\n",
+        # tcc's perf dump, then the remainder reported at exit.
+        "[ERR][tprof] cacheprof pid=3 phase=run ext4_hits=5 ext4_misses=1 ext4_read_requests=2 ext4_read_sectors=8 ext4_cached_sectors=2\n",
+        "[ERR][tprof] cacheprof pid=3 phase=run ext4_hits=1 ext4_misses=0 ext4_read_requests=0 ext4_read_sectors=0 ext4_cached_sectors=0\n",
+        "ordinary output cacheprof pid=3 phase=run fat_hits=999\n",
+    ]
+    profile = parse_lines(lines)
+    assert profile.caches["ext4_hits"] == 6
+    assert profile.caches["fat_hits"] == 8
+    assert profile.caches["ext4_read_sectors"] - profile.caches["ext4_cached_sectors"] == 6
+    assert profile.load_caches == {"romfs_hits": 2, "romfs_misses": 1, "romfs_overflow": 0}
+    assert "romfs_hits" not in profile.caches
+    combined = KernelProfile().add(profile).add(profile)
+    assert combined.to_dict()["caches"]["ext4_hits"] == 12
+    assert combined.to_dict()["load_caches"]["romfs_hits"] == 4
+
+
+def test_old_transcripts_have_no_cache_measurements():
+    assert parse_lines([]).to_dict()["caches"] == {}
+
+
 COMPILE_MARKER = "__COMPILE_STATUS__:"
 EXIT_MARKER = "__EXIT_STATUS__:"
 

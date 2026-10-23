@@ -25,6 +25,7 @@ import pytest
 
 from .conftest import session_key
 from .kernel_profile import (
+    CACHEPROF_RE,
     DISKPROF_RE,
     OPENPROF_RE,
     POOLCLEAR_RE,
@@ -78,7 +79,17 @@ def _profile_since(session, offset):
     clear = None
     opens = None
     disks = None
+    caches_by_pid = {}
     for line in _lines_since(session, offset):
+        match = CACHEPROF_RE.search(line)
+        if match:
+            if match.group("phase") == "load":
+                continue
+            counters = caches_by_pid.setdefault(int(match.group("pid")), {})
+            for item in match.group("counts").split():
+                name, value = item.split("=")
+                counters[name] = counters.get(name, 0) + int(value)
+            continue
         match = SYSPROF_RE.search(line)
         if match:
             sysprof = match
@@ -109,6 +120,7 @@ def _profile_since(session, offset):
         for key, value in sysprof.groupdict().items()
     }
     profile["run_us"] = int(run.group("us")) if run is not None else 0
+    profile["caches"] = caches_by_pid.get(profile["pid"], {})
     profile["pool"] = (
         {key: int(value) for key, value in pool.groupdict().items()}
         if pool is not None
@@ -157,6 +169,16 @@ def _report(label, profile):
         + (f"   dropped {profile['dropped']}" if profile["dropped"] else "")
     )
     print(f"  {'':<28}   top: {_format_top(profile['top'])}")
+    caches = profile.get("caches", {})
+    for backend in ("fat", "romfs", "ext4"):
+        values = {key: value for key, value in caches.items() if key.startswith(backend + "_")}
+        if values:
+            hits = values.get(backend + "_hits", 0)
+            misses = values.get(backend + "_misses", 0)
+            rate = f"{100 * hits / (hits + misses):.1f}%" if hits + misses else "n/a"
+            print(f"  {'':<28}   {backend} cache: {rate} hit; " + " ".join(
+                f"{key.removeprefix(backend + '_')}={value}" for key, value in values.items()
+            ))
     disks = profile.get("disks")
     if disks and (disks["writes"] or disks["reads"]):
         print(

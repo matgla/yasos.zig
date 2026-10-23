@@ -23,4 +23,5 @@ comptime {
     _ = @import("file_system_header.zig");
     _ = @import("file_header.zig");
     _ = @import("romfs.zig");
+    _ = @import("lookup_cache.zig");
 }

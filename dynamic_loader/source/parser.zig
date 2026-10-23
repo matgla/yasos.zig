@@ -35,6 +35,56 @@ const LocalRelocations = relocation.RelocationTable(relocation.LocalRelocation);
 const DataRelocations = relocation.RelocationTable(relocation.DataRelocation);
 const CopyRelocations = relocation.RelocationTable(relocation.CopyRelocation);
 
+/// A file-backed image; all parser pointers must stay within these bytes.
+pub const Image = []align(4) const u8;
+pub const ValidationError = error{InvalidImageLayout};
+
+fn span_end(start: usize, count: usize, stride: usize, limit: usize) ValidationError!usize {
+    if (start > limit or (stride != 0 and count > (limit - start) / stride)) return error.InvalidImageLayout;
+    return start + count * stride;
+}
+
+fn names_end(image: Image, start: usize, end: usize, count: usize, prefix: usize, alignment: usize, lookup: ?[]align(1) const u16) ValidationError!usize {
+    var at = start;
+    if (end > image.len or start > end or count > (end - start) / (prefix + 1)) return error.InvalidImageLayout;
+    for (0..count) |i| {
+        if (lookup) |offsets| {
+            if (offsets[i] != at - start) return error.InvalidImageLayout;
+        }
+        const name_at = try span_end(at, 1, prefix, end);
+        const len = std.mem.indexOfScalar(u8, image[name_at..end], 0) orelse return error.InvalidImageLayout;
+        const next = try span_end(name_at, len + 1, 1, end);
+        const padding = (0 -% next) & (alignment - 1);
+        at = try span_end(next, padding, 1, end);
+        if (at > end) return error.InvalidImageLayout;
+    }
+    return at;
+}
+
+fn validate_hash(image: Image, start: usize, end: usize, symbols: usize) ValidationError!void {
+    if (start % 4 != 0) return error.InvalidImageLayout;
+    _ = try span_end(start, 2, 4, end);
+    const words: [*]align(1) const u32 = @ptrCast(image.ptr + start);
+    const buckets = words[0];
+    const chains = words[1];
+    if (buckets == 0 or chains != symbols) return error.InvalidImageLayout;
+    const chain_at = try span_end(start + 8, buckets, 4, end);
+    _ = try span_end(chain_at, chains, 4, end);
+    for (words[2..][0..buckets]) |index| {
+        if (index != 0 and index >= symbols) return error.InvalidImageLayout;
+    }
+    const chain: [*]align(1) const u32 = @ptrCast(image.ptr + chain_at);
+    for (chain[0..chains]) |index| {
+        if (index != 0 and index >= symbols) return error.InvalidImageLayout;
+    }
+    for (words[2..][0..buckets]) |first| {
+        var index = first;
+        var remaining = symbols;
+        while (index != 0 and remaining != 0) : (remaining -= 1) index = chain[index];
+        if (index != 0) return error.InvalidImageLayout;
+    }
+}
+
 pub const Parser = struct {
     name: []const u8,
     imported_libraries: DependencyTable,
@@ -54,6 +104,69 @@ pub const Parser = struct {
     imported_symbols_hash_table: YaffHashTable,
     exported_symbols_hash_table: YaffHashTable,
 
+    /// Validate the writer's layout once per immutable image. Required before create.
+    pub fn validate(image: Image) ValidationError!void {
+        if (image.len < @sizeOf(Header)) return error.InvalidImageLayout;
+        const h: *const Header = @ptrCast(image.ptr);
+        const alignment: usize = h.alignment;
+        if (!std.math.isPowerOfTwo(alignment) or alignment < 4 or
+            h.data_alignment == 0 or h.text_offset > image.len or h.const_rodata_length > h.data_length or
+            h.got_length % 8 != 0 or h.got_plt_length != 0 or h.arch_section_offset < @sizeOf(Header) + 1) return error.InvalidImageLayout;
+        const offsets = [_]usize{ h.arch_section_offset, h.imported_libraries_offset, h.relocations_offset, h.imported_symbols_offset, h.exported_symbols_offset, h.imported_symbols_lookup_offset, h.exported_symbols_lookup_offset, h.imported_symbols_hash_table_offset, h.exported_symbols_hash_table_offset, h.text_offset };
+        var previous: usize = @sizeOf(Header);
+        for (offsets, 0..) |offset, i| {
+            if (offset < previous or offset > h.text_offset or offset % @as(usize, if (i == 6) 2 else 4) != 0) return error.InvalidImageLayout;
+            previous = offset;
+        }
+        const name_len = std.mem.indexOfScalar(u8, image[@sizeOf(Header)..h.arch_section_offset], 0) orelse return error.InvalidImageLayout;
+        _ = name_len;
+        const Arch = @import("header.zig").ArchSection;
+        _ = try span_end(h.arch_section_offset, 1, @sizeOf(Arch), h.imported_libraries_offset);
+        const arch: *const Arch = @ptrCast(@alignCast(image.ptr + h.arch_section_offset));
+        if (arch.size < @sizeOf(Arch)) return error.InvalidImageLayout;
+        _ = try span_end(h.arch_section_offset, arch.size, 1, h.imported_libraries_offset);
+        if (try names_end(image, h.imported_libraries_offset, h.relocations_offset, h.external_libraries_amount, 0, alignment, null) != h.relocations_offset) return error.InvalidImageLayout;
+        var rel_end: usize = h.relocations_offset;
+        rel_end = try span_end(rel_end, h.symbol_table_relocations_amount, @sizeOf(relocation.SymbolTableRelocation), h.imported_symbols_offset);
+        rel_end = try span_end(rel_end, h.local_relocations_amount, @sizeOf(relocation.LocalRelocation), h.imported_symbols_offset);
+        rel_end = try span_end(rel_end, h.data_relocations_amount, @sizeOf(relocation.DataRelocation), h.imported_symbols_offset);
+        rel_end = try span_end(rel_end, h.copy_relocations_amount, @sizeOf(relocation.CopyRelocation), h.imported_symbols_offset);
+        if (rel_end != h.imported_symbols_offset) return error.InvalidImageLayout;
+        _ = try span_end(h.imported_symbols_lookup_offset, h.imported_symbols_amount, 2, h.exported_symbols_lookup_offset);
+        _ = try span_end(h.exported_symbols_lookup_offset, h.exported_symbols_amount, 2, h.imported_symbols_hash_table_offset);
+        const imported_lookup: [*]align(1) const u16 = @ptrCast(image.ptr + h.imported_symbols_lookup_offset);
+        const exported_lookup: [*]align(1) const u16 = @ptrCast(image.ptr + h.exported_symbols_lookup_offset);
+        if (try names_end(image, h.imported_symbols_offset, h.exported_symbols_offset, h.imported_symbols_amount, @sizeOf(Symbol), alignment, imported_lookup[0..h.imported_symbols_amount]) != h.exported_symbols_offset) return error.InvalidImageLayout;
+        if (try names_end(image, h.exported_symbols_offset, h.imported_symbols_lookup_offset, h.exported_symbols_amount, @sizeOf(Symbol), alignment, exported_lookup[0..h.exported_symbols_amount]) != h.imported_symbols_lookup_offset) return error.InvalidImageLayout;
+        try validate_hash(image, h.imported_symbols_hash_table_offset, h.exported_symbols_hash_table_offset, h.imported_symbols_amount);
+        try validate_hash(image, h.exported_symbols_hash_table_offset, h.text_offset, h.exported_symbols_amount);
+        var payload_end: usize = h.text_offset;
+        for ([_]usize{ h.code_length, h.init_length, h.plt_length, h.data_length, h.got_length, h.got_plt_length }) |length| {
+            payload_end = try span_end(payload_end, length, 1, image.len);
+        }
+        const data_bss = std.math.add(usize, h.data_length, h.bss_length) catch return error.InvalidImageLayout;
+        const region_length = std.math.add(usize, data_bss, h.got_length) catch return error.InvalidImageLayout;
+        _ = std.math.add(usize, region_length, h.data_alignment - 1) catch return error.InvalidImageLayout;
+        // Bounded chains are checked during lookup too, so malformed cycles cannot hang.
+        const parser = create(h);
+        for (parser.symbol_table_relocations.relocations) |rel| {
+            const count = if (rel.is_exported_symbol != 0) h.exported_symbols_amount else h.imported_symbols_amount;
+            if (rel.index >= h.got_length / 8 or rel.symbol_index >= count) return error.InvalidImageLayout;
+        }
+        for (parser.local_relocations.relocations) |rel| {
+            if (rel.index >= h.got_length / 8 or rel.section == 3) return error.InvalidImageLayout;
+        }
+        for (parser.data_relocations.relocations) |rel| {
+            if (rel.to < h.const_rodata_length or rel.to % 4 != 0) return error.InvalidImageLayout;
+            _ = try span_end(rel.to, 1, 4, data_bss);
+            if (rel.section == 3 and rel.from >= h.got_length / 8) return error.InvalidImageLayout;
+        }
+        for (parser.copy_relocations.relocations) |rel| {
+            _ = try span_end(rel.bss_offset, rel.size, 1, h.bss_length);
+            if (rel.symbol_index >= h.imported_symbols_amount) return error.InvalidImageLayout;
+        }
+    }
+
     pub fn create(header: *const Header) Parser {
         const name: []const u8 = std.mem.span(@as([*:0]const u8, @ptrFromInt(@intFromPtr(header) + @sizeOf(Header))));
         // The table no longer follows the name directly -- the architecture
@@ -66,7 +179,9 @@ pub const Parser = struct {
             .lookup = &[_]u16{},
         };
 
-        const symbol_table_array: [*]align(4) relocation.SymbolTableRelocation = @ptrFromInt(imported_libraries.address() + imported_libraries.size());
+        const symbol_table_start = @intFromPtr(header) + header.relocations_offset;
+
+        const symbol_table_array: [*]align(4) relocation.SymbolTableRelocation = @ptrFromInt(symbol_table_start);
 
         const symbol_table_relocations = SymbolTableRelocations{
             .relocations = symbol_table_array[0..header.symbol_table_relocations_amount],
@@ -121,19 +236,22 @@ pub const Parser = struct {
             exported_symbols_hash_table.chain = exported_hash_table_data[2 + exported_hash_table_data[0] ..][0..exported_hash_table_data[1]];
         }
 
+        const imported_symbols_start = @intFromPtr(header) + header.imported_symbols_offset;
+
         const imported_array = SymbolTable{
             .number_of_items = header.imported_symbols_amount,
             .alignment = header.alignment,
-            .root = @as(*const Symbol, @ptrFromInt(copy_relocations.address() + copy_relocations.size())),
+            .root = @as(*const Symbol, @ptrFromInt(imported_symbols_start)),
             .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.imported_symbols_lookup_offset))[0..header.imported_symbols_amount],
             .hashtable = if (header.imported_symbols_amount > 0) imported_symbols_hash_table else null,
         };
 
-        const imported_array_size = imported_array.size();
+        const exported_start = @intFromPtr(header) + header.exported_symbols_offset;
+
         const exported_array = SymbolTable{
             .number_of_items = header.exported_symbols_amount,
             .alignment = header.alignment,
-            .root = @as(*const Symbol, @ptrFromInt(imported_array.address() + imported_array_size)),
+            .root = @as(*const Symbol, @ptrFromInt(exported_start)),
             .lookup = @as([*]u16, @ptrFromInt(@intFromPtr(header) + header.exported_symbols_lookup_offset))[0..header.exported_symbols_amount],
             .hashtable = if (header.exported_symbols_amount > 0) exported_symbols_hash_table else null,
         };
@@ -182,11 +300,11 @@ pub const Parser = struct {
         }
         log.debug("local relocations: {d}", .{self.local_relocations.relocations.len});
         for (self.local_relocations.relocations) |rel| {
-            log.debug("  index: 0x{x}, target_offset: 0x{x}, section: {s}", .{ rel.index, rel.target_offset, @tagName(@as(Section, @enumFromInt(rel.section))) });
+            log.debug("  index: 0x{x}, target_offset: 0x{x}, section: {s}", .{ rel.index, rel.target_offset, @tagName(@as(Section, @fromBackingInt(@intCast(rel.section)))) });
         }
         log.debug("data relocations: {d}", .{self.data_relocations.relocations.len});
         for (self.data_relocations.relocations) |rel| {
-            log.debug("  from: 0x{x}, to: 0x{x}, section: {s}", .{ rel.from, rel.to, @tagName(@as(Section, @enumFromInt(rel.section))) });
+            log.debug("  from: 0x{x}, to: 0x{x}, section: {s}", .{ rel.from, rel.to, @tagName(@as(Section, @fromBackingInt(@intCast(rel.section)))) });
         }
         {
             log.debug("imported symbols: {d}", .{self.imported_symbols.number_of_items});
@@ -254,3 +372,111 @@ pub const Parser = struct {
         return ptr[0..self.header.init_length];
     }
 };
+
+const testing = std.testing;
+
+// The two ways `create` finds a table have to agree: the offsets the writer
+// records, and the addresses implied by chaining the sizes. This is the small
+// readable case behind the whole-rootfs precache byte-compare the gate runs.
+// The image is laid out exactly as `tcc_yaff_write_*` lays a real one out --
+// name, architecture section, dependency table, the relocation block, both
+// symbol tables (each starting with the empty-name entry the writer emits),
+// the lookup arrays and the hash tables.
+test "Parser.ReadsTablesFromTheHeaderOffsets" {
+    // The header is the first thing in a YAFF image and every table offset is
+    // measured from it, so the test keeps one contiguous buffer: `header` at
+    // offset 0, the image bytes from @sizeOf(Header) on.
+    const TestImage = extern struct {
+        header: Header,
+        bytes: [256]u8,
+    };
+    const at: u32 = @sizeOf(Header);
+
+    var image: TestImage align(4) = std.mem.zeroes(TestImage);
+    image.header.data_alignment = 4;
+    @memset(&image.bytes, 0);
+
+    image.header.alignment = 4;
+    image.header.arch_section_offset = at + 4;
+    image.header.got_length = 8;
+    image.bytes[4] = @sizeOf(@import("header.zig").ArchSection);
+    image.header.external_libraries_amount = 1;
+    image.header.symbol_table_relocations_amount = 1;
+    image.header.local_relocations_amount = 0;
+    image.header.data_relocations_amount = 0;
+    image.header.copy_relocations_amount = 0;
+    image.header.imported_symbols_amount = 2;
+    image.header.exported_symbols_amount = 2;
+    image.header.imported_libraries_offset = at + 16;
+    image.header.relocations_offset = at + 24;
+    image.header.imported_symbols_offset = at + 32;
+    image.header.exported_symbols_offset = at + 48;
+    image.header.imported_symbols_lookup_offset = at + 64;
+    image.header.exported_symbols_lookup_offset = at + 68;
+    image.header.imported_symbols_hash_table_offset = at + 72;
+    image.header.exported_symbols_hash_table_offset = at + 100;
+    image.header.text_offset = at + 128;
+
+    @memcpy(image.bytes[0..4], "lib\x00");
+    // at+4..at+16 is the architecture section, which `create` does not read.
+    @memcpy(image.bytes[16..24], "libc\x00\x00\x00\x00");
+    // One symbol-table relocation at at+24; no local, data or copy relocations.
+    image.bytes[24] = 1;
+
+    // Both symbol tables start with the empty-name entry, then one symbol whose
+    // offset field carries 7 -- enough to tell the two entries apart.
+    const sym: Symbol = .{ .section = 0, .weak = 0, .offset = 7 };
+    @memcpy(image.bytes[40..44], std.mem.asBytes(&sym));
+    @memcpy(image.bytes[44..48], "abc\x00");
+    @memcpy(image.bytes[56..60], std.mem.asBytes(&sym));
+    @memcpy(image.bytes[60..64], "xyz\x00");
+
+    // The lookup arrays are byte offsets into the table, entry 0 first.
+    const imported_lookup: [2]u16 align(4) = .{ 0, 8 };
+    @memcpy(image.bytes[64..68], std.mem.asBytes(&imported_lookup));
+    const exported_lookup: [2]u16 align(4) = .{ 0, 8 };
+    @memcpy(image.bytes[68..72], std.mem.asBytes(&exported_lookup));
+
+    // The hash table the writer would build for these two names: the empty
+    // name is unreachable (its bucket value is the 0 terminator), "abc" and
+    // "xyz" both land on bucket 0 -> table index 1.
+    const imported_hash: [7]u32 align(4) = .{ 3, 2, 1, 0, 0, 0, 0 };
+    @memcpy(image.bytes[72..100], std.mem.asBytes(&imported_hash));
+    const exported_hash: [7]u32 align(4) = .{ 3, 2, 1, 0, 0, 0, 0 };
+    @memcpy(image.bytes[100..128], std.mem.asBytes(&exported_hash));
+
+    const by_offset = Parser.create(&image.header);
+    const base = @intFromPtr(&image.header);
+
+    try Parser.validate(std.mem.asBytes(&image));
+    try testing.expectEqual(@as(usize, at + 32), by_offset.imported_symbols.address() - base);
+    try testing.expectEqual(@as(usize, at + 48), by_offset.exported_symbols.address() - base);
+    try testing.expectEqualStrings("abc", by_offset.imported_symbols.element_by_name("abc").?.name());
+    try testing.expectEqualStrings("xyz", by_offset.exported_symbols.element_at(1).?.name());
+
+    // Missing/corrupt fields are errors, never an unbounded fallback.
+    for ([_]u32{ 0, 4, at + 25, 0xffffffff }) |offset| {
+        var bad: TestImage align(4) = image;
+        bad.header.relocations_offset = offset;
+        try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&bad)));
+    }
+    var bad: TestImage align(4) = image;
+    bad.header.symbol_table_relocations_amount = 0xffffffff;
+    try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&bad)));
+    bad = image;
+    @memset(bad.bytes[44..48], 'x');
+    try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&bad)));
+    bad = image;
+    bad.header.data_alignment = 0;
+    try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&bad)));
+    bad = image;
+    bad.bytes[96] = 1; // hash chain[1] points back to itself
+    try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&bad)));
+    bad = image;
+    bad.bytes[28] = 0xff; // symbol index outside its table
+    try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&bad)));
+    bad = image;
+    bad.header.code_length = 0xffffffff;
+    try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&bad)));
+    try testing.expectError(error.InvalidImageLayout, Parser.validate(std.mem.asBytes(&image)[0 .. at + 127]));
+}
