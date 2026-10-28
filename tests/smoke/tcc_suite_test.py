@@ -796,6 +796,9 @@ COMPILE_MARKER_PREFIX = "__COMPILE_STATUS__:"
 # Every test under it (largest ~7 KB) streams intact.
 LARGE_OUTPUT_READBACK_BYTES = 16 * 1024
 LARGE_OUTPUT_READBACK_LINES = 100
+# Reads of one chunk before its mismatch is believed: the rig's bridge still
+# drops the odd byte of a 4 KB chunk, a miscompile prints the same line each time.
+LARGE_OUTPUT_READBACK_ATTEMPTS = 3
 temp_source_reuse_plan_key = pytest.StashKey()
 
 
@@ -2433,6 +2436,13 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
         # times out (which buffers megabytes of garbage first).
         run_state = {"index": 0, "reason": None}
 
+        def _run_line_matches(expected_line, line):
+            if use_float_tolerance:
+                return lines_match_with_float_tolerance(
+                    expected_line, line, FLOAT_RELATIVE_TOLERANCE
+                )
+            return expected_line in line
+
         def _validate_run_line(line):
             if line.startswith(EXIT_MARKER_PREFIX):
                 return False
@@ -2440,13 +2450,7 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
             if index < len(runtime_expected_lines):
                 expected_line = runtime_expected_lines[index]
                 run_state["index"] = index + 1
-                if use_float_tolerance:
-                    matched = lines_match_with_float_tolerance(
-                        expected_line, line, FLOAT_RELATIVE_TOLERANCE
-                    )
-                else:
-                    matched = expected_line in line
-                if not matched:
+                if not _run_line_matches(expected_line, line):
                     run_state["reason"] = (
                         f"expected '{expected_line}' in output, got '{line}'"
                     )
@@ -2470,7 +2474,10 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
             # One uninterrupted burst this size loses bytes on the rig's UART
             # bridge (bug_u64_zero_high_shift, 30 KB: chunks missing mid-line;
             # the board's TX path blocks and never drops). Capture on the device
-            # and read it back in prompt-paced chunks, which arrive intact.
+            # and compare its sha256 with the expected output; only on a
+            # mismatch read it back in prompt-paced chunks, re-reading a chunk
+            # that does not match (prompt pacing alone still lost bytes, CI
+            # run 40683984088).
             capture_path = f"{output_binary}.out"
             cleanup_paths.append(capture_path)
             session.write_command(
@@ -2484,17 +2491,31 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
                 timing.execute_ms = elapsed_ms(_t_execute)
                 attach_loader_timing(timing, getattr(session, "log_path", ""), output_binary)
             assert not run_aborted, run_state["reason"]
-            output_lines = []
-            # One chunk past the expected count, so extra output still fails.
-            last = len(runtime_expected_lines) + LARGE_OUTPUT_READBACK_LINES
-            for first in range(1, last + 1, LARGE_OUTPUT_READBACK_LINES):
-                end = first + LARGE_OUTPUT_READBACK_LINES - 1
-                command = f"sed -n '{first},{end}p' {shlex.quote(capture_path)}"
-                session.write_command(command)
-                output_lines.extend(
-                    line for line in session.wait_for_prompt_except_logs(timeout=COMPILE_TIMEOUT)
-                    if line != command
-                )
+            expected_digest = hashlib.sha256(
+                "".join(line + "\n" for line in runtime_expected_lines).encode()
+            ).hexdigest()
+            if _get_remote_hash_uncounted(capture_path, session) == expected_digest:
+                output_lines = list(runtime_expected_lines)
+            else:
+                output_lines = []
+                # One chunk past the expected count, so extra output still fails.
+                last = len(runtime_expected_lines) + LARGE_OUTPUT_READBACK_LINES
+                for first in range(1, last + 1, LARGE_OUTPUT_READBACK_LINES):
+                    end = first + LARGE_OUTPUT_READBACK_LINES - 1
+                    expected_chunk = runtime_expected_lines[first - 1:end]
+                    command = f"sed -n '{first},{end}p' {shlex.quote(capture_path)}"
+                    for _attempt in range(LARGE_OUTPUT_READBACK_ATTEMPTS):
+                        session.write_command(command)
+                        chunk = [
+                            line for line in session.wait_for_prompt_except_logs(timeout=COMPILE_TIMEOUT)
+                            if line != command
+                        ]
+                        if len(chunk) == len(expected_chunk) and all(
+                            _run_line_matches(expected_line, line)
+                            for expected_line, line in zip(expected_chunk, chunk)
+                        ):
+                            break
+                    output_lines.extend(chunk)
             for line in output_lines:
                 if _validate_run_line(line):
                     break
