@@ -161,10 +161,40 @@ fn configureCmake(b: *std.Build) ![]const u8 {
 
         const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
         std.log.info("{s}", .{configure_project});
+        try relativizeConfigAutogen(b, cmake_binary_dir);
         return cmake_binary_dir;
     };
 
+    try relativizeConfigAutogen(b, cmake_binary_dir);
     return cmake_binary_dir;
+}
+
+// cmake writes the board and CMSIS headers into config_autogen.h by absolute
+// path, so a copy of the tree -- the kernel built on the device from
+// scripts/kernel_tcc's plan -- read this checkout's headers, or none at all.
+// Relative to the header itself they are the same files wherever the tree is.
+fn relativizeConfigAutogen(b: *std.Build, cmake_binary_dir: []const u8) !void {
+    const io = b.graph.io;
+    const header_dir = b.pathJoin(&.{ cmake_binary_dir, "generated", "pico_base", "pico" });
+    const header = b.pathJoin(&.{ header_dir, "config_autogen.h" });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, header, b.allocator, .limited(1 << 20)) catch return;
+    const cwd = try std.process.currentPathAlloc(io, b.allocator);
+    var out: std.ArrayList(u8) = .empty;
+    var changed = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(b.allocator, '\n');
+        first = false;
+        const prefix = "#include \"/";
+        if (std.mem.startsWith(u8, line, prefix) and std.mem.endsWith(u8, line, "\"")) {
+            const target = line[prefix.len - 1 .. line.len - 1];
+            const rel = try std.fs.path.relativeAlloc(b.allocator, cwd, null, header_dir, target);
+            try out.print(b.allocator, "#include \"{s}\"", .{rel});
+            changed = true;
+        } else try out.appendSlice(b.allocator, line);
+    }
+    if (changed) try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = header, .data = out.items });
 }
 
 // The C port of the SDK's pioasm (apps/pioasm), built for this machine. The

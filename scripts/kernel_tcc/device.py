@@ -77,7 +77,9 @@ class Plan:
         self.commands = [self._command(cmd) for cmd in data["commands"]]
 
     def _inside(self, p):
-        return os.path.normpath(p).startswith(str(self.root) + os.sep)
+        # The repository itself too: -I<repository> is "." on the device.
+        p = os.path.normpath(p)
+        return p == str(self.root) or p.startswith(str(self.root) + os.sep)
 
     def dev(self, p):
         """Device path, relative to the build directory, of host path p."""
@@ -99,7 +101,13 @@ class Plan:
             if kind == "dep":
                 deps.append(path)
                 continue
-            argv.append(prefix + self.dev(path))
+            dev = self.dev(path)
+            # The host build names its inputs "./<path>", and an object keeps
+            # the name it was compiled from (STT_FILE): spelled otherwise, every
+            # output differs from the host's in its string table.
+            if kind == "in" and not dev.startswith(("ext/", "/")):
+                dev = "./" + dev
+            argv.append(prefix + dev)
             if kind == "in":
                 inputs.append(path)
             elif kind == "out":
