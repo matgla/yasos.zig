@@ -41,9 +41,17 @@ var memory_layout: [3]MemoryInfo = [_]MemoryInfo{
     },
 };
 
+var mapped = false;
+
 pub const MemoryStub = struct {
     pub fn get_memory_layout(self: MemoryStub) []const MemoryInfo {
         _ = self;
+        // One mapping for the whole test binary. A Debug alloc fills what it returns, so
+        // each mapping is 130 MB of real memory that nothing frees, and this is called
+        // for every process pool and every lock or atomic that checks its placement.
+        if (mapped) return &memory_layout;
+        mapped = true;
+
         const allocator = std.heap.page_allocator;
         memory_layout[0].size = 0x1000 * 256;
         const kernel_ram = allocator.alloc(u8, memory_layout[0].size) catch unreachable;
@@ -53,7 +61,7 @@ pub const MemoryStub = struct {
         const user_ram = allocator.alloc(u8, memory_layout[1].size) catch unreachable;
         memory_layout[1].start_address = @intFromPtr(user_ram.ptr);
 
-        memory_layout[2].size = 0x1000 * 0x1000 * 8; // 8MB PSRAM
+        memory_layout[2].size = 0x1000 * 0x1000 * 8; // 128 MB PSRAM
         const psram = allocator.alignedAlloc(u8, .@"16", memory_layout[2].size) catch unreachable;
         memory_layout[2].start_address = @intFromPtr(psram.ptr);
 
