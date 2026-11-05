@@ -463,7 +463,10 @@ pub const ProcessMemoryPool = struct {
                 if (self.reserve_pages(number_of_pages, pid, source)) |reserved| return reserved;
             }
         }
-        if (source != .heap and source != .heap_slow and source != .heap_fast) return null;
+        // Not for .heap_fast: fast SRAM is asked for opportunistically (tcc's IR
+        // arena) and the caller falls back to the slow tier. Swapping for it
+        // wrote make out and back for every compile, for nothing.
+        if (source != .heap and source != .heap_slow) return null;
         const swap = swap_hook orelse return null;
         while (swap(bytes) != 0) {
             if (self.reserve_pages(number_of_pages, pid, source)) |reserved| return reserved;
@@ -512,10 +515,10 @@ pub const ProcessMemoryPool = struct {
                 count += 1;
             }
         }
-        log.warn("pool full: pid {d} asked {d} KiB; free {d}+{d} KiB, longest run {d}+{d} KiB", .{
+        log.err("pool full: pid {d} asked {d} KiB; free {d}+{d} KiB, longest run {d}+{d} KiB", .{
             pid, bytes / 1024, free[0] / 1024, free[1] / 1024, run[0] / 1024, run[1] / 1024,
         });
-        for (held[0..count]) |h| log.warn("  pid {d}: {d} KiB resident, {d} KiB on swap", .{ h.pid, h.resident / 1024, h.swapped / 1024 });
+        for (held[0..count]) |h| log.err("  pid {d}: {d} KiB resident, {d} KiB on swap", .{ h.pid, h.resident / 1024, h.swapped / 1024 });
     }
 
     /// Find a free run, mark it used and record it against `pid`. Bitmap and

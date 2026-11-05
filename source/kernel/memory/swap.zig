@@ -42,6 +42,11 @@ var node: ?kernel.fs.Node = null;
 var path_buffer: [128]u8 = undefined;
 var path_len: usize = 0;
 var clusters: std.DynamicBitSetUnmanaged = .{};
+/// Where a run goes through when it does not start on a sector: the pool's
+/// grain is 256 bytes and a card takes whole, 512-aligned sectors (the mmc
+/// driver refuses anything else). A file on a filesystem would not need it.
+const bounce_align = std.mem.Alignment.fromByteUnits(512);
+var bounce: []align(512) u8 = &.{};
 var used_clusters: usize = 0;
 
 pub const Stats = struct {
@@ -92,7 +97,10 @@ pub fn activate(allocator: std.mem.Allocator, swap_path: []const u8, size: u64) 
     if (count == 0) return kernel.errno.ErrnoSet.InvalidArgument;
     // A bit per 4 KiB: 4 KiB of bitmap for 128 MiB, kept out of the kernel's
     // SRAM where the board has PSRAM for it.
-    clusters = try std.DynamicBitSetUnmanaged.initEmpty(kernel.memory.heap.slow.allocator_or(allocator), count);
+    const slow = kernel.memory.heap.slow.allocator_or(allocator);
+    clusters = try std.DynamicBitSetUnmanaged.initEmpty(slow, count);
+    errdefer clusters.deinit(slow);
+    bounce = try slow.alignedAlloc(u8, bounce_align, cluster_size);
     @memcpy(path_buffer[0..swap_path.len], swap_path);
     path_len = swap_path.len;
     node = n;
@@ -150,8 +158,27 @@ fn transfer(first: usize, data: []u8, comptime write: bool) !void {
     var n = node orelse return kernel.errno.ErrnoSet.NoSuchDevice;
     var file = n.as_file() orelse return kernel.errno.ErrnoSet.NoSuchDevice;
     _ = try file.interface.seek(@intCast(first * cluster_size), c.SEEK_SET);
-    const done = if (write) file.interface.write(data) else file.interface.read(data);
-    if (done != data.len) return kernel.errno.ErrnoSet.InputOutputError;
+    if (bounce_align.check(@intFromPtr(data.ptr)) and bounce_align.check(data.len)) {
+        const done = if (write) file.interface.write(data) else file.interface.read(data);
+        if (done != data.len) return kernel.errno.ErrnoSet.InputOutputError;
+        return;
+    }
+    var at: usize = 0;
+    while (at < data.len) {
+        const part = data[at..@min(data.len, at + bounce.len)];
+        // Whole sectors to the device; a short tail only ever ends a run, and
+        // the cluster it ends in is the run's own.
+        const span = bounce[0..std.mem.alignForward(usize, part.len, 512)];
+        if (write) {
+            @memcpy(span[0..part.len], part);
+            @memset(span[part.len..], 0);
+            if (file.interface.write(span) != span.len) return kernel.errno.ErrnoSet.InputOutputError;
+        } else {
+            if (file.interface.read(span) != span.len) return kernel.errno.ErrnoSet.InputOutputError;
+            @memcpy(part, span[0..part.len]);
+        }
+        at += part.len;
+    }
 }
 
 // ---- ProcessMemoryPool.SwapIo: io_lock held by the caller ----

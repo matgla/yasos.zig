@@ -167,11 +167,13 @@ def _session_class():
     return Session
 
 
-def run(session, command: str, silence: float = 600.0, echo=True, on_line=None) -> int:
+def run(session, command: str, silence: float = 600.0, echo=True, on_line=None, kernel_log=False) -> int:
     """Run *command* in the target shell and return its exit status.
 
     *silence* bounds the time between two output lines, not the whole run, so a
-    long build is fine as long as it keeps printing."""
+    long build is fine as long as it keeps printing. *kernel_log* passes the
+    kernel's own lines ([ERR]... on the console) through with the command's:
+    the session drops them otherwise."""
     rc = None
 
     def line(text):
@@ -194,8 +196,17 @@ def run(session, command: str, silence: float = 600.0, echo=True, on_line=None) 
     # printing the postmortem at HardFault priority spins forever on TX-full.
     # Keep reading through it; a genuinely dead kernel still fails on *silence*
     # ("Prompt not found"), just a little later.
-    with session.expect_process_fault():
-        session.wait_for_prompt_streaming(on_line=line, timeout=silence)
+    # The session's reader looks LOG_PREFIXES up in its module on every line,
+    # and this works with whichever framework the machine has (the rig's own).
+    framework = sys.modules[type(session).__module__]
+    prefixes = framework.LOG_PREFIXES
+    if kernel_log:
+        framework.LOG_PREFIXES = ()
+    try:
+        with session.expect_process_fault():
+            session.wait_for_prompt_streaming(on_line=line, timeout=silence)
+    finally:
+        framework.LOG_PREFIXES = prefixes
     if rc is None:
         raise DeviceError(f"no exit status seen for: {command}")
     return rc

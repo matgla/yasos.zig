@@ -169,7 +169,7 @@ def board_push(session, payload: Path, dest: str, full: bool, force: bool):
 
 def board_make(session, dest: str, configure: str) -> int:
     source = f"{dest}/tree/src"
-    return device.run(session, f"cd {source} && ./configure {configure} && make; r=$?; cd /; (exit $r)", silence=3600)
+    return device.run(session, f"cd {source} && ./configure {configure} && make; r=$?; cd /; (exit $r)", silence=3600, kernel_log=True)
 
 
 def board_fetch(session, dest: str, paths: list, out: Path):
@@ -203,7 +203,7 @@ def do_board(session, args) -> int:
     elif args.action == "make":
         return board_make(session, dest, args.configure)
     elif args.action == "run":
-        return device.run(session, f"cd {dest}/tree/src && {args.command}; r=$?; cd /; (exit $r)", silence=3600)
+        return device.run(session, f"cd {dest}/tree/src && {args.command}; r=$?; cd /; (exit $r)", silence=3600, kernel_log=True)
     elif args.action == "changed":
         print("CHANGED " + json.dumps(board_changed(session, dest)), flush=True)
     elif args.action == "fetch":

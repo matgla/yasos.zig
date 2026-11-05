@@ -1070,6 +1070,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             current_process.set_heap_limit_bytes(executable.module.heap_size);
 
             try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv_copy.argv), symbol.address, symbol.target_got_address);
+            // A vfork child stops sharing its parent's stack here: it has its own
+            // now (reallocate_stack), and the parent is handed back below. Left
+            // set, it outlived the exec for good: the exit-frame ceiling of a
+            // later fault came from the parent's next vfork, and swap passed over
+            // every exec'd process -- make included.
+            current_process._stack_shared_with_parent = false;
 
             // Under `proctable_lock`, like the identical hand-off in
             // `delete_process`: `set_next` claims the parent and, through
@@ -1331,7 +1337,10 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // The swap file's I/O sleeps; an allocation that cannot wait for
             // it gets nothing (its caller holds a spinlock, or is the idle
             // process).
-            if (preempt.preempt_disabled() or !kernel.memory.swap.active()) return 0;
+            if (preempt.preempt_disabled() or !kernel.memory.swap.active()) {
+                log.err("swap: not for {d} bytes: preempt off {}, swap on {}", .{ bytes, preempt.preempt_disabled(), kernel.memory.swap.active() });
+                return 0;
+            }
             const io = kernel.memory.heap.ProcessMemoryPool.swap_io orelse return 0;
             const pool = self.get_process_memory_pool();
             const current = self.get_current_process();
@@ -1340,7 +1349,10 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             var freed: usize = 0;
             var tried: usize = 0;
             while (freed < bytes and tried < 8) : (tried += 1) {
-                const victim = self.claim_swap_victim(current) orelse break;
+                const victim = self.claim_swap_victim(current) orelse {
+                    if (tried == 0) self.log_swap_candidates(current);
+                    break;
+                };
                 const out = pool.swap_out(victim.pid, victim.get_stack_bottom(), io);
                 log.info("swap: pid {d} out, {d} KiB, for pid {d}", .{ victim.pid, out / 1024, current.pid });
                 if (!pool.is_swapped_out(victim.pid)) {
@@ -1388,6 +1400,28 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             if (!swappable(chosen)) return null;
             chosen.swapped = true;
             return chosen;
+        }
+
+        /// Why nothing could be swapped: every other process and what
+        /// `swappable` looks at.
+        fn log_swap_candidates(self: *Self, current: *Process) void {
+            const Row = struct { pid: c.pid_t, eligible: bool, swapped: bool, blocked: bool, shared: bool };
+            var rows: [12]Row = undefined;
+            var count: usize = 0;
+            {
+                const flags = proctable_lock.lock_irqsave();
+                defer proctable_lock.unlock_irqrestore(flags);
+                var next = self.processes.first;
+                while (next) |node| : (next = node.next) {
+                    const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                    if (p == current) continue;
+                    if (count == rows.len) break;
+                    rows[count] = .{ .pid = p.pid, .eligible = p.swap_eligible, .swapped = p.swapped, .blocked = p.state == Process.State.Blocked, .shared = p._stack_shared_with_parent };
+                    count += 1;
+                }
+            }
+            log.err("swap: nothing to swap for pid {d}", .{current.pid});
+            for (rows[0..count]) |r| log.err("  pid {d}: waiting {} swapped {} blocked {} vfork-stack {}", .{ r.pid, r.eligible, r.swapped, r.blocked, r.shared });
         }
 
         fn swappable(p: *const Process) bool {
