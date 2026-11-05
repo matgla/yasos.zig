@@ -539,6 +539,8 @@ def _archive_entries(payload: Path):
     import tarfile
     entries = {}
     for name, prefix in (("src.tar.gz", "src"), ("ref.tar.gz", "ref")):
+        if not (payload / name).is_file():
+            continue
         with tarfile.open(payload / name) as tar:
             for member in tar:
                 if member.isfile():
@@ -586,7 +588,9 @@ def uart_send_manifest(session, payload: Path, dest: str, full: bool = False, ti
                     source = sources.setdefault(archive, tarfile.open(payload / archive))
                     info = tarfile.TarInfo(path)
                     data = source.extractfile(member).read()
-                    info.size, info.mode, info.mtime = len(data), 0o644, 0
+                    # configure has to stay executable, and a changed file has to
+                    # look changed to make on the board.
+                    info.size, info.mode, info.mtime = len(data), source.getmember(member).mode, int(time.time())
                     out.addfile(info, io.BytesIO(data))
             for source in sources.values():
                 source.close()

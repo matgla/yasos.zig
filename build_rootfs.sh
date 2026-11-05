@@ -472,13 +472,13 @@ build_cross_compiler()
   # reorg) — dropping only armv8m-arch/armv8m-ir would reuse the other stage's
   # objects and fail the link with "unrecognized file type".
   rm -rf armv8m-arch armv8m-ir armv8m-source armv8m-*.o *.o
-  make -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
+  make -j$JOBS AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
-  make install AR="$HOST_AR" MRI_AR="$HOST_AR" INC-armv8m="$YASOS_SYSINCLUDES"
+  make install AR="$HOST_AR" INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -598,12 +598,10 @@ build_c_compiler()
     # reorg) — dropping only armv8m-arch/armv8m-ir would reuse the other
     # stage's objects and fail the link with "unrecognized file type".
     rm -rf armv8m-arch armv8m-ir armv8m-source armv8m-*.o *.o
-    # Archive the backend library with the host `ar`, not the cross-prefixed
-    # `armv8m-tcc -ar`: the arch Makefile bundles libthumb.a into libarm.a via
-    # ar's MRI batch mode (`ar -M`), which tcc's built-in archiver does not
-    # support.  Archiving is target-agnostic, so the host ar handles the ARM
-    # objects fine.
-    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
+    # Archive with the host `ar`: archiving is target-agnostic, and the cross
+    # stage's objects are not the target's.  (The tree builds with `tcc -ar`
+    # too: that is how it builds on the board.)
+    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
 
     if [ $? -ne 0 ]; then
       exit -1;
@@ -664,8 +662,8 @@ build_c_compiler()
         fi
       done
     fi
-    # Use the host `ar` for the backend archive (MRI mode); see stage 1 above.
-    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
+    # Host `ar`, as in stage 1 above.
+    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
     if [ $? -ne 0 ]; then
       exit -1;
     fi

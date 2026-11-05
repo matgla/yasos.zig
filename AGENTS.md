@@ -62,6 +62,16 @@ once — prefer that when a bug class repeats.
   only changed files (rz up, `sz` down). Both are three-way: a file changed on
   both sides is never overwritten -- the target's copy lands as `<file>.target`,
   and push holds that file back until the `.target` is deleted.
+- **`scripts/tinycc_board.py push | make | run CMD | pull | all`** — work on
+  tinycc on the board: the whole repository (or `--sources-only`) goes to
+  `/root/tinycc/tree/src` as a compressed delta (first push ~5.5 min, then only
+  what changed), `make` runs `./configure && make` there (`--configure=` for
+  options; plain `./configure` needs none on YasOS), `pull` brings the board's
+  edits back with the target_sync three-way merge, and a push refuses to
+  overwrite a file edited on the board. Default is the rig's board under its
+  lock (`--flash` installs this checkout's images first); `--serial DEV` for a
+  probe on this PC, `--qemu all` for a guest (sources in `/tmp`: QEMU's RAM
+  `/root` holds ~14 MB). tinycc side: `libs/tinycc/docs/native_build.md`.
 - **`scripts/tcc_selfhost.py --qemu | --uart --dest /abs/dir`** — the tinycc
   self-host test: builds the stage-2 native tcc with the cross in
   `.cache/tcc_selfhost`, sends sources + host-cross objects, the device's tcc
