@@ -5,7 +5,7 @@
  * A copy of linker_script.ld with three regions moved, and nothing else
  * different: tests/test_linker_scripts.py fails if the two drift. Core 0's MSP
  * stack (`scratch`) is 32 KB instead of 16 KB; the 16 KB comes off the top of
- * process_ram (336K -> 320K), and core 1's stack moves down to stay butted
+ * process_ram (400K -> 384K), and core 1's stack moves down to stay butted
  * against it. The region comments below are the release script's and describe
  * the release sizes.
  *
@@ -52,12 +52,21 @@ MEMORY
    * 71.5 KB heap left idled at ~70 KB and a pipe's 4 KB ring panicked it.
    * Check MemKernelBrk against MemKernelLimit in /proc/meminfo before
    * shrinking this again. */
-  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 128K
+  /* Holds the kernel's hot functions too (source/kernel/hot_functions.txt, in
+   * .time_critical, about 35 KB). 128K -> 64K (2026-11-05): what does not need SRAM is
+   * on the kernel's slow heap in PSRAM (kernel_slow_heap.zig), and these boards have
+   * PSRAM. A board without it needs linker_script_pico2.ld's sizes and no hot
+   * functions. */
+  kernel_ram(rxw)   : ORIGIN = 0x20000000, LENGTH = 64K
   /* Arena for the hybrid /tmp filesystem (source/fs/ramfs, mounted by
    * source/main.zig). Carved out of process_ram so a compile's process image
    * can never eat it; files larger than CONFIG_TMPFS_MAX_FILE_SIZE (or anything
    * that no longer fits here) spill to CONFIG_TMPFS_SPILL_DIRECTORY on the SD
    * card. Kernel-owned: not mapped by the MPU for unprivileged code.
+   *
+   * Only without PSRAM. With it the arena moves to PSRAM's top end and this goes
+   * to the process pool, which is why the two regions must stay neighbours: see
+   * move_temp_to_psram in source/memory.zig.
    *
    * 128K -> 32K (2026-08-06). This side of the split was over-provisioned and
    * the other side was the binding constraint: a compile wants ~315 KiB (213
@@ -68,8 +77,8 @@ MEMORY
    * executables are not -- 14 KiB typically, 49 KiB for strlen-5 and 52 KiB for
    * mibench_rijndael -- so those now go to the SD card instead of RAM. Watch
    * MemTmpPeak: if it pins at the ceiling, this went too far. */
-  temp_ram(rxw)     : ORIGIN = 0x20020000, LENGTH = 32K
-  process_ram(rxw)  : ORIGIN = 0x20028000, LENGTH = 320K
+  temp_ram(rxw)     : ORIGIN = 0x20010000, LENGTH = 32K
+  process_ram(rxw)  : ORIGIN = 0x20018000, LENGTH = 384K
   /* Core 1's MSP stack. MSP is banked per core; the memory behind it is not, so
    * a second core needs a stack of its own. Placed below `scratch` rather than
    * carved out of it, which keeps core 0's stack unchanged to the byte.

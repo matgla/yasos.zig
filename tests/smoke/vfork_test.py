@@ -274,3 +274,27 @@ def test_direct_exec_preserves_script_arguments_and_recovers_after_error(request
     assert "SCRIPT_ARG:kept" in output, output
     assert "SCRIPT_STATUS:7" in output, output
     assert "RETRY_STATUS:0" in output, output
+
+
+def test_failed_exec_in_a_subshell_leaves_its_heap_alone(request):
+    """A subshell whose command is missing carries on, with a working heap.
+
+    The vfork child reports the failure, which in a fresh subshell was the first use
+    of stderr: its buffer came from malloc in the child, the parent then wound the
+    pool back and handed the same block out again, and the subshell faulted. The
+    fallback after `||` never ran and the substitution came back empty.
+    """
+    session = request.node.stash[session_key]
+
+    def faults():
+        session.write_command("cat /proc/faultstat")
+        return session.read_until_prompt().split("fault_kills ")[1].split()[0]
+
+    before = faults()
+    session.write_command('x=$(no_such_command_at_all || echo fallback); echo "got[$x]"')
+    assert "got[fallback]" in session.read_until_prompt()
+    session.write_command('(no_such_command_at_all; echo after_failure)')
+    assert "after_failure" in session.read_until_prompt()
+    session.write_command('y=$(no_such_command_at_all; echo a; echo b | cat); echo "two[$y]"')
+    assert "b" in session.read_until_prompt()
+    assert faults() == before

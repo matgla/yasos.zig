@@ -38,7 +38,7 @@
 #
 # Any non-option arguments are passed through to pytest. With none, the default
 # set is the core target tests plus the tcc suites:
-#   cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py
+#   cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py hot_text_test.py
 #   timestamp_test.py make_test.py tcc_test.py tcc_suite_test.py
 # The tcc tests currently FAIL (known tinycc bug + a serial-upload corruption on
 # QEMU) and are enabled so they run as fixes land. Pass files to override, e.g.
@@ -186,7 +186,7 @@ if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
     # Core target tests plus the tcc suites. The tcc tests are expected to FAIL
     # for now (known tinycc miscompiles + a serial-upload corruption on QEMU);
     # they are enabled here so they run as fixes land. Override by passing files.
-    PYTEST_ARGS=(cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py timestamp_test.py make_test.py tcc_test.py tcc_suite_test.py)
+    PYTEST_ARGS=(cd_test.py ls_test.py ps_test.py shell_test.py smp_test.py yaff_arch_test.py hot_text_test.py timestamp_test.py make_test.py tcc_test.py tcc_suite_test.py)
 fi
 
 # The FP mode rootfs.img must match, and the mode it was actually built with.

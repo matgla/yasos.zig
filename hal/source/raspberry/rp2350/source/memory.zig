@@ -13,6 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+const std = @import("std");
+
 const MemoryInfo = @import("hal_interface").memory.MemoryInfo;
 
 const external_memory = &@import("../rp2350.zig").external_memory;
@@ -22,6 +24,7 @@ const external_memory = &@import("../rp2350.zig").external_memory;
 // 2. Processe RAM determined by the linker script
 // 3. PSRAM determined by the detection of external hardware
 // 4. Temp RAM determined by the linker script (arena of the hybrid /tmp)
+// 5. The kernel's slow heap, carved out of PSRAM
 
 extern var __process_ram_start__: u8;
 extern var __process_ram_end__: u8;
@@ -30,7 +33,7 @@ extern var __kernel_ram_end__: u8;
 extern var __temp_ram_start__: u8;
 extern var __temp_ram_end__: u8;
 
-var memory_layout: [4]MemoryInfo = [_]MemoryInfo{
+var memory_layout: [5]MemoryInfo = [_]MemoryInfo{
     MemoryInfo{
         .speed = MemoryInfo.MemorySpeed.Fast,
         .memory_type = MemoryInfo.MemoryType.SRAM,
@@ -59,7 +62,97 @@ var memory_layout: [4]MemoryInfo = [_]MemoryInfo{
         .size = 0,
         .start_address = 0,
     },
+    MemoryInfo{
+        .speed = MemoryInfo.MemorySpeed.Slow,
+        .memory_type = MemoryInfo.MemoryType.PSRAM,
+        .owner = MemoryInfo.Owner.KernelSlow,
+        .size = 0,
+        .start_address = 0,
+    },
 };
+
+/// The /tmp arena in PSRAM. Larger than in SRAM because it is cheap there, and the
+/// file tree lives in it at 256 bytes an allocation, a file costing about 1.3 KB.
+const temp_size_in_psram: usize = 128 * 1024;
+
+/// With PSRAM, the /tmp arena moves to its top end and the SRAM it had goes to the
+/// processes: a compile's IR is what wants fast memory, and /tmp holds a few KB
+/// during one. Called on the layout as the linker script has it. Without PSRAM, or
+/// if the two SRAM regions stop being neighbours, nothing changes.
+fn move_temp_to_psram(layout: *[5]MemoryInfo) void {
+    const process = &layout[1];
+    const psram = &layout[2];
+    const temp = &layout[3];
+    if (psram.size <= temp_size_in_psram) return;
+    if (temp.start_address + temp.size != process.start_address) return;
+
+    process.start_address = temp.start_address;
+    process.size += temp.size;
+    psram.size -= temp_size_in_psram;
+    temp.start_address = psram.start_address + psram.size;
+    temp.size = temp_size_in_psram;
+    temp.speed = .Slow;
+    temp.memory_type = .PSRAM;
+}
+
+/// The kernel's slow heap: fds, pipes, filesystem objects, the cold half of each
+/// process. Peaks far below this, and running out only fails requests.
+const kernel_slow_size: usize = 512 * 1024;
+
+/// Off the top of what is left of PSRAM. Called after `move_temp_to_psram`, and
+/// without PSRAM there is nothing to carve: the kernel heap stays the only one.
+fn carve_kernel_slow(layout: *[5]MemoryInfo) void {
+    const psram = &layout[2];
+    const slow = &layout[4];
+    slow.size = 0;
+    if (psram.size <= kernel_slow_size) return;
+    psram.size -= kernel_slow_size;
+    slow.start_address = psram.start_address + psram.size;
+    slow.size = kernel_slow_size;
+}
+
+comptime {
+    const assert = std.debug.assert;
+    const board = struct {
+        fn layout(psram_size: usize, temp_start: usize) [5]MemoryInfo {
+            const region = MemoryInfo{
+                .speed = .Fast,
+                .memory_type = .SRAM,
+                .owner = .User,
+                .size = 0,
+                .start_address = 0,
+            };
+            var result: [5]MemoryInfo = @splat(region);
+            result[1].start_address = 0x20018000;
+            result[1].size = 400 * 1024;
+            result[2].start_address = 0x11000000;
+            result[2].size = psram_size;
+            result[3].start_address = temp_start;
+            result[3].size = 32 * 1024;
+            return result;
+        }
+    };
+
+    var with_psram = board.layout(8 * 1024 * 1024, 0x20010000);
+    move_temp_to_psram(&with_psram);
+    carve_kernel_slow(&with_psram);
+    assert(with_psram[1].start_address == 0x20010000 and with_psram[1].size == 432 * 1024);
+    assert(with_psram[2].size == 8 * 1024 * 1024 - 128 * 1024 - 512 * 1024);
+    assert(with_psram[3].start_address == 0x117E0000 and with_psram[3].size == 128 * 1024);
+    assert(with_psram[3].memory_type == .PSRAM);
+    assert(with_psram[4].start_address == 0x11760000 and with_psram[4].size == 512 * 1024);
+
+    var without_psram = board.layout(0, 0x20010000);
+    move_temp_to_psram(&without_psram);
+    carve_kernel_slow(&without_psram);
+    assert(without_psram[1].start_address == 0x20018000 and without_psram[3].start_address == 0x20010000);
+    assert(without_psram[3].memory_type == .SRAM);
+    assert(without_psram[4].size == 0);
+
+    var apart = board.layout(8 * 1024 * 1024, 0x20000000);
+    move_temp_to_psram(&apart);
+    assert(apart[3].start_address == 0x20000000 and apart[2].size == 8 * 1024 * 1024);
+}
 
 pub const Memory = struct {
     pub fn get_memory_layout(self: Memory) []const MemoryInfo {
@@ -72,6 +165,10 @@ pub const Memory = struct {
         memory_layout[2].size = external_memory.get_memory_size();
         memory_layout[3].start_address = @intFromPtr(&__temp_ram_start__);
         memory_layout[3].size = @intFromPtr(&__temp_ram_end__) - @intFromPtr(&__temp_ram_start__);
+        memory_layout[3].speed = .Fast;
+        memory_layout[3].memory_type = .SRAM;
+        move_temp_to_psram(&memory_layout);
+        carve_kernel_slow(&memory_layout);
         return &memory_layout;
     }
 

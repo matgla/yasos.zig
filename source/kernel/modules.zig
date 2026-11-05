@@ -144,6 +144,34 @@ fn cache_resolution(name: []const u8, image: ?yasld.Image) void {
     }
 }
 
+/// Resolve every library in /lib now, on the boot stack, while the rootfs is all there
+/// is to look at. Otherwise a program's first load of each one does it, on the stack of
+/// whichever process ran it, and that is the deepest thing a shell's stack sees. A /lib
+/// that changes later clears this and resolves as it goes, as before. The precache
+/// is the same: looked for once, by whoever gets there first.
+pub fn resolve_libraries() void {
+    find_precache();
+    const token = fs.get_vfs().immutable_token("/lib") orelse return;
+    clear_resolver_cache();
+    resolver_token = token;
+    var node = fs.get_ivfs().interface.get("/lib") catch return;
+    defer node.delete();
+    if (!node.immutable_backing) return;
+    var dir = node.as_directory() orelse return;
+    var it = dir.interface.iterator() catch return;
+    defer it.interface.delete();
+    while (it.interface.next()) |*entry| {
+        if (!valid_library_name(entry.name)) continue;
+        var child: kernel.fs.Node = undefined;
+        dir.interface.get(entry.name, &child) catch continue;
+        defer child.delete();
+        if (child.as_file()) |file| {
+            var context: ModuleContext = .{ .name = entry.name, .image = null };
+            if (is_requested_file(file, &context)) cache_resolution(entry.name, context.image);
+        }
+    }
+}
+
 fn file_resolver(name: []const u8) ?yasld.Image {
     if (!valid_library_name(name)) return null;
     const token = fs.get_vfs().immutable_token("/lib");
@@ -158,27 +186,41 @@ fn file_resolver(name: []const u8) ?yasld.Image {
     // Iterator EOF also masks allocation/I/O failures. Only a direct NoEntry
     // from this immutable namespace establishes absence.
     var authoritative = false;
-    var path_buf: [64]u8 = undefined;
-    if (std.fmt.bufPrint(&path_buf, "/lib/{s}", .{name})) |path| {
-        var maybe_node = fs.get_ivfs().interface.get(path) catch |err| blk: {
-            authoritative = err == kernel.errno.ErrnoSet.NoEntry;
-            break :blk null;
-        };
-        if (maybe_node) |*node| {
-            defer node.delete();
-            if (!node.immutable_backing) return null;
-            if (node.as_file()) |file| {
-                var context: ModuleContext = .{ .name = name, .image = null };
-                if (is_requested_file(file, &context)) {
-                    cache_resolution(name, context.image);
-                    return context.image;
-                }
-                // Mapping/ioctl failure may be transient, so do not cache absence.
-                authoritative = false;
-            }
-        }
-    } else |_| {}
+    switch (@call(.never_inline, resolve_by_path, .{ name, &authoritative })) {
+        .found => |image| return image,
+        .refused => return null,
+        .not_there => {},
+    }
+    return @call(.never_inline, resolve_by_scan, .{ name, authoritative });
+}
 
+const PathResolution = union(enum) { found: ?yasld.Image, refused, not_there };
+
+/// Out of line, like the scan below, for the stack: this runs in the middle of a load
+/// on the exec caller's stack, and each goes through the whole filesystem.
+fn resolve_by_path(name: []const u8, authoritative: *bool) PathResolution {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/lib/{s}", .{name}) catch return .not_there;
+    var node = fs.get_ivfs().interface.get(path) catch |err| {
+        authoritative.* = err == kernel.errno.ErrnoSet.NoEntry;
+        return .not_there;
+    };
+    defer node.delete();
+    if (!node.immutable_backing) return .refused;
+    if (node.as_file()) |file| {
+        var context: ModuleContext = .{ .name = name, .image = null };
+        if (is_requested_file(file, &context)) {
+            cache_resolution(name, context.image);
+            return .{ .found = context.image };
+        }
+        // Mapping/ioctl failure may be transient, so do not cache absence.
+        authoritative.* = false;
+    }
+    return .not_there;
+}
+
+fn resolve_by_scan(name: []const u8, was_authoritative: bool) ?yasld.Image {
+    var authoritative = was_authoritative;
     var context: ModuleContext = .{ .name = name, .image = null };
     var node = fs.get_ivfs().interface.get("/lib") catch |err| {
         if (authoritative and err == kernel.errno.ErrnoSet.NoEntry) cache_resolution(name, null);
@@ -297,6 +339,8 @@ fn map_load_error(err: anyerror) anyerror {
 /// Owner of the loader cache's pages in the process pool. No process has a
 /// negative pid, so nothing exits and releases them by accident.
 pub const loader_cache_pid: c.pid_t = -2;
+/// Owns the --hot-text copies, which outlive whichever process loaded them first.
+pub const hot_text_pid: c.pid_t = -4; // -3 is the ext4 block cache (main.zig)
 
 var cache_lock: kernel.sync.locks.Ranked(.loader_cache) = .{};
 
@@ -344,6 +388,39 @@ const CachePages = struct {
     const allocator: std.mem.Allocator = .{ .ptr = undefined, .vtable = &vtable };
 };
 
+/// Fast memory first, like a process's own image: the point of the copy.
+const HotTextPages = struct {
+    const Pool = kernel.memory.heap.ProcessMemoryPool;
+
+    fn pool() *Pool {
+        return kernel.process.process_manager.instance.get_process_memory_pool();
+    }
+
+    fn pages_for(len: usize) i32 {
+        return @intCast((len + Pool.page_size - 1) / Pool.page_size);
+    }
+
+    fn alloc(_: *anyopaque, len: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+        const memory = pool().allocate_pages_from(pages_for(len), hot_text_pid, .loader) orelse return null;
+        return memory.ptr;
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(_: *anyopaque, memory: []u8, _: std.mem.Alignment, _: usize) void {
+        pool().free_pages(memory.ptr, pages_for(memory.len), hot_text_pid);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+    const allocator: std.mem.Allocator = .{ .ptr = undefined, .vtable = &vtable };
+};
+
 fn reclaim_loader_cache(bytes: usize) usize {
     return yasld.template.reclaim(bytes);
 }
@@ -377,10 +454,14 @@ fn find_precache() void {
     log.info("loader precache: {s}", .{precache_path});
 }
 
-pub fn init(allocator: std.mem.Allocator) void {
+/// `allocator` holds the loader's metadata. `atomics_allocator` holds what is
+/// counted with atomics, so it must not be in PSRAM.
+pub fn init(allocator: std.mem.Allocator, atomics_allocator: std.mem.Allocator) void {
     log.info("yasld initialization started", .{});
-    yasld.loader_init(&file_resolver, allocator, machine_profile);
+    yasld.loader_init(&file_resolver, allocator, atomics_allocator, machine_profile);
     if (!builtin.is_test) {
+        yasld.set_thunk_allocator_of(&kernel.process.Process.ProcessMemoryAllocator.slow_variant_of);
+        yasld.set_hot_text_allocator(HotTextPages.allocator);
         yasld.template.enable(CachePages.allocator, .{ .lock = &cache_lock_acquire, .unlock = &cache_lock_release });
         kernel.memory.heap.ProcessMemoryPool.reclaim_hook = &reclaim_loader_cache;
     }
@@ -452,6 +533,16 @@ fn read_image(file: *kernel.fs.IFile, allocator: std.mem.Allocator, size: usize)
     return memory;
 }
 
+/// Out of line for the stack: its hash map work has no need to sit in
+/// `load_executable_node`'s frame through the load, on the caller's stack.
+fn install_executable(pid: c.pid_t, entry: *ExecutableHandle) !*yasld.Executable {
+    errdefer entry.executable.?.deinit();
+    try modules_list.ensureUnusedCapacity(1);
+    release_executable_locked(pid);
+    modules_list.putAssumeCapacity(pid, entry.*);
+    return &modules_list.getPtr(pid).?.executable.?;
+}
+
 /// The body of `load_executable` for a node the caller has already resolved.
 /// `sys_execve` looks the path up once to sniff its `#!` line and hands that
 /// node over here instead of resolving the same path a second time -- on a
@@ -467,7 +558,7 @@ pub fn load_executable_node(node: *kernel.fs.Node, path: []const u8, process_all
     const cache_before = perf.cache_summary();
     defer perf.dump_load_cache(pid, cache_before);
     log.debug("load_executable: pid={d} path={s}", .{ pid, path });
-    if (!builtin.is_test) find_precache();
+    if (!builtin.is_test) @call(.never_inline, find_precache, .{});
     defer node.delete();
     var maybe_file = node.as_file();
     if (maybe_file) |*f| {
@@ -491,10 +582,11 @@ pub fn load_executable_node(node: *kernel.fs.Node, path: []const u8, process_all
             const bytes: [*]align(4) const u8 = @ptrCast(@alignCast(address));
             image = bytes[0..size];
         } else {
-            const memory = try read_image(f, process_allocator, size);
+            const memory = try @call(.never_inline, read_image, .{ f, process_allocator, size });
             entry.memory = memory;
             image = memory;
         }
+        if (!builtin.is_test) CachePages.pool().set_prefers_slow(pid, yasld.image_prefers_slow_memory(image));
         if (yasld.get_loader()) |loader| {
             // Only a mapped (romfs XIP) image keeps its address; a RAM copy's
             // address is recycled, so nothing computed against it may outlive it.
@@ -505,12 +597,7 @@ pub fn load_executable_node(node: *kernel.fs.Node, path: []const u8, process_all
             last_executable_load_us = hal.time.get_time_us() - load_start_us;
             log_loader_timing("executable", path, pid, load_start_us);
             entry.executable = executable;
-            errdefer entry.executable.?.deinit();
-            try modules_list.ensureUnusedCapacity(1);
-            release_executable_locked(pid);
-            modules_list.putAssumeCapacity(pid, entry);
-            const exec_ptr: *yasld.Executable = &modules_list.getPtr(pid).?.executable.?;
-            return exec_ptr;
+            return @call(.never_inline, install_executable, .{ pid, &entry });
         } else {
             log.err("yasld is not initialized", .{});
             return kernel.errno.ErrnoSet.NotPermitted;
@@ -524,7 +611,7 @@ pub fn load_executable_node(node: *kernel.fs.Node, path: []const u8, process_all
 /// loading the image.  The boot shell needs it: `kernel_process` loads /bin/sh
 /// into the root process and calls its main on the root process's own stack,
 /// so the exec-time hint (`exec_stack_limit`) never reaches pid 1.
-pub fn executable_stack_hint(path: []const u8) ?u32 {
+fn read_executable_header(path: []const u8) ?yasld.Header {
     var node = fs.get_ivfs().interface.get(path) catch return null;
     defer node.delete();
     var file = node.as_file() orelse return null;
@@ -532,8 +619,19 @@ pub fn executable_stack_hint(path: []const u8) ?u32 {
     const bytes = std.mem.asBytes(&header);
     if (file.interface.read(bytes) != @as(isize, @intCast(bytes.len))) return null;
     if (!std.mem.eql(u8, std.mem.asBytes(&header.magic), "YAFF")) return null;
+    return header;
+}
+
+pub fn executable_stack_hint(path: []const u8) ?u32 {
+    const header = read_executable_header(path) orelse return null;
     if (header.stack_size == 0 or header.stack_size == 0xFFFFFFFF) return null;
     return header.stack_size;
+}
+
+/// For a process whose stack is allocated before its image is loaded.
+pub fn executable_prefers_slow_memory(path: []const u8) bool {
+    const header = read_executable_header(path) orelse return false;
+    return yasld.header_prefers_slow_memory(&header);
 }
 
 pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Module {
@@ -897,7 +995,7 @@ pub fn restore_parent_writable_sections(child_pid: c.pid_t) void {
 }
 
 test "Modules.ShouldInitializeAndDeinitialize" {
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     try std.testing.expect(modules_list.count() == 0);
@@ -945,7 +1043,7 @@ fn create_filemock(allocator: std.mem.Allocator) !*FileMock {
 test "Modules.ShouldLoadExecutableFromFileSystem" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     // Create a mock ELF file
@@ -969,7 +1067,7 @@ test "Modules.ShouldLoadExecutableFromFileSystem" {
 test "Modules.ShouldLoadSharedLibrariesFromFileSystem" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     // Create a mock ELF file
@@ -996,7 +1094,7 @@ test "Modules.ShouldLoadSharedLibrariesFromFileSystem" {
 test "Modules.ShouldHandleExecutableDependantOnSharedLibraries" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     // Create a mock ELF file
@@ -1042,7 +1140,7 @@ test "Modules.ShouldHandleExecutableDependantOnSharedLibraries" {
 test "Modules.ShouldForwardLoadingErrors" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     // Create a mock ELF file
@@ -1070,7 +1168,7 @@ test "Modules.LoadsAnExecutableFromANodeTheCallerAlreadyResolved" {
     // assertion that the loader worked from the node the caller handed over.
     _ = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var file_mock = try create_filemock(std.testing.allocator);
@@ -1092,7 +1190,7 @@ test "Modules.LoadsAnExecutableFromANodeTheCallerAlreadyResolved" {
 test "Modules.ShouldRejectAnImageThatCameUpShort" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var file_mock = try FileMock.create(std.testing.allocator);
@@ -1119,7 +1217,7 @@ const DirectoryMock = @import("fs/tests/directory_mock.zig").DirectoryMock;
 test "Modules.ShouldFailIfDirectoryProvidedInsteadOfFile" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var dirmock = try DirectoryMock.create(std.testing.allocator);
@@ -1146,7 +1244,7 @@ test "Modules.ShouldFailIfDirectoryProvidedInsteadOfFile" {
 test "Modules.ShouldFailIfDynamicLoaderUninitialized" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var file_mock = try create_filemock(std.testing.allocator);
@@ -1175,7 +1273,7 @@ const DirectoryIteratorMock = @import("fs/tests/directory_mock.zig").DirectoryIt
 test "Modules.ResolverShouldReturnNullIfFileNotFoundInFileSystem" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     // The direct probe of `/lib/<name>` runs first, so it is the first call
@@ -1211,7 +1309,7 @@ test "Modules.ResolverShouldReturnNullIfFileNotFoundInFileSystem" {
 test "Modules.ResolverSkipsTheSymlinkProbeOnAFilesystemThatCannotHoldOne" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     _ = fs_mock
@@ -1239,7 +1337,7 @@ test "Modules.ResolverSkipsTheSymlinkProbeOnAFilesystemThatCannotHoldOne" {
 test "Modules.ResolverShouldReturnNullIfIteratorCreationFails" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var dirmock = try DirectoryMock.create(std.testing.allocator);
@@ -1273,7 +1371,7 @@ test "Modules.ResolverShouldReturnNullIfIteratorCreationFails" {
 test "Modules.ResolverShouldReturnNullIfFileNotFoundInDirectory" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var dirmock = try DirectoryMock.create(std.testing.allocator);
@@ -1313,7 +1411,7 @@ test "Modules.ResolverShouldReturnNullIfFileNotFoundInDirectory" {
 test "Modules.ResolverShouldReturnAddressIfFileFoundInDirectory" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var dirmock = try DirectoryMock.create(std.testing.allocator);
@@ -1376,7 +1474,7 @@ test "Modules.ResolverShouldReturnAddressIfFileFoundInDirectory" {
 test "Modules.ResolverShouldReturnNullIfFileIsNotMemoryMapped" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var dirmock = try DirectoryMock.create(std.testing.allocator);
@@ -1448,7 +1546,7 @@ test "Modules.ResolverShouldReturnNullIfFileIsNotMemoryMapped" {
 test "Modules.ResolverFindsTheLibraryFromTheDirectProbe" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     var filemock = try create_filemock(std.testing.allocator);
@@ -1472,7 +1570,7 @@ test "Modules.ResolverFindsTheLibraryFromTheDirectProbe" {
 test "Modules.ResolverRemembersALibraryThatIsNotThere" {
     var fs_mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
 
     _ = fs_mock
@@ -1534,7 +1632,7 @@ test "Modules.ReadImageReleasesMemoryOnReadAndSeekErrors" {
 test "Modules.ResolverRejectsInvalidComponentsWithoutFilesystemCalls" {
     _ = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
     for ([_][]const u8{ "", ".", "..", "../libc.so", "a/b", "a\x00b" }) |name| {
         try std.testing.expect(file_resolver(name) == null);
@@ -1542,7 +1640,7 @@ test "Modules.ResolverRejectsInvalidComponentsWithoutFilesystemCalls" {
 }
 
 test "Modules.ResolverBoundsNegativeEntriesAndKeyBytes" {
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
     resolver_token = 1;
     var buffer: [32]u8 = undefined;
@@ -1562,7 +1660,7 @@ test "Modules.ResolverBoundsNegativeEntriesAndKeyBytes" {
 test "Modules.ResolverRetriesTransientFailures" {
     var mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
     _ = mock.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(false);
     _ = mock.expectCall("get").withArgs(.{"/lib/libretry.so"}).willReturn(kernel.errno.ErrnoSet.InputOutputError);
@@ -1578,7 +1676,7 @@ test "Modules.ResolverRetriesTransientFailures" {
 test "Modules.ResolverDiscardsResultsWhenNamespaceChanges" {
     var mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
     _ = mock.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(false);
     _ = mock.expectCall("get").withArgs(.{"/lib/libnew.so"}).willReturn(kernel.errno.ErrnoSet.NoEntry);
@@ -1601,7 +1699,7 @@ test "Modules.ResolverDiscardsResultsWhenNamespaceChanges" {
 test "Modules.ResolverCacheAllocationFailuresLeaveAnswersUncached" {
     for (0..2) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
-        init(failing.allocator());
+        init(failing.allocator(), failing.allocator());
         defer deinit();
         resolver_token = 1;
         cache_resolution("missing.so", null);
@@ -1613,7 +1711,7 @@ test "Modules.ResolverCacheAllocationFailuresLeaveAnswersUncached" {
 test "Modules.UnmappedDlopenReturnsAnErrorWithoutPanicking" {
     var mock = try create_vfs_for_test(std.testing.allocator);
     defer fs.vfs_deinit();
-    init(std.testing.allocator);
+    init(std.testing.allocator, std.testing.allocator);
     defer deinit();
     var file = try FileMock.create(std.testing.allocator);
     _ = file.expectCall("ioctl").willReturn(0);

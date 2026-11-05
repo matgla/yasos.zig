@@ -33,15 +33,15 @@ pub const RomFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     _header: FileHeader,
     _fs: *FileSystemHeader,
 
-    pub fn create(allocator: std.mem.Allocator, header: FileHeader, fs: *FileSystemHeader) RomFsDirectory {
+    pub fn create(allocator: std.mem.Allocator, header: *const FileHeader, fs: *FileSystemHeader) RomFsDirectory {
         return RomFsDirectory.init(.{
             ._allocator = allocator,
-            ._header = header,
+            ._header = header.*,
             ._fs = fs,
         });
     }
 
-    pub fn create_node(allocator: std.mem.Allocator, header: FileHeader, fs: *FileSystemHeader) anyerror!kernel.fs.Node {
+    pub fn create_node(allocator: std.mem.Allocator, header: *const FileHeader, fs: *FileSystemHeader) anyerror!kernel.fs.Node {
         const dir = try create(allocator, header, fs).interface.new(allocator);
         return kernel.fs.Node.create_directory(dir);
     }
@@ -52,11 +52,13 @@ pub const RomFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
             if (std.mem.eql(u8, file.name(), filename)) {
                 defer file.deinit();
                 if (file.filetype() == .Directory) {
-                    const dir = try create_node(self._allocator, try file.dupe(), self._fs);
+                    const copy = try file.dupe();
+                    const dir = try create_node(self._allocator, &copy, self._fs);
                     node.* = dir;
                     return;
                 } else {
-                    const f = try RomFsFile.InstanceType.create_node(self._allocator, try file.dupe());
+                    const copy = try file.dupe();
+                    const f = try RomFsFile.InstanceType.create_node(self._allocator, &copy);
                     node.* = f;
                     return;
                 }

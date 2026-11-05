@@ -23,6 +23,7 @@ const std = @import("std");
 const SymbolTable = @import("item_table.zig").SymbolTable;
 const Section = @import("section.zig").Section;
 const Header = @import("header.zig").Header;
+const header_module = @import("header.zig");
 const Parser = @import("parser.zig").Parser;
 // Temporary load-phase accounting; see load_profile.zig.
 const profile = @import("load_profile.zig");
@@ -47,6 +48,8 @@ pub const SymbolEntry = struct {
     owner: u8 = 0,
     /// `address` is in the owner's per-process region rather than its image.
     in_region: bool = false,
+    /// `address` is in the owner's --hot-text block.
+    in_hot: bool = false,
 };
 
 /// An exported symbol's runtime address, and whether it lives in the
@@ -54,6 +57,7 @@ pub const SymbolEntry = struct {
 pub const LocalSymbol = struct {
     address: usize,
     in_region: bool,
+    in_hot: bool = false,
 };
 
 extern const indirect_call_thunk_template_size: usize;
@@ -78,6 +82,15 @@ pub fn thunk_code() *const [thunk_size]u8 {
 /// spun forever in `delete` once the block spilled out of SRAM, hanging the
 /// exiting process with its parent still waiting on it. Every holder is the one
 /// `LoadedUniqueData` that created it, so there is nothing to count.
+/// Which allocator a process's thunks come from, given its usual one. The kernel
+/// points this at the slow memory: a thunk runs once per indirect call, is cached like
+/// any code, and has no reason to hold the memory a program's data could use.
+pub var thunk_allocator_of: *const fn (std.mem.Allocator) std.mem.Allocator = same_allocator;
+
+fn same_allocator(allocator: std.mem.Allocator) std.mem.Allocator {
+    return allocator;
+}
+
 pub const ThunkHolderData = struct {
     data: []u8,
     generated: bool,
@@ -125,6 +138,11 @@ pub const LoadedSharedData = struct {
     exported_symbols: SymbolTable,
     allocator: std.mem.Allocator,
     process_allocator: std.mem.Allocator,
+    /// The copy of the image's --hot-text block. One per image, like the text it
+    /// came from: it reaches everything per-process through r9, and libc is in
+    /// every process.
+    hot_text: ?[]align(8) u8 = null,
+    hot_text_allocator: std.mem.Allocator = undefined,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -145,14 +163,28 @@ pub const LoadedSharedData = struct {
                 .allocator = allocator,
                 .process_allocator = process_allocator,
             };
+            // The image's code stays valid, so with no memory for the copy the
+            // module just runs this block from it.
+            if (header_module.get_hot_text(parser.header)) |hot| {
+                self.hot_text_allocator = hot_text_allocator orelse allocator;
+                if (self.hot_text_allocator.alignedAlloc(u8, .@"8", hot.length)) |copy| {
+                    @memcpy(copy, parser.get_text()[hot.offset..][0..hot.length]);
+                    self.hot_text = copy;
+                } else |_| {}
+            }
         }
         return self;
     }
 
     pub fn destroy(self: *LoadedSharedData) void {
+        if (self.hot_text) |hot| self.hot_text_allocator.free(hot);
         self.allocator.destroy(self);
     }
 };
+
+/// Where --hot-text copies come from: they outlive the process that loaded them
+/// first. Null on a host, where the module allocator will do.
+pub var hot_text_allocator: ?std.mem.Allocator = null;
 
 pub const LoadedUniqueData = struct {
     data: ?[]u8,
@@ -175,7 +207,7 @@ pub const LoadedUniqueData = struct {
     /// `from_image` false leaves data and GOT for the caller to fill (from a
     /// relocated-image template); bss is cleared either way. `copy_view` says
     /// which words of [data][got] the image still owns; null means all of them.
-    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *const Header, parser: *const Parser, from_image: bool, copy_view: ?template.View) !*LoadedUniqueData {
+    pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, header: *const Header, parser: *const Parser, from_image: bool, copy_view: ?*const template.View) !*LoadedUniqueData {
         const self = try allocator.create(LoadedUniqueData);
         errdefer allocator.destroy(self);
         // RELRO: the first const_rodata_length bytes of the data region are
@@ -232,7 +264,7 @@ pub const LoadedUniqueData = struct {
             // which the old full copy handed over twice.
             const data_bytes = region[0..data_part];
             const got_bytes = region[data_part + header.bss_length ..][0..header.got_length];
-            template.copy_from_image(data_bytes, got_bytes, parser.get_process_data(), parser.get_got(), if (copy_view) |view| view.copy_runs else &.{}, if (copy_view) |view| view.copy_all else true);
+            @call(.never_inline, template.copy_from_image, .{ data_bytes, got_bytes, parser.get_process_data(), parser.get_got(), if (copy_view) |view| view.copy_runs else &.{}, if (copy_view) |view| view.copy_all else true });
         }
 
         return self;
@@ -243,7 +275,7 @@ pub const LoadedUniqueData = struct {
     /// Zero for any other load.
     pub fn allocate_thunks(self: *LoadedUniqueData, size: usize, zero_from_slot: usize) !void {
         if (self.thunks == null) {
-            self.thunks = try ThunkHolderData.create(self.process_allocator, size, zero_from_slot);
+            self.thunks = try ThunkHolderData.create(thunk_allocator_of(self.process_allocator), size, zero_from_slot);
         }
     }
 
@@ -348,6 +380,8 @@ pub const Module = struct {
     // symbols, data relocation values) already carry their Thumb bit, clear
     // for a data object in an executable section -- trust it as written.
     exact_thumb: bool = false,
+    hot_text_offset: u32 = 0,
+    hot_text_length: u32 = 0,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -375,7 +409,7 @@ pub const Module = struct {
     // per-process [data][bss][got] buffer (which starts at const_rodata_length
     // in the offset space). With const_rodata_length == 0 this is the identity
     // data-base + offset (legacy behaviour).
-    pub fn resolve_data_offset(self: Module, offset: usize) usize {
+    pub fn resolve_data_offset(self: *const Module, offset: usize) usize {
         if (self.const_rodata_length > 0 and offset < self.const_rodata_length) {
             if (self.shared_data) |shared| {
                 if (shared.rodata) |rodata| {
@@ -392,7 +426,7 @@ pub const Module = struct {
     /// Whether `address_in_section(section, offset)` lands in this module's
     /// per-process region (data, bss) rather than its image (code, init, the
     /// shared rodata). Mirrors `resolve_data_offset`.
-    pub fn section_in_region(self: Module, section: Section, offset: usize) bool {
+    pub fn section_in_region(self: *const Module, section: Section, offset: usize) bool {
         return switch (section) {
             .Data => !self.in_shared_rodata(offset),
             .Bss => true,
@@ -400,17 +434,33 @@ pub const Module = struct {
         };
     }
 
-    fn in_shared_rodata(self: Module, offset: usize) bool {
+    fn in_shared_rodata(self: *const Module, offset: usize) bool {
         if (self.const_rodata_length == 0 or offset >= self.const_rodata_length) return false;
         const shared = self.shared_data orelse return false;
         return shared.rodata != null;
     }
 
+    /// Whether (section, offset) is in the image's --hot-text block.
+    pub fn section_in_hot(self: *const Module, section: Section, offset: usize) bool {
+        return section == .Code and offset >= self.hot_text_offset and offset - self.hot_text_offset < self.hot_text_length;
+    }
+
+    /// Where this load runs the --hot-text block: its copy, or the image itself.
+    pub fn hot_text_base(self: *const Module) usize {
+        if (self.shared_data) |shared| {
+            if (shared.hot_text) |hot| return @intFromPtr(hot.ptr);
+        }
+        return @intFromPtr(self.get_text().ptr) + self.hot_text_offset;
+    }
+
     // Runtime address of (section, offset). DATA goes through the rodata-aware
     // resolver; every other section is its base + offset.
-    pub fn address_in_section(self: Module, section: Section, offset: usize) error{UnknownSection}!usize {
+    pub fn address_in_section(self: *const Module, section: Section, offset: usize) error{UnknownSection}!usize {
         if (section == .Data) {
             return self.resolve_data_offset(offset);
+        }
+        if (self.section_in_hot(section, offset)) {
+            return self.hot_text_base() + (offset - self.hot_text_offset);
         }
         return (try self.get_base_address(section)) + offset;
     }
@@ -454,7 +504,7 @@ pub const Module = struct {
         log.debug("created module: {s}", .{name});
     }
 
-    pub fn get_base_address(self: Module, section: Section) error{UnknownSection}!usize {
+    pub fn get_base_address(self: *const Module, section: Section) error{UnknownSection}!usize {
         switch (section) {
             .Code => {
                 if (self.shared_data) |shared_data| {
@@ -491,7 +541,7 @@ pub const Module = struct {
         return error.UnknownSection;
     }
 
-    pub fn find_local_symbol(self: Module, name: []const u8) ?LocalSymbol {
+    pub fn find_local_symbol(self: *const Module, name: []const u8) ?LocalSymbol {
         if (self.shared_data) |shared_data| {
             const maybe_symbol = shared_data.exported_symbols.element_by_name(name);
             if (maybe_symbol) |symbol| {
@@ -506,7 +556,7 @@ pub const Module = struct {
                 if ((section == .Code or section == .Init) and !self.exact_thumb and (address & 1 == 0)) {
                     address |= 1;
                 }
-                return .{ .address = address, .in_region = self.section_in_region(section, symbol.offset) };
+                return .{ .address = address, .in_hot = self.section_in_hot(section, symbol.offset), .in_region = self.section_in_region(section, symbol.offset) };
             }
             // var it = shared_data.exported_symbols.iter();
             // while (it) |symbol| : (it = symbol.next()) {
@@ -529,6 +579,7 @@ pub const Module = struct {
                         .target_got_address = @intFromPtr(got.ptr),
                         .owner = 0,
                         .in_region = symbol.in_region,
+                        .in_hot = symbol.in_hot,
                     };
                 }
             }
@@ -550,6 +601,7 @@ pub const Module = struct {
                             .target_got_address = @intFromPtr(got.ptr),
                             .owner = owner,
                             .in_region = symbol.in_region,
+                            .in_hot = symbol.in_hot,
                         };
                     }
                 }

@@ -19,6 +19,7 @@
 //
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const c = @import("c").c;
 
@@ -199,6 +200,18 @@ pub fn check_free_list() ?FreeListFault {
 }
 
 extern fn _sbrk(incr: usize) *allowzero anyopaque;
+
+/// A block of the kernel's slow heap freed through this allocator reads whatever is in
+/// front of it as a chunk header. That corrupts the free list, or faults, or on QEMU's
+/// empty memory does nothing at all: say so here instead.
+fn assert_in_kernel_heap(pointer: [*]const u8) void {
+    if (comptime builtin.is_test or !std.debug.runtime_safety) return;
+    const address = @intFromPtr(pointer);
+    if (address < @intFromPtr(&end) or address >= @intFromPtr(&__heap_limit__)) {
+        log.err("freeing 0x{x}, which is not on the kernel heap", .{address});
+        @panic("free of a pointer outside the kernel heap");
+    }
+}
 
 /// Bytes the kernel heap can still hand out: what the break has not claimed yet
 /// plus what sits on malloc's free list. An upper bound -- a single allocation
@@ -559,6 +572,7 @@ pub fn MallocAllocator(comptime options: anytype) type {
             return_address: usize,
         ) void {
             _ = return_address;
+            assert_in_kernel_heap(buf.ptr);
             // Same reasoning as `alloc`: the free and its bookkeeping have to be
             // one operation, or `tracker.remove` races the splice in `push`.
             kheap_lock.yasos_kheap_lock();

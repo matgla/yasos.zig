@@ -509,9 +509,10 @@ build_c_compiler()
   YASOS_SYSINCLUDES="$SCRIPT_DIR/rootfs/usr/include:{B}/include"
 
   NATIVE_TCC_DEBUG_CONFIG=""
-  # -DCONFIG_TCC_DEBUG enables the on-target `-dump-ir` / `-dump-ir-passes=` flags
-  # (libtcc.c gates them under #ifdef CONFIG_TCC_DEBUG) so the native compiler can
-  # dump IR on-device for HW-vs-QEMU codegen comparison.
+  # CONFIG_TCC_DEBUG (the on-target `-dump-ir` / `-dump-ir-passes=` flags) is off
+  # here, and -DCONFIG_TCC_CHECKS=0 drops -bench's allocation sites, the
+  # per-instruction R9 check and the ICE messages: --tcc-ab-knobs and --debug-tcc put
+  # them back.
   # -DCONFIG_TCC_DEBUG_ENV=0 compiles out the ~30 getenv-driven debug/bisect
   # knobs (TCC_DISABLE_PASS, TCC_NO_COALESCE, DBG_CLINL, SCAN_OVERLAP, ...); see
   # libs/tinycc/tccdbgenv.h.  The device compiler is XIP-miss-bound, so the dead
@@ -519,7 +520,7 @@ build_c_compiler()
   # them is .text -14,584 B / -17,272 B total, with byte-identical output.  The
   # HOST cross keeps them (the Makefile default follows CONFIG_TCC_DEBUG), so the
   # bisect tooling is unaffected.  --debug-tcc puts them back on-device.
-  NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0 -DCONFIG_TCC_DEBUG -DCONFIG_TCC_DEBUG_ENV=0"
+  NATIVE_TCC_DEBUG_DEFINE="-DTCC_DEBUG=0 -DCONFIG_TCC_DEBUG_ENV=0 -DCONFIG_TCC_CHECKS=0"
   NATIVE_TCC_DEBUG_OPT="${NATIVE_TCC_OPT_OVERRIDE:--O2}"
   if $DEBUG_TCC; then
     NATIVE_TCC_DEBUG_CONFIG="--debug --enable-O2"
@@ -535,7 +536,19 @@ build_c_compiler()
   # program compiled on the device matches the libraries it links against.
   # (Appended after the --debug-tcc branch, which replaces the string wholesale
   # and used to drop this.)
-  NATIVE_TCC_DEBUG_DEFINE="$NATIVE_TCC_DEBUG_DEFINE $TCC_FP_DEFINE"
+  NATIVE_TCC_DEBUG_DEFINE="$NATIVE_TCC_DEBUG_DEFINE $TCC_FP_DEFINE ${TCC_NATIVE_EXTRA_CFLAGS:-}"
+  # The functions the loader runs from SRAM (docs/hot_text.md in tinycc).
+  # TCC_HOT_TEXT_FILE overrides the list; empty means none.
+  NATIVE_HOT_TEXT_FILE="${TCC_HOT_TEXT_FILE-$SCRIPT_DIR/libs/tinycc/source/driver/hot_functions.txt}"
+  NATIVE_HOT_TEXT_FLAG=""
+  if [ -n "$NATIVE_HOT_TEXT_FILE" ]; then
+    # Without it the compiler still works and takes twice as long: not by accident.
+    if [ ! -f "$NATIVE_HOT_TEXT_FILE" ]; then
+      echo "ERROR: hot function list '$NATIVE_HOT_TEXT_FILE' not found (TCC_HOT_TEXT_FILE= builds without one)"
+      exit 1
+    fi
+    NATIVE_HOT_TEXT_FLAG="-Wl,--hot-text=$NATIVE_HOT_TEXT_FILE"
+  fi
 
   NATIVE_STAGE1_OUTPUT="$SCRIPT_DIR/libs/tinycc/bin/armv8m-tcc.elf"
   NATIVE_STAGE2_OUTPUT="$PREFIX/bin/tcc"
@@ -561,7 +574,7 @@ build_c_compiler()
   else
     ./configure --cc=tcc --cpu=armv8m \
       --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
-      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
+      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE $NATIVE_HOT_TEXT_FLAG -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
       --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
       --disable-asan \
       $NATIVE_TCC_DEBUG_CONFIG \
@@ -625,7 +638,7 @@ build_c_compiler()
   else
     ./configure --cc=tcc --cpu=armv8m \
       --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
-      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
+      --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE $NATIVE_HOT_TEXT_FLAG -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
       --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
       --disable-asan \
       $NATIVE_TCC_DEBUG_CONFIG \
@@ -749,7 +762,7 @@ build_gnumake()
   # the flags, so re-run it when the generated Makefile is missing or stale
   # rather than on every rootfs build.
   if [ ! -f Makefile ] || [ configure -nt Makefile ] || [ "$SCRIPT_DIR/build_rootfs.sh" -nt Makefile ]; then
-    CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" LDFLAGS="-stack-size=$GNUMAKE_STACK_SIZE" \
+    CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" LDFLAGS="-stack-size=$GNUMAKE_STACK_SIZE -slow-memory" \
       CC="$CC" ./configure --host=arm-none-eabi --prefix=$PREFIX
     if [ $? -ne 0 ]; then
       exit -1;
@@ -771,7 +784,7 @@ build_gnumake()
   # default link emits the YaFF the loader wants.  Relinking is enough -- the
   # earlier version of this reconfigured and rebuilt the whole tree twice.
   mv make make.yaff
-  make $GNUMAKE_MAKE_ARGS LDFLAGS="-stack-size=$GNUMAKE_STACK_SIZE -Wl,-oformat=elf32-littlearm"
+  make $GNUMAKE_MAKE_ARGS LDFLAGS="-stack-size=$GNUMAKE_STACK_SIZE -slow-memory -Wl,-oformat=elf32-littlearm"
   if [ $? -ne 0 ]; then
     exit -1;
   fi

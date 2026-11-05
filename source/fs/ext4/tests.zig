@@ -111,6 +111,22 @@ test "Ext4.DirectoriesListWithoutDotEntries" {
     try std.testing.expect(saw_file and saw_dir);
 }
 
+test "Ext4.RepeatedSlashesNameTheSamePath" {
+    // `cp file dir/` opens dir//file. POSIX: any number of slashes is one.
+    var fs = try create_formatted();
+    defer fs.interface.delete();
+    try fs.interface.mkdir("/dir", 0o755);
+    try fs.interface.mkdir("/dir//sub", 0o755);
+    try write_file(&fs, "/dir//sub///file", "x");
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("x", try read_file(&fs, "/dir/sub/file", &buffer));
+    try std.testing.expectEqualStrings("x", try read_file(&fs, "//dir//sub//file", &buffer));
+    var st: c.struct_stat = undefined;
+    try fs.interface.stat("/dir//sub//file", &st, true);
+    try fs.interface.unlink("/dir//sub//file");
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, fs.interface.get("/dir/sub/file"));
+}
+
 test "Ext4.RmdirRefusesAnOccupiedDirectory" {
     var fs = try create_formatted();
     defer fs.interface.delete();

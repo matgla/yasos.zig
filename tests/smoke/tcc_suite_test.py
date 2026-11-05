@@ -317,6 +317,8 @@ COMPILE_TIMEOUT_TESTS = {
     "bug_sso_be_runtime_byte_order.c": 30,
     # 73 macro-generated functions; no single hot pass, -O2 just overruns ~6 s
     "886_struct_arg_copy_live_regs.c": 30,
+    # 1100 macro-generated functions, each in its own section
+    "bug_link_many_function_sections.c": 120,
     # gcc-torture compile: macro/argument-count stress files
     "limits-fnargs": 60,
     "limits-stringlit": 30,

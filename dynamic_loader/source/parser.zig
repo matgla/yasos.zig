@@ -125,6 +125,9 @@ pub const Parser = struct {
         const arch: *const Arch = @ptrCast(@alignCast(image.ptr + h.arch_section_offset));
         if (arch.size < @sizeOf(Arch)) return error.InvalidImageLayout;
         _ = try span_end(h.arch_section_offset, arch.size, 1, h.imported_libraries_offset);
+        if (@import("header.zig").get_hot_text(h)) |hot| {
+            if (hot.offset % 8 != 0 or hot.offset > h.code_length or hot.length > h.code_length - hot.offset) return error.InvalidImageLayout;
+        }
         if (try names_end(image, h.imported_libraries_offset, h.relocations_offset, h.external_libraries_amount, 0, alignment, null) != h.relocations_offset) return error.InvalidImageLayout;
         var rel_end: usize = h.relocations_offset;
         rel_end = try span_end(rel_end, h.symbol_table_relocations_amount, @sizeOf(relocation.SymbolTableRelocation), h.imported_symbols_offset);
@@ -284,7 +287,7 @@ pub const Parser = struct {
         };
     }
 
-    pub fn print(self: Parser) void {
+    pub fn print(self: *const Parser) void {
         log.debug("              name: {s}", .{self.name});
         log.debug("imported libraries: {d}, size: {x}", .{ self.imported_libraries.number_of_items, self.imported_libraries.address() });
         {
@@ -329,45 +332,45 @@ pub const Parser = struct {
         log.debug(".got.plt: 0x{x}", .{self.got_plt_address});
     }
 
-    pub fn get_data(self: Parser) []const u8 {
+    pub fn get_data(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.data_address);
         return ptr[0..self.header.data_length];
     }
 
     // RELRO: the first const_rodata_length bytes of the data region are
     // pure-const .rodata shared XIP across processes (borrowed, never copied).
-    pub fn get_rodata(self: Parser) []const u8 {
+    pub fn get_rodata(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.data_address);
         return ptr[0..self.header.const_rodata_length];
     }
 
     // The per-process data (everything after the shared rodata prefix).
-    pub fn get_process_data(self: Parser) []const u8 {
+    pub fn get_process_data(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.data_address + self.header.const_rodata_length);
         return ptr[0 .. self.header.data_length - self.header.const_rodata_length];
     }
 
-    pub fn get_text(self: Parser) []const u8 {
+    pub fn get_text(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.text_address);
         return ptr[0..self.header.code_length];
     }
 
-    pub fn get_got(self: Parser) []const u8 {
+    pub fn get_got(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.got_address);
         return ptr[0..self.header.got_length];
     }
 
-    pub fn get_got_plt(self: Parser) []const u8 {
+    pub fn get_got_plt(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.got_plt_address);
         return ptr[0..self.header.got_plt_length];
     }
 
-    pub fn get_plt(self: Parser) []const u8 {
+    pub fn get_plt(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.plt_address);
         return ptr[0..self.header.plt_length];
     }
 
-    pub fn get_init(self: Parser) []const u8 {
+    pub fn get_init(self: *const Parser) []const u8 {
         const ptr: [*]const u8 = @ptrFromInt(self.init_address);
         return ptr[0..self.header.init_length];
     }

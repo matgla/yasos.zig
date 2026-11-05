@@ -45,7 +45,9 @@ speed=$ADAPTER_SPEED
 
 rescue
 for attempt in 1 2 3; do
-    cmd=( openocd -c "set USE_CORE 0" -f "$INTERFACE_CFG" -f "$TARGET_CFG"
+    # Both cores: OpenOCD programs from a work area at 0x20010000, which is the kernel's
+    # process pool on the PSRAM boards, and a core it does not halt keeps writing there.
+    cmd=( openocd -f "$INTERFACE_CFG" -f "$TARGET_CFG"
           -c "adapter speed $speed" -c "init" -c "reset halt" )
     if [[ -n "$ROOTFS" && -f "$ROOTFS" && -n "$ROOTFS_ADDR" ]]; then
         cmd+=( -c "program $ROOTFS $ROOTFS_ADDR" )

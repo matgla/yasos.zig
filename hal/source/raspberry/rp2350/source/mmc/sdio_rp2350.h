@@ -67,7 +67,7 @@ typedef enum {
 #endif
 
 #ifndef SDIO_MAX_BLOCKS_PER_REQ
-#define SDIO_MAX_BLOCKS_PER_REQ 128
+#define SDIO_MAX_BLOCKS_PER_REQ 32
 #endif
 
 #ifndef SDIO_CMD_TIMEOUT_US

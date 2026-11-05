@@ -32,7 +32,7 @@ extern var __psram_end__: u8;
 extern var __temp_ram_start__: u8;
 extern var __temp_ram_end__: u8;
 
-var memory_layout: [4]MemoryInfo = [_]MemoryInfo{
+var memory_layout: [5]MemoryInfo = [_]MemoryInfo{
     MemoryInfo{
         .speed = MemoryInfo.MemorySpeed.Fast,
         .memory_type = MemoryInfo.MemoryType.SRAM,
@@ -54,14 +54,31 @@ var memory_layout: [4]MemoryInfo = [_]MemoryInfo{
         .size = 0,
         .start_address = 0,
     },
+    // Reported as PSRAM, which this DDR is not, so QEMU runs what a board with PSRAM
+    // runs: there the /tmp arena is PSRAM, where exclusives never succeed. QEMU's
+    // always do, so without this an atomic in the arena would pass every test here
+    // and hang the board. sync/placement.zig panics on one instead.
     MemoryInfo{
-        .speed = MemoryInfo.MemorySpeed.Fast,
-        .memory_type = MemoryInfo.MemoryType.SRAM,
+        .speed = MemoryInfo.MemorySpeed.Slow,
+        .memory_type = MemoryInfo.MemoryType.PSRAM,
         .owner = MemoryInfo.Owner.Temp,
         .size = 0,
         .start_address = 0,
     },
+    // The kernel's slow heap, off the top of `psram` as on the boards. Reported as
+    // PSRAM for the same reason, and the board model charges it as PSRAM.
+    MemoryInfo{
+        .speed = MemoryInfo.MemorySpeed.Slow,
+        .memory_type = MemoryInfo.MemoryType.PSRAM,
+        .owner = MemoryInfo.Owner.KernelSlow,
+        .size = 0,
+        .start_address = 0,
+    },
 };
+
+/// An /16 of `psram`, as the boards' 512 KB of 8 MB: on a 256 MB `psram` a RamFs on
+/// the slow heap (/var and /home with no card) still holds what the tests write.
+const kernel_slow_fraction: usize = 16;
 
 pub const Memory = struct {
     pub fn get_memory_layout(self: Memory) []const MemoryInfo {
@@ -74,6 +91,10 @@ pub const Memory = struct {
         memory_layout[2].size = @intFromPtr(&__psram_end__) - @intFromPtr(&__psram_start__);
         memory_layout[3].start_address = @intFromPtr(&__temp_ram_start__);
         memory_layout[3].size = @intFromPtr(&__temp_ram_end__) - @intFromPtr(&__temp_ram_start__);
+        const slow_size = memory_layout[2].size / kernel_slow_fraction;
+        memory_layout[2].size -= slow_size;
+        memory_layout[4].start_address = memory_layout[2].start_address + memory_layout[2].size;
+        memory_layout[4].size = slow_size;
         return &memory_layout;
     }
 

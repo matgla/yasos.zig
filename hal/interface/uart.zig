@@ -26,10 +26,17 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
         const Self = @This();
         impl: UartImplementation,
 
+        /// Whether the receive ring can be given its memory at run time.
+        pub const movable_rx = @hasDecl(UartImplementation, "set_rx_storage");
+
         pub fn create() Self {
             return Self{
                 .impl = UartImplementation{},
             };
+        }
+
+        pub fn set_rx_storage(self: Self, memory: []u8) void {
+            self.impl.set_rx_storage(memory);
         }
 
         pub fn init(self: Self, config: Config) InitializeError!void {

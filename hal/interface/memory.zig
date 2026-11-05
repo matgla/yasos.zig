@@ -32,6 +32,10 @@ pub const MemoryInfo = struct {
         // NOT mapped for unprivileged code — but kept out of the process memory
         // pool's tiers so a growing process image can never eat it.
         Temp,
+        // Kernel objects that do not need fast memory (the kernel's slow heap,
+        // source/kernel/memory/heap/kernel_slow_heap.zig). Not mapped for
+        // unprivileged code, and not part of the process pool.
+        KernelSlow,
     };
 
     speed: MemorySpeed,

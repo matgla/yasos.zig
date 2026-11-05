@@ -64,6 +64,19 @@ fn initialize_stat_identity(data: *c.struct_stat, path: []const u8) void {
 /// whose step is 390.
 const path_scratch_bytes = 4 * 128;
 
+/// Whether normalising `path` would leave it as it is, which is nearly always: the VFS
+/// has already resolved it.  Then none of the callers need the scratch below on their
+/// stack, under everything else they call.
+fn is_normal_path(path: []const u8) bool {
+    if (path.len == 0 or path[path.len - 1] == '/' and path.len > 1) return false;
+    var it = std.mem.splitScalar(u8, if (path[0] == '/') path[1..] else path, '/');
+    if (path.len == 1 and path[0] == '/') return true;
+    while (it.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
+}
+
 fn resolve_into(buffer: []u8, path: []const u8) ![]const u8 {
     var scratch = std.heap.FixedBufferAllocator.init(buffer);
     const resolved = try std.fs.path.resolve(scratch.allocator(), &.{path});
@@ -118,8 +131,16 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     fn get_parent_node(self: *Self, path: []const u8) !kernel.fs.Node {
+        if (is_normal_path(path)) return self.parent_of_resolved(path);
+        return @call(.never_inline, parent_of_unresolved, .{ self, path });
+    }
+
+    fn parent_of_unresolved(self: *Self, path: []const u8) !kernel.fs.Node {
         var scratch: [path_scratch_bytes]u8 = undefined;
-        const resolved_path = try resolve_into(&scratch, path);
+        return self.parent_of_resolved(try resolve_into(&scratch, path));
+    }
+
+    fn parent_of_resolved(self: *Self, resolved_path: []const u8) !kernel.fs.Node {
         const maybe_dirpath: ?[]const u8 = std.fs.path.dirname(resolved_path);
 
         if (maybe_dirpath) |dirpath| {
@@ -232,8 +253,16 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     /// result aliases the one the tree owns: read it and drop it, never
     /// `delete()` it. Callers that need to hold a node must use `get`.
     fn borrow_node(self: *Self, path: []const u8) !kernel.fs.Node {
+        if (is_normal_path(path)) return self.borrow_resolved(path);
+        return @call(.never_inline, borrow_unresolved, .{ self, path });
+    }
+
+    fn borrow_unresolved(self: *Self, path: []const u8) !kernel.fs.Node {
         var scratch: [path_scratch_bytes]u8 = undefined;
-        const resolved_path = try resolve_into(&scratch, path);
+        return self.borrow_resolved(try resolve_into(&scratch, path));
+    }
+
+    fn borrow_resolved(self: *Self, resolved_path: []const u8) !kernel.fs.Node {
         if (resolved_path.len == 0 or std.mem.eql(u8, resolved_path, "/")) {
             return self._root;
         }
@@ -249,8 +278,16 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         // Allocates nothing, deliberately -- see borrow_directory. The existence
         // check a `get` would stand for is one the parent's own unlink already
         // makes: it answers NoEntry for a name it does not hold.
+        if (is_normal_path(path)) return self.unlink_resolved(path);
+        return @call(.never_inline, unlink_unresolved, .{ self, path });
+    }
+
+    fn unlink_unresolved(self: *Self, path: []const u8) anyerror!void {
         var scratch: [path_scratch_bytes]u8 = undefined;
-        const resolved_path = try resolve_into(&scratch, path);
+        return self.unlink_resolved(try resolve_into(&scratch, path));
+    }
+
+    fn unlink_resolved(self: *Self, resolved_path: []const u8) anyerror!void {
         const nodename = std.fs.path.basename(resolved_path);
         const dirpath = std.fs.path.dirname(resolved_path) orelse "/";
         var parent = try self.borrow_directory(dirpath);
@@ -339,7 +376,10 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
             try self.ensure_room_for_node();
             const filedata = try self._allocator.create(RamFsData);
             filedata.* = try RamFsData.create(self._allocator);
-            // The link target is stored verbatim as the file content.
+            // The link target is stored verbatim as the file content. Reserved first:
+            // a handful of bytes, already allowed for by the node check above, and
+            // growing a file has a kernel heap rule of its own for much bigger writes.
+            try filedata.reserve(target.len);
             _ = try filedata.write_at(0, target);
             const filenode = try self._allocator.create(RamFsNode);
             const filename = try self._allocator.dupe(u8, basename);
@@ -474,11 +514,19 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     /// destination that is a non-empty directory is refused (unlink reports it);
     /// and a directory cannot be moved inside itself.
     pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
+        if (is_normal_path(old_path) and is_normal_path(new_path)) return self.rename_resolved(old_path, new_path);
+        return @call(.never_inline, rename_unresolved, .{ self, old_path, new_path });
+    }
+
+    fn rename_unresolved(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
         var old_scratch: [path_scratch_bytes]u8 = undefined;
         var new_scratch: [path_scratch_bytes]u8 = undefined;
         const old_resolved = try resolve_into(&old_scratch, old_path);
         const new_resolved = try resolve_into(&new_scratch, new_path);
+        return self.rename_resolved(old_resolved, new_resolved);
+    }
 
+    fn rename_resolved(self: *Self, old_resolved: []const u8, new_resolved: []const u8) anyerror!void {
         if (std.mem.eql(u8, old_resolved, new_resolved)) {
             // Same name: POSIX says do nothing and report success.
             var existing = try self.get(old_resolved);
@@ -1425,4 +1473,93 @@ test "RamFsFile.ShouldAlwaysReturnZeroForFcntl" {
     try std.testing.expectEqual(0, file.?.interface.fcntl(-123, null));
     try std.testing.expectEqual(0, file.?.interface.fcntl(0, &data));
     try std.testing.expectEqual(0, file.?.interface.fcntl(999, null));
+}
+
+test "RamFs.NormalPathsAreExactlyWhatResolveLeavesAlone" {
+    const paths = [_][]const u8{
+        "/", "/a", "/a/b", "a", "a/b", "a.b/c..d", "...", "/.hidden",
+        "", ".", "..", "./", "../", "/.", "/..", "./a", "../a", "a/", "/a/", "a//b", "//a", "a/./b", "a/../b", "a/.", "a/..",
+    };
+    for (paths) |path| {
+        var scratch: [path_scratch_bytes]u8 = undefined;
+        const resolved = try resolve_into(&scratch, path);
+        // Nothing the check lets through may be changed by the normalising it skips.
+        if (is_normal_path(path)) try std.testing.expectEqualStrings(path, resolved);
+    }
+    try std.testing.expect(is_normal_path("/a/b"));
+    try std.testing.expect(is_normal_path("/"));
+    try std.testing.expect(!is_normal_path("/a/../b"));
+    try std.testing.expect(!is_normal_path(""));
+}
+
+test "RamFs.KeepsItsCountersOutOfAnArenaInPsram" {
+    // A counter in PSRAM would hang on its first atomic. The rest of the tree and the
+    // file contents belong in the arena.
+    var arena_memory: [8192]u8 align(256) = undefined;
+    var pool = try kernel.memory.heap.TmpMemoryPool(256).init(std.testing.allocator, &arena_memory);
+    defer pool.deinit();
+    var page_allocator = kernel.memory.heap.TmpPageAllocator(@TypeOf(pool)).init(&pool);
+    var apart = kernel.memory.heap.CountersApartAllocator{
+        .arena = page_allocator.allocator(),
+        .counters = std.testing.allocator,
+    };
+    var fixture = try TieredFixture.init(std.testing.allocator, apart.allocator(), 1024);
+    defer fixture.deinit(std.testing.allocator);
+
+    const in_arena = struct {
+        fn check(memory: []const u8, pointer: *const anyopaque) bool {
+            const address = @intFromPtr(pointer);
+            return address >= @intFromPtr(memory.ptr) and address < @intFromPtr(memory.ptr) + memory.len;
+        }
+    }.check;
+
+    const empty = pool.get_used_size();
+    try fixture.sut.interface.mkdir("/dir", 0);
+    try fixture.sut.interface.create("/dir/file", 0);
+    try fixture.sut.interface.symlink("/dir/file", "/link");
+    try std.testing.expect(pool.get_used_size() > empty);
+
+    var dir_node = try fixture.sut.interface.get("/dir");
+    defer dir_node.delete();
+    var directory = dir_node.as_directory().?;
+    try std.testing.expect(!in_arena(&arena_memory, directory.as(RamFsDirectory).data()._shared.refcounter));
+
+    var node = try fixture.sut.interface.get("/dir/file");
+    var file = node.as_file().?;
+    try std.testing.expect(!in_arena(&arena_memory, file.__refcount.?));
+    const ramfs_file = file.as(RamFsFile).data();
+    try std.testing.expect(!in_arena(&arena_memory, ramfs_file._data.refcounter));
+
+    const before_contents = pool.get_used_size();
+    const contents = "contents of the file";
+    try std.testing.expectEqual(@as(isize, contents.len), file.interface.write(contents));
+    try std.testing.expect(pool.get_used_size() > before_contents);
+    node.delete();
+}
+
+test "RamFs.ASymlinkOnlyNeedsRoomForANode" {
+    // The rp2350's whole kernel heap is below the 256 KB a file's growth must leave,
+    // so a link's few bytes must not be judged by that rule: `ln -s` on the board
+    // always failed with ENOSPC. Only a heap too low for any new node refuses it.
+    const Heap = struct {
+        var room: usize = 0;
+        fn headroom() usize {
+            return room;
+        }
+    };
+    ramfs_data.kernel_heap_headroom = &Heap.headroom;
+    defer ramfs_data.kernel_heap_headroom = null;
+
+    var sut_fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = sut_fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    Heap.room = 64 * 1024;
+    try sut.interface.symlink("/target", "/link");
+    var buffer: [16]u8 = undefined;
+    const length = try sut.interface.readlink("/link", &buffer);
+    try std.testing.expectEqualStrings("/target", buffer[0..length]);
+
+    Heap.room = 1024;
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoSpaceLeftOnDevice, sut.interface.symlink("/target", "/low"));
 }

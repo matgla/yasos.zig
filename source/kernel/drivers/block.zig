@@ -337,9 +337,11 @@ pub fn find_by_label(wanted: []const u8, out: []u8) ?[]const u8 {
             var node = dir.get(node_name) catch return false;
             defer node.delete();
             var file = node.as_file() orelse return false;
-            var head: [head_size]u8 = undefined;
-            if (!read_head(&file, &head)) return false;
-            const label = volume_label(&head) orelse return false;
+            // On the heap: mount(2) gets here on the stack of a small process.
+            const head = allocator.create([head_size]u8) catch return false;
+            defer allocator.destroy(head);
+            if (!read_head(&file, head)) return false;
+            const label = volume_label(head) orelse return false;
             if (!std.ascii.eqlIgnoreCase(label.slice(), self.wanted)) return false;
             if (node_name.len > self.out.len) return false;
             @memcpy(self.out[0..node_name.len], node_name);

@@ -194,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
         .float_abi = .Softfp,
         .features = .{ .fpu_sp = true, .fpu_dp = true, .dcp = true },
     };
-    yasld.loader_init(&resolve_library, gpa, machine);
+    yasld.loader_init(&resolve_library, gpa, gpa, machine);
     yasld.set_load_map_logging(false);
     template.enable(gpa, .{ .lock = &no_lock, .unlock = &no_unlock });
     const loader = yasld.get_loader().?;

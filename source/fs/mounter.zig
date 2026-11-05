@@ -90,11 +90,13 @@ const FirstSector = enum { blank, fat, ext4, partition_table, other, unreadable 
 
 fn classify_first_sector(file: *kernel.fs.IFile) FirstSector {
     const block = kernel.driver.block;
-    var head: [block.head_size]u8 = undefined;
-    if (!block.read_head(file, &head)) return .unreadable;
-    if (std.mem.allEqual(u8, &head, 0)) return .blank;
+    // On the heap: mount(2) runs on the stack of whoever called it, 8 KB for toybox.
+    const head = kernel_allocator.create([block.head_size]u8) catch return .unreadable;
+    defer kernel_allocator.destroy(head);
+    if (!block.read_head(file, head)) return .unreadable;
+    if (std.mem.allEqual(u8, head, 0)) return .blank;
     if (block.has_partition_table(head[0..512], file.interface.size() / 512)) return .partition_table;
-    return switch (block.volume_kind(&head)) {
+    return switch (block.volume_kind(head)) {
         .ext4 => .ext4,
         .fat => .fat,
         .unknown => .other,
@@ -113,9 +115,36 @@ fn attach(filesystem: kernel.fs.IFileSystem, request: Request, source: []const u
 
 /// A filesystem on a block device: FAT or ext4, or whichever the device
 /// holds when `kind` is null ("auto").
+fn create_filesystem(kind: Kind, file: kernel.fs.IFile) !kernel.fs.IFileSystem {
+    return switch (kind) {
+        .fat => try (try FatFs.InstanceType.init(kernel_allocator, file)).interface.new(kernel_allocator),
+        .ext4 => try (try Ext4Fs.InstanceType.init(kernel_allocator, file)).interface.new(kernel_allocator),
+    };
+}
+
+/// Mount `filesystem`, formatting it first when the line asks for that and it needs it.
+fn attach_block(filesystem: kernel.fs.IFileSystem, request: Request, device: []const u8, fstype: []const u8, blank: bool) !void {
+    var owned = filesystem;
+    kernel.fs.get_vfs().mount_filesystem_with_info(request.target, owned, kernel.fs.MountInfo.init(device, fstype, request.options)) catch |first_error| {
+        if (first_error != error.NotMounted or !has(request.options, "x-format-blank") or !blank) {
+            owned.interface.delete();
+            return first_error;
+        }
+        log.info("{s} is blank, formatting it {s}", .{ device, fstype });
+        owned.interface.format() catch |err| {
+            owned.interface.delete();
+            return err;
+        };
+        try attach(owned, request, device, fstype);
+    };
+}
+
+/// Every step out of line, so that its frame is gone when the next one goes deep: this
+/// runs on the caller's stack, and the mount itself needs the room. Inlined, the steps
+/// made a frame of 3.7 KB, and with the label search `mount /opt` overflowed toybox's 8.
 fn mount_block(request: Request, requested: ?Kind) !void {
     var device_buffer: [32]u8 = undefined;
-    const device = try resolve_device(request.source, &device_buffer);
+    const device = try @call(.never_inline, resolve_device, .{ request.source, &device_buffer });
     var node = try kernel.fs.get_ivfs().interface.get(device);
     defer node.delete();
     var file = node.as_file() orelse return kernel.errno.ErrnoSet.BlockDeviceRequired;
@@ -125,7 +154,7 @@ fn mount_block(request: Request, requested: ?Kind) !void {
     // its first partition instead, which is never what the line meant --
     // mount the partition (/dev/<disk>p1) or its LABEL=. EINVAL, not ENOTBLK:
     // toybox mount takes ENOTBLK as "set up a loop device and retry".
-    const first_sector = classify_first_sector(&file);
+    const first_sector = @call(.never_inline, classify_first_sector, .{&file});
     if (first_sector == .partition_table) return kernel.errno.ErrnoSet.InvalidArgument;
     const kind: Kind = requested orelse switch (first_sector) {
         .fat => .fat,
@@ -134,26 +163,12 @@ fn mount_block(request: Request, requested: ?Kind) !void {
     };
 
     // `as_file` lends the node's interface; the filesystems clone what they keep.
-    var filesystem = switch (kind) {
-        .fat => try (try FatFs.InstanceType.init(kernel_allocator, file)).interface.new(kernel_allocator),
-        .ext4 => try (try Ext4Fs.InstanceType.init(kernel_allocator, file)).interface.new(kernel_allocator),
-    };
+    const filesystem = try @call(.never_inline, create_filesystem, .{ kind, file });
     const fstype = switch (kind) {
         .fat => "vfat",
         .ext4 => "ext4",
     };
-    kernel.fs.get_vfs().mount_filesystem_with_info(request.target, filesystem, kernel.fs.MountInfo.init(device, fstype, request.options)) catch |first_error| {
-        if (first_error != error.NotMounted or !has(request.options, "x-format-blank") or first_sector != .blank) {
-            filesystem.interface.delete();
-            return first_error;
-        }
-        log.info("{s} is blank, formatting it {s}", .{ device, fstype });
-        filesystem.interface.format() catch |err| {
-            filesystem.interface.delete();
-            return err;
-        };
-        try attach(filesystem, request, device, fstype);
-    };
+    try @call(.never_inline, attach_block, .{ filesystem, request, device, fstype, first_sector == .blank });
 }
 
 fn mount_ramfs(request: Request, source: []const u8) !void {
@@ -217,16 +232,16 @@ pub fn mount(request: Request) anyerror!void {
     if (request.target.len == 0 or request.target[0] != '/') return kernel.errno.ErrnoSet.InvalidArgument;
     const fstype = request.fstype;
     if (std.mem.eql(u8, fstype, "vfat") or std.mem.eql(u8, fstype, "fat") or std.mem.eql(u8, fstype, "msdos")) {
-        return mount_block(request, .fat);
+        return @call(.never_inline, mount_block, .{ request, .fat });
     }
     if (std.mem.eql(u8, fstype, "ext4") or std.mem.eql(u8, fstype, "ext3") or std.mem.eql(u8, fstype, "ext2")) {
-        return mount_block(request, .ext4);
+        return @call(.never_inline, mount_block, .{ request, .ext4 });
     }
-    if (std.mem.eql(u8, fstype, "auto")) return mount_block(request, null);
-    if (std.mem.eql(u8, fstype, "ramfs")) return mount_ramfs(request, request.source);
-    if (std.mem.eql(u8, fstype, "tmpfs")) return mount_tmpfs(request);
-    if (std.mem.eql(u8, fstype, "proc")) return mount_proc(request);
-    if (std.mem.eql(u8, fstype, "bind")) return mount_bind(request);
+    if (std.mem.eql(u8, fstype, "auto")) return @call(.never_inline, mount_block, .{ request, null });
+    if (std.mem.eql(u8, fstype, "ramfs")) return @call(.never_inline, mount_ramfs, .{ request, request.source });
+    if (std.mem.eql(u8, fstype, "tmpfs")) return @call(.never_inline, mount_tmpfs, .{request});
+    if (std.mem.eql(u8, fstype, "proc")) return @call(.never_inline, mount_proc, .{request});
+    if (std.mem.eql(u8, fstype, "bind")) return @call(.never_inline, mount_bind, .{request});
     return kernel.errno.ErrnoSet.NoSuchDevice;
 }
 

@@ -123,7 +123,8 @@ pub const Loader = struct {
 
 var loader_object: ?Loader = null;
 
-pub fn init(file_resolver: anytype, allocator: std.mem.Allocator, machine: MachineProfile) void {
+pub fn init(file_resolver: anytype, allocator: std.mem.Allocator, atomics_allocator: std.mem.Allocator, machine: MachineProfile) void {
+    _ = atomics_allocator;
     loader_object = Loader.create(file_resolver, allocator, machine);
 }
 

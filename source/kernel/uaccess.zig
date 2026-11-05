@@ -39,9 +39,7 @@ const log = std.log.scoped(.uaccess);
 
 /// Pointer validation only means anything where userspace and the kernel share
 /// one address space, i.e. the Cortex-M targets. The host and unit-test builds
-/// pass ordinary heap pointers no region list would cover, and their
-/// `get_memory_layout()` allocates fresh backing memory on every call, so
-/// consulting it per syscall would leak megabytes.
+/// pass ordinary heap pointers no region list would cover.
 pub const enabled = builtin.cpu.arch.isThumb();
 
 pub const Access = enum { read, write };
@@ -67,7 +65,7 @@ extern var __romfs_end__: u8;
 /// Snapshot the regions once, at boot.
 ///
 /// Snapshotting rather than calling `get_memory_layout()` per check is not just
-/// a speed matter: on the host and ut_stub HALs that getter allocates.
+/// a speed matter: on the host HAL that getter allocates.
 pub fn init() void {
     if (comptime !enabled) {
         initialized = true;

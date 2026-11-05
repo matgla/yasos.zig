@@ -45,6 +45,15 @@ pub fn preempt_disable() void {
     self.count += 1;
 }
 
+/// Drop this core's nesting for a thread that was killed instead of unwinding:
+/// the `preempt_enable` its windows were waiting for will never run.
+pub fn forget_nesting() void {
+    const flags = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(flags);
+    const self = state.current();
+    self.count = 0;
+}
+
 /// Whether an unbalanced release is a panic or a clamp. Off in ReleaseFast so a
 /// latent accounting bug cannot turn into a boot-time panic on a shipped image.
 const panic_on_unbalanced_release = std.debug.runtime_safety;

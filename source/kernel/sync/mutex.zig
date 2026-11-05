@@ -40,6 +40,14 @@ pub fn RankedMutex(comptime rank: locks.Rank) type {
         /// The holder, or null when taken before the scheduler existed. Only
         /// meaningful while `held`, which is why the two are separate fields.
         owner: ?*Process = null,
+        /// Stack a holder may need, for a lock over state that outlives the
+        /// process: dying inside would leave it half updated for everyone, and
+        /// on disk. A caller without this much is killed before taking the lock.
+        /// Syscalls run on the process stack, so this is reachable from any of
+        /// them. Zero for locks where that is not worth a kill.
+        stack_needed: u16 = 0,
+        /// This mutex on `owner`'s list of what it holds. See `release_held_by`.
+        held_link: locks.HeldMutex = .{ .release = &release_for_dead_owner },
 
         const Self = @This();
         pub const lock_rank = rank;
@@ -48,10 +56,11 @@ pub fn RankedMutex(comptime rank: locks.Rank) type {
         /// boot -- the kernel mounts filesystems before anything is scheduled.
         fn current_process() ?*Process {
             if (!process_manager.is_initialized()) return null;
-            return process_manager.instance.get_current_process();
+            return process_manager.instance.try_current_process();
         }
 
         pub fn lock(self: *Self) void {
+            if (self.stack_needed != 0) arch.sync.require_stack(self.stack_needed);
             const me = current_process();
             locks.enter_rank(rank);
 
@@ -61,8 +70,7 @@ pub fn RankedMutex(comptime rank: locks.Rank) type {
                     defer self.guard.unlock_irqrestore(flags);
 
                     if (!self.held) {
-                        self.held = true;
-                        self.owner = me;
+                        self.take(me);
                         break :blk false;
                     }
                     if (me != null and self.owner == me) {
@@ -116,11 +124,44 @@ pub fn RankedMutex(comptime rank: locks.Rank) type {
                 if (me != null and self.owner != null and self.owner != me) {
                     @panic("sleeping mutex released by a process that does not hold it");
                 }
-                self.held = false;
-                self.owner = null;
-                self.wake_waiters();
+                self.give_up();
             }
             locks.leave_rank(rank);
+        }
+
+        /// Caller holds `guard`.
+        fn take(self: *Self, me: ?*Process) void {
+            self.held = true;
+            self.owner = me;
+            if (me) |process| {
+                self.held_link.next = process._held_mutexes;
+                process._held_mutexes = &self.held_link;
+            }
+        }
+
+        /// Caller holds `guard`.
+        fn give_up(self: *Self) void {
+            if (self.owner) |process| {
+                var link = &process._held_mutexes;
+                while (link.*) |entry| : (link = &entry.next) {
+                    if (entry == &self.held_link) {
+                        link.* = entry.next;
+                        break;
+                    }
+                }
+            }
+            self.held = false;
+            self.owner = null;
+            self.wake_waiters();
+        }
+
+        /// `HeldMutex.release`. The rank goes with `forget_sleeping_ranks`, which
+        /// also covers the mutexes this thread was still waiting for.
+        fn release_for_dead_owner(link: *locks.HeldMutex) void {
+            const self: *Self = @alignCast(@fieldParentPtr("held_link", link));
+            const flags = self.guard.lock_irqsave();
+            defer self.guard.unlock_irqrestore(flags);
+            self.give_up();
         }
 
         /// Take the mutex only if it is free. Never blocks, so it is safe from
@@ -129,8 +170,7 @@ pub fn RankedMutex(comptime rank: locks.Rank) type {
             const flags = self.guard.lock_irqsave();
             defer self.guard.unlock_irqrestore(flags);
             if (self.held) return false;
-            self.held = true;
-            self.owner = current_process();
+            self.take(current_process());
             locks.enter_rank_untracked(rank);
             return true;
         }
@@ -165,6 +205,19 @@ pub fn RankedMutex(comptime rank: locks.Rank) type {
             }
         }
     };
+}
+
+/// Release everything `process` holds, for a thread that will never reach its
+/// `unlock`s: it was killed inside a syscall and resumes at `_exit` on a fresh
+/// frame. What those locks protected may be half updated, which is the price of
+/// keeping the rest of the system up; a lock nobody releases is a certain hang.
+/// Safe from a fault handler, since nothing here blocks. The caller has
+/// established that this core holds no spinlock, so no guard can be ours.
+pub fn release_held_by(process: *Process) void {
+    while (process._held_mutexes) |link| link.release(link);
+    process.waiting_for = null;
+    process.reevaluate_state();
+    locks.forget_sleeping_ranks();
 }
 
 const testing = std.testing;
@@ -220,6 +273,60 @@ test "Sync.Mutex.ParticipatesInTheLockHierarchy" {
     try testing.expectEqual(@as(locks.HeldSet, 0), locks.held_ranks());
 }
 
+test "Sync.Mutex.ADeadProcessGivesUpEverythingItHeld" {
+    locks.reset();
+    defer locks.reset();
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+    defer hal.irq.impl().clear();
+    var arg: usize = 0;
+    try process_manager.instance.create_process(1024, &blocked_entry, &arg, "holder");
+    _ = process_manager.instance.schedule_next();
+    _ = process_manager.process_set_next_task();
+    const process = process_manager.instance.get_current_process();
+
+    var outer = RankedMutex(.mount){};
+    var inner = TestMutex{};
+    outer.lock();
+    inner.lock();
+    try testing.expect(process._held_mutexes != null);
+
+    // Never reaches its unlocks: killed inside the syscall.
+    release_held_by(process);
+    try testing.expect(!outer.is_locked());
+    try testing.expect(!inner.is_locked());
+    try testing.expect(process._held_mutexes == null);
+    try testing.expectEqual(@as(locks.HeldSet, 0), locks.held_ranks());
+
+    // The next process in can take them, in order, without lockdep objecting.
+    outer.lock();
+    inner.lock();
+    inner.unlock();
+    outer.unlock();
+}
+
+test "Sync.Mutex.HeldListSurvivesReleaseOutOfOrder" {
+    locks.reset();
+    defer locks.reset();
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+    defer hal.irq.impl().clear();
+    var arg: usize = 0;
+    try process_manager.instance.create_process(1024, &blocked_entry, &arg, "holder");
+    _ = process_manager.instance.schedule_next();
+    _ = process_manager.process_set_next_task();
+    const process = process_manager.instance.get_current_process();
+
+    var first = RankedMutex(.mount){};
+    var second = TestMutex{};
+    first.lock();
+    second.lock();
+    first.unlock();
+    try testing.expect(process._held_mutexes == &second.held_link);
+    second.unlock();
+    try testing.expect(process._held_mutexes == null);
+}
+
 test "Sync.Mutex.BootContextTakesItWithoutAProcess" {
     locks.reset();
     defer locks.reset();
@@ -232,6 +339,27 @@ test "Sync.Mutex.BootContextTakesItWithoutAProcess" {
     try testing.expect(mutex.is_locked());
     // With no process to compare against, "held by the caller" is the only
     // answer available, and boot is single-threaded, so it is right.
+    try testing.expect(mutex.held_by_current());
+    mutex.unlock();
+    try testing.expect(!mutex.is_locked());
+}
+
+test "Sync.Mutex.BootWithAManagerButNothingScheduledHasNoOwner" {
+    locks.reset();
+    defer locks.reset();
+
+    // main() creates the process manager and then mounts: the manager exists, but
+    // no core has a process yet. The board faulted here, reading the held list
+    // through whatever an unset core slot contained. An unset slot reads as zero
+    // on the host, so what is pinned is the answer the mutex relies on.
+    process_manager.initialize_process_manager(std.testing.allocator);
+    defer process_manager.deinitialize_process_manager();
+    try testing.expect(process_manager.instance.try_current_process() == null);
+
+    var mutex = TestMutex{};
+    mutex.lock();
+    try testing.expect(mutex.is_locked());
+    try testing.expect(mutex.owner == null);
     try testing.expect(mutex.held_by_current());
     mutex.unlock();
     try testing.expect(!mutex.is_locked());

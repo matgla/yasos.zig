@@ -126,7 +126,125 @@ pub fn RingBuffer(BufferType: type, BufferSize: usize) type {
     };
 }
 
+/// `RingBuffer` over memory given at run time, which can move once: a board's UART
+/// receives from before its big memory is up. Same rules as above.
+pub fn MovableRingBuffer(BufferType: type) type {
+    return struct {
+        const Self = @This();
+
+        buffer: []BufferType,
+        head: std.atomic.Value(usize),
+        tail: std.atomic.Value(usize),
+        dropped: std.atomic.Value(usize),
+
+        pub fn init(buffer: []BufferType) linksection(".time_critical") Self {
+            return Self{
+                .buffer = buffer,
+                .head = .init(0),
+                .tail = .init(0),
+                .dropped = .init(0),
+            };
+        }
+
+        fn after(self: *const Self, index: usize) linksection(".time_critical") usize {
+            return if (index + 1 == self.buffer.len) 0 else index + 1;
+        }
+
+        pub fn push(self: *Self, data: BufferType) linksection(".time_critical") void {
+            const head = self.head.load(.monotonic);
+            const next_head = self.after(head);
+            if (next_head == self.tail.load(.acquire)) {
+                self.dropped.store(self.dropped.load(.monotonic) +% 1, .monotonic);
+                return;
+            }
+            self.buffer[head] = data;
+            self.head.store(next_head, .release);
+        }
+
+        pub fn pop(self: *Self) linksection(".time_critical") ?BufferType {
+            const tail = self.tail.load(.monotonic);
+            if (self.head.load(.acquire) == tail) {
+                return null;
+            }
+            const data = self.buffer[tail];
+            self.tail.store(self.after(tail), .release);
+            return data;
+        }
+
+        pub fn read(self: *Self, buffer: []BufferType) linksection(".time_critical") usize {
+            var tail = self.tail.load(.monotonic);
+            const head = self.head.load(.acquire);
+            var count: usize = 0;
+            while (count < buffer.len and head != tail) {
+                buffer[count] = self.buffer[tail];
+                tail = self.after(tail);
+                count += 1;
+            }
+            self.tail.store(tail, .release);
+            return count;
+        }
+
+        pub fn size(self: *const Self) linksection(".time_critical") usize {
+            const head = self.head.load(.acquire);
+            const tail = self.tail.load(.monotonic);
+            return if (head >= tail) head - tail else self.buffer.len - (tail - head);
+        }
+
+        pub fn is_empty(self: *const Self) linksection(".time_critical") bool {
+            return self.head.load(.acquire) == self.tail.load(.monotonic);
+        }
+
+        pub fn clear(self: *Self) linksection(".time_critical") void {
+            self.head.store(self.tail.load(.monotonic), .release);
+        }
+
+        /// Carry on in `buffer`, with whatever is unread. The caller excludes both
+        /// sides, and `buffer` must hold it all: this is for growing.
+        pub fn move_to(self: *Self, buffer: []BufferType) void {
+            std.debug.assert(buffer.len > self.size());
+            const count = self.read(buffer);
+            self.buffer = buffer;
+            self.tail.store(0, .monotonic);
+            self.head.store(count, .release);
+        }
+    };
+}
+
 const testing = std.testing;
+
+test "Hal.Utils.MovableRingBuffer.WrapsAndDropsLikeTheFixedOne" {
+    var memory: [4]u8 = undefined;
+    var ring = MovableRingBuffer(u8).init(&memory);
+    for (0..4) |index| ring.push(@intCast(index));
+    try testing.expectEqual(@as(usize, 3), ring.size());
+    try testing.expectEqual(@as(usize, 1), ring.dropped.load(.monotonic));
+    try testing.expectEqual(@as(u8, 0), ring.pop().?);
+    ring.push(7);
+    try testing.expectEqual(@as(usize, 3), ring.size());
+    var out: [8]u8 = undefined;
+    try testing.expectEqual(@as(usize, 3), ring.read(&out));
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 7 }, out[0..3]);
+    try testing.expect(ring.is_empty());
+}
+
+test "Hal.Utils.MovableRingBuffer.MovingKeepsUnreadBytesInOrder" {
+    var small: [4]u8 = undefined;
+    var ring = MovableRingBuffer(u8).init(&small);
+    // Leave the unread bytes wrapped around the end of the old memory.
+    for ("abc") |byte| ring.push(byte);
+    _ = ring.pop();
+    _ = ring.pop();
+    ring.push('d');
+    ring.push('e');
+
+    var big: [16]u8 = undefined;
+    ring.move_to(&big);
+    try testing.expectEqual(@as(usize, 3), ring.size());
+    ring.push('f');
+    var out: [8]u8 = undefined;
+    try testing.expectEqual(@as(usize, 4), ring.read(&out));
+    try testing.expectEqualSlices(u8, "cdef", out[0..4]);
+}
 
 test "Hal.Utils.RingBuffer.PushPopRoundTripsInOrder" {
     var ring = RingBuffer(u8, 8).init();

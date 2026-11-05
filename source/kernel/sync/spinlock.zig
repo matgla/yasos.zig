@@ -90,6 +90,7 @@ pub const SpinLock = struct {
     /// acquiring first leaves a window for an interrupt on this core to reach
     /// for the lock this context just took.
     pub fn lock_irqsave(self: *Self) IrqState {
+        arch.sync.require_stack_for_masked_section();
         const flags = arch.sync.save_and_disable_interrupts();
         self.lock();
         return flags;
@@ -105,6 +106,7 @@ pub const SpinLock = struct {
     /// `lock_irqsave` that gives up rather than spinning. Returns null with
     /// interrupts left exactly as they were.
     pub fn try_lock_irqsave(self: *Self) ?IrqState {
+        arch.sync.require_stack_for_masked_section();
         const flags = arch.sync.save_and_disable_interrupts();
         if (self.try_lock()) return flags;
         arch.sync.restore_interrupts(flags);

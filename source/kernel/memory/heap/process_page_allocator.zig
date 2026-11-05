@@ -145,16 +145,28 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
             return used + @as(usize, @intCast(requested)) > self._page_limit;
         }
 
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .remap = remap,
+            .resize = resize,
+            .free = free,
+        };
+        const slow_vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc_slow,
+            .remap = remap,
+            .resize = resize,
+            .free = free,
+        };
+
         pub fn allocator(self: *Self) std.mem.Allocator {
-            return .{
-                .ptr = self,
-                .vtable = &.{
-                    .alloc = alloc,
-                    .remap = remap,
-                    .resize = resize,
-                    .free = free,
-                },
-            };
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+
+        /// The same allocator for what a process rarely touches: it starts at the
+        /// slow end of the pool. Anything else comes back unchanged.
+        pub fn slow_variant_of(any: std.mem.Allocator) std.mem.Allocator {
+            if (any.vtable != &vtable) return any;
+            return .{ .ptr = any.ptr, .vtable = &slow_vtable };
         }
 
         /// Take a cached run of exactly `number_of_pages` back, if one is parked.
@@ -162,11 +174,12 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
         /// Exact size only: the pool derives the run to release from the page
         /// count userspace passes to munmap, so handing back a larger run than
         /// was asked for would strand its tail until the process exits.
-        fn cache_take(self: *Self, number_of_pages: i32) ?[]u8 {
+        fn cache_take(self: *Self, number_of_pages: i32, tier: Tier) ?[]u8 {
             if (!page_cache_enabled) return null;
             for (&self._cache) |*slot| {
                 if (slot.pages != number_of_pages) continue;
                 const memory = slot.memory orelse continue;
+                if (tier != .any and self._pool.is_fast_address(memory.ptr) != (tier == .fast)) continue;
                 slot.* = .{};
                 self._cache_bytes -= memory.len;
                 return memory;
@@ -193,7 +206,17 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
         }
 
         pub fn allocate_pages(self: *Self, number_of_pages: i32) ?[]u8 {
-            if (self.cache_take(number_of_pages)) |memory| {
+            return self.allocate_pages_tiered(number_of_pages, .any, false);
+        }
+
+        /// Which memory a mapping wants.  `.any` takes the fastest with room,
+        /// and a parked run of either tier.  `.slow` (MAP_SLOW) prefers the
+        /// slowest tier and falls back; `.fast` (MAP_FAST) is the fastest tier
+        /// or nothing, so a program can tell whether it got it.
+        pub const Tier = enum { any, fast, slow };
+
+        pub fn allocate_pages_tiered(self: *Self, number_of_pages: i32, tier: Tier, may_keep_own: bool) ?[]u8 {
+            if (self.cache_take(number_of_pages, tier)) |memory| {
                 perf.pool_cache_hit();
                 return memory;
             }
@@ -209,7 +232,11 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
             // argument rather than stashed on the pool first -- see
             // `allocate_pages_from`.
             perf.pool_cache_miss();
-            return self._pool.allocate_pages_from(number_of_pages, self._pid, .heap);
+            return switch (tier) {
+                .any => self._pool.allocate_pages_cleared(number_of_pages, self._pid, .heap, may_keep_own),
+                .slow => self._pool.allocate_pages_cleared(number_of_pages, self._pid, .heap_slow, may_keep_own),
+                .fast => self._pool.allocate_pages_cleared(number_of_pages, self._pid, .heap_fast, may_keep_own),
+            };
         }
 
         pub fn release_pages(self: *Self, address: *anyopaque, number_of_pages: i32) void {
@@ -253,6 +280,15 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
                 perf.trace("ldralloc pid={d} len={d} pages={d} ra=0x{x}", .{ self._pid, len, pages, return_address });
             }
             return @as([*]u8, @ptrCast(self._pool.allocate_pages(pages, self._pid) orelse null));
+        }
+
+        fn alloc_slow(ctx: *anyopaque, len: usize, log2_align: std.mem.Alignment, return_address: usize) ?[*]u8 {
+            _ = log2_align;
+            _ = return_address;
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const pages = calculate_number_of_pages(len);
+            if (self.would_exceed_limit(pages)) return null;
+            return @as([*]u8, @ptrCast(self._pool.allocate_pages_from(pages, self._pid, .loader_slow) orelse return null));
         }
 
         fn resize(

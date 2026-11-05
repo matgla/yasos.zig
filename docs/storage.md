@@ -88,6 +88,11 @@ Options, beyond `ro` (enforced by the VFS), `rw`, `defaults`:
 | `x-mkdir`          | `bind`: create the source directory first                        |
 | `spill=DIR`        | `tmpfs`: where files too big for the RAM arena go (default `CONFIG_TMPFS_SPILL_DIRECTORY`, `/var/tmp`) |
 
+With PSRAM the /tmp arena is 128 KiB at the top of PSRAM and the 32 KiB `temp_ram`
+joins the process pool. Only the tree's reference counters stay on the kernel heap,
+because an exclusive store to PSRAM never succeeds (`CountersApartAllocator`). Without
+PSRAM the arena is `temp_ram`, as the linker script has it.
+
 Without a card (QEMU, or a board with the slot empty), `/var` and `/home` are
 RAM fallbacks, `/root` is bound into the RAM `/home`, and `/boot` and `/opt`
 are the empty romfs directories. The kernel log goes to

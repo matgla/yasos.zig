@@ -2,7 +2,7 @@
 
 Profiling on-device tcc compiles on the host, or on plain QEMU, puts the time in
 the wrong places. On the Pimoroni Pico Plus 2, tcc's code and read-only data
-execute in place from flash, its heap spills from the 336 KB of process SRAM into
+execute in place from flash, its heap spills from the 432 KB of process SRAM into
 PSRAM, and both flash and PSRAM sit behind one 16 KB XIP cache whose misses each
 cost a QSPI transaction -- about a hundred core cycles at 532 MHz. QEMU's
 mps3-an524 charges none of that, so its per-pass ratios to the board are flat
@@ -27,7 +27,7 @@ suite compiles, and within ~7% on held-out tests of the calibration set.
 | `tests/smoke/profiling.py` | `YASOS_SMOKE_RESULTS_DIR`: one JSON line per compile per xdist worker (bench rows + PASS_TIME), so profiles survive `-n` |
 
 An **image** is a copy of a yasos tree configured for an524 with the board's
-memory map (process SRAM 336 KB, PSRAM 8 MB -- the linker script of the copy is
+memory map (process SRAM 432 KB, PSRAM 8 MB -- the linker script of the copy is
 resized), so the kernel's SRAM-then-PSRAM tiering spills tcc's heap exactly where
 the board does, with its tinycc swapped for whatever revision you are measuring.
 
@@ -75,6 +75,55 @@ if present, otherwise the system's (`glib2-devel` + `meson`). Fedora's own
 The [2026-10-07 compiler profile](board_model_tcc_profile_2026-10-07.md)
 records a PSRAM-emulated baseline, an aggregate-folding optimization, and its
 validation results.
+
+## What to optimise next
+
+`scripts/selfhost_profile.py` answers this for the self-compile, one QEMU per
+translation unit of the `tcc_selfhost.py` payload (frozen in
+`.cache/board_model/selfhost_src` on first use, so comparisons share an input):
+
+```bash
+scripts/board_model.py image mine --tinycc ~/repos/my-tcc-worktree
+selfhost_profile.py ab base mine                     # -O0 and -O2: time, and do the objects match?
+selfhost_profile.py run mine OUT --nest 2 --opt=-O0  # every unit, keeping per-PC profiles
+selfhost_profile.py funcs mine OUT                   # cycles per function, split into fetch and data
+selfhost_profile.py callers mine OUT CALLERS irop_get_vreg_w tcc_ir_op_get_src1 --unit ir_regalloc
+selfhost_profile.py run nolist WHATIF --fast tcc:names.txt --fast kernel:knames.txt
+selfhost_profile.py hotlist nolist OUT --kb 128 --module tcc --marks libs/tinycc/source/driver/hot_functions.txt
+```
+
+* A profile reads only its own build: `run` stamps `OUT/image.sha256` and refuses
+  to add to results of another build of an image with the same name.
+* `--opt` replaces the level in the response file. Appending it would not do:
+  `-O2 ... -O0` keeps the passes `-O2` turned on, so the objects differ from `-O0`.
+* `--nest 2` runs the compile under two shells, as `build.sh` does: they hold
+  memory the compile cannot have.
+* `callers` is what a host profile cannot give you: the host cross inlines the
+  accessors the device calls. It needs a run of the same build (`BASE` above) to
+  find the SRAM copies, whose address nothing records, and a function in the
+  block has two entries, both counted. Veneers and PLT stubs are skipped, so a
+  caller is the real call site. `FN` may be `name+OFFSET`, for a block inside a
+  function. `--attr ENTRY,ZERO,LOOP` counts each run of the block `LOOP` by who
+  called `ENTRY` and who called `ZERO`: bytes cleared, per caller of `__tcc_memset`
+  and of `tcc_mallocz`, is `--attr __tcc_memset,tcc_mallocz,.Lset_16`.
+* `run --fast` charges nothing for fetches from the listed functions: what a
+  placement would buy, before building it. Run it on an image without a list.
+  It is an upper bound: the real block also pays for veneers and pool memory.
+
+The model ranks; only the board decides. `scripts/board_selfhost.py` builds the
+board image and runs the self-compile on the rig at each level:
+
+```bash
+scripts/board_selfhost.py --build              # -O0 and -O2; logs in .cache/board_selfhost/<label>/
+scripts/board_selfhost.py --opt=-O0 --no-wait  # queue what is built; prints how to watch
+scripts/board_selfhost.py --logs               # collect them later
+```
+
+It queues on `/var/lock/rp2350-board.lock`, keeps its images in its own directory
+until it holds the lock, and compares their hashes before and after flashing. The
+board's tree (`/root/selfhost-<label>`, the checkout's name by default) and the rig's
+directory are per label, so a manifest never describes another session's files. The
+first run in a label sends everything. The rig's side is in `scripts/rig/`.
 
 ## Calibration
 

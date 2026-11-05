@@ -30,6 +30,13 @@ pub const Executable = @import("executable.zig").Executable;
 pub const Environment = @import("environment.zig").Environment;
 pub const SymbolEntry = @import("module.zig").SymbolEntry;
 pub const Module = @import("module.zig").Module;
+pub fn set_hot_text_allocator(allocator: @import("std").mem.Allocator) void {
+    @import("module.zig").hot_text_allocator = allocator;
+}
+
+pub fn set_thunk_allocator_of(of: *const fn (@import("std").mem.Allocator) @import("std").mem.Allocator) void {
+    @import("module.zig").thunk_allocator_of = of;
+}
 pub const get_loader = @import("loader.zig").get_loader;
 pub const loader_init = @import("loader.zig").init;
 pub const loader_deinit = @import("loader.zig").deinit;
@@ -45,3 +52,14 @@ pub fn thunk_size() usize {
 pub const Image = @import("loader.zig").Image;
 
 pub const header_size: usize = @sizeOf(Header);
+
+/// Whether this image asked to live in slow memory (tcc's -slow-memory). The
+/// loader rejects a malformed image later; its flag just has no effect then.
+pub fn image_prefers_slow_memory(image: Image) bool {
+    const header: *const Header = @ptrCast(@alignCast(image.ptr));
+    return header_prefers_slow_memory(header);
+}
+
+pub fn header_prefers_slow_memory(header: *const Header) bool {
+    return (header.memory_flags & @import("header.zig").memory_flag_slow) != 0;
+}

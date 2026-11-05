@@ -24,6 +24,7 @@ const IDriver = @import("../idriver.zig").IDriver;
 const UartFile = @import("uart_file.zig").UartFile;
 
 const kernel = @import("../../kernel.zig");
+const refcount = kernel.sync.refcount;
 
 const interface = @import("interface");
 const config = @import("config");
@@ -75,16 +76,31 @@ pub fn UartDriver(comptime UartType: anytype) type {
             const uart = UartType;
             _allocator: std.mem.Allocator,
             _node: kernel.fs.Node,
+            /// Clones share the node (/dev/stdin and friends are clones of uart0), and
+            /// the last one to go releases it. On its own: an atomic stays out of PSRAM.
+            _refcounter: *i16,
 
             pub fn create(allocator: std.mem.Allocator, driver_name: []const u8) !UartDriverImpl {
+                const refcounter = try allocator.create(i16);
+                errdefer allocator.destroy(refcounter);
+                kernel.sync.placement.assert_coherent(refcounter);
+                refcount.init(refcounter);
                 return UartDriverImpl.init(.{
                     ._allocator = allocator,
                     ._node = try UartFile(uart).InstanceType.create_node(allocator, driver_name),
+                    ._refcounter = refcounter,
                 });
             }
 
+            pub fn __clone(self: *Self, other: *const Self) void {
+                self.* = other.*;
+                refcount.acquire(self._refcounter);
+            }
+
             pub fn delete(self: *Self) void {
+                if (!refcount.release(self._refcounter)) return;
                 self._node.delete();
+                self._allocator.destroy(self._refcounter);
             }
 
             pub fn load(self: *Self) anyerror!void {
@@ -131,4 +147,30 @@ test "UartDriver.ShouldCreateAndDeleteDriver" {
     try std.testing.expectEqual(kernel.fs.FileType.CharDevice, node.filetype());
 
     try std.testing.expectEqual(UartMock.baudrate, console_baudrate);
+}
+
+test "UartDriver.DeletingACloneLeavesTheSharedNodeAlone" {
+    // /dev/stdin, stdout and stderr are clones of uart0, sharing its node. Each used to
+    // release it, three times too many: a write into freed memory that traps nothing.
+    const UartMock = @import("tests/uart_mock.zig").MockUart;
+    defer UartMock.reset();
+
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = counting.allocator();
+    const live = struct {
+        fn bytes(c: *const std.testing.FailingAllocator) usize {
+            return c.allocated_bytes - c.freed_bytes;
+        }
+    }.bytes;
+
+    var driver = try (try UartDriver(UartMock).InstanceType.create(allocator, "uart0")).interface.new(allocator);
+    const with_one = live(&counting);
+
+    var clone = try driver.clone();
+    clone.interface.delete();
+    try std.testing.expectEqual(with_one, live(&counting));
+
+    // The last one does let go of it.
+    driver.interface.delete();
+    try std.testing.expectEqual(@as(usize, 0), live(&counting));
 }

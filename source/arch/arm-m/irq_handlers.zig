@@ -40,6 +40,7 @@ extern fn dump_fault_maps(pid: c.pid_t) void;
 extern fn dump_ctx_ring() void;
 extern fn dump_vreg_status() void;
 extern fn _exit(code: c_int) void;
+extern fn abandon_faulting_thread() bool;
 
 const usage_fault_stkof_mask: u32 = 1 << 20;
 const stack_overflow_exit_code: c_int = -1;
@@ -247,6 +248,8 @@ export fn report_bad_exc_return(value: usize) callconv(.c) void {
 
 export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callconv(.c) void {
     const callee = hardfault_callee;
+    // First: the diagnostics below take masked sections of their own.
+    const interrupted_masked = read_primask() != 0;
     // SDIO depends on lower-priority interrupts that are masked inside the
     // fault handler, so a blocking SD write here would hang. Route the
     // postmortem to the console only; everything before the fault is already
@@ -360,6 +363,16 @@ export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callco
     // the guest keeps running, and the loader reclaims the process. Only a
     // fault taken from kernel (MSP) context is a genuine kernel bug we panic on.
     if (uses_process_stack(exc_return)) {
+        // Masked means kernel code inside a spinlock section: user code cannot
+        // set PRIMASK. That state cannot be released on the thread's behalf, and
+        // resuming at _exit would not work either -- SVC under PRIMASK escalates
+        // straight back here, for ever.
+        if (interrupted_masked) {
+            @panic("fault on a process stack with interrupts masked (kernel spinlock section)");
+        }
+        if (!abandon_faulting_thread()) {
+            @panic("fault on a process stack that cannot be unwound (spinlock held, or the process faulted again while exiting)");
+        }
         if (is_psplim_overflow(exc_return, cfsr_raw)) {
             log.err("Process stack overflow detected, terminating current process", .{});
         } else {
@@ -444,6 +457,13 @@ inline fn read_psp() usize {
 inline fn read_msp() usize {
     return asm volatile (
         \\ mrs %[out], msp
+        : [out] "=r" (-> usize),
+    );
+}
+
+inline fn read_primask() usize {
+    return asm volatile (
+        \\ mrs %[out], PRIMASK
         : [out] "=r" (-> usize),
     );
 }

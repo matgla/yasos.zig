@@ -80,6 +80,8 @@ pub const Rank = enum(u8) {
     loader_cache = 78,
     /// `ProcessMemoryPool`.
     pagepool = 80,
+    /// The kernel's slow heap: below `kheap`, which it spills to outside the lock.
+    kslow = 85,
     /// malloc's free list + `malloc.zig` accounting + `_sbrk`.
     kheap = 90,
     /// `stdout.zig`, UART TX, the `file_log` ring.
@@ -165,7 +167,34 @@ pub fn reset() void {
 /// the process across a switch -- see `RoundRobin.update_current`. Every other
 /// rank is a spin_irq, held with interrupts masked, so it cannot migrate.
 pub const migrating_ranks: HeldSet =
-    bit(.loader) | bit(.block) | bit(.mount) | bit(.fs) | bit(.dev) | bit(.sdio);
+    bit(.kernel_files) | bit(.loader) | bit(.block) | bit(.mount) | bit(.fs) | bit(.dev) | bit(.sdio);
+
+/// One sleeping mutex a process holds, on that process's list. The list exists
+/// for one reader: a process killed inside a syscall cannot unwind, so whatever
+/// it held has to be released for it. Lives in the mutex, so holding one costs
+/// no allocation.
+pub const HeldMutex = struct {
+    next: ?*HeldMutex = null,
+    release: *const fn (*HeldMutex) void,
+};
+
+/// Forget every sleeping-mutex rank on this core, for a thread that was killed
+/// instead of unwinding. Also clears a rank recorded by a `lock` that never got
+/// the mutex. The spin ranks are left: they belong to the core, and a fault
+/// while holding one is not survivable.
+pub fn forget_sleeping_ranks() void {
+    if (comptime !checked) return;
+    const flags = arch.sync.save_and_disable_interrupts();
+    defer arch.sync.restore_interrupts(flags);
+    held.current().* &= ~migrating_ranks;
+}
+
+/// Spinning ranks this core holds, other than the console, which the fault path
+/// can release because it protects nothing but the UART. Always zero when
+/// `checked` is false: `arch.sync` masking is what catches those builds.
+pub fn held_spin_ranks() HeldSet {
+    return held_ranks() & ~migrating_ranks & ~(comptime bit(.console));
+}
 
 /// Detach the migrating ranks from this core, for storing on the process being
 /// switched away from. Leaves the spin ranks, which belong to the core.
@@ -262,6 +291,7 @@ pub fn Ranked(comptime rank: Rank) type {
             // in which a PendSV can migrate the caller, stranding a per-core
             // rank bit on the core it left. The order check still runs before
             // the acquire, so a violation is reported at the offending call.
+            arch.sync.require_stack_for_masked_section();
             const flags = arch.sync.save_and_disable_interrupts();
             enter(rank);
             self.inner.lock();

@@ -533,6 +533,81 @@ def uart_session(serial_device=None):
     return Session("uart")
 
 
+def _archive_entries(payload: Path):
+    """{path under tree/: (archive, member, sha256)} for the payload's tars."""
+    import hashlib
+    import tarfile
+    entries = {}
+    for name, prefix in (("src.tar.gz", "src"), ("ref.tar.gz", "ref")):
+        with tarfile.open(payload / name) as tar:
+            for member in tar:
+                if member.isfile():
+                    digest = hashlib.sha256(tar.extractfile(member).read()).hexdigest()
+                    entries[f"{prefix}/{member.name}"] = (name, member.name, digest)
+    return entries
+
+
+def uart_send_manifest(session, payload: Path, dest: str, full: bool = False, timeout: float = 30.0) -> int:
+    """Bring *dest*/tree on the board up to the payload's src and ref, sending only
+    what differs from *dest*/MANIFEST, which holds a sha256 per file.
+
+    The manifest is removed before anything changes and written back last, so an
+    interrupted update means a full one next time, not a wrong tree.  It says what was
+    sent, not what the card holds now: *full* resends everything."""
+    import io
+    import tarfile
+    import tempfile
+    if not dest.startswith("/"):
+        raise DeviceError(f"destination {dest!r} must be absolute")
+    dest = dest.rstrip("/")
+    entries = _archive_entries(payload)
+    remote = {}
+    if not full:
+        def line(text):
+            match = re.match(r"^([0-9a-f]{64})  (\S.*)$", text.strip())
+            if match:
+                remote[match.group(2)] = match.group(1)
+        run(session, f"[ -f {dest}/tree/.complete ] && cat {dest}/MANIFEST", silence=60, echo=False, on_line=line)
+    changed = sorted(p for p, e in entries.items() if remote.get(p) != e[2])
+    removed = sorted(p for p in remote if p not in entries)
+    plain = [f for f in sorted(payload.iterdir()) if f.is_file() and f.name not in ("src.tar.gz", "ref.tar.gz")]
+    manifest = "".join(f"{entries[p][2]}  {p}\n" for p in sorted(entries))
+    print(f"uart: manifest: {len(changed)} of {len(entries)} files changed, {len(removed)} removed", file=sys.stderr)
+    from tests.smoke.framework import file_transfer
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        transfers = [(f, f"{dest}/{f.name}") for f in plain]
+        if changed or removed:
+            sources = {}
+            with tarfile.open(work / "delta.tar.gz", "w:gz", compresslevel=6, format=tarfile.USTAR_FORMAT) as out:
+                for path in changed:
+                    archive, member, _ = entries[path]
+                    source = sources.setdefault(archive, tarfile.open(payload / archive))
+                    info = tarfile.TarInfo(path)
+                    data = source.extractfile(member).read()
+                    info.size, info.mode, info.mtime = len(data), 0o644, 0
+                    out.addfile(info, io.BytesIO(data))
+            for source in sources.values():
+                source.close()
+            (work / "removed.txt").write_text("".join(p + "\n" for p in removed))
+            (work / "MANIFEST.new").write_text(manifest)
+            transfers += [(work / n, f"{dest}/{n}") for n in ("delta.tar.gz", "removed.txt", "MANIFEST.new")]
+            run(session, f"mkdir -p {dest}/tree; rm -f {dest}/MANIFEST {dest}/tree/.complete", silence=60, echo=False)
+        total = sum(os.path.getsize(local) for local, _ in transfers)
+        print(f"uart: sending {len(transfers)} files, {total / 1048576:.2f} MiB to {dest}", file=sys.stderr)
+        sent = file_transfer.send_files(session, transfers, timeout=timeout)
+        if changed or removed:
+            rc = run(session, f"cd {dest}/tree && tar xzf ../delta.tar.gz && "
+                              f"while read f; do rm -f \"$f\"; done < ../removed.txt && "
+                              f"mv ../MANIFEST.new ../MANIFEST && : > .complete && rm -f ../delta.tar.gz ../removed.txt; "
+                              f"r=$?; cd /; (exit $r)", silence=600, echo=False)
+            if rc != 0:
+                raise DeviceError(f"applying the update in {dest}/tree failed: {rc}")
+    print(f"uart: updated in {time.monotonic() - started:.0f} s", file=sys.stderr)
+    return sent
+
+
 def uart_send(session, host_dir: Path, dest: str, timeout: float = 30.0) -> int:
     """Send everything under *host_dir* into the board's absolute *dest*."""
     if not dest.startswith("/"):

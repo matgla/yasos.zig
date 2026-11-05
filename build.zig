@@ -659,7 +659,13 @@ pub fn build(b: *std.Build) !void {
                     std.log.err("-Dkernel_cc=tcc needs the cross tcc at '{s}': run ./build_rootfs.sh first, or build with -Dkernel_cc=llvm", .{kernel_tcc_path});
                     return error.MissingCrossTcc;
                 };
-                const built = kernel_tcc.build(b, kernel_exec, .{ .tcc = kernel_tcc_path });
+                // The PSRAM boards, and the QEMU one that models them. The range veneers
+                // are Thumb-2 and the list is ~35 KB of kernel_ram, which a Pico 2 needs for its
+                // heap: with no PSRAM, kernel objects stay there.
+                const hot_functions = for ([_][]const u8{ "pimoroni_pico_plus2", "mspc_v2", "qemu_mps3_an524" }) |board| {
+                    if (std.mem.eql(u8, config.board, board)) break true;
+                } else false;
+                const built = kernel_tcc.build(b, kernel_exec, .{ .tcc = kernel_tcc_path, .hot_functions = hot_functions });
                 b.getInstallStep().dependOn(&b.addInstallBinFile(built.elf, "yasos_kernel").step);
                 // The same commands as data, for scripts/kernel_tcc/device.py.
                 const plan_step = b.step("kernel-tcc-plan", "Write zig-out/kernel_tcc_plan.json: the tcc kernel build for the device to replay");

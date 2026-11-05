@@ -31,13 +31,22 @@ megabytes and the check passes trivially; it is the board it is for.
 """
 
 import re
+import termios
 import time
 
-from .conftest import session_key
+import serial
 
-# Left free with everything mounted and warm: a pipe ring (4 KB), a process
-# being spawned and an open file or two, with margin.
-REQUIRED_HEADROOM = 16 * 1024
+from .conftest import session_key
+from .framework.session import Session
+
+# Left free with everything mounted and warm. On the PSRAM boards the heap is about
+# 16 KB and holds little beyond the processes: a pipe's ring, open files and fd tables
+# are on the slow heap. A dozen more processes' worth, with margin.
+REQUIRED_HEADROOM = 8 * 1024
+# The break never comes back, so this is what the whole run left of the heap at worst,
+# fragmentation included. Past it the next allocation panics.
+REQUIRED_UNCLAIMED = 4 * 1024
+MOUNT_STACK_KB = 7
 
 
 def _run(session, command):
@@ -117,21 +126,61 @@ def test_storage_leaves_kernel_heap_headroom(request):
         _sample(session, f"umounted-{target[1:]}", samples)
         after = samples[-1][1].get("MemKernelUsed", 0)
         print(f"HEAPBENCH cost of {target}: {before - after} B")
-        _run(session, f"mount {target}")
+        # Below toybox's 8 KB: mount(2) runs on the caller's stack, and an overflow in it
+        # dies holding a lock. It once took 9 KB, and QEMU has no card to find that.
+        _run(session, f"(ulimit -s {MOUNT_STACK_KB}; mount {target})")
         _sample(session, f"remounted-{target[1:]}", samples)
         assert _mounted(session, target), target
 
-    # A pipe needs its 4 KB ring; a heap without room for it panics the
-    # kernel, which would take the rest of the numbers with it.
-    info = samples[-1][1]
-    if "MemKernelLimit" in info and info["MemKernelLimit"] - info["MemKernelUsed"] < 8 * 1024:
-        print("HEAPBENCH skipping the pipe: under 8 KB free")
-    else:
-        _timed(session, "cat /usr/bin/toybox | cat > /dev/null")
-        _sample(session, "after-pipe", samples)
+    _timed(session, "cat /usr/bin/toybox | cat > /dev/null")
+    _sample(session, "after-pipe", samples)
 
     final = _sample(session, "final", samples)
     if "MemKernelLimit" not in final:
         return  # host-side kernel without a break to measure
     headroom = final["MemKernelLimit"] - final["MemKernelUsed"]
     assert headroom >= REQUIRED_HEADROOM, (headroom, samples)
+    unclaimed = final["MemKernelLimit"] - final["MemKernelBrk"]
+    assert unclaimed >= REQUIRED_UNCLAIMED, (unclaimed, samples)
+
+
+def test_many_processes_do_not_run_the_kernel_heap_dry(request):
+    """A process costs kernel heap, and the heap running out is a panic. Past what fits,
+    the shell has to be told to try again, keep going, and work again once they are gone."""
+    session = request.node.stash[session_key]
+    with session.timeout(60):
+        _run(session, "for i in " + " ".join(str(i) for i in range(64)) + "; do (sleep 2 &) ; done 2>/dev/null")
+        # A pipeline needs processes of its own, which an echo builtin alone would not.
+        deadline = time.monotonic() + 20
+        while True:
+            out = _run(session, "echo still alive | cat")
+            if "still alive" in out and "vfork" not in out:
+                break
+            assert time.monotonic() < deadline, out
+            time.sleep(0.5)
+    final = _meminfo(session)
+    if "MemKernelLimit" in final:
+        assert final["MemKernelBrk"] < final["MemKernelLimit"]
+
+
+def test_shutdown_gives_everything_back_without_a_fault(request):
+    """Leaving the root shell tears the kernel down: every process, driver and
+    filesystem, in an order nothing else exercises. The harness kills QEMU rather than
+    shut it down, so two bad frees here passed every QEMU run and only faulted on a board."""
+    session = request.node.stash[session_key]
+    seen = b""
+    stopped = False
+    session.serial.write(b"exit\n")
+    deadline = time.monotonic() + 30
+    try:
+        while time.monotonic() < deadline:
+            seen += session.serial.read(4096)
+            if b"turn off your PC" in seen or b"KERNEL PANIC" in seen:
+                break
+    except (OSError, termios.error, serial.SerialException):
+        stopped = True  # QEMU exits with its guest, and the pty goes with it.
+    finally:
+        Session.target_needs_reset = True
+    text = seen.decode(errors="replace")
+    assert "hardfault" not in text and "PANIC" not in text, text[-2000:]
+    assert stopped or "turn off your PC" in text, text[-2000:]

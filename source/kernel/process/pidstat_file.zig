@@ -161,12 +161,76 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
         break :blk fmt ++ "\n";
     };
 
-    fn write_stat_content(stat: *const PidStat, buffer: []u8) usize {
-        var args: [stat_fields.len]vfmt.Value = undefined;
+    /// The arguments on the heap: 55 of them are 880 bytes, on the stack of whichever
+    /// process opened this, usually `ps`.
+    fn write_stat_content(allocator: std.mem.Allocator, stat: *const PidStat, buffer: []u8) ?usize {
+        const args = allocator.alloc(vfmt.Value, stat_fields.len) catch return null;
+        defer allocator.free(args);
+        @call(.never_inline, fill_stat_args, .{ stat, args });
+        return vfmt.vprint(buffer, stat_format, args).len;
+    }
+
+    fn fill_stat_args(stat: *const PidStat, args: []vfmt.Value) void {
         inline for (stat_fields, 0..) |field_name, i| {
             args[i] = vfmt.value(@field(stat, field_name));
         }
-        return vfmt.vprint(buffer, stat_format, &args).len;
+    }
+
+    fn fill_stat(stat: *PidStat, pid: i16, name: []const u8, utime: anytype) void {
+        stat.* = .{
+            .pid = pid,
+            .comm = name,
+            .state = "R",
+            .pgid = 0,
+            .pgrp = 0,
+            .session = 0,
+            .tty_nr = 1,
+            .tpgid = 0,
+            .flags = 0,
+            .minflt = 0,
+            .cminflt = 0,
+            .majflt = 0,
+            .cmajflt = 0,
+            .utime = utime,
+            .stime = 0,
+            .cutime = 0,
+            .cstime = 0,
+            .priority = 0,
+            .nice = 0,
+            .num_threads = 1,
+            .itrealvalue = 0,
+            .starttime = 0,
+            .vsize = 0,
+            .rss = 0,
+            .rsslim = 0,
+            .startcode = 0,
+            .endcode = 0,
+            .startstack = 0,
+            .kstkesp = 0,
+            .kstkeip = 0,
+            .signal = 0,
+            .blocked = 0,
+            .sigignore = 0,
+            .sigcatch = 0,
+            .wchan = 0,
+            .nswap = 0,
+            .cnswap = 0,
+            .exit_signal = 0,
+            .processor = 0,
+            .rt_priority = 0,
+            .policy = 0,
+            .delayacct_blkio_ticks = 0,
+            .guest_time = 0,
+            .cguest_time = 0,
+            .start_data = 0,
+            .end_data = 0,
+            .start_brk = 0,
+            .arg_start = 0,
+            .arg_end = 0,
+            .env_start = 0,
+            .env_end = 0,
+            .exit_code = 0,
+        };
     }
 
     pub fn sync(self: *Self) i32 {
@@ -183,61 +247,11 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
             if (self._human_readable) {
                 interface.base(self)._end = write_status_content(process, name, self._pid, buffer);
             } else {
-                const stat: PidStat = .{
-                    .pid = self._pid,
-                    .comm = name,
-                    .state = "R",
-                    .pgid = 0,
-                    .pgrp = 0,
-                    .session = 0,
-                    .tty_nr = 1,
-                    .tpgid = 0,
-                    .flags = 0,
-                    .minflt = 0,
-                    .cminflt = 0,
-                    .majflt = 0,
-                    .cmajflt = 0,
-                    .utime = process.get_uptime() / 1000,
-                    .stime = 0,
-                    .cutime = 0,
-                    .cstime = 0,
-                    .priority = 0,
-                    .nice = 0,
-                    .num_threads = 1,
-                    .itrealvalue = 0,
-                    .starttime = 0,
-                    .vsize = 0,
-                    .rss = 0,
-                    .rsslim = 0,
-                    .startcode = 0,
-                    .endcode = 0,
-                    .startstack = 0,
-                    .kstkesp = 0,
-                    .kstkeip = 0,
-                    .signal = 0,
-                    .blocked = 0,
-                    .sigignore = 0,
-                    .sigcatch = 0,
-                    .wchan = 0,
-                    .nswap = 0,
-                    .cnswap = 0,
-                    .exit_signal = 0,
-                    .processor = 0,
-                    .rt_priority = 0,
-                    .policy = 0,
-                    .delayacct_blkio_ticks = 0,
-                    .guest_time = 0,
-                    .cguest_time = 0,
-                    .start_data = 0,
-                    .end_data = 0,
-                    .start_brk = 0,
-                    .arg_start = 0,
-                    .arg_end = 0,
-                    .env_start = 0,
-                    .env_end = 0,
-                    .exit_code = 0,
-                };
-                interface.base(self)._end = write_stat_content(&stat, buffer);
+                const allocator = interface.base(self)._allocator;
+                const stat = allocator.create(PidStat) catch return -1;
+                defer allocator.destroy(stat);
+                @call(.never_inline, fill_stat, .{ stat, self._pid, name, process.get_uptime() / 1000 });
+                interface.base(self)._end = write_stat_content(allocator, stat, buffer) orelse return -1;
             }
         }
         return 0;
@@ -256,7 +270,7 @@ const FileSystemMock = @import("../fs/tests/filesystem_mock.zig").FileSystemMock
 test "PidStatFile.ShouldCreateStatFile" {
     kernel.process.process_manager.initialize_process_manager(std.testing.allocator);
     defer kernel.process.process_manager.deinitialize_process_manager();
-    kernel.dynamic_loader.init(std.testing.allocator);
+    kernel.dynamic_loader.init(std.testing.allocator, std.testing.allocator);
     defer kernel.dynamic_loader.deinit();
     kernel.fs.vfs_init(std.testing.allocator);
     defer kernel.fs.vfs_deinit();

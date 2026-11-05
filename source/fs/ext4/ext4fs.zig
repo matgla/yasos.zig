@@ -37,6 +37,7 @@
 // them, so `get` and following `stat` refuse a link rather than open it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const oop = @import("interface");
 const kernel = @import("kernel");
@@ -50,7 +51,10 @@ const log = std.log.scoped(.@"fs/ext4");
 
 /// Every call into lwext4 holds this. Rank `fs`, like FatFs's; the two never
 /// nest.
-pub var lock: kernel.sync.RankedMutex(.fs) = .{};
+/// A lookup that reads a cold directory block from the card goes about 1.7 KB below
+/// this lock on the board, 280 bytes more than on QEMU. See
+/// scripts/stack_overflow_sweep.py and /proc/faultstat.
+pub var lock: kernel.sync.RankedMutex(.fs) = .{ .stack_needed = 2048 };
 
 /// CONFIG_EXT4_MOUNTPOINTS_COUNT in build.zig.
 pub const max_volumes = 4;
@@ -183,6 +187,17 @@ const BufferClass = struct {
         self.free = slot;
     }
 };
+
+/// lwext4's mount points, about 2 KB each: where the block cache is when the board
+/// has PSRAM, since nothing in them is an atomic and they are read a few times per
+/// operation at most. Never freed; a host test's allocator would call that a leak.
+fn ensure_mount_table(allocator: std.mem.Allocator) !void {
+    if (lwext4.ext4_mount_table_is_set()) return;
+    const backing = if (builtin.is_test) std.heap.page_allocator else cache_backing orelse allocator;
+    const table = try backing.alloc(u8, lwext4.ext4_mount_table_size());
+    @memset(table, 0);
+    lwext4.ext4_mount_table_set(table.ptr);
+}
 
 /// Give the block cache its own memory and let it grow: `cache_blocks` per
 /// mounted volume, `idle_blocks` unreferenced ones across all of them. Call
@@ -374,7 +389,24 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     /// it. The root is the mount point itself, trailing slash included.
     pub fn full_path(self: *const Self, path: []const u8) ![:0]u8 {
         const relative = std.mem.trim(u8, path, "/");
-        return std.fmt.allocPrintSentinel(self._allocator, "{s}{s}", .{ std.mem.sliceTo(&self._volume.mount_point, 0), relative }, 0);
+        // By hand: a formatter's writer is on the stack of every call under this
+        // lock, for two concatenated strings.
+        const prefix: []const u8 = std.mem.sliceTo(&self._volume.mount_point, 0);
+        // lwext4 takes an empty component for the end of the path, and `cp file
+        // dir/` opens dir//file: any number of slashes is one.
+        var repeats: usize = 0;
+        for (relative, 0..) |ch, i| {
+            if (ch == '/' and relative[i - 1] == '/') repeats += 1;
+        }
+        const full = try self._allocator.allocSentinel(u8, prefix.len + relative.len - repeats, 0);
+        @memcpy(full[0..prefix.len], prefix);
+        var to = prefix.len;
+        for (relative, 0..) |ch, i| {
+            if (ch == '/' and relative[i - 1] == '/') continue;
+            full[to] = ch;
+            to += 1;
+        }
+        return full;
     }
 
     fn mount_point(self: *const Self) [*:0]const u8 {
@@ -386,6 +418,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         defer lock.unlock();
         const volume = self._volume;
         if (volume.mounted) return 0;
+        ensure_mount_table(self._allocator) catch return -1;
         if (lwext4.ext4_device_register(&volume.bdev, &volume.device_name) != 0) return -1;
         const ReadOnly = @typeInfo(@TypeOf(lwext4.ext4_mount)).@"fn".param_types[2].?;
         const rc = lwext4.ext4_mount(&volume.device_name, &volume.mount_point, c_bool(ReadOnly, false));
@@ -439,6 +472,15 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         var sb: [*c]lwext4.struct_ext4_sblock = null;
         if (lwext4.ext4_get_sblock(self.mount_point(), &sb) != 0) return null;
         return sb;
+    }
+
+    /// Not through `inode_of`: an inode is 160 bytes of stack, under the whole
+    /// of the lookup, for one field.
+    fn mode_at(self: *Self, full: [:0]const u8) !u32 {
+        _ = self;
+        var mode: u32 = 0;
+        try check(lwext4.ext4_mode_get(full.ptr, &mode));
+        return mode;
     }
 
     fn mode_of(self: *Self, inode: *lwext4.struct_ext4_inode) u32 {
@@ -507,12 +549,11 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
-        var number: u32 = 0;
-        var inode: lwext4.struct_ext4_inode = undefined;
-        self.inode_of(full, &number, &inode) catch return kernel.errno.ErrnoSet.NoEntry;
-        switch (self.mode_of(&inode) & 0xF000) {
-            lwext4.EXT4_INODE_MODE_DIRECTORY => return Ext4Directory.InstanceType.create_node(self._allocator, full),
-            lwext4.EXT4_INODE_MODE_FILE => return Ext4File.InstanceType.create_node(self._allocator, full),
+        const mode = @call(.never_inline, mode_at, .{ self, full }) catch return kernel.errno.ErrnoSet.NoEntry;
+        switch (mode & 0xF000) {
+            // Out of line, or their frames sit under the lookup above for nothing.
+            lwext4.EXT4_INODE_MODE_DIRECTORY => return @call(.never_inline, Ext4Directory.InstanceType.create_node, .{ self._allocator, full }),
+            lwext4.EXT4_INODE_MODE_FILE => return @call(.never_inline, Ext4File.InstanceType.create_node, .{ self._allocator, full }),
             // A link is the VFS's to follow: it resolves through readlink.
             else => return kernel.errno.ErrnoSet.NoEntry,
         }

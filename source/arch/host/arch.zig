@@ -36,6 +36,12 @@ pub const atomic = struct {
 };
 
 pub const sync = struct {
+    pub inline fn require_stack(bytes: usize) void {
+        _ = bytes;
+    }
+
+    pub inline fn require_stack_for_masked_section() void {}
+
     pub inline fn save_and_disable_interrupts() usize {
         return 0;
     }

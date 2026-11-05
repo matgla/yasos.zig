@@ -125,8 +125,18 @@ pub const RamFsData = struct {
             .inode = next_inode(),
             .times = kernel.fs.FileTimes.create(kernel.time.now_timespec()),
         };
+        kernel.sync.placement.assert_coherent(obj.refcounter);
         refcount.init(obj.refcounter);
         return obj;
+    }
+
+    /// Room for `length` bytes of a body still in RAM, without the heap checks of
+    /// growing one. For a body known to be tiny.
+    pub fn reserve(self: *RamFsData, length: usize) !void {
+        switch (self.storage) {
+            .ram => |*list| try list.ensureTotalCapacityPrecise(self._allocator, length),
+            .spilled => {},
+        }
     }
 
     pub fn share(self: *RamFsData) *RamFsData {
