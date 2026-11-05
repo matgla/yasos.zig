@@ -28,6 +28,7 @@ pub const Header = c.YaffHeader;
 /// Machine requirements of the image, found at Header.arch_section_offset.
 pub const ArchSection = c.YaffArchSection;
 pub const arch_flag_exact_thumb: u8 = c.YAFF_ARCH_FLAG_EXACT_THUMB;
+pub const memory_flag_slow: u32 = c.YAFF_MEMORY_SLOW;
 
 /// The only on-disk layout this loader understands. An image written by an
 /// older or newer toolchain is refused rather than guessed at.
@@ -197,6 +198,18 @@ comptime {
 /// The `size` field is the forward compatibility hinge: a newer writer appends
 /// fields and grows it, so a section at least as long as what we read here is
 /// usable and anything beyond is ignored.
+/// The block of code an image linked with --hot-text wants run from fast memory,
+/// null for any other image: they carry the short arch section.
+pub const HotText = struct { offset: u32, length: u32 };
+
+pub fn get_hot_text(header: *const Header) ?HotText {
+    const arch = get_arch_section(header) orelse return null;
+    if (arch.size < @sizeOf(c.YaffHotTextArchSection)) return null;
+    const hot: *align(1) const c.YaffHotTextArchSection = @ptrFromInt(@intFromPtr(header) + header.arch_section_offset);
+    if (hot.hot_text_length == 0) return null;
+    return .{ .offset = hot.hot_text_offset, .length = hot.hot_text_length };
+}
+
 pub fn get_arch_section(header: *const Header) ?*const ArchSection {
     if (header.arch_section_offset == 0) return null;
     const section: *const ArchSection = @ptrFromInt(@intFromPtr(header) + header.arch_section_offset);
@@ -292,11 +305,12 @@ pub fn print_header(header: *const Header) void {
 }
 
 comptime {
-    // 132 bytes since YAFF_VERSION 4, which appended data_alignment and
-    // data_alignment_offset; 124 in version 3, which widened every table offset
+    // 136 bytes since YAFF_VERSION 5, which appended memory_flags; 132 in
+    // version 4, which appended data_alignment and data_alignment_offset; 124 in
+    // version 3, which widened every table offset
     // and the relocation/symbol counts from 16 to 32 bits (92 before that). The
     // check is here so a toolchain/loader mismatch is a build error rather than
     // a module that loads with its sections read from the wrong offsets.
     var buf: [30]u8 = undefined;
-    if (@sizeOf(Header) != 132) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
+    if (@sizeOf(Header) != 136) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
 }

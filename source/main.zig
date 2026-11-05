@@ -134,7 +134,8 @@ pub const os = struct {
 // ----------------------------------------------------------------------------
 // Hybrid /tmp
 //
-// A RamFs mounted at /tmp over the board's `temp_ram` region: a compile writes
+// A RamFs mounted at /tmp over the board's Temp region, `temp_ram` or a stretch of
+// PSRAM (see move_temp_to_psram in the rp2350 HAL): a compile writes
 // its output there and the loader reads it straight back, so both are memcpy
 // rather than SD-card traffic. The arena is deliberately a dedicated region and
 // not the process pool — an unbounded /tmp RamFs carved out of `process_ram`
@@ -163,6 +164,7 @@ const TmpPageAllocatorType = kernel.memory.heap.TmpPageAllocator(TmpMemoryPoolTy
 
 var tmp_memory_pool: ?TmpMemoryPoolType = null;
 var tmp_page_allocator: ?TmpPageAllocatorType = null;
+var tmp_counters_apart: ?kernel.memory.heap.CountersApartAllocator = null;
 var tmp_tier: ?RamFsTier = null;
 
 /// The spill directory comes off with its mount (`umount /var`) once no /tmp
@@ -250,6 +252,11 @@ fn prepare_tmp_arena(kernel_allocator: std.mem.Allocator, spill_directory: []con
         tmpfs.max_file_size,
         spill_directory,
     });
+    // In PSRAM the tree's reference counters cannot live in the arena.
+    if (!kernel.sync.placement.is_coherent_address(start)) {
+        tmp_counters_apart = .{ .arena = tmp_page_allocator.?.allocator(), .counters = kernel_allocator };
+        return tmp_counters_apart.?.allocator();
+    }
     return tmp_page_allocator.?.allocator();
 }
 
@@ -534,7 +541,7 @@ fn initialize_filesystem(allocator: std.mem.Allocator) !void {
 
     // Everything else comes from /etc/fstab (source/fs/mounter.zig), or from
     // a RAM-only default when the image has none.
-    mounter.init(allocator, &make_tmp_filesystem, &kernel.memory.heap.malloc.headroom);
+    mounter.init(allocator, &make_tmp_filesystem, &kernel.memory.heap.slow.headroom);
     if (mounter.read_file(allocator, "/etc/fstab")) |fstab| {
         defer allocator.free(fstab);
         mounter.mount_all(fstab);
@@ -681,6 +688,13 @@ pub export fn main() void {
         // external memory has been probed, and that is what the placement
         // assertion checks against.
         kernel.sync.init();
+        // Past this, memory that is not SRAM for whatever can do without it.
+        const slow_allocator = kernel.memory.heap.slow.install(allocator);
+        // The console's receive ring: the interrupt is already filling a small one.
+        if (@TypeOf(board.uart.uart0).movable_rx) {
+            const rx_storage = slow_allocator.alloc(u8, 4096) catch @panic("no memory for the console's receive ring");
+            board.uart.uart0.set_rx_storage(rx_storage);
+        }
         splashscreen();
 
         // Release the other cores: after the console exists, so a failed
@@ -700,12 +714,14 @@ pub export fn main() void {
 
         kernel.memory.heap.malloc.set_get_current_pid(&get_current_pid);
 
-        kernel.irq.system_call.init(kernel_allocator.allocator());
-        kernel.dynamic_loader.init(allocator);
+        // Mostly path buffers that live for one call: on the kernel heap, which is
+        // not much slower to allocate from than memory that is slow to touch.
+        kernel.irq.system_call.init(allocator);
+        kernel.dynamic_loader.init(slow_allocator, allocator);
         defer kernel.dynamic_loader.deinit();
         // Before anything mounts: a volume sizes its block cache at mount.
         Ext4CachePages.install();
-        initialize_filesystem(allocator) catch |err| {
+        initialize_filesystem(slow_allocator) catch |err| {
             kernel.log.err("Filesystem initialization failed: {s}", .{@errorName(err)});
             return;
         };
@@ -732,9 +748,12 @@ pub export fn main() void {
         // shell's own YAFF hint, as exec would for any other image: with a
         // small default (8 KiB on the Pico 2) the shell otherwise overflowed
         // as soon as a vforked child walked the VFS.
+        kernel.dynamic_loader.resolve_libraries();
         const root_hint = kernel.dynamic_loader.executable_stack_hint("/bin/sh");
         root_stack_from_image = root_hint != null;
         const root_stack = root_hint orelse kernel.process.process_manager.instance.get_default_stack_size();
+        // The root process is pid 1 and allocates that stack before loading anything.
+        kernel.process.process_manager.instance.get_process_memory_pool().set_prefers_slow(1, kernel.dynamic_loader.executable_prefers_slow_memory("/bin/sh"));
         @call(.never_inline, kernel.spawn.root_process, .{ &kernel_process, root_stack }) catch |err| {
             kernel.log.err("Cannot start root process: {s}", .{@errorName(err)});
         };

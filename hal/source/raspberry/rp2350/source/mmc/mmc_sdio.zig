@@ -20,6 +20,8 @@
 
 const std = @import("std");
 
+const crc7 = @import("crc7.zig");
+
 const hal = @import("hal_interface");
 const picosdk = @import("../picosdk.zig").picosdk;
 
@@ -333,7 +335,7 @@ pub const MmcSdio = struct {
         const status = sdio.rp2350_sdio_command_u32(@intCast(cmd), arg, &response, flags);
         restore_irq(primask);
         if (status != sdio.SDIO_OK) {
-            self.report_command_failure(cmd, status, false);
+            @call(.never_inline, report_command_failure, .{ self, cmd, status, false });
             return .{ .command_index = 0, .card_status = 0, .crc_ok = false };
         }
 
@@ -351,7 +353,7 @@ pub const MmcSdio = struct {
         const status = sdio.rp2350_sdio_command_u32(@intCast(cmd), arg, &response, flags);
         restore_irq(primask);
         if (status != sdio.SDIO_OK) {
-            self.report_command_failure(cmd, status, true);
+            @call(.never_inline, report_command_failure, .{ self, cmd, status, true });
             return .{ .command_index = 0, .card_status = 0, .crc_ok = false };
         }
 
@@ -416,7 +418,7 @@ pub const MmcSdio = struct {
 
     // The C driver's hard ceiling per request (SDIO_MAX_BLOCKS_PER_REQ); its
     // DMA descriptor and checksum arrays are sized for it.
-    const max_blocks_per_req: u32 = 128;
+    const max_blocks_per_req: u32 = 32;
 
     // Cap on how many blocks go out under one `cpsid i`. Reads have always
     // masked the whole transfer; writes deliberately did not, because a
@@ -519,7 +521,7 @@ pub const MmcSdio = struct {
                 }
                 if (poll_status != sdio.SDIO_BUSY) {
                     restore_irq(primask);
-                    self.report_rx_poll_failure(poll_status, blocks_complete, chunk, !direct);
+                    @call(.never_inline, report_rx_poll_failure, .{ self, poll_status, blocks_complete, chunk, !direct });
                     try check_status(poll_status);
                 }
             }
@@ -619,7 +621,7 @@ pub const MmcSdio = struct {
         buffer[0] = 0x40 | @as(u8, command);
         const argument_bytes = std.mem.toBytes(argument_value);
         @memcpy(buffer[1..5], argument_bytes[0..4]);
-        buffer[5] = @as(u8, std.hash.crc.@"CRC-7/MMC".hash(buffer[0..5])) << 1 | 1;
+        buffer[5] = crc7.command_crc_byte(buffer[0..5]);
         return buffer;
     }
 

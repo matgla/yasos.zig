@@ -17,6 +17,7 @@
 // Public License along with this program. If not, see
 // <https://www.gnu.org/licenses/>.
 //
+const stackuse_file = @import("process/stackuse_file.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -35,6 +36,9 @@ const c = @import("libc_imports").c;
 const handlers = @import("interrupts/syscall_handlers.zig");
 const perf = @import("interrupts/perf_profile.zig");
 const preempt = @import("sync/preempt.zig");
+const sync_locks = @import("sync/locks.zig");
+const sync_mutex = @import("sync/mutex.zig");
+const stdout = @import("stdout.zig");
 const smp = @import("smp.zig");
 
 /// Rank 70, a leaf. `spin_irq` rather than a sleeping mutex because
@@ -82,11 +86,13 @@ const vfork_stack_slack: usize = 256;
 /// there, so it does not survive into the imported declarations.
 const wnohang: i32 = 0x1;
 
-/// Stack for a core's idle process. 8 KB, matching the secondary core's MSP: the
-/// idle body itself needs almost none of it, but `reap_terminated` unwinds
-/// through `Process.deinit` into the page pool and the kernel heap, and the
-/// fault handler's module-map dump alone wants a 4 KB buffer.
-const idle_stack_size: u32 = 8 * 1024;
+/// Stack for a core's idle process. It holds exactly one context switch and
+/// `reap_terminated`, which by then only frees: `delete_process` closed the files
+/// on the exiting process's own stack, and a fault runs on MSP. 684 B measured
+/// with rp2350_timing's watch= under a shell workload; idle is two of these out
+/// of the process SRAM, and PSPLIM turns any mistake here into a clean fault.
+/// The reap path's log lines format on this stack, so a logging kernel keeps 8 KB.
+const idle_stack_size: u32 = if (builtin.mode == .debug or config.instrumentation.log_info or config.instrumentation.log_debug) 8 * 1024 else 2 * 1024;
 
 /// A YAFF image's stack_size when it declares none: run with the OS default.
 const no_stack_hint: u32 = 0xFFFFFFFF;
@@ -139,6 +145,15 @@ fn vfork_caller_stack_pointer(context: *const volatile c.vfork_context) usize {
     const frame = @intFromPtr(context.sp.?);
     const fpu_bytes: usize = if (context.is_fpu_used == 1) vfork_fpu_frame_bytes else 0;
     return frame + vfork_frame_bytes + fpu_bytes;
+}
+
+/// What a new process must leave of the kernel heap. A process takes little of it, but
+/// the heap running dry is a panic, and a shell or a compile is better told to try again.
+const kernel_heap_floor_for_a_process = 2 * 1024;
+
+fn kernel_heap_has_room_for_a_process() bool {
+    if (comptime builtin.is_test) return true;
+    return kernel.memory.heap.malloc.headroom() >= kernel_heap_floor_for_a_process;
 }
 
 fn reserve_vfork_stack_for(parent: *Process, context: *const volatile c.vfork_context) !void {
@@ -218,6 +233,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         pub const ContainerType = std.DoublyLinkedList;
         pub const ProcessType = Process;
         const Self = @This();
+        /// What an unset `core` slot holds. Only ever compared, never dereferenced.
+        const no_process: *ProcessType = @ptrFromInt(@alignOf(ProcessType));
 
         pub const PidMap = std.StaticBitSet(config.process.max_pid_value);
         pub const PidIterator = PidMap.Iterator(.{
@@ -261,7 +278,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 ._process_memory_pool = processes_memory_pool,
                 ._pid_map = std.StaticBitSet(config.process.max_pid_value).full,
                 ._pid_holds = @splat(0),
-                .core = undefined,
+                .core = @splat(no_process),
                 .idle = @splat(null),
                 .terminate_list = .{},
                 .runtime_configuration = RuntimeConfiguration.init(),
@@ -569,6 +586,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             dynamic_loader.restore_parent_writable_sections(pid);
 
             if (self.get_process_for_pid(pid)) |exiting| {
+                if (stackuse_file.enabled and !exiting.impl.stack_is_shared) {
+                    if (exiting.get_executable_path()) |path| stackuse_file.record(path, exiting.impl.stack);
+                }
                 // Close this process's files in its own thread context, not in
                 // `deinit`, which the reaper calls where the filesystem's
                 // sleeping mutex is unavailable. Idempotent, so `deinit` may
@@ -682,6 +702,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         /// Blocked, leaving the child created, unreleased and unreachable.
         pub fn vfork(self: *Self, context: *const volatile c.vfork_context) !i32 {
             const current_process = self.get_current_process();
+            if (!kernel_heap_has_room_for_a_process()) {
+                return kernel.errno.ErrnoSet.TryAgain;
+            }
             const maybe_pid = self.get_next_pid();
             if (maybe_pid == null) {
                 return kernel.errno.ErrnoSet.TryAgain;
@@ -944,17 +967,24 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             const executable = loaded catch |err| {
                 return if (err == error.IncorrectSignature) kernel.errno.ErrnoSet.ExecFormatError else err;
             };
+            return @call(.never_inline, finish_exec, .{ self, current_process, executable, path, &owns_path, path_allocator, argv, envp, argv_scratch });
+        }
+
+        /// The rest of an exec, after the load. Out of line for the stack: the load is
+        /// the deepest thing a process's stack ever holds (it runs on the vfork parent's
+        /// stack), and none of this has to be in a frame under it.
+        fn finish_exec(self: *Self, current_process: *Process, executable: anytype, path: []const u8, owns_path: *bool, path_allocator: ?std.mem.Allocator, argv: [*c][*c]u8, envp: [*c][*c]u8, argv_scratch: ?*?[]usize) !i32 {
             // Taken from inside the loader, not measured around this call: on a
             // profiling build the loader's own trace lines are written before
             // it returns, and billing those to the load overstated it 6x.
-            current_process._load_us = dynamic_loader.last_executable_load_us;
+            current_process.cold._load_us = dynamic_loader.last_executable_load_us;
 
             // Mark the load/relocate boundary so process exit can report real
             // execution time separately from dynamic-load time (perf profiling).
             // Also reset the memory-pool peak marks so the run's peak SRAM/PSRAM
             // usage (spill detection) is attributable to this exec'd image.
             if (perf.enabled) {
-                current_process._exec_loaded_time = hal.time.get_time_us();
+                current_process.cold._exec_loaded_time = hal.time.get_time_us();
                 self.get_process_memory_pool().reset_peaks();
                 // The syscall counters are system-wide, so they only mean "this
                 // process" if the window starts here. It holds for the smoke
@@ -977,7 +1007,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // all defers in the caller).
             if (path_allocator) |alloc| {
                 alloc.free(path);
-                owns_path = false;
+                owns_path.* = false;
             }
             const exec_allocator = current_process.get_process_memory_allocator();
             // argv_copy holds argv and envp contiguously (see clone_exec_args);
@@ -1314,6 +1344,13 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         ///
         /// Single-core builds fold the masking away -- with one schedulable core
         /// the index is a constant and there is nothing to tear.
+        /// The process on this core, or null while boot has not scheduled one:
+        /// the manager exists well before that, since `main` mounts in between.
+        pub fn try_current_process(self: *const Self) ?*Process {
+            const current = self.get_current_process();
+            return if (current == no_process) null else current;
+        }
+
         pub fn get_current_process(self: *const Self) *Process {
             if (comptime !kernel.sync.percpu.smp) return self.core[hal.cpu.coreid()];
             const flags = arch.sync.save_and_disable_interrupts();
@@ -1501,7 +1538,7 @@ const CtxEvent = struct {
 };
 
 const CtxRing = struct {
-    events: [24]CtxEvent = @splat(.{}),
+    events: [8]CtxEvent = @splat(.{}),
     seq: u32 = 0,
 };
 
@@ -1632,6 +1669,39 @@ export fn dump_ctx_ring() void {
 
 export fn get_current_pid() c.pid_t {
     return instance.core[hal.cpu.coreid()].pid;
+}
+
+/// For `/proc/faultstat`. Updated at HardFault priority on either core, and only
+/// ever read as a diagnostic, so a lost increment does not matter.
+pub var fault_kills: u32 = 0;
+pub var fault_kills_holding_locks: u32 = 0;
+
+/// The current process is being killed by a fault and will resume at `_exit`,
+/// possibly from the middle of a syscall, since syscalls run on its stack. Drop
+/// what that syscall held so `_exit` can run and nobody else waits on it forever.
+/// Returns false when this is not survivable. Called from HardFault with this
+/// core's spinlocks already ruled out by interrupts being unmasked.
+export fn abandon_faulting_thread() bool {
+    if (comptime sync_locks.checked) {
+        if (sync_locks.held_spin_ranks() != 0) return false;
+    }
+    const current = instance.core[hal.cpu.coreid()];
+    // The exit runs from a fresh frame on an empty stack, so a second fault means
+    // exit itself cannot finish. Restarting it would only repeat that, forever.
+    if (current._fault_kills != 0) return false;
+    current._fault_kills = 1;
+    fault_kills +%= 1;
+
+    stdout.console_forget_dead_holder();
+    if (current._held_mutexes != null) {
+        fault_kills_holding_locks +%= 1;
+        log.err("pid {d} killed holding sleeping locks (ranks 0x{x}): what they protect may be half updated", .{
+            current.pid, sync_locks.held_ranks(),
+        });
+    }
+    sync_mutex.release_held_by(current);
+    preempt.forget_nesting();
+    return true;
 }
 
 export fn get_stack_top() *const u8 {
@@ -1838,7 +1908,7 @@ test "ProcessManager.ShouldRejectProcessCreationWhenNoPIDsAvailable" {
 
 test "ProcessManager.ShouldScheduleProcesses" {
     initialize_process_manager(std.testing.allocator);
-    kernel.dynamic_loader.init(std.testing.allocator);
+    kernel.dynamic_loader.init(std.testing.allocator, std.testing.allocator);
     defer kernel.dynamic_loader.deinit();
     defer deinitialize_process_manager();
     var sut = &instance;
@@ -1886,7 +1956,7 @@ test "ProcessManager.ShouldScheduleProcesses" {
 }
 
 test "ProcessManager.ShouldForkProcess" {
-    kernel.dynamic_loader.init(std.testing.allocator);
+    kernel.dynamic_loader.init(std.testing.allocator, std.testing.allocator);
     // defer kernel.dynamic_loader.deinit();
     initialize_process_manager(std.testing.allocator);
     defer deinitialize_process_manager();
@@ -1959,7 +2029,7 @@ test "ProcessManager.ShouldForkProcess" {
     defer kernel.fs.vfs_deinit();
     const fs_mock = try FileSystemMock.create(std.testing.allocator);
     const fs = fs_mock.get_interface();
-    kernel.dynamic_loader.init(std.testing.allocator);
+    kernel.dynamic_loader.init(std.testing.allocator, std.testing.allocator);
     defer kernel.dynamic_loader.deinit();
 
     const IoctlCallback = struct {
@@ -2018,7 +2088,7 @@ test "ProcessManager.ExecStackLimitReplacesTheLastImagesHintButKeepsAnExplicitLi
 }
 
 test "ProcessManager.WaitingForAPidThatIsGoneFailsWithNoChildProcesses" {
-    kernel.dynamic_loader.init(std.testing.allocator);
+    kernel.dynamic_loader.init(std.testing.allocator, std.testing.allocator);
     initialize_process_manager(std.testing.allocator);
     defer deinitialize_process_manager();
     var sut = &instance;
@@ -2037,7 +2107,7 @@ test "ProcessManager.WaitingForAPidThatIsGoneFailsWithNoChildProcesses" {
 }
 
 test "ProcessManager.ShouldWaitForProcess" {
-    kernel.dynamic_loader.init(std.testing.allocator);
+    kernel.dynamic_loader.init(std.testing.allocator, std.testing.allocator);
     initialize_process_manager(std.testing.allocator);
     defer deinitialize_process_manager();
     var sut = &instance;

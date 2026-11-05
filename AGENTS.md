@@ -85,10 +85,30 @@ once — prefer that when a bug class repeats.
   `setup`, `image NAME --tinycc REV|DIR`, `run IMAGE [-k ...]`, `report`,
   `compare A B`, `calibrate`. Host and plain-QEMU profiles mis-rank passes for
   the board — use this before optimising compile time.
+- **`scripts/selfhost_profile.py`** — where a self-compile's board time goes, on a
+  board-model image: `run` (units of the tcc_selfhost payload), `funcs` (cycles per
+  function across tcc, libc and the kernel), `allocs` (misses per allocation site
+  and what SRAM could hold; needs a `-DTCC_ALLOC_PROFILE` image), `compare`,
+  `poolmap` (who owns SRAM, `/proc/poolmap`), `identity` (do two images' crosses
+  produce the same objects), `hotlist` (regenerate a `--hot-text`/`--ram-text` list,
+  `--marks` keeps its `=` marks), `callers` (the device's call graph; the host's
+  inlining hides it), `ab` (two images at -O0 and -O2: time and object identity),
+  `run --fast` (what if these functions cost no fetch). The device tcc keeps its heap in PSRAM and its hot IR
+  arrays in an SRAM arena (`MAP_SLOW` / `MAP_FAST`, see `libs/tinycc/source/driver/libtcc.c`).
+- **`scripts/board_selfhost.py`** — the self-compile on the rig's board at each level:
+  `--build` for the board config + images, `--opt=-O0` for one level, `--no-wait` and
+  `--logs`. Holds the board lock, flashes private images with hash checks, and keeps a
+  per-checkout tree on the card (`/root/selfhost-<label>`). Rig side: `scripts/rig/`.
 - **`scripts/qemu_capture_yaff.py`** — older RAM-scan capture (slower/flakier;
   prefer the FAT drive).
 - **`scripts/run_qemu_smoke.sh`** — the pytest smoke suite on QEMU (no hardware).
   `--no-build` reuses the current kernel; `-k <name>` selects tests.
+- **`scripts/stack_overflow_sweep.py [--kernel ELF] [--step N]`** — overflow a
+  process stack at every depth of the ext4 and FAT paths on a QEMU SD card; fails
+  on a panic, a broken filesystem afterwards, or a process killed holding a
+  filesystem lock. Run it after changing those paths or their `stack_needed`
+  margins (`source/fs/ext4/ext4fs.zig`, `source/fs/fatfs/fs_lock.zig`): the smoke
+  suite has no card. Its sweep without a disk is in `tests/smoke/user_fault_test.py`.
 - **`scripts/vfs_cache_baseline.py --kernel ELF`** — FAT/ext4 repeated-read,
   compile and spawn traffic on a perf-profiling kernel. Keeps raw UART logs,
   cache counters and hashes; `--board-model` uses a board-shaped kernel with
@@ -129,6 +149,15 @@ rm -rf .zig-cache && zig build -Doptimize=ReleaseSafe   # kernel (re-embeds root
   the device compiler's by 8-byte stack-frame shifts — every host-vs-device
   comparison then "fails" without any miscompile. Always build crosses
   through `./build_rootfs.sh` (or replicate its exact configure line).
+- **Flash with both cores halted: never `set USE_CORE 0` around `program`.** OpenOCD's
+  work area is SRAM 0x20010000, the start of the process pool on the PSRAM boards, so a
+  running core 1 writes into the buffer being programmed. Erase and write report nothing;
+  verify shows `Was 0x00` / SRAM pointers at a repeatable address. A Pi reboot does not
+  clear it. For reset-only and GDB commands core 0 alone is fine.
+- **`source/kernel/hot_functions.txt` rots silently:** Zig's inner numbers (`__func_N`,
+  `struct_N`) move with any edit and differ per board, and `--ram-text` drops what it cannot
+  find. After kernel changes run `scripts/hot_functions_refresh.py`; rank new lists only on
+  a kernel with no list.
 - **`-O0`-native shifts the bug** elsewhere — not a clean bisector.
 - The bump commit is **not** automatically the cause — verify by reverting.
 

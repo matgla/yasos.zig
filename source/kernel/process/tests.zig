@@ -23,7 +23,9 @@ comptime {
     _ = @import("uartstat_file.zig");
     _ = @import("xipstat_file.zig");
     _ = @import("cpus_file.zig");
+    _ = @import("faultstat_file.zig");
     _ = @import("mempeak_file.zig");
+    _ = @import("poolmap_file.zig");
     _ = @import("vreg_file.zig");
     _ = @import("temp_file.zig");
 }

@@ -129,6 +129,21 @@ pub const FileSystemHeader = struct {
         return try FileHeader.init(self._device_file, self._reader.get_offset() + offset, @intCast(self._offset), self._size, self._mapped_memory, self._allocator);
     }
 
+    /// `create_file_header_with_offset` into storage the caller has.
+    pub fn init_file_header(self: *FileSystemHeader, header: *FileHeader, offset: c.off_t) !void {
+        try header.init_at(self._device_file, self._reader.get_offset() + offset, @intCast(self._offset), self._size, self._mapped_memory, self._allocator);
+    }
+
+    /// Move a live header to another entry.
+    pub fn reload_file_header(self: *FileSystemHeader, header: *FileHeader, offset: c.off_t) !void {
+        header.deinit();
+        try header.load(self._reader.get_offset() + offset);
+    }
+
+    pub fn first_file_offset(self: *const FileSystemHeader) c.off_t {
+        return self._reader.get_data_offset();
+    }
+
     /// Where `header` sits in the image, as `create_file_header_with_offset`
     /// takes it back.
     pub fn offset_of(self: *const FileSystemHeader, header: *const FileHeader) !u32 {

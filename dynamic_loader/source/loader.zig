@@ -142,10 +142,12 @@ pub const Loader = struct {
     validated: [32]?Image = @splat(null),
     validation_next: usize = 0,
 
-    pub fn create(file_resolver: FileResolver, kernel_allocator: std.mem.Allocator, machine: MachineProfile) Loader {
+    /// `kernel_allocator` may be in memory with no exclusives (PSRAM on a board).
+    /// `atomics_allocator` may not: `modules_list` holds each image's `users`.
+    pub fn create(file_resolver: FileResolver, kernel_allocator: std.mem.Allocator, atomics_allocator: std.mem.Allocator, machine: MachineProfile) Loader {
         return .{
             .file_resolver = file_resolver,
-            .modules_list = @import("integer_hash_map.zig").IntegerHashMap(usize, LoadedModule).init(kernel_allocator),
+            .modules_list = @import("integer_hash_map.zig").IntegerHashMap(usize, LoadedModule).init(atomics_allocator),
             .kernel_allocator = kernel_allocator,
             .machine = machine,
         };
@@ -220,6 +222,14 @@ pub const Loader = struct {
         }
     }
 
+    /// Filled here so that the copy Parser.create returns stays out of load_module's
+    /// frame, which is on the stack twice for a program and its libc.
+    fn new_parser(self: *Loader, header: *const Header) !*Parser {
+        const parser = try self.kernel_allocator.create(Parser);
+        parser.* = Parser.create(header);
+        return parser;
+    }
+
     fn load_module(self: *Loader, module: *Module, module_address: Image, process_allocator: std.mem.Allocator, stable: bool, given_header: ?*const Header) !void {
         var _t = profile.now_us();
         const header = if (given_header) |h|
@@ -229,7 +239,10 @@ pub const Loader = struct {
                 log.err("Refusing to load module: {s}", .{@errorName(err)});
                 return err;
             };
-        const parser = Parser.create(header);
+        // On the heap: this runs on the exec caller's stack, once per image and
+        // nested for each library, and a Parser is hundreds of bytes.
+        const parser = try @call(.never_inline, new_parser, .{ self, header });
+        defer self.kernel_allocator.destroy(parser);
         // Both of these only emit `log.debug`, but their loops are driven by
         // `ItemTable.iter()`, which calls `size()` -- a full strlen-strided walk
         // -- to find its end pointer. The bodies compile out at the pinned
@@ -249,18 +262,22 @@ pub const Loader = struct {
         if (header_module.get_arch_section(header)) |arch| {
             module.exact_thumb = (arch.flags & header_module.arch_flag_exact_thumb) != 0;
         }
+        if (header_module.get_hot_text(header)) |hot| {
+            module.hot_text_offset = hot.offset;
+            module.hot_text_length = hot.length;
+        }
 
         try module.set_name(parser.name);
         profile.account(.parse, _t);
 
         _t = profile.now_us();
-        try self.import_child_modules(header, &parser, module);
+        try self.import_child_modules(header, parser, module);
         profile.account(.children, _t);
 
         // if module is already loaded just data must be loaded
         _t = profile.now_us();
         module.image = @intFromPtr(header);
-        const shared_data = try self.get_shared_data(module.image, process_allocator, &parser, module.xip);
+        const shared_data = try self.get_shared_data(module.image, process_allocator, parser, module.xip);
         module.add_shared_data(shared_data);
         profile.account(.shared_data, _t);
 
@@ -280,14 +297,14 @@ pub const Loader = struct {
             var found = find_template(header, module, child_images.?);
             defer found.release();
             if (found.view) |view| {
-                try self.relocate(header, &parser, module, null);
-                try verify_template(view, header, &parser, module);
+                try self.relocate(header, parser, module, null);
+                try verify_template(view, header, parser, module);
                 return self.finish_load(header, module);
             }
         }
-        const reused = cacheable and try self.load_from_template(header, &parser, module, child_images.?);
+        const reused = cacheable and try self.load_from_template(header, parser, module, child_images.?);
         if (!reused) {
-            try self.relocate(header, &parser, module, if (cacheable) child_images.? else null);
+            try self.relocate(header, parser, module, if (cacheable) child_images.? else null);
         }
 
         try self.finish_load(header, module);
@@ -314,6 +331,7 @@ pub const Loader = struct {
         bases[template.region_kind(0)] = region_base(module);
         bases[template.self_thunks] = if (thunk_bytes(module)) |thunks| @intFromPtr(thunks.ptr) else 0;
         bases[template.image_kind(0)] = module.image;
+        bases[template.hot_kind(0)] = if (module.hot_text_length != 0) module.hot_text_base() else 0;
         var owner: u8 = 1;
         var it = module.children.first;
         while (it) |node| : ({
@@ -324,6 +342,7 @@ pub const Loader = struct {
             const child: *const Module = @fieldParentPtr("child_list_node", node);
             bases[template.region_kind(owner)] = region_base(child);
             bases[template.image_kind(owner)] = child.image;
+            bases[template.hot_kind(owner)] = if (child.hot_text_length != 0) child.hot_text_base() else 0;
         }
         return bases;
     }
@@ -402,10 +421,8 @@ pub const Loader = struct {
     fn find_template(header: *const Header, module: *const Module, child_images: []const usize) Found {
         var found: Found = .{};
         const data_length = header.data_length - header.const_rodata_length;
-        var ids: [template.max_children]u64 = undefined;
-        for (child_images, 0..) |image, i| ids[i] = image;
         if (template.lookup(module.image)) |t| {
-            if (fits(t.view, ids[0..child_images.len], data_length, header.got_length)) {
+            if (fits(&t.view, child_images, false, data_length, header.got_length)) {
                 found.view = t.view;
                 found.pinned = t;
                 template.stats.hits += 1;
@@ -415,8 +432,7 @@ pub const Loader = struct {
         }
         if (template.have_precache()) {
             if (template.precache_find(image_hash(module.image))) |view| {
-                for (child_images, 0..) |image, i| ids[i] = image_hash(image);
-                if (fits(view, ids[0..child_images.len], data_length, header.got_length)) {
+                if (fits(&view, child_images, true, data_length, header.got_length)) {
                     found.view = view;
                     template.stats.precache_hits += 1;
                     return found;
@@ -427,10 +443,12 @@ pub const Loader = struct {
         return found;
     }
 
-    fn fits(view: template.View, children: []const u64, data_length: usize, got_length: usize) bool {
-        if (view.children.len != children.len) return false;
-        for (view.children, children) |a, b| {
-            if (a != b) return false;
+    /// A template names its dependencies by image address in the RAM cache and by
+    /// content hash in the precache.
+    fn fits(view: *const template.View, child_images: []const usize, by_hash: bool, data_length: usize, got_length: usize) bool {
+        if (view.children.len != child_images.len) return false;
+        for (view.children, child_images) |id, image| {
+            if (id != if (by_hash) image_hash(image) else image) return false;
         }
         return view.data_length == data_length and view.got_length == got_length;
     }
@@ -439,19 +457,29 @@ pub const Loader = struct {
     fn image_hash(image: usize) u64 {
         if (template.memo_lookup(image)) |hash| return hash;
         const header: *const Header = @ptrFromInt(image);
-        const parser = Parser.create(header);
-        const hash = template.content_hash(@ptrFromInt(image), header.text_offset, parser.get_got());
+        const hash = template.content_hash(@ptrFromInt(image), header.text_offset, image_got(header));
         template.memo_store(image, hash);
         return hash;
+    }
+
+    /// Out of line for the stack it saves: a Parser is large, loads run on the
+    /// calling process's stack, and all the hash needs from one is this slice.
+    fn image_got(header: *const Header) []const u8 {
+        // Parser.create lays it out after text, init, plt and data; a Parser is large,
+        // and this runs on the calling process's stack.
+        const base: [*]const u8 = @ptrCast(header);
+        const at = header.text_offset + header.code_length + header.init_length + header.plt_length + header.data_length;
+        return base[at..][0..header.got_length];
     }
 
     /// Load `module`'s writable state from a template, if there is a usable
     /// one. False leaves the module as it was, for `relocate`.
     fn load_from_template(_: *Loader, header: *const Header, parser: *const Parser, module: *Module, child_images: []const usize) !bool {
         var _t = profile.now_us();
-        var found = find_template(header, module, child_images);
+        var found = @call(.never_inline, find_template, .{ header, module, child_images });
         defer found.release();
-        const view = found.view orelse return false;
+        if (found.view == null) return false;
+        const view: *const template.View = &found.view.?;
 
         // The same start as any load -- data and GOT from the image, thunks
         // zeroed -- and then the template's stores instead of the relocation.
@@ -460,16 +488,21 @@ pub const Loader = struct {
         // the ones it writes.
         module.unique_data = try LoadedUniqueData.create(module.allocator, module.process_allocator, header, parser, true, view);
         if (view.thunk_count > 0) try module.unique_data.?.allocate_thunks(view.thunk_count, view.slots_written);
-        const bases = template_bases(module);
-        view.apply(template_layout(header, module), &bases, module_file.thunk_code());
+        @call(.never_inline, apply_template, .{ view, header, module });
         if (module.unique_data.?.thunks) |thunks| thunks.generated = true;
         profile.account(.template_apply, _t);
 
         // These copy a dependency's live data, not anything relocation decided.
         _t = profile.now_us();
-        try process_copy_relocations(parser, module);
+        try @call(.never_inline, process_copy_relocations, .{ parser, module });
         profile.account(.copy_relocations, _t);
         return true;
+    }
+
+    /// Out of line for the stack: the allocations above go much deeper than this.
+    fn apply_template(view: *const template.View, header: *const Header, module: *Module) void {
+        const bases = template_bases(module);
+        view.apply(template_layout(header, module), &bases, module_file.thunk_code());
     }
 
     /// Relocate `module` from its image. With `child_images`, also record what
@@ -645,7 +678,7 @@ pub const Loader = struct {
         }
     }
 
-    fn process_data(_: Loader, header: *const Header, parser: *const Parser, module: *Module) !void {
+    fn process_data(_: *const Loader, header: *const Header, parser: *const Parser, module: *Module) !void {
         // unique data must be always copied to RAM
         module.unique_data = try LoadedUniqueData.create(
             module.allocator,
@@ -661,7 +694,7 @@ pub const Loader = struct {
         }
     }
 
-    fn get_section_address_for_offset(module: *Module, header: *const Header, offset: usize) error{OffsetOutOfRange}!struct { section: usize, offset: usize, is_code: bool, in_region: bool = false } {
+    fn get_section_address_for_offset(module: *Module, header: *const Header, offset: usize) error{OffsetOutOfRange}!struct { section: usize, offset: usize, is_code: bool, in_region: bool = false, in_hot: bool = false } {
         const text_limit: usize = header.code_length;
         const init_offset: usize = text_limit + header.init_length;
         const plt_limit: usize = init_offset + header.plt_length;
@@ -669,7 +702,9 @@ pub const Loader = struct {
         const bss_limit: usize = data_limit + header.bss_length;
         const got_limit: usize = bss_limit + header.got_length;
 
-        if (offset < text_limit) {
+        if (module.section_in_hot(.Code, offset)) {
+            return .{ .section = module.hot_text_base(), .offset = module.hot_text_offset, .is_code = true, .in_hot = true };
+        } else if (offset < text_limit) {
             return .{ .section = @intFromPtr(module.get_text().ptr), .offset = 0, .is_code = true };
         } else if (offset < init_offset) {
             return .{ .section = @intFromPtr(module.get_init().ptr), .offset = text_limit, .is_code = true };
@@ -728,14 +763,16 @@ pub const Loader = struct {
     }
 
     fn symbol_address_kind(entry: SymbolEntry) template.Kind {
+        if (entry.in_hot) return template.hot_kind(entry.owner);
         return if (entry.in_region) template.region_kind(entry.owner) else template.image_kind(entry.owner);
     }
 
     fn section_kind(module: *const Module, section: Section, offset: usize) template.Kind {
+        if (module.section_in_hot(section, offset)) return template.hot_kind(0);
         return if (module.section_in_region(section, offset)) template.region_kind(0) else template.image_kind(0);
     }
 
-    fn process_symbol_table_relocations(self: Loader, parser: *const Parser, module: *Module, header: *const Header, cap: ?*Capture) !void {
+    fn process_symbol_table_relocations(self: *const Loader, parser: *const Parser, module: *Module, header: *const Header, cap: ?*Capture) !void {
         var got = module.get_got();
         const trace_got = should_trace_got(module);
         log.debug("Processing symbol table relocations for GOT: {x}", .{@intFromPtr(got.ptr)});
@@ -776,7 +813,7 @@ pub const Loader = struct {
             const stt_object = 1;
             got[i].symbol_offset = if (section_start.is_code and sym_type != stt_object) address | 1 else address;
             mark(cap, &got[i].base_register, template.region_kind(0));
-            mark(cap, &got[i].symbol_offset, if (section_start.in_region) template.region_kind(0) else template.image_kind(0));
+            mark(cap, &got[i].symbol_offset, if (section_start.in_hot) template.hot_kind(0) else if (section_start.in_region) template.region_kind(0) else template.image_kind(0));
             log.debug("PhaseA GOT[{d}]: raw=0x{x} -> 0x{x}, is_code={}", .{ i, raw_offset, got[i].symbol_offset, section_start.is_code });
             if (trace_got) {
                 log.err("gotmap A[{d}] raw=0x{x} -> 0x{x} code={}", .{ i, raw_offset, got[i].symbol_offset, section_start.is_code });
@@ -899,7 +936,7 @@ pub const Loader = struct {
         }
     }
 
-    fn find_symbol(_: Loader, module: *Module, name: []const u8) ?SymbolEntry {
+    fn find_symbol(_: *const Loader, module: *Module, name: []const u8) ?SymbolEntry {
         if (module.find_symbol(name)) |symbol| {
             return symbol;
         }
@@ -907,7 +944,7 @@ pub const Loader = struct {
         return null;
     }
 
-    fn process_local_relocations(_: Loader, parser: *const Parser, module: *Module, thunk_start_index: usize, cap: ?*Capture) !void {
+    fn process_local_relocations(_: *const Loader, parser: *const Parser, module: *Module, thunk_start_index: usize, cap: ?*Capture) !void {
         var got = module.get_got();
         log.debug("Processing local relocations for GOT: 0x{x}", .{@intFromPtr(got.ptr)});
         var thunk_index = thunk_start_index;
@@ -939,7 +976,7 @@ pub const Loader = struct {
                             log.debug("Setting GOT[{d}] to local thunk: 0x{x}, target: 0x{x}, r9: 0x{x}, thunk_idx: {d}", .{ rel.index, address, fn_address, @intFromPtr(got.ptr), thunk_index });
                             got[rel.index].symbol_offset = address;
                             mark(cap, &got[rel.index].symbol_offset, template.self_thunks);
-                            mark_thunk(cap, address, template.region_kind(0), template.image_kind(0));
+                            mark_thunk(cap, address, template.region_kind(0), section_kind(module, section, rel.target_offset));
                             if (should_trace_got(module)) {
                                 log.err("gotmap L[{d}] thunk=0x{x} fn=0x{x} idx={d}", .{ rel.index, address, fn_address, thunk_index });
                             }
@@ -966,7 +1003,7 @@ pub const Loader = struct {
         }
     }
 
-    fn process_data_relocations(_: Loader, parser: *const Parser, module: *Module, thunk_start_index: usize, cap: ?*Capture) !void {
+    fn process_data_relocations(_: *const Loader, parser: *const Parser, module: *Module, thunk_start_index: usize, cap: ?*Capture) !void {
         var thunk_index = thunk_start_index;
         const maybe_unique_data = module.unique_data;
 
@@ -1173,8 +1210,8 @@ pub const Loader = struct {
 
 var loader_object: ?Loader = null;
 
-pub fn init(file_resolver: anytype, allocator: std.mem.Allocator, machine: MachineProfile) void {
-    loader_object = Loader.create(file_resolver, allocator, machine);
+pub fn init(file_resolver: anytype, allocator: std.mem.Allocator, atomics_allocator: std.mem.Allocator, machine: MachineProfile) void {
+    loader_object = Loader.create(file_resolver, allocator, atomics_allocator, machine);
 }
 
 pub fn deinit() void {

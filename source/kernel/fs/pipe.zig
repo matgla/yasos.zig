@@ -270,6 +270,12 @@ pub const Pipe = struct {
         return @intCast(written);
     }
 
+    fn has_no_readers(self: *Pipe) bool {
+        const flags = pipe_lock.lock_irqsave();
+        defer pipe_lock.unlock_irqrestore(flags);
+        return self._readers == 0;
+    }
+
     fn open_end(self: *Pipe, writable: bool) void {
         {
             const flags = pipe_lock.lock_irqsave();
@@ -352,6 +358,14 @@ pub const PipeFile = interface.DeriveFromBase(IFile, struct {
     pub fn write(self: *Self, data: []const u8) isize {
         if (!self._writable) return -1;
         return self._pipe.write(data, self._nonblocking);
+    }
+
+    /// Why `write` just returned -1. With no signals in this kernel errno is all a
+    /// writer gets, and programs do go by it: toybox stays quiet about EPIPE.
+    pub fn write_error(self: *const Self) anyerror {
+        if (!self._writable) return kernel.errno.ErrnoSet.BadFileDescriptor;
+        if (self._pipe.has_no_readers()) return kernel.errno.ErrnoSet.BrokenPipe;
+        return kernel.errno.ErrnoSet.TryAgain;
     }
 
     pub fn seek(self: *Self, offset: i64, whence: i32) anyerror!i64 {

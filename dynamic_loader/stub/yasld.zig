@@ -33,8 +33,8 @@ pub const Architecture = loader.Architecture;
 pub const FloatAbi = loader.FloatAbi;
 pub const Features = loader.Features;
 
-pub fn loader_init(file_resolver: anytype, allocator: std.mem.Allocator, machine: MachineProfile) void {
-    loader.init(file_resolver, allocator, machine);
+pub fn loader_init(file_resolver: anytype, allocator: std.mem.Allocator, atomics_allocator: std.mem.Allocator, machine: MachineProfile) void {
+    loader.init(file_resolver, allocator, atomics_allocator, machine);
 }
 
 pub fn loader_deinit() void {

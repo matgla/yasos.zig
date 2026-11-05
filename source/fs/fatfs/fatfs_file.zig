@@ -37,7 +37,8 @@ const log = kernel.log;
 
 pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     const Self = @This();
-    _file: ?fatfs.File,
+    // On the heap: it holds a sector buffer, and `create` runs on a process's stack.
+    _file: ?*fatfs.File,
     _allocator: std.mem.Allocator,
     _is_open: bool,
     _name: []const u8,
@@ -46,7 +47,10 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn create(allocator: std.mem.Allocator, path: [:0]const u8) !FatFsFile {
         const filename = try allocator.dupe(u8, std.fs.path.basename(path));
         errdefer allocator.free(filename);
-        const file = fatfs.File.open(path, .{ .access = .read_write, .mode = .open_existing }) catch |err| {
+        const file = try allocator.create(fatfs.File);
+        errdefer allocator.destroy(file);
+        const flags = @intFromEnum(fatfs.File.Mode.open_existing) | @intFromEnum(fatfs.File.Access.read_write);
+        fatfs.File.OpenError.throw(fatfs.api.open(&file.raw, path.ptr, flags)) catch |err| {
             return fatfs_error_to_errno(err);
         };
         return FatFsFile.init(.{
@@ -66,7 +70,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn read(self: *Self, buffer: []u8) isize {
         fs_lock.acquire();
         defer fs_lock.release();
-        if (self._file) |*file| {
+        if (self._file) |file| {
             const s = file.read(buffer) catch return -1;
             return @as(isize, @intCast(s));
         }
@@ -76,7 +80,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn write(self: *Self, data: []const u8) isize {
         fs_lock.acquire();
         defer fs_lock.release();
-        if (self._file) |*file| {
+        if (self._file) |file| {
             const s = file.write(data) catch return -1;
             return @as(isize, @intCast(s));
         }
@@ -88,7 +92,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
         fs_lock.acquire();
         defer fs_lock.release();
         var new_position: i64 = 0;
-        if (self._file) |*file| {
+        if (self._file) |file| {
             const file_size: i64 = @intCast(file.size());
             switch (whence) {
                 c.SEEK_SET => {
@@ -115,7 +119,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn sync(self: *Self) i32 {
         fs_lock.acquire();
         defer fs_lock.release();
-        if (self._file) |*file| {
+        if (self._file) |file| {
             file.sync() catch return -1;
         }
         return 0;
@@ -124,7 +128,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn tell(self: *Self) i64 {
         fs_lock.acquire();
         defer fs_lock.release();
-        if (self._file) |*file| {
+        if (self._file) |file| {
             return @intCast(file.tell());
         }
         return 0;
@@ -176,8 +180,9 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
             return;
         }
         self._is_open = false;
-        if (self._file) |*file| {
+        if (self._file) |file| {
             file.close();
+            self._allocator.destroy(file);
             self._file = null;
         }
         self._allocator.free(self._name);
@@ -186,7 +191,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn size(self: *const Self) u64 {
         fs_lock.acquire();
         defer fs_lock.release();
-        if (self._file) |*file| {
+        if (self._file) |file| {
             return @as(u64, @intCast(file.size()));
         }
         return 0;
@@ -195,7 +200,7 @@ pub const FatFsFile = interface.DeriveFromBase(kernel.fs.IFile, struct {
     pub fn truncate(self: *Self, length: u64) anyerror!void {
         fs_lock.acquire();
         defer fs_lock.release();
-        if (self._file) |*file| {
+        if (self._file) |file| {
             file.seekTo(@intCast(length)) catch |err| return fatfs_error_to_errno(err);
             file.truncate() catch |err| return fatfs_error_to_errno(err);
             return;

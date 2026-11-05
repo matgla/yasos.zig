@@ -64,6 +64,12 @@ pub const sync = struct {
     /// There are no interrupts to mask on the host, so this is a no-op -- but
     /// the *lock* half of `lock_irqsave` is not, and that is what the host race
     /// tests exercise.
+    pub inline fn require_stack(bytes: usize) void {
+        _ = bytes;
+    }
+
+    pub inline fn require_stack_for_masked_section() void {}
+
     pub inline fn save_and_disable_interrupts() usize {
         return 0;
     }

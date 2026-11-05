@@ -73,7 +73,17 @@ pub fn image_kind(owner: u8) Kind {
 
 /// Dependencies a template can describe. Real images import two to four.
 pub const max_children = 16;
-pub const max_kinds = 4 + 2 * max_children;
+/// Where this load runs the --hot-text block of the module, or of a dependency.
+pub fn hot_kind(owner: u8) Kind {
+    return 4 + 2 * max_children + owner;
+}
+
+pub const max_kinds = 4 + 2 * max_children + max_children + 1;
+
+/// Whether `kind` is one a template with this many dependencies can name.
+fn kind_in_range(kind: usize, children: usize) bool {
+    return kind < 4 + 2 * children or (kind >= hot_kind(0) and kind <= hot_kind(0) + children);
+}
 
 /// The current load's bases, indexed by `Kind`.
 pub const Bases = [max_kinds]usize;
@@ -216,7 +226,7 @@ pub const View = struct {
 
     /// Whether this template was computed for a load of this shape against
     /// these dependencies.
-    pub fn fits(self: View, children: []const u64, layout: Layout, slot_size: usize) bool {
+    pub fn fits(self: *const View, children: []const u64, layout: Layout, slot_size: usize) bool {
         if (self.children.len != children.len) return false;
         for (self.children, children) |a, b| {
             if (a != b) return false;
@@ -226,7 +236,7 @@ pub const View = struct {
     }
 
     /// Validate once at capture/precache acceptance, never in the warm loop.
-    pub fn valid(self: View, slot_size: usize) bool {
+    pub fn valid(self: *const View, slot_size: usize) bool {
         if (self.children.len > max_children or self.copy_runs.len > max_copy_runs or
             self.data_length % 4 != 0 or self.got_length % 4 != 0 or
             slot_size != thunk_size or self.slots_written > self.thunk_count) return false;
@@ -242,7 +252,7 @@ pub const View = struct {
         for (self.entries) |entry| {
             const word: usize = entry.at >> 8;
             const kind = entry.at & 0xff;
-            if (word >= total / 4 or kind >= 4 + self.children.len * 2) return false;
+            if (word >= total / 4 or !kind_in_range(kind, self.children.len)) return false;
             if (previous) |prev| {
                 if (word <= prev) return false;
             }
@@ -290,7 +300,7 @@ pub const View = struct {
     /// Replay onto a fresh load: data and GOT already copied from the image,
     /// thunks zeroed. Requires a valid template and matching layout.
     /// `thunk_code` is one slot's template (code + descriptor).
-    pub fn apply(self: View, layout: Layout, bases: *const Bases, thunk_code: *const [thunk_size]u8) void {
+    pub fn apply(self: *const View, layout: Layout, bases: *const Bases, thunk_code: *const [thunk_size]u8) void {
         // Entries are sorted by word, so the data words come first, then the
         // GOT's, then the thunks'. The first two ranges are a plain store
         // each; only the thunk words need the slot bookkeeping -- and the
@@ -481,7 +491,7 @@ pub fn finish_capture(capture: *Capture, image: usize, children: []const usize, 
         }
     }
     for (capture.kinds) |kind| {
-        if (kind != unwritten and kind >= 4 + 2 * children.len) return;
+        if (kind != unwritten and !kind_in_range(kind, children.len)) return;
     }
 
     const header = std.mem.alignForward(usize, @sizeOf(Template), 8);
@@ -668,10 +678,9 @@ pub fn reclaim(wanted: usize) usize {
 /// the header. A dependency's hash covers what an importer resolves against:
 /// its exports, and the layout that places its region.
 pub fn content_hash(image: [*]const u8, text_offset: u32, got: []const u8) u64 {
-    var hasher = std.hash.Wyhash.init(0x79617366_74706c31); // "yasftpl1"
-    hasher.update(image[0..text_offset]);
-    hasher.update(got);
-    return hasher.final();
+    // Chained one-shots rather than the streaming hasher: its state and buffer sat
+    // on the stack of whichever process was exec'ing. "yasftpl1"
+    return std.hash.Wyhash.hash(std.hash.Wyhash.hash(0x79617366_74706c31, image[0..text_offset]), got);
 }
 
 /// Hashes of stable images, so each is hashed once per boot rather than once

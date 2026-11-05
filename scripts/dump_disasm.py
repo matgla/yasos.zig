@@ -114,7 +114,7 @@ def parse_yaff(data):
         return None
     u32 = lambda o: struct.unpack_from("<I", data, o)[0]
     u16 = lambda o: struct.unpack_from("<H", data, o)[0]
-    # Offsets are for YAFF_VERSION 4: the relocation/symbol counts and every
+    # Offsets are for YAFF_VERSION 4 and 5: the relocation/symbol counts and every
     # table offset are 32-bit since version 3 (they were 16-bit, and text_offset
     # wrapped on any module with more than 64 KiB of tables ahead of its code);
     # version 4 appended the data region's alignment.

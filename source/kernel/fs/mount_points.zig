@@ -46,9 +46,9 @@ const interface = @import("interface");
 const log = std.log.scoped(.@"kernel/fs/mount_points");
 
 /// What `/proc/mounts` says about a mount: the first, third and fourth fields
-/// of an fstab line. Kept by value, truncated to fit -- it is a description for
-/// people and for `umount`'s lookup by device, never something the VFS itself
-/// resolves.
+/// of an fstab line. Kept by value, truncated to fit -- a description for people
+/// and for `umount`'s lookup by device. The VFS resolves it for one case only, a
+/// bind's source when that fits whole: see `VirtualFileSystem.find_through_binds`.
 pub const MountInfo = struct {
     source_buffer: [48]u8 = undefined,
     source_len: u8 = 0,

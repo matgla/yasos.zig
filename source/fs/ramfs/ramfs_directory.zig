@@ -26,13 +26,12 @@ const refcount = kernel.sync.refcount;
 
 /// State every handle on one directory shares.
 ///
-/// The refcount and the timestamps travel together because `__clone` copies the
-/// handle struct wholesale: anything a second handle must see a first handle's
-/// change to has to live behind a pointer, and folding the timestamps into the
-/// refcounter's allocation keeps a directory at the two allocations it already
-/// cost.
+/// The refcount and the timestamps are behind a pointer because `__clone` copies
+/// the handle struct wholesale: anything a second handle must see a first handle's
+/// change to has to live there. The counter has an allocation of its own, because
+/// an atomic must stay out of an arena in PSRAM: see CountersApartAllocator.
 const SharedState = struct {
-    refcounter: i16,
+    refcounter: *i16,
     times: kernel.fs.FileTimes,
 };
 
@@ -47,7 +46,9 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         const list = try allocator.create(std.DoublyLinkedList);
         const shared = try allocator.create(SharedState);
         shared.times = kernel.fs.FileTimes.create(kernel.time.now_timespec());
-        refcount.init(&shared.refcounter);
+        shared.refcounter = try allocator.create(i16);
+        kernel.sync.placement.assert_coherent(shared.refcounter);
+        refcount.init(shared.refcounter);
         list.* = std.DoublyLinkedList{};
         return RamFsDirectory.init(.{
             ._allocator = allocator,
@@ -65,8 +66,8 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     /// the entry moves to a new parent while the contents stay exactly where
     /// they are, with no child touched and no open handle invalidated.
     pub fn alias(self: *Self, allocator: std.mem.Allocator, nodename: []const u8) anyerror!kernel.fs.Node {
-        refcount.acquire(&self._shared.refcounter);
-        errdefer _ = refcount.release(&self._shared.refcounter);
+        refcount.acquire(self._shared.refcounter);
+        errdefer _ = refcount.release(self._shared.refcounter);
         const dir = try (RamFsDirectory.init(.{
             ._allocator = allocator,
             ._root = self._root,
@@ -83,7 +84,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
 
     pub fn __clone(self: *Self, other: *const Self) void {
         self.* = other.*;
-        refcount.acquire(&self._shared.refcounter);
+        refcount.acquire(self._shared.refcounter);
     }
 
     pub fn create_node(allocator: std.mem.Allocator, nodename: []const u8) anyerror!kernel.fs.Node {
@@ -159,7 +160,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
     }
 
     pub fn delete(self: *Self) void {
-        if (refcount.release(&self._shared.refcounter)) {
+        if (refcount.release(self._shared.refcounter)) {
             var next = self._root.pop();
             while (next) |child| {
                 const file_node: *RamFsNode = @fieldParentPtr("list_node", child);
@@ -167,6 +168,7 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
                 next = self._root.pop();
             }
             self._allocator.destroy(self._root);
+            self._allocator.destroy(self._shared.refcounter);
             self._allocator.destroy(self._shared);
         }
     }

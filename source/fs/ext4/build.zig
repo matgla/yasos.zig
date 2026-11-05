@@ -55,6 +55,7 @@ pub const config_macros = [_][2][]const u8{
     // Each mount point is ~2 KiB of static RAM (it holds the superblock).
     .{ "CONFIG_EXT4_BLOCKDEVS_COUNT", "4" },
     .{ "CONFIG_EXT4_MOUNTPOINTS_COUNT", "4" },
+    .{ "CONFIG_EXT4_EXTERNAL_MOUNT_TABLE", "1" },
     .{ "CONFIG_EXT4_MAX_BLOCKDEV_NAME", "8" },
     .{ "CONFIG_EXT4_MAX_MP_NAME", "8" },
     .{ "CONFIG_USE_USER_MALLOC", "1" },

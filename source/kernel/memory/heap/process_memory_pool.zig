@@ -13,13 +13,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+const config = @import("config");
 const std = @import("std");
 
 const memory = @import("hal").memory;
 const c = @import("libc_imports").c;
 
 const perf = @import("../../interrupts/perf_profile.zig");
+const vfmt = @import("../../vfmt.zig");
 const locks = @import("../../sync/locks.zig");
+const slow_heap = @import("kernel_slow_heap.zig");
 
 /// Rank 80, a leaf, `spin_irq` rather than a sleeping mutex because
 /// `release_pages_for` is reached from PendSV. Affordable only because
@@ -78,7 +81,7 @@ pub const ProcessMemoryPool = struct {
     /// template.zig): memory that is only worth having while nobody else wants
     /// it, so it fills the pool from the slow end and gives way on demand --
     /// see `reclaim_hook`.
-    pub const AllocSource = enum { loader, heap, cache };
+    pub const AllocSource = enum { loader, loader_slow, heap, heap_slow, heap_fast, cache };
 
     /// Asked to free about `bytes` of reclaimable memory when an allocation
     /// finds no room; returns how much it freed, 0 when it has nothing left.
@@ -104,6 +107,10 @@ pub const ProcessMemoryPool = struct {
         // Allocation grain for THIS region (bytes). May differ per tier.
         page_size: usize,
         page_bitmap: std.DynamicBitSet,
+        // Who freed each page last (see `owner_tag`), so a process's next mapping
+        // need not clear what only it ever wrote. Slow tier only: that is where
+        // the clear is expensive and the page count small.
+        last_owner: ?[]u8 = null,
         // High-water mark of used pages in this region since the last reset.
         // Diagnostic only (perf profiling): lets us see whether a process spilled
         // out of fast SRAM into slow PSRAM during a run.
@@ -250,6 +257,11 @@ pub const ProcessMemoryPool = struct {
 
     regions: []Region,
     memory_map: ProcessMemoryMap,
+    /// Pids whose image asked for slow memory: what they allocate without a
+    /// stated tier starts at the slow end. See `set_prefers_slow`.
+    /// Plain words: StaticBitSet's accessors take the set by value, 256 bytes copied
+    /// to the stack of every allocation.
+    slow_pids: [(config.process.max_pid_value + 31) / 32]u32 = @splat(0),
     // this allocator is used to keep track of the memory allocated for the process inside the kernel
     allocator: std.mem.Allocator,
     // Set by the user-mmap path immediately before allocate_pages so the next
@@ -270,12 +282,19 @@ pub const ProcessMemoryPool = struct {
             if (memory_layout[idx].size >= tier_page_sizes[tier_i]) region_count += 1;
         }
 
+        // One byte per PSRAM page, read when a run is handed out, which already means
+        // clearing it. The bitmaps stay in SRAM: every allocation scans them.
+        const owners_allocator = slow_heap.allocator_or(allocator);
+
         const regions = try allocator.alloc(Region, region_count);
         errdefer allocator.free(regions);
 
         var created: usize = 0;
         errdefer {
-            for (regions[0..created]) |*region| region.page_bitmap.deinit();
+            for (regions[0..created]) |*region| {
+                region.page_bitmap.deinit();
+                if (region.last_owner) |owners| owners_allocator.free(owners);
+            }
         }
 
         for (tier_indices, 0..) |idx, tier_i| {
@@ -283,11 +302,15 @@ pub const ProcessMemoryPool = struct {
             const region_page_size = tier_page_sizes[tier_i];
             if (info.size < region_page_size) continue;
             const page_count = info.size / region_page_size;
+            const owners: ?[]u8 = if (tier_i == tier_indices.len - 1) try owners_allocator.alloc(u8, page_count) else null;
+            errdefer if (owners) |o| owners_allocator.free(o);
+            if (owners) |o| @memset(o, 0);
             regions[created] = .{
                 .start_address = info.start_address,
                 .page_count = page_count,
                 .page_size = region_page_size,
                 .page_bitmap = try std.DynamicBitSet.initEmpty(allocator, page_count),
+                .last_owner = owners,
             };
             log.debug("Process memory tier {d}: 0x{x} ({d} pages)", .{ created, info.start_address, page_count });
             created += 1;
@@ -302,7 +325,10 @@ pub const ProcessMemoryPool = struct {
 
     pub fn deinit(self: *ProcessMemoryPool) void {
         log.debug("Process memory pool deinitialization started...", .{});
-        for (self.regions) |*region| region.page_bitmap.deinit();
+        for (self.regions) |*region| {
+            region.page_bitmap.deinit();
+            if (region.last_owner) |owners| slow_heap.allocator_or(self.allocator).free(owners);
+        }
         self.allocator.free(self.regions);
         var it = self.memory_map.iterator();
         while (it.next()) |process| {
@@ -310,7 +336,7 @@ pub const ProcessMemoryPool = struct {
             while (next) |node| {
                 const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
                 next = process.value_ptr.pop();
-                self.allocator.destroy(entity);
+                slow_heap.allocator_or(self.allocator).destroy(entity);
             }
         }
         self.memory_map.deinit();
@@ -346,6 +372,14 @@ pub const ProcessMemoryPool = struct {
     /// one-shot flag on the pool this replaced -- that was a global handshake
     /// that only held while nothing else could allocate in between.
     pub fn allocate_pages_from(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t, source: AllocSource) ?[]u8 {
+        return self.allocate_pages_cleared(number_of_pages, pid, source, false);
+    }
+
+    /// `may_keep_own`: the caller does not need zeroes, only not to see another
+    /// process's data, so pages this pid freed itself stay as they are. malloc
+    /// asks for this, and a compile unmaps and remaps its large arrays all along:
+    /// their clears through PSRAM were 5% of it.
+    pub fn allocate_pages_cleared(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t, source: AllocSource, may_keep_own: bool) ?[]u8 {
         if (number_of_pages <= 0) {
             return null;
         }
@@ -367,7 +401,16 @@ pub const ProcessMemoryPool = struct {
         // A board may know a cheaper route to zeroed pages: the rp2350's PSRAM
         // tier is cached write-allocate, so a plain memset moves twice the bytes
         // it needs to and evicts the running process's code doing it.
-        memory.zero_pages(reserved.address);
+        if (may_keep_own) {
+            self.zero_foreign_pages(reserved.address, pid);
+        } else {
+            memory.zero_pages(reserved.address);
+        }
+        // Nobody's until freed: a run can also come back in part, by `shrink`.
+        if (self.region_for_addr(@intFromPtr(reserved.address.ptr))) |region| {
+            const first = (@intFromPtr(reserved.address.ptr) - region.start_address) / region.page_size;
+            set_last_owner(region, first, first + reserved.address.len / region.page_size, 0);
+        }
         if (perf.enabled) {
             perf.pool_clear(reserved.tier, perf.read_cycles() -% t_clear, reserved.address.len);
             perf.pool_alloc(reserved.region_pages, reserved.address.len, reserved.tier);
@@ -390,6 +433,63 @@ pub const ProcessMemoryPool = struct {
     /// Find a free run, mark it used and record it against `pid`. Bitmap and
     /// bookkeeping only -- microseconds -- which is what makes `spin_irq` the
     /// right lock for this pool.
+    /// A pid as `last_owner` holds it; 0 is nobody, and what does not fit is nobody.
+    fn owner_tag(pid: c.pid_t) u8 {
+        return if (pid > 0 and pid <= std.math.maxInt(u8)) @intCast(pid) else 0;
+    }
+
+    fn set_last_owner(region: *Region, from: usize, to: usize, tag: u8) void {
+        if (region.last_owner) |owners| @memset(owners[from..@min(to, owners.len)], tag);
+    }
+
+    fn zero_foreign_pages(self: *ProcessMemoryPool, run: []u8, pid: c.pid_t) void {
+        const region = self.region_for_addr(@intFromPtr(run.ptr)) orelse {
+            memory.zero_pages(run);
+            return;
+        };
+        const owners = region.last_owner orelse {
+            memory.zero_pages(run);
+            return;
+        };
+        const tag = owner_tag(pid);
+        const first = (@intFromPtr(run.ptr) - region.start_address) / region.page_size;
+        const count = run.len / region.page_size;
+        var i: usize = 0;
+        while (i < count) {
+            if (tag != 0 and owners[first + i] == tag) {
+                i += 1;
+                continue;
+            }
+            var end = i + 1;
+            while (end < count and (tag == 0 or owners[first + end] != tag)) end += 1;
+            memory.zero_pages(run[i * region.page_size .. end * region.page_size]);
+            i = end;
+        }
+    }
+
+    /// Exec sets this from the image before loading it. It stays until the next
+    /// exec or the process's pages are released, since pids are reused.
+    pub fn set_prefers_slow(self: *ProcessMemoryPool, pid: c.pid_t, prefers: bool) void {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        const index = std.math.cast(usize, pid) orelse return;
+        if (index >= self.slow_pids.len * 32) return;
+        const bit = @as(u32, 1) << @intCast(index % 32);
+        if (prefers) {
+            self.slow_pids[index / 32] |= bit;
+        } else {
+            self.slow_pids[index / 32] &= ~bit;
+        }
+    }
+
+    /// Less than half a slow page stays fast: it would free little there, and
+    /// rounding it up means clearing a whole slow page at every exec.
+    fn goes_slow(self: *const ProcessMemoryPool, pid: c.pid_t, bytes: usize) bool {
+        const index = std.math.cast(usize, pid) orelse return false;
+        if (index >= self.slow_pids.len * 32 or self.slow_pids[index / 32] & (@as(u32, 1) << @intCast(index % 32)) == 0) return false;
+        return bytes * 2 >= self.regions[self.regions.len - 1].page_size;
+    }
+
     fn reserve_pages(self: *ProcessMemoryPool, number_of_pages: i32, pid: c.pid_t, source: AllocSource) ?Reserved {
         const flags = pagepool_lock.lock_irqsave();
         defer pagepool_lock.unlock_irqrestore(flags);
@@ -403,7 +503,8 @@ pub const ProcessMemoryPool = struct {
         // The loader cache goes the other way: it should never be what pushes a
         // process out of fast SRAM.
         for (0..self.regions.len) |probe| {
-            const tier = if (source == .cache) self.regions.len - 1 - probe else probe;
+            const tier = if (source == .cache or source == .heap_slow or source == .loader_slow or (source != .heap_fast and self.goes_slow(pid, requested_bytes))) self.regions.len - 1 - probe else probe;
+            if (source == .heap_fast and tier != 0) break;
             const region = &self.regions[tier];
             // Round the request up to THIS region's own page grain.
             const region_pages_usize = (requested_bytes + region.page_size - 1) / region.page_size;
@@ -414,7 +515,7 @@ pub const ProcessMemoryPool = struct {
             if (region.used_pages + region_pages_usize > region.page_count) continue;
             // Hold the scan state locally: TCC otherwise reloads these fields on every probe.
             const first_free = advance_free_hint(region);
-            const slot_start = find_free_run(region, region_pages_usize, first_free, region.page_count) orelse continue;
+            const slot_start = @call(.never_inline, find_free_run, .{ region, region_pages_usize, first_free, region.page_count }) orelse continue;
             const t_mark = if (perf.enabled) perf.read_cycles() else 0;
             perf.pool_record(.scan, t_mark -% t_scan);
             const end_index: usize = slot_start + region_pages_usize;
@@ -443,41 +544,9 @@ pub const ProcessMemoryPool = struct {
                     }
                 }
             }
-            mark_used(region, slot_start, end_index);
-            if (region.used_pages > region.peak_used) {
-                region.peak_used = region.used_pages;
-            }
-            if (region.used_pages > region.watermark_used) {
-                region.watermark_used = region.used_pages;
-            }
-            const t_book = if (perf.enabled) perf.read_cycles() else 0;
-            perf.pool_record(.mark, t_book -% t_mark);
-            var list = self.memory_map.getOrPut(pid) catch {
-                mark_free(region, slot_start, end_index);
-                return null;
-            };
-            if (!list.found_existing) {
-                list.value_ptr.* = .{};
-            }
-            const entity = self.allocator.create(ProcessMemoryEntity) catch {
-                mark_free(region, slot_start, end_index);
-                return null;
-            };
-            entity.* = .{
-                .address = slicify(
-                    @as([*]u8, @ptrFromInt(region.start_address + slot_start * region.page_size)),
-                    region_pages_usize * region.page_size,
-                ),
-                .pid = pid,
-                .access = .{ .read = 1, .write = 1, .execute = 1 },
-                .source = source,
-                .node = .{},
-            };
-            list.value_ptr.append(&entity.node);
-            log.debug("Allocating {d} pages for {d} at 0x{x}", .{ number_of_pages, pid, @intFromPtr(entity.address.ptr) });
-            if (perf.enabled) perf.pool_record(.book, perf.read_cycles() -% t_book);
+            const address = @call(.never_inline, record_run, .{ self, region, slot_start, end_index, region_pages_usize, number_of_pages, pid, source, t_mark }) orelse return null;
             return .{
-                .address = entity.address,
+                .address = address,
                 .tier = tier,
                 .region_pages = region_pages_usize,
             };
@@ -485,9 +554,52 @@ pub const ProcessMemoryPool = struct {
         return null;
     }
 
+    /// Mark a found run used and add it to the pid's list. Out of line for the
+    /// stack: the hash map and the kernel heap go deep, and the search's locals are
+    /// no use to them. A process's stack holds this.
+    fn record_run(self: *ProcessMemoryPool, region: *Region, slot_start: usize, end_index: usize, region_pages_usize: usize, number_of_pages: i32, pid: c.pid_t, source: AllocSource, t_mark: anytype) ?[]u8 {
+        mark_used(region, slot_start, end_index);
+        if (region.used_pages > region.peak_used) {
+            region.peak_used = region.used_pages;
+        }
+        if (region.used_pages > region.watermark_used) {
+            region.watermark_used = region.used_pages;
+        }
+        const t_book = if (perf.enabled) perf.read_cycles() else 0;
+        perf.pool_record(.mark, t_book -% t_mark);
+        var list = self.memory_map.getOrPut(pid) catch {
+            mark_free(region, slot_start, end_index);
+            return null;
+        };
+        if (!list.found_existing) {
+            list.value_ptr.* = .{};
+        }
+        const entity = slow_heap.allocator_or(self.allocator).create(ProcessMemoryEntity) catch {
+            mark_free(region, slot_start, end_index);
+            return null;
+        };
+        entity.* = .{
+            .address = slicify(
+                @as([*]u8, @ptrFromInt(region.start_address + slot_start * region.page_size)),
+                region_pages_usize * region.page_size,
+            ),
+            .pid = pid,
+            .access = .{ .read = 1, .write = 1, .execute = 1 },
+            .source = source,
+            .node = .{},
+        };
+        list.value_ptr.append(&entity.node);
+        log.debug("Allocating {d} pages for {d} at 0x{x}", .{ number_of_pages, pid, @intFromPtr(entity.address.ptr) });
+        if (perf.enabled) perf.pool_record(.book, perf.read_cycles() -% t_book);
+        return entity.address;
+    }
+
     pub fn release_pages_for(self: *ProcessMemoryPool, pid: c.pid_t) void {
         const flags = pagepool_lock.lock_irqsave();
         defer pagepool_lock.unlock_irqrestore(flags);
+        if (std.math.cast(usize, pid)) |index| {
+            if (index < self.slow_pids.len * 32) self.slow_pids[index / 32] &= ~(@as(u32, 1) << @intCast(index % 32));
+        }
         log.debug("release_pages_for: pid={d} pages_before={d}", .{ pid, self.get_used_size() / page_size });
         const maybe_mapping = self.memory_map.getEntry(pid);
         if (maybe_mapping) |*mapping| {
@@ -502,6 +614,8 @@ pub const ProcessMemoryPool = struct {
                     const n_pages = end_index - start_index;
                     log.debug("  entity[{d}]: addr=0x{x} pages={d}", .{ entity_count, @intFromPtr(entity.address.ptr), n_pages });
                     mark_free(region, start_index, end_index);
+                    // The pid is about to be reused: its next owner is somebody else.
+                    set_last_owner(region, start_index, end_index, 0);
                     pages_freed += n_pages;
                 }
                 entity_count += 1;
@@ -512,7 +626,7 @@ pub const ProcessMemoryPool = struct {
                 var next_element = list.*.pop();
                 while (next_element) |node| {
                     const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", node);
-                    self.allocator.destroy(entity);
+                    slow_heap.allocator_or(self.allocator).destroy(entity);
                     next_element = list.*.pop();
                 }
             }
@@ -544,7 +658,7 @@ pub const ProcessMemoryPool = struct {
                     matched_bytes = entity.address.len;
                     found = true;
                     _ = mapping.value_ptr.remove(entity_node);
-                    self.allocator.destroy(entity);
+                    slow_heap.allocator_or(self.allocator).destroy(entity);
                     break;
                 }
                 next = entity_node.next;
@@ -574,6 +688,7 @@ pub const ProcessMemoryPool = struct {
             const region_pages = (@as(usize, @intCast(number_of_pages)) * page_size + region.page_size - 1) / region.page_size;
             const end_index = start_index + region_pages;
             mark_free(region, start_index, end_index);
+            set_last_owner(region, start_index, end_index, owner_tag(pid));
             if (perf.enabled) {
                 perf.pool_record(.free_mark, perf.read_cycles() -% t_mark);
                 perf.pool_free();
@@ -589,6 +704,14 @@ pub const ProcessMemoryPool = struct {
     /// silent corruption that only surfaces once those pages are handed out
     /// again. Checked where a process takes ownership of a pid, so the ordering
     /// bug that produces it (see `reap_terminated`) reports itself instead.
+    /// Is this address in the fastest tier?
+    pub fn is_fast_address(self: *const ProcessMemoryPool, address: *const anyopaque) bool {
+        if (self.regions.len == 0) return false;
+        const region = &self.regions[0];
+        const a = @intFromPtr(address);
+        return a >= region.start_address and a < region.start_address + region.page_count * region.page_size;
+    }
+
     pub fn has_live_mapping(self: *const ProcessMemoryPool, pid: c.pid_t) bool {
         const flags = pagepool_lock.lock_irqsave();
         defer pagepool_lock.unlock_irqrestore(flags);
@@ -725,16 +848,42 @@ pub const ProcessMemoryPool = struct {
                     else => psram += bytes,
                 }
                 switch (entity.source) {
-                    .heap => heap_bytes += bytes,
+                    .heap, .heap_slow, .heap_fast => heap_bytes += bytes,
                     // Only the cache's own pid has these; count them with the
                     // loader's, which is what they are a copy of.
-                    .loader, .cache => loader_bytes += bytes,
+                    .loader, .loader_slow, .cache => loader_bytes += bytes,
                 }
                 next = node.next;
             }
             if (sram + psram == 0) continue;
             perf.trace("proc pid={d} sram_b={d} psram_b={d} total_b={d} heap_b={d} loader_b={d}", .{ entry.key_ptr.*, sram, psram, sram + psram, heap_bytes, loader_bytes });
         }
+    }
+
+    /// One line per live mapping, for `/proc/poolmap`: who holds which memory.
+    /// Returns the bytes written; a full buffer truncates the list.
+    pub fn write_map(self: *const ProcessMemoryPool, buffer: []u8) usize {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        var written: usize = 0;
+        var it = self.memory_map.iterator();
+        while (it.next()) |entry| {
+            var next = entry.value_ptr.first;
+            while (next) |node| {
+                const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", node);
+                if (buffer.len - written < 48) return written;
+                const line = vfmt.print(buffer[written..], "{d} {d} 0x{x} {d} {s}\n", .{
+                    entry.key_ptr.*,
+                    self.region_index_for_addr(@intFromPtr(entity.address.ptr)) orelse 9,
+                    @intFromPtr(entity.address.ptr),
+                    entity.address.len,
+                    @tagName(entity.source),
+                });
+                written += line.len;
+                next = node.next;
+            }
+        }
+        return written;
     }
 
     /// Total pages in a tier (0=fast SRAM, 1=PSRAM).
@@ -1003,6 +1152,114 @@ test "ProcessMemoryPool.ShouldAllocateContiguousPages" {
         const page_addr = start_addr + i * ProcessMemoryPool.page_size;
         try std.testing.expectEqual(owning, pool.region_for_addr(page_addr));
     }
+}
+
+test "ProcessMemoryPool.SlowMemoryIsAPerPidPreferenceUntilItsPagesGoBack" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    if (pool.regions.len < 2) return;
+    const pages: i32 = @intCast(pool.regions[1].page_size / ProcessMemoryPool.page_size);
+
+    pool.set_prefers_slow(5, true);
+    const big = pool.allocate_pages_from(pages, 5, .loader) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!pool.is_fast_address(big.ptr));
+    // Under half a slow page stays fast, and so does anybody else.
+    const small = pool.allocate_pages_from(1, 5, .loader) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.is_fast_address(small.ptr));
+    const other = pool.allocate_pages_from(pages, 6, .loader) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.is_fast_address(other.ptr));
+    // A reused pid starts over.
+    pool.release_pages_for(5);
+    const again = pool.allocate_pages_from(pages, 5, .loader) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.is_fast_address(again.ptr));
+    // Thunks go slow whoever asks.
+    const thunks = pool.allocate_pages_from(1, 6, .loader_slow) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!pool.is_fast_address(thunks.ptr));
+}
+
+test "ProcessMemoryPool.OnlyAProcesssOwnPagesStayUncleared" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const last = &pool.regions[pool.regions.len - 1];
+    if (last.last_owner == null) return;
+
+    const pages: i32 = @intCast(last.page_size / ProcessMemoryPool.page_size);
+    const a = pool.allocate_pages_cleared(pages, 1, .heap_slow, true) orelse return error.TestUnexpectedResult;
+    @memset(a, 0x5A);
+    pool.free_pages(a.ptr, pages, 1);
+
+    // The same process, asking not to clear: its own bytes.
+    const b = pool.allocate_pages_cleared(pages, 1, .heap_slow, true) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(a.ptr, b.ptr);
+    try std.testing.expectEqual(@as(u8, 0x5A), b[0]);
+    pool.free_pages(b.ptr, pages, 1);
+
+    // Another process, asking the same: zeroes.
+    const c1 = pool.allocate_pages_cleared(pages, 2, .heap_slow, true) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(a.ptr, c1.ptr);
+    try std.testing.expectEqual(@as(u8, 0), c1[0]);
+    @memset(c1, 0x5A);
+    pool.free_pages(c1.ptr, pages, 2);
+
+    // The same process, not asking: zeroes.
+    const d = pool.allocate_pages_cleared(pages, 2, .heap_slow, false) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 0), d[0]);
+    @memset(d, 0x5A);
+
+    // A process's exit: its pid's next owner is somebody else.
+    pool.release_pages_for(2);
+    const e = pool.allocate_pages_cleared(pages, 2, .heap_slow, true) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(d.ptr, e.ptr);
+    try std.testing.expectEqual(@as(u8, 0), e[0]);
+}
+
+test "ProcessMemoryPool.MapFastIsTheFastTierOrNothing" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    if (pool.regions.len < 2) return;
+
+    const fast_pages: i32 = @intCast(pool.regions[0].page_count * pool.regions[0].page_size / ProcessMemoryPool.page_size);
+    const all_fast = pool.allocate_pages_from(fast_pages, 1, .heap_fast) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.is_fast_address(all_fast.ptr));
+    // Full now: the slow tier has room, and the request still fails rather than spill.
+    try std.testing.expect(pool.allocate_pages_from(1, 1, .heap_fast) == null);
+    // A plain request does spill.
+    const spilled = pool.allocate_pages_from(1, 1, .heap) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!pool.is_fast_address(spilled.ptr));
+}
+
+test "ProcessMemoryPool.MapSlowPrefersTheSlowTierAndFallsBack" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    if (pool.regions.len < 2) return;
+
+    const slow = pool.allocate_pages_from(1, 1, .heap_slow) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!pool.is_fast_address(slow.ptr));
+    // The fast tier was left alone for whoever asks for it.
+    const fast = pool.allocate_pages_from(1, 1, .heap) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.is_fast_address(fast.ptr));
+
+    const slow_region = &pool.regions[pool.regions.len - 1];
+    const rest: i32 = @intCast((slow_region.page_count - slow_region.used_pages) * slow_region.page_size / ProcessMemoryPool.page_size);
+    _ = pool.allocate_pages_from(rest, 1, .heap_slow) orelse return error.TestUnexpectedResult;
+    const fallback = pool.allocate_pages_from(1, 1, .heap_slow) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.is_fast_address(fallback.ptr));
+}
+
+test "ProcessMemoryPool.WriteMapListsEveryMapping" {
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    _ = pool.allocate_pages_from(1, 7, .heap) orelse return error.TestUnexpectedResult;
+    _ = pool.allocate_pages_from(1, 9, .loader) orelse return error.TestUnexpectedResult;
+    var buffer: [256]u8 = undefined;
+    const text = buffer[0..pool.write_map(&buffer)];
+    try std.testing.expect(std.mem.indexOf(u8, text, "7 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "9 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " heap\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " loader\n") != null);
+    // Too small for a line: truncated, never overrun.
+    var small: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pool.write_map(&small));
 }
 
 test "ProcessMemoryPool.ShouldHandleFragmentation" {

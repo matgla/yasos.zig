@@ -320,7 +320,13 @@ pub fn sys_isatty(arg: *const anyopaque) !i32 {
     return 0;
 }
 
+/// Every syscall that takes a path comes through here, and its 256-byte copy of the
+/// path has no business in their frames, under the lookup that follows.
 fn determine_path_for_file(allocator: std.mem.Allocator, maybe_path: [*c]const u8, fd: i32) ![]const u8 {
+    return @call(.never_inline, determine_path_for_file_impl, .{ allocator, maybe_path, fd });
+}
+
+fn determine_path_for_file_impl(allocator: std.mem.Allocator, maybe_path: [*c]const u8, fd: i32) ![]const u8 {
     var prefix: []const u8 = "";
     if (maybe_path) |cpath| {
         // Every path-taking syscall funnels through here, which is why this is
@@ -491,8 +497,8 @@ pub fn sys_exit(arg: *const anyopaque) !i32 {
     process.append_tty_newline_on_exit();
     // Report real execution time (load/relocate boundary → exit), separate from
     // the dynamic-load time emitted as `# tprof load`. Correlate by pid.
-    if (perf.enabled and process._exec_loaded_time != 0) {
-        const run_us = hal.time.get_time_us() - process._exec_loaded_time;
+    if (perf.enabled and process.cold._exec_loaded_time != 0) {
+        const run_us = hal.time.get_time_us() - process.cold._exec_loaded_time;
         perf.trace("run pid={d} us={d} code={d}", .{ process.pid, run_us, context.* });
         // The same syscall/IO totals tcc prints for itself under -bench, but
         // from the kernel at exit, so it works for every program -- ls, cat,
@@ -506,7 +512,7 @@ pub fn sys_exit(arg: *const anyopaque) !i32 {
         perf.trace("syscyc pid={d} cyc={s}", .{ process.pid, if (perf.has_cycle_counter()) "on" else "off" });
         perf.trace("sysprof pid={d} calls={d} us={d} handler_us={d} load_us={d} read={d}/{d} write={d}/{d} dropped={d} top={d}:{d}/{d},{d}:{d}/{d},{d}:{d}/{d}", .{
             process.pid,    sys.calls,        sys.total_us,
-            sys.handler_us, process._load_us, sys.read_bytes,
+            sys.handler_us, process.cold._load_us, sys.read_bytes,
             sys.read_us,    sys.write_bytes,  sys.write_us,
             sys.dropped,    sys.top[0].id,    sys.top[0].calls,
             sys.top[0].us,  sys.top[1].id,    sys.top[1].calls,
@@ -732,6 +738,9 @@ pub fn sys_write(arg: *const anyopaque) !i32 {
         if (maybe_file) |*file| {
             const is_tty = file.interface.filetype() == FileType.CharDevice;
             result_out.* = file.interface.write(data);
+            if (result_out.* == -1 and file.interface.filetype() == FileType.Fifo) {
+                return file.as(kernel.fs.PipeFile).data().write_error();
+            }
             if (is_tty and result_out.* > 0) {
                 process.record_tty_output(context.fd, data[0..@intCast(result_out.*)]);
             }
@@ -1164,7 +1173,8 @@ pub fn sys_execve(arg: *const anyopaque) !i32 {
     // so they have to be proven well-formed before it starts.
     try check_user_string_vector(context.argv);
     try check_user_string_vector(context.envp);
-    var path = try resolve_exec_link(try determine_path_for_file(kernel_allocator, context.filename, -1));
+    // These hold 256-byte buffers, and the load below runs on this same stack.
+    var path = try @call(.never_inline, resolve_exec_link, .{try determine_path_for_file(kernel_allocator, context.filename, -1)});
     var argv = context.argv;
     var scratch: ?[]usize = null;
     // One path resolution per exec: this node is what the `#!` sniff reads and
@@ -1182,7 +1192,7 @@ pub fn sys_execve(arg: *const anyopaque) !i32 {
         kernel_allocator.free(path);
         return err;
     };
-    const maybe_script = shebang_exec(&to_load, path, context.argv) catch |err| {
+    const maybe_script = @call(.never_inline, shebang_exec, .{ &to_load, path, context.argv }) catch |err| {
         to_load.delete();
         kernel_allocator.free(path);
         return err;
@@ -1220,7 +1230,8 @@ pub fn sys_pipe(arg: *const anyopaque) !i32 {
     const process = process_manager.instance.get_current_process();
 
     const nonblocking = (context.flags & c.O_NONBLOCK) != 0;
-    var ends = try kernel.fs.create_pipe(kernel_allocator, nonblocking);
+    // Its 4 KB ring does not need SRAM.
+    var ends = try kernel.fs.create_pipe(kernel.memory.heap.slow.allocator_or(kernel_allocator), nonblocking);
 
     // `attach_file` takes the node over, so each end is this handler's to
     // release only until the descriptor for it exists -- after that the
@@ -1341,14 +1352,14 @@ pub fn sys_chdir(arg: *const anyopaque) !i32 {
     var slice_allocated = false;
     var path_slice: []const u8 = std.mem.span(@as([*:0]const u8, @ptrCast(context.path.?)));
     if (path_slice[0] != '/') {
-        if (process.cwd[process.cwd.len - 1] == '/') {
-            path_slice = try vfmt.allocPrint(kernel_allocator, "{s}{s}", .{ process.cwd, path_slice });
+        if (process.cold.cwd[process.cold.cwd.len - 1] == '/') {
+            path_slice = try vfmt.allocPrint(kernel_allocator, "{s}{s}", .{ process.cold.cwd, path_slice });
             slice_allocated = true;
         }
     }
     defer if (slice_allocated) kernel_allocator.free(path_slice);
 
-    const resolved_path = try std.fs.path.resolve(kernel_allocator, &.{ process.cwd, path_slice });
+    const resolved_path = try std.fs.path.resolve(kernel_allocator, &.{ process.cold.cwd, path_slice });
     defer kernel_allocator.free(resolved_path);
 
     if (resolved_path.len == 0) {
@@ -1389,9 +1400,16 @@ pub fn sys_fchdir(arg: *const anyopaque) !i32 {
 /// the backend sees one description of the request whichever way it came.
 pub fn sys_mount(arg: *const anyopaque) !i32 {
     const context: *const c.mount_context = @ptrCast(@alignCast(arg));
-    var source_storage: [max_user_path]u8 = undefined;
-    var fstype_storage: [32]u8 = undefined;
-    var options_storage: [max_user_path]u8 = undefined;
+    // On the heap: a mount needs all the stack the caller has.
+    const Storage = struct {
+        source: [max_user_path]u8,
+        fstype: [32]u8,
+        options: [max_user_path]u8,
+        combined: [max_user_path + 4]u8,
+    };
+    const slow_allocator = kernel.memory.heap.slow.allocator_or(kernel_allocator);
+    const storage = try slow_allocator.create(Storage);
+    defer slow_allocator.destroy(storage);
 
     const target = try determine_path_for_file(kernel_allocator, context.target, -1);
     defer kernel_allocator.free(target);
@@ -1401,14 +1419,14 @@ pub fn sys_mount(arg: *const anyopaque) !i32 {
     var fstype: []const u8 = if (is_bind) "bind" else "";
     if (!is_bind) {
         if (context.filesystemtype == null) return ErrnoSet.InvalidArgument;
-        fstype = try user_string(&fstype_storage, context.filesystemtype);
+        fstype = try user_string(&storage.fstype, context.filesystemtype);
     }
 
     var source: []const u8 = "none";
     var resolved_source: ?[]const u8 = null;
     defer if (resolved_source) |resolved| kernel_allocator.free(resolved);
     if (context.source != null) {
-        source = try user_string(&source_storage, context.source);
+        source = try user_string(&storage.source, context.source);
         // A bind source is a directory, and may be given relative to the
         // working directory like any other path.
         if (std.mem.eql(u8, fstype, "bind") and source.len > 0 and source[0] != '/') {
@@ -1419,11 +1437,10 @@ pub fn sys_mount(arg: *const anyopaque) !i32 {
 
     var options: []const u8 = "";
     if (context.data != null) {
-        options = try user_string(&options_storage, @ptrCast(context.data));
+        options = try user_string(&storage.options, @ptrCast(context.data));
     }
-    var combined: [max_user_path + 4]u8 = undefined;
     if ((flags & c.MS_RDONLY) != 0 and !kernel.fs.fstab.has_option_in(options, "ro")) {
-        options = std.fmt.bufPrint(&combined, "{s}{s}ro", .{ options, if (options.len == 0) "" else "," }) catch return ErrnoSet.NameTooLong;
+        options = std.fmt.bufPrint(&storage.combined, "{s}{s}ro", .{ options, if (options.len == 0) "" else "," }) catch return ErrnoSet.NameTooLong;
     }
     try kernel.fs.mount_api.mount(.{ .source = source, .target = target, .fstype = fstype, .flags = flags, .options = options });
     return 0;
@@ -1752,7 +1769,7 @@ pub fn sys_perf_dump(arg: *const anyopaque) !i32 {
     // smoke harness separate loader time from compile time without an extra
     // serial round trip.
     const process = process_manager.instance.get_current_process();
-    perf.dump(context, process._load_us);
+    perf.dump(context, process.cold._load_us);
     if (context.reset != 0) {
         // tcc -bench resets before exit. Preserve this window's cache traffic
         // in the transcript before the ordinary exit report covers the tail.

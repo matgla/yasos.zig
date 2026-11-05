@@ -147,7 +147,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         };
         pub const ImplType = ProcessType;
         pub const UnblockAction = *const fn (context: ?*anyopaque, rc: i32) void;
-        const ProcessMemoryAllocator = kernel.memory.heap.ProcessPageAllocator(ProcessMemoryPoolType);
+        pub const ProcessMemoryAllocator = kernel.memory.heap.ProcessPageAllocator(ProcessMemoryPoolType);
 
         pub const BlockedByProcess = struct {
             waiting_for: *const Self,
@@ -170,8 +170,53 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             node: std.DoublyLinkedList.Node = .{},
         };
 
+        /// What only system calls and the reaper read, never the scheduler or an
+        /// interrupt: most of a process's size, and it needs no SRAM. On the kernel's
+        /// slow heap, so nothing in here may be an atomic or a lock.
+        pub const Cold = struct {
+            allocator: std.mem.Allocator,
+            _process_memory_allocator: ProcessMemoryAllocator,
+            resource_limits: [c.RLIM_NLIMITS]c.rlimit,
+            cwd: []u8,
+            /// Path of the image this process is running, as exec() was given it.
+            /// Kept so /proc/<pid>/exe can answer readlink(2) -- which is how any
+            /// Linux-shaped program finds its own binary (the Zig compiler does it
+            /// on startup, and refuses to run without an answer). Null until the
+            /// process has exec'd an image; owned by `_kernel_allocator`.
+            exe_path: ?[]u8 = null,
+            /// The slice of this process's stack a vfork child is running over.
+            ///
+            /// A vfork child continues from the parent's `vfork()` call site, the
+            /// only stack pointer the caller's frame offsets are valid against, so
+            /// everything below it is the child's to reuse -- and is also where the
+            /// parent's suspended kernel frames live. Those bytes are copied out
+            /// when the child starts and put back when it execs or exits.
+            ///
+            /// Kept on the parent and reused across vforks: a process parked in
+            /// vfork cannot reach `vfork()` again until its child is gone.
+            _vfork_stack: ?[]u8 = null,
+            /// Address the saved bytes came from, and how many are live (0 = none).
+            _vfork_stack_base: usize = 0,
+            _vfork_stack_len: usize = 0,
+            /// The parent's stack pointer at its `vfork()` call site: the exclusive
+            /// upper bound of the region above.
+            _vfork_stack_top: usize = 0,
+            _start_time: u64,
+            // Wall-clock (us) captured right after this process's exec'd image is
+            // loaded and relocated. Used to separate dynamic-load time from real
+            // execution time when perf profiling is enabled. 0 means the process was
+            // never exec'd (e.g. a forked process that did not call execve).
+            _exec_loaded_time: u64 = 0,
+            // How long (us) the dynamic loader spent producing this process's
+            // image: path lookup, image copy for a non-XIP file, relocation and
+            // every library it pulled in. A process cannot measure this itself, so
+            // it is handed back through sys_perf_dump. 0 = never exec'd.
+            _load_us: u64 = 0,
+        };
+
         state: State,
         priority: u8,
+        cold: *Cold,
         impl: ImplType,
         pid: c.pid_t,
         _kernel_allocator: std.mem.Allocator,
@@ -202,15 +247,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// exec'd, not a limit anyone asked for, so the next exec replaces it
         /// rather than handing it on (see `exec_stack_limit`). setrlimit clears it.
         stack_limit_from_image: bool = false,
-        cwd: []u8,
-        /// Path of the image this process is running, as exec() was given it.
-        /// Kept so /proc/<pid>/exe can answer readlink(2) -- which is how any
-        /// Linux-shaped program finds its own binary (the Zig compiler does it
-        /// on startup, and refuses to run without an answer). Null until the
-        /// process has exec'd an image; owned by `_kernel_allocator`.
-        exe_path: ?[]u8 = null,
         node: std.DoublyLinkedList.Node,
-        _process_memory_allocator: ProcessMemoryAllocator,
         _parent: ?*Self = null,
         _child: ?*Self = null,
         _blocked_by: std.DoublyLinkedList,
@@ -222,23 +259,6 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _exited_children: std.DoublyLinkedList = .{},
         _stack_shared_with_parent: bool,
         _vfork_context: ?VForkContext = null,
-        /// The slice of this process's stack a vfork child is running over.
-        ///
-        /// A vfork child continues from the parent's `vfork()` call site, the
-        /// only stack pointer the caller's frame offsets are valid against, so
-        /// everything below it is the child's to reuse -- and is also where the
-        /// parent's suspended kernel frames live. Those bytes are copied out
-        /// when the child starts and put back when it execs or exits.
-        ///
-        /// Kept on the parent and reused across vforks: a process parked in
-        /// vfork cannot reach `vfork()` again until its child is gone.
-        _vfork_stack: ?[]u8 = null,
-        /// Address the saved bytes came from, and how many are live (0 = none).
-        _vfork_stack_base: usize = 0,
-        _vfork_stack_len: usize = 0,
-        /// The parent's stack pointer at its `vfork()` call site: the exclusive
-        /// upper bound of the region above.
-        _vfork_stack_top: usize = 0,
         _initialized: bool = false,
         /// Sleeping-mutex ranks this process holds, parked here while it is not
         /// running. lockdep's held-set is per-core, which is right for the
@@ -246,24 +266,16 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// block and resume on the other core. Saved and restored by
         /// `RoundRobin.update_current`; see `sync/locks.zig:migrating_ranks`.
         _held_lock_ranks: kernel.sync.locks.HeldSet = 0,
-        _start_time: u64,
-        // Wall-clock (us) captured right after this process's exec'd image is
-        // loaded and relocated. Used to separate dynamic-load time from real
-        // execution time when perf profiling is enabled. 0 means the process was
-        // never exec'd (e.g. a forked process that did not call execve).
-        _exec_loaded_time: u64 = 0,
-        // How long (us) the dynamic loader spent producing this process's
-        // image: path lookup, image copy for a non-XIP file, relocation and
-        // every library it pulled in. A process cannot measure this itself, so
-        // it is handed back through sys_perf_dump. 0 = never exec'd.
-        _load_us: u64 = 0,
+        /// The sleeping mutexes this process holds, most recent first.
+        _held_mutexes: ?*kernel.sync.locks.HeldMutex = null,
+        /// Times this process has been killed by a fault and resumed at `_exit`.
+        _fault_kills: u8 = 0,
         vfork_return: usize = 0,
         vfork_sp: usize = 0,
         vfork_fp: usize = 0,
         child_exit_code: i32 = 0,
         _last_tty_output_fd: ?u16 = null,
         _pending_tty_newline_on_exit: bool = false,
-        resource_limits: [c.RLIM_NLIMITS]c.rlimit,
 
         pub const State = enum(u3) {
             Initialized,
@@ -275,8 +287,12 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn init(kernel_allocator: std.mem.Allocator, stack_size: u32, process_entry: anytype, arg: ?*const anyopaque, cwd: []const u8, process_memory_pool: *ProcessMemoryPoolType, parent: ?*Self, pid: c.pid_t, is_root: bool) !*Self {
             const process = try kernel_allocator.create(Self);
+            errdefer kernel_allocator.destroy(process);
+            const cold_allocator = kernel.memory.heap.slow.allocator_or(kernel_allocator);
+            const cold = try cold_allocator.create(Cold);
+            errdefer cold_allocator.destroy(cold);
             kernel.log.debug("initializing memory allocator for pid: {d}", .{pid});
-            const cwd_handle = try kernel_allocator.alloc(u8, cwd.len);
+            const cwd_handle = try cold_allocator.alloc(u8, cwd.len);
             @memcpy(cwd_handle[0..cwd.len], cwd);
             var args: [1]usize = [_]usize{0};
             if (arg) |a| {
@@ -288,24 +304,28 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .impl = undefined,
                 .pid = pid,
                 ._kernel_allocator = kernel_allocator,
+                .cold = cold,
                 .current_core = 0,
                 .privileged = is_root,
                 .resume_privileged = is_root,
-                ._fds = IntegerHashMap(u16, FileHandle).init(kernel_allocator),
-                .cwd = cwd_handle,
-                // No image yet: exec() fills this in once one has loaded.
-                .exe_path = null,
+                ._fds = IntegerHashMap(u16, FileHandle).init(cold_allocator),
                 .node = .{},
-                ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
                 ._parent = parent,
                 ._blocked_by = std.DoublyLinkedList{},
                 ._blocks = std.DoublyLinkedList{},
                 ._stack_shared_with_parent = false,
                 ._vfork_context = null,
+            };
+            cold.* = .{
+                .allocator = cold_allocator,
+                .cwd = cwd_handle,
+                // No image yet: exec() fills this in once one has loaded.
+                .exe_path = null,
+                ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
                 ._start_time = hal.time.get_time_us(),
                 .resource_limits = create_default_resource_limits(stack_size),
             };
-            process.impl = try ImplType.init(process._process_memory_allocator.allocator(), stack_size, process_entry, exit_handler_impl, args[0..], is_root);
+            process.impl = try ImplType.init(process.cold._process_memory_allocator.allocator(), stack_size, process_entry, exit_handler_impl, args[0..], is_root);
             return process;
         }
 
@@ -340,7 +360,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             };
         }
         fn dupe_fds(self: *Self) !IntegerHashMap(u16, FileHandle) {
-            var fds = IntegerHashMap(u16, FileHandle).init(self._kernel_allocator);
+            var fds = IntegerHashMap(u16, FileHandle).init(self.cold.allocator);
             var it = self._fds.iterator();
             while (it.next()) |*n| {
                 try fds.put(n.key_ptr.*, try dupe_filehandle(n.value_ptr));
@@ -353,37 +373,39 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn deinit(self: *Self) void {
-            const pool = self._process_memory_allocator.get_pool();
+            const pool = self.cold._process_memory_allocator.get_pool();
             log.info("deinit pid={d}: kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
-            self.impl.deinit(self._process_memory_allocator.allocator());
+            self.impl.deinit(self.cold._process_memory_allocator.allocator());
             log.info("deinit pid={d}: after impl.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             self.clear_fds();
             log.info("deinit pid={d}: after clear_fds kernel_used={d} process_pages={d} alloc_count={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size(), kernel.memory.heap.malloc.get_counter() });
-            if (self._vfork_stack) |buffer| {
-                self._kernel_allocator.free(buffer);
-                self._vfork_stack = null;
+            if (self.cold._vfork_stack) |buffer| {
+                self.cold.allocator.free(buffer);
+                self.cold._vfork_stack = null;
             }
             self.drop_exited_children();
-            self._kernel_allocator.free(self.cwd);
-            if (self.exe_path) |path| {
-                self._kernel_allocator.free(path);
-                self.exe_path = null;
+            self.cold.allocator.free(self.cold.cwd);
+            if (self.cold.exe_path) |path| {
+                self.cold.allocator.free(path);
+                self.cold.exe_path = null;
             }
-            self._process_memory_allocator.deinit();
+            self.cold._process_memory_allocator.deinit();
             log.info("deinit pid={d}: after proc_mem.deinit kernel_used={d} process_pages={d}", .{ self.pid, kernel.memory.heap.malloc.get_usage(), pool.get_used_size() });
             var it = self._blocked_by.first;
             while (it) |blocked| {
                 const blocker: *BlockedByProcess = @fieldParentPtr("node", blocked);
                 it = blocked.next;
-                self._kernel_allocator.destroy(blocker);
+                self.cold.allocator.destroy(blocker);
             }
 
             it = self._blocks.first;
             while (it) |blocks| {
                 const action: *BlockedProcessAction = @fieldParentPtr("node", blocks);
                 it = blocks.next;
-                self._kernel_allocator.destroy(action);
+                self.cold.allocator.destroy(action);
             }
+            const cold = self.cold;
+            cold.allocator.destroy(cold);
             self._kernel_allocator.destroy(self);
         }
 
@@ -392,7 +414,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn get_process_memory_allocator(self: *Self) std.mem.Allocator {
-            return self._process_memory_allocator.allocator();
+            return self.cold._process_memory_allocator.allocator();
         }
 
         /// Bound this process's heap to `heap_bytes` beyond its current footprint
@@ -402,19 +424,22 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// paged pool without bound. 0xFFFFFFFF = unbounded. Call after the stack
         /// is reallocated so the baseline captures the fixed sections.
         pub fn set_heap_limit_bytes(self: *Self, heap_bytes: u32) void {
-            self._process_memory_allocator.set_heap_limit_bytes(heap_bytes);
+            self.cold._process_memory_allocator.set_heap_limit_bytes(heap_bytes);
         }
         // this is full copy of the process, so it shares the same stack
         // stack relocation impossible without MMU
         pub fn vfork(self: *Self, process_memory_pool: *ProcessMemoryPoolType, pid: c.pid_t) !*Self {
             // allocate stack copy
             const process = try self._kernel_allocator.create(Self);
-            const cwd_handle = try self._kernel_allocator.alloc(u8, self.cwd.len);
-            @memcpy(cwd_handle, self.cwd);
+            errdefer self._kernel_allocator.destroy(process);
+            const cold = try self.cold.allocator.create(Cold);
+            errdefer self.cold.allocator.destroy(cold);
+            const cwd_handle = try self.cold.allocator.alloc(u8, self.cold.cwd.len);
+            @memcpy(cwd_handle, self.cold.cwd);
             // The child runs the parent's image until it execs, so it reports
             // the parent's /proc/<pid>/exe until then -- same as fork(2).
-            const exe_handle: ?[]u8 = if (self.exe_path) |path|
-                try self._kernel_allocator.dupe(u8, path)
+            const exe_handle: ?[]u8 = if (self.cold.exe_path) |path|
+                try self.cold.allocator.dupe(u8, path)
             else
                 null;
 
@@ -424,6 +449,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .impl = undefined,
                 .pid = pid,
                 ._kernel_allocator = self._kernel_allocator,
+                .cold = cold,
                 .current_core = 0,
                 // A vfork child is a user process on its way to exec; it must run
                 // unprivileged regardless of whether its parent (e.g. the init
@@ -431,21 +457,24 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 .privileged = false,
                 .resume_privileged = false,
                 ._fds = try self.dupe_fds(),
-                .cwd = cwd_handle,
-                .exe_path = exe_handle,
                 .node = .{},
-                ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
                 ._parent = self,
                 ._blocked_by = std.DoublyLinkedList{},
                 ._blocks = std.DoublyLinkedList{},
                 ._stack_shared_with_parent = true,
                 ._vfork_context = null,
                 ._initialized = false,
-                ._start_time = hal.time.get_time_us(),
-                .resource_limits = self.resource_limits,
                 .stack_limit_from_image = self.stack_limit_from_image,
             };
-            process.impl = try self.impl.vfork(process._process_memory_allocator.allocator());
+            cold.* = .{
+                .allocator = self.cold.allocator,
+                .cwd = cwd_handle,
+                .exe_path = exe_handle,
+                ._process_memory_allocator = ProcessMemoryAllocator.init(pid, process_memory_pool),
+                ._start_time = hal.time.get_time_us(),
+                .resource_limits = self.cold.resource_limits,
+            };
+            process.impl = try self.impl.vfork(process.cold._process_memory_allocator.allocator());
             self._child = process;
 
             return process;
@@ -461,14 +490,14 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// parent's stack pointer at its call site; `capacity` must reach down
         /// to where the child is released, deeper than this caller's frame.
         pub fn reserve_vfork_stack(self: *Self, top: usize, capacity: usize) !void {
-            self._vfork_stack_top = top;
-            self._vfork_stack_len = 0;
-            if (self._vfork_stack) |buffer| {
+            self.cold._vfork_stack_top = top;
+            self.cold._vfork_stack_len = 0;
+            if (self.cold._vfork_stack) |buffer| {
                 if (buffer.len >= capacity) return;
-                self._kernel_allocator.free(buffer);
-                self._vfork_stack = null;
+                self.cold.allocator.free(buffer);
+                self.cold._vfork_stack = null;
             }
-            self._vfork_stack = try self._kernel_allocator.alloc(u8, capacity);
+            self.cold._vfork_stack = try self.cold.allocator.alloc(u8, capacity);
         }
 
         /// Copy [`low`, call site) out of the stack. Returns false when there is
@@ -478,14 +507,14 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// Must run with the stack pointer at or below `low`, or it would copy
         /// its own frame over the parent's.
         pub fn save_vfork_stack(self: *Self, low: usize) bool {
-            const buffer = self._vfork_stack orelse return false;
-            if (low >= self._vfork_stack_top) return false;
-            const length = self._vfork_stack_top - low;
+            const buffer = self.cold._vfork_stack orelse return false;
+            if (low >= self.cold._vfork_stack_top) return false;
+            const length = self.cold._vfork_stack_top - low;
             if (length > buffer.len) return false;
             const source: [*]const u8 = @ptrFromInt(low);
             @memcpy(buffer[0..length], source[0..length]);
-            self._vfork_stack_base = low;
-            self._vfork_stack_len = length;
+            self.cold._vfork_stack_base = low;
+            self.cold._vfork_stack_len = length;
             return true;
         }
 
@@ -504,15 +533,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn vfork_save_state(self: *const Self) VForkSaveState {
             var resume_pc: ?u32 = null;
-            if (self._vfork_stack) |buffer| {
-                if (self._vfork_stack_len >= 40) {
+            if (self.cold._vfork_stack) |buffer| {
+                if (self.cold._vfork_stack_len >= 40) {
                     resume_pc = std.mem.readInt(u32, buffer[36..40][0..4], .little);
                 }
             }
             return .{
-                .base = self._vfork_stack_base,
-                .len = self._vfork_stack_len,
-                .top = self._vfork_stack_top,
+                .base = self.cold._vfork_stack_base,
+                .len = self.cold._vfork_stack_len,
+                .top = self.cold._vfork_stack_top,
                 .resume_pc = resume_pc,
             };
         }
@@ -521,8 +550,8 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// the frames below it are saved and can be scribbled on. Null once they
         /// are not -- with no backup, those frames are the parent's only copy.
         pub fn vfork_stack_ceiling(self: *const Self) ?usize {
-            if (self._vfork_stack_len == 0) return null;
-            return self._vfork_stack_top;
+            if (self.cold._vfork_stack_len == 0) return null;
+            return self.cold._vfork_stack_top;
         }
 
         /// Put the saved bytes back, so the parent can resume on them. Must run
@@ -535,11 +564,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// is what makes a lost restore reportable instead of showing up later
         /// as a branch through an unrestored frame.
         pub fn restore_vfork_stack(self: *Self) bool {
-            const buffer = self._vfork_stack orelse return false;
-            const length = self._vfork_stack_len;
+            const buffer = self.cold._vfork_stack orelse return false;
+            const length = self.cold._vfork_stack_len;
             if (length == 0) return false;
-            self._vfork_stack_len = 0;
-            const destination: [*]u8 = @ptrFromInt(self._vfork_stack_base);
+            self.cold._vfork_stack_len = 0;
+            const destination: [*]u8 = @ptrFromInt(self.cold._vfork_stack_base);
             @memcpy(destination[0..length], buffer[0..length]);
             return true;
         }
@@ -553,19 +582,19 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn change_directory(self: *Self, path: []const u8) !void {
-            self._kernel_allocator.free(self.cwd);
-            self.cwd = try self._kernel_allocator.dupe(u8, path);
+            self.cold.allocator.free(self.cold.cwd);
+            self.cold.cwd = try self.cold.allocator.dupe(u8, path);
         }
 
         pub fn get_current_directory(self: Self) []const u8 {
-            return self.cwd;
+            return self.cold.cwd;
         }
 
         /// Does this process work inside `prefix`, or hold a descriptor open
         /// on something under it? What umount(2) asks before it pulls a
         /// filesystem away.
         pub fn uses_path_under(self: *Self, prefix: []const u8) bool {
-            if (kernel.fs.path_is_under(self.cwd, prefix)) return true;
+            if (kernel.fs.path_is_under(self.cold.cwd, prefix)) return true;
             var it = self._fds.valueIterator();
             while (it.next()) |handle| {
                 if (kernel.fs.path_is_under(handle.path, prefix)) return true;
@@ -576,13 +605,13 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// Record the image this process now runs. Called by exec once the load
         /// has succeeded, so a failed exec leaves the previous answer standing.
         pub fn set_executable_path(self: *Self, path: []const u8) !void {
-            const copy = try self._kernel_allocator.dupe(u8, path);
-            if (self.exe_path) |old_path| self._kernel_allocator.free(old_path);
-            self.exe_path = copy;
+            const copy = try self.cold.allocator.dupe(u8, path);
+            if (self.cold.exe_path) |old_path| self.cold.allocator.free(old_path);
+            self.cold.exe_path = copy;
         }
 
         pub fn get_executable_path(self: Self) ?[]const u8 {
-            return self.exe_path;
+            return self.cold.exe_path;
         }
 
         pub fn stack_pointer(self: Self) *const u8 {
@@ -642,7 +671,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn blocks_process(self: *Self, blocked_process: *Self, action: UnblockAction, context: ?*anyopaque) !void {
-            const blocked_data = try self._kernel_allocator.create(BlockedProcessAction);
+            const blocked_data = try self.cold.allocator.create(BlockedProcessAction);
             blocked_data.* = .{
                 .blocked = blocked_process,
                 .context = context,
@@ -661,7 +690,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             // taking it here would be a same-rank nesting.
             preempt.preempt_disable();
             defer preempt.preempt_enable();
-            const blocked_data = try self._kernel_allocator.create(BlockedByProcess);
+            const blocked_data = try self.cold.allocator.create(BlockedByProcess);
             try process.blocks_process(self, action, context);
             blocked_data.* = .{
                 .waiting_for = process,
@@ -730,7 +759,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (action.blocked == self._parent.?) {
                     action.action(action.context, 0);
                     self._blocks.remove(&action.node);
-                    self._kernel_allocator.destroy(action);
+                    self.cold.allocator.destroy(action);
                 }
             }
 
@@ -747,7 +776,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 it = blocks.next;
                 if (blocker.waiting_for == blocking_process) {
                     self._blocked_by.remove(blocks);
-                    self._kernel_allocator.destroy(blocker);
+                    self.cold.allocator.destroy(blocker);
                 }
             }
             self.reevaluate_state();
@@ -757,7 +786,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// effort: if the record cannot be allocated the exit is still reported
         /// through `child_exit_code`.
         pub fn record_child_exit(self: *Self, child_pid: c.pid_t, status: i32) void {
-            const entry = self._kernel_allocator.create(ExitedChild) catch {
+            const entry = self.cold.allocator.create(ExitedChild) catch {
                 log.err("no room to record the exit of pid={d}", .{child_pid});
                 return;
             };
@@ -777,7 +806,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (pid != -1 and entry.pid != pid) continue;
                 const collected = entry.*;
                 self._exited_children.remove(node);
-                self._kernel_allocator.destroy(entry);
+                self.cold.allocator.destroy(entry);
                 return collected;
             }
             return null;
@@ -794,14 +823,14 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             while (self._exited_children.pop()) |node| {
                 const entry: *ExitedChild = @fieldParentPtr("node", node);
                 owner.release_pid(entry.pid);
-                self._kernel_allocator.destroy(entry);
+                self.cold.allocator.destroy(entry);
             }
         }
 
         fn drop_exited_children(self: *Self) void {
             while (self._exited_children.pop()) |node| {
                 const entry: *ExitedChild = @fieldParentPtr("node", node);
-                self._kernel_allocator.destroy(entry);
+                self.cold.allocator.destroy(entry);
             }
         }
 
@@ -811,7 +840,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 const action: *BlockedProcessAction = @fieldParentPtr("node", node);
                 action.action(action.context, result);
                 action.blocked.unblock_from(self);
-                self._kernel_allocator.destroy(action);
+                self.cold.allocator.destroy(action);
                 next = self._blocks.pop();
             }
         }
@@ -820,14 +849,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             self.current_core = coreid;
         }
 
-        pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, _: i32, _: i32, _: i32) !*anyopaque {
+        pub fn mmap(self: *Self, addr: ?*anyopaque, length: i32, _: i32, flags: i32, _: i32, _: i32) !*anyopaque {
             // Preemptible; see the syscall wrappers. The pool guards itself.
             if (addr == null) {
                 var number_of_pages = @divTrunc(length, ProcessMemoryPoolType.page_size);
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
-                const maybe_address = self._process_memory_allocator.allocate_pages(number_of_pages);
+                const tier: @TypeOf(self.cold._process_memory_allocator).Tier = if ((flags & c.MAP_SLOW) != 0) .slow else if ((flags & c.MAP_FAST) != 0) .fast else .any;
+                const maybe_address = self.cold._process_memory_allocator.allocate_pages_tiered(number_of_pages, tier, (flags & c.MAP_UNINITIALIZED) != 0);
                 if (maybe_address) |address| {
                     return address.ptr;
                 }
@@ -849,7 +879,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
-                self._process_memory_allocator.release_pages(addr, number_of_pages);
+                self.cold._process_memory_allocator.release_pages(addr, number_of_pages);
             }
         }
 
@@ -868,17 +898,17 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 new_pages += 1;
             }
             if (new_pages < old_pages) {
-                if (self._process_memory_allocator.try_shrink_pages(addr, old_pages, new_pages)) |shrunk| {
+                if (self.cold._process_memory_allocator.try_shrink_pages(addr, old_pages, new_pages)) |shrunk| {
                     return shrunk.ptr;
                 }
-            } else if (self._process_memory_allocator.try_extend_pages(addr, old_pages, new_pages)) |extended| {
+            } else if (self.cold._process_memory_allocator.try_extend_pages(addr, old_pages, new_pages)) |extended| {
                 return extended.ptr;
             }
             return kernel.errno.ErrnoSet.OutOfMemory;
         }
 
         fn can_allocate_fd(self: *const Self, fd: u16) bool {
-            const limit = self.resource_limits[c.RLIMIT_NOFILE].rlim_cur;
+            const limit = self.cold.resource_limits[c.RLIMIT_NOFILE].rlim_cur;
             if (limit == c.RLIM_INFINITY) {
                 return true;
             }
@@ -891,7 +921,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 return kernel.errno.ErrnoSet.InvalidArgument;
             }
 
-            return self.resource_limits[@intCast(resource)];
+            return self.cold.resource_limits[@intCast(resource)];
         }
 
         pub fn set_resource_limit(self: *Self, resource: i32, limit: c.rlimit) !void {
@@ -903,11 +933,11 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 return kernel.errno.ErrnoSet.InvalidArgument;
             }
 
-            self.resource_limits[@intCast(resource)] = limit;
+            self.cold.resource_limits[@intCast(resource)] = limit;
         }
 
         pub fn set_resource_limits(self: *Self, limits: [c.RLIM_NLIMITS]c.rlimit) void {
-            self.resource_limits = limits;
+            self.cold.resource_limits = limits;
         }
 
         pub fn get_free_fd(self: *Self) ?u16 {
@@ -972,7 +1002,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         pub fn get_uptime(self: *const Self) u64 {
-            return hal.time.get_time_us() - self._start_time;
+            return hal.time.get_time_us() - self.cold._start_time;
         }
 
         pub fn attach_file(self: *Self, path: []const u8, node: kernel.fs.Node) !i32 {
@@ -983,7 +1013,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 log.err("pid={d}: out of file descriptors opening '{s}' (RLIMIT_NOFILE={d}, open={d})", .{
                     self.pid,
                     path,
-                    self.resource_limits[c.RLIMIT_NOFILE].rlim_cur,
+                    self.cold.resource_limits[c.RLIMIT_NOFILE].rlim_cur,
                     self._fds.count(),
                 });
                 return kernel.errno.ErrnoSet.TooManyOpenFiles;
@@ -1000,7 +1030,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 return kernel.errno.ErrnoSet.TooManyOpenFiles;
             }
 
-            const handle = try FileHandle.create(self._kernel_allocator, path, node);
+            const handle = try FileHandle.create(self.cold.allocator, path, node);
             try self._fds.put(@intCast(fd), handle);
             return @intCast(fd);
         }
@@ -1126,6 +1156,16 @@ const ProcessMemoryPoolForTests = struct {
         return self.allocate_pages(number_of_pages, pid);
     }
 
+    pub fn allocate_pages_cleared(self: *Self, number_of_pages: i32, pid: c.pid_t, source: anytype, may_keep_own: bool) ?[]u8 {
+        _ = source;
+        _ = may_keep_own;
+        return self.allocate_pages(number_of_pages, pid);
+    }
+
+    pub fn is_fast_address(_: *const Self, _: *const anyopaque) bool {
+        return true;
+    }
+
     pub fn allocate_pages(self: *Self, number_of_pages: i32, pid: c.pid_t) ?[]u8 {
         self.caller_pid = pid;
         self.caller_number_of_pages = number_of_pages;
@@ -1176,7 +1216,7 @@ test "Process.ShouldBeCreated" {
 
     try std.testing.expectEqual(pid_for_process, sut.pid);
     try std.testing.expectEqualStrings(cwd_for_process, sut.get_current_directory());
-    try std.testing.expectEqual(1000, sut._start_time);
+    try std.testing.expectEqual(1000, sut.cold._start_time);
 }
 
 const FileMock = @import("fs/tests/file_mock.zig").FileMock;

@@ -19,6 +19,8 @@
 
 const std = @import("std");
 
+const crc7 = @import("crc7.zig");
+
 const hal = @import("hal_interface");
 
 const log = std.log.scoped(.@"mmc/spi");
@@ -60,7 +62,7 @@ pub const MmcSpi = struct {
         buffer[0] = 0x40 | @as(u8, command);
         const argument_bytes = std.mem.toBytes(argument_value);
         @memcpy(buffer[1..5], argument_bytes[0..4]);
-        buffer[5] = @as(u8, std.hash.crc.@"CRC-7/MMC".hash(buffer[0..5])) << 1 | 1;
+        buffer[5] = crc7.command_crc_byte(buffer[0..5]);
         return buffer;
     }
 

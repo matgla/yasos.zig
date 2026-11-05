@@ -25,6 +25,8 @@ const Compile = Build.Step.Compile;
 pub const Options = struct {
     /// The host cross compiler (libs/tinycc/bin/armv8m-tcc, built by build_rootfs.sh).
     tcc: []const u8,
+    /// Run source/kernel/hot_functions.txt from RAM: a board with room for it.
+    hot_functions: bool = false,
 };
 
 pub const Result = struct {
@@ -335,6 +337,9 @@ pub fn build(b: *Build, kernel: *Compile, opts: Options) Result {
     // 5. Link with tcc and the kernel's linker script.
     const link = ctx.cmd(&.{ "-g", "-nostdlib", "-nodefaultlibs", "-static", "-Wl,--gc-sections", "-Wl,-oformat=elf32-littlearm" });
     if (kernel.linker_script) |script| link.file("-T", script);
+    // The functions to run from RAM (source/kernel/hot_functions.txt): profile, not
+    // source, decides, and the numbers Zig's C backend appends change on every edit.
+    if (opts.hot_functions) link.file("-Wl,--ram-text=", ctx.b.path("source/kernel/hot_functions.txt"));
     link.arg("-o");
     const elf = link.out("", "yasos_kernel");
     for (objs.items) |o| link.file("", o);

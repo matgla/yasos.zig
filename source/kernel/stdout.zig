@@ -104,6 +104,11 @@ pub fn console_acquire() bool {
     return true;
 }
 
+/// Let go of the console for a thread that was killed inside its section.
+pub fn console_forget_dead_holder() void {
+    if (console_lock.held_by_current()) console_lock.unlock_no_irq();
+}
+
 pub fn console_release(held: bool) void {
     if (held) console_lock.unlock_no_irq();
     // Mirrors the acquire: thread context always disabled preemption, handler

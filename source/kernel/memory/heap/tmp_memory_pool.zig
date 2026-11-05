@@ -173,6 +173,13 @@ pub fn TmpMemoryPool(comptime page_size_bytes: usize) type {
         }
 
         pub fn allocate_pages(self: *Self, number_of_pages: i32) ?[]u8 {
+            const slice = self.reserve_pages(number_of_pages) orelse return null;
+            @memset(slice, 0);
+            return slice;
+        }
+
+        /// `allocate_pages` without the clear: in PSRAM it evicts what is running.
+        pub fn reserve_pages(self: *Self, number_of_pages: i32) ?[]u8 {
             if (number_of_pages <= 0) {
                 return null;
             }
@@ -180,9 +187,7 @@ pub fn TmpMemoryPool(comptime page_size_bytes: usize) type {
             const pages: usize = @intCast(number_of_pages);
             const start_index = self.find_free_range(pages) orelse return null;
             self.claim_range(start_index, start_index + pages);
-            const slice = self.range_slice(start_index, pages);
-            @memset(slice, 0);
-            return slice;
+            return self.range_slice(start_index, pages);
         }
 
         pub fn free_pages(self: *Self, address: *anyopaque, number_of_pages: i32) void {

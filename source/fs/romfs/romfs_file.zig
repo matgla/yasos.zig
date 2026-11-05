@@ -48,16 +48,16 @@ pub const RomFsFile = interface.DeriveFromBase(ReadOnlyFile, struct {
     position: c.off_t,
 
     // RomFsFile interface
-    pub fn create(allocator: std.mem.Allocator, header: FileHeader) RomFsFile {
+    pub fn create(allocator: std.mem.Allocator, header: *const FileHeader) RomFsFile {
         return RomFsFile.init(.{
             .base = ReadOnlyFile.init(.{}),
-            .header = header,
+            .header = header.*,
             .allocator = allocator,
             .position = 0,
         });
     }
 
-    pub fn create_node(allocator: std.mem.Allocator, header: FileHeader) anyerror!kernel.fs.Node {
+    pub fn create_node(allocator: std.mem.Allocator, header: *const FileHeader) anyerror!kernel.fs.Node {
         const file = try create(allocator, header).interface.new(allocator);
         return kernel.fs.Node.create_file(file);
     }

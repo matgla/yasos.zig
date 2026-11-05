@@ -29,20 +29,23 @@ const ProcFsDirectoryData = struct {
     const Self = @This();
     _nodes: std.ArrayList(kernel.fs.Node),
     _name: []const u8,
-    _refcounter: i16,
+    /// Allocated on its own: an atomic must stay out of PSRAM, and this object is
+    /// on the kernel's slow heap. See CountersApartAllocator.
+    _refcounter: *i16,
 
     pub fn share(self: *Self) *Self {
-        refcount.acquire(&self._refcounter);
+        refcount.acquire(self._refcounter);
         return self;
     }
 
     pub fn delete(self: *Self, allocator: std.mem.Allocator) void {
-        if (refcount.release(&self._refcounter)) {
+        if (refcount.release(self._refcounter)) {
             for (self._nodes.items) |*node| {
                 node.delete();
             }
             self._nodes.deinit(allocator);
             // allocator.free(self._name);
+            allocator.destroy(self._refcounter);
             allocator.destroy(self);
         }
     }
@@ -57,11 +60,15 @@ pub const ProcFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struc
     pub fn create(allocator: std.mem.Allocator, dirname: []const u8, is_root: bool) !ProcFsDirectory {
         const data = try allocator.create(ProcFsDirectoryData);
         errdefer allocator.destroy(data);
+        const refcounter = try allocator.create(i16);
+        errdefer allocator.destroy(refcounter);
+        kernel.sync.placement.assert_coherent(refcounter);
+        refcount.init(refcounter);
 
         data.* = .{
             ._nodes = try std.ArrayList(kernel.fs.Node).initCapacity(allocator, 4),
             ._name = dirname,
-            ._refcounter = 1,
+            ._refcounter = refcounter,
         };
 
         return ProcFsDirectory.init(.{

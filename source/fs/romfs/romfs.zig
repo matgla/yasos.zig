@@ -90,17 +90,23 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         const t_walk = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
-        var header = try self.get_file_header(path, true);
+        var header: FileHeader = undefined;
+        try self.get_file_header(&header, path, true);
         // The node takes the header over; it is only ours to free if that fails.
         errdefer header.deinit();
         const t_node = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         if (kernel.perf.enabled) kernel.perf.romfs_walk(t_node -% t_walk);
         defer if (kernel.perf.enabled) kernel.perf.romfs_node(kernel.perf.read_cycles() -% t_node);
+        return try @call(.never_inline, node_of, .{ self, &header });
+    }
+
+    /// Out of line for the stack: these take the header by value, and that copy would
+    /// otherwise sit in `get`'s frame through the whole lookup.
+    fn node_of(self: *Self, header: *const FileHeader) anyerror!kernel.fs.Node {
         if (header.filetype() != FileType.Directory) {
             return try RomFsFile.InstanceType.create_node(self.allocator, header);
-        } else {
-            return try RomFsDirectory.InstanceType.create_node(self.allocator, header, &self.root);
         }
+        return try RomFsDirectory.InstanceType.create_node(self.allocator, header, &self.root);
     }
 
     pub fn format(self: *Self) anyerror!void {
@@ -110,7 +116,8 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
-        var node = try self.get_file_header(path, follow_symlinks);
+        var node: FileHeader = undefined;
+        try self.get_file_header(&node, path, follow_symlinks);
         defer node.deinit();
         node.stat(data, kernel.time.timespec_of_uptime_us(self.mount_uptime_us));
         // Per instance, like the other filesystems: `df` takes st_dev 0 as
@@ -137,7 +144,8 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
 
     pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
         // Fetch the raw link node (no-follow); its data holds the target path.
-        var header = try self.get_file_header(path, false);
+        var header: FileHeader = undefined;
+        try self.get_file_header(&header, path, false);
         defer header.deinit();
         if (header.filetype() != FileType.SymbolicLink) {
             return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
@@ -152,97 +160,90 @@ pub const RomFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     }
 
     /// The entry `path` names, from the lookup cache when this path was found
-    /// before. See LookupCache.
-    fn get_file_header(self: *Self, path: []const u8, resolve_link: bool) anyerror!FileHeader {
+    /// before. See LookupCache.  Fills `out`, which the caller then owns: a
+    /// FileHeader is ~120 bytes, and these run on the stack of whoever asked --
+    /// returning one by value gave the walk most of a kilobyte of temporaries.
+    fn get_file_header(self: *Self, out: *FileHeader, path: []const u8, resolve_link: bool) anyerror!void {
         if (self.lookups.find(path, resolve_link)) |offset| {
-            return self.create_file_header(offset);
+            return self.root.init_file_header(out, @intCast(offset));
         }
-        var header = try self.walk(path, resolve_link);
-        errdefer header.deinit();
-        self.lookups.insert(path, resolve_link, try self.root.offset_of(&header));
-        return header;
+        try @call(.never_inline, walk, .{ self, out, path, resolve_link });
+        errdefer out.deinit();
+        try @call(.never_inline, remember_lookup, .{ self, out, path, resolve_link });
     }
 
-    fn walk(self: *Self, path: []const u8, resolve_link: bool) anyerror!FileHeader {
-        const path_without_trailing_separator = std.mem.trimEnd(u8, path, "/");
-        var it = std.fs.path.componentIterator(path);
-        var component = it.first();
-        var maybe_node: ?FileHeader = try self.root.first_file_header();
-        if (path_without_trailing_separator.len < 1) {
-            return maybe_node orelse kernel.errno.ErrnoSet.InvalidArgument;
-        }
-        while (component) |part| : (component = it.next()) {
-            if (maybe_node == null) {
-                return kernel.errno.ErrnoSet.NoEntry;
-            }
-            // Step the header in place rather than taking one by value from
-            // `next()`: the struct is ~120 bytes and this scan is per directory
-            // entry, so returning it by value made the walk memcpy its way
-            // through the directory. See FileHeader.load.
-            var filename = maybe_node.?.name();
-            while (!std.mem.eql(u8, filename, part.name)) {
-                errdefer if (maybe_node) |*n| n.deinit();
-                if (!try maybe_node.?.step_to_next()) {
-                    maybe_node.?.deinit();
-                    return kernel.errno.ErrnoSet.NoEntry;
+    fn remember_lookup(self: *Self, node: *const FileHeader, path: []const u8, resolve_link: bool) !void {
+        self.lookups.insert(path, resolve_link, try self.root.offset_of(node));
+    }
+
+    /// The path with a link replaced by its target. Out of line for the stack: every
+    /// lookup has `walk`'s frame, and this is the deepest thing under it.
+    fn follow_link(self: *Self, link_name: []const u8, link_path: []const u8, remaining: []const u8) ![]u8 {
+        const target = try std.fs.path.resolve(self.allocator, &.{ link_path, "..", link_name });
+        defer self.allocator.free(target);
+        const next = try self.allocator.alloc(u8, target.len + remaining.len);
+        @memcpy(next[0..target.len], target);
+        @memcpy(next[target.len..], remaining);
+        return next;
+    }
+
+    /// The largest number of symbolic links followed for one lookup, as on Linux.
+    const max_symlinks = 40;
+
+    /// Walk a path, starting over from the root at each symbolic link with the
+    /// link's target in place of what led to it.  This recursed once per link
+    /// before -- and /bin is a link, so every program load paid for a second frame.
+    fn walk(self: *Self, node: *FileHeader, path: []const u8, resolve_link: bool) anyerror!void {
+        var current = path;
+        var owned: ?[]u8 = null;
+        defer if (owned) |o| self.allocator.free(o);
+        var links: u32 = 0;
+        restart: while (true) {
+            try self.root.init_file_header(node, self.root.first_file_offset());
+            errdefer node.deinit();
+            if (std.mem.trimEnd(u8, current, "/").len < 1) return;
+            const whole = std.mem.trimEnd(u8, current, "/").len;
+            var it = std.fs.path.componentIterator(current);
+            var component = it.first();
+            while (component) |part| : (component = it.next()) {
+                // Step the header in place: this scan is per directory entry.
+                var filename = node.name();
+                while (!std.mem.eql(u8, filename, part.name)) {
+                    if (!try node.step_to_next()) {
+                        return kernel.errno.ErrnoSet.NoEntry;
+                    }
+                    filename = node.name();
                 }
-                filename = maybe_node.?.name();
-            }
-            // if symbolic link then fetch target node
-            if (maybe_node) |*node| {
                 if (node.filetype() == FileType.SymbolicLink) {
-                    // iterate through link
-                    if (!resolve_link) {
-                        return maybe_node orelse kernel.errno.ErrnoSet.NoEntry;
-                    }
-                    const maybe_name = node.read_name_at_offset(self.allocator, 0);
-                    if (maybe_name) |*link_name| {
+                    if (!resolve_link) return;
+                    if (node.read_name_at_offset(self.allocator, 0)) |link_name_value| {
+                        var link_name = link_name_value;
                         defer link_name.deinit();
-                        {
-                            errdefer maybe_node.?.deinit();
-                            maybe_node.?.deinit();
-                            maybe_node = null;
-                        }
-                        const relative = try std.fs.path.resolve(self.allocator, &.{ part.path, "..", link_name.get_name() });
-                        defer self.allocator.free(relative);
-
-                        maybe_node = try self.get_file_header(relative, resolve_link);
-                    }
-                }
-            }
-
-            if (maybe_node) |*node| {
-                // if last component then return
-                if (path_without_trailing_separator.len == part.path.len) {
-                    if (node.filetype() == FileType.HardLink) {
-                        // if hard link then get it
-                        const specinfo = node.specinfo();
+                        links += 1;
+                        if (links > max_symlinks) return kernel.errno.ErrnoSet.TooManySymbolicLinks;
+                        const next = try @call(.never_inline, follow_link, .{ self, link_name.get_name(), part.path, current[part.path.len..] });
+                        if (owned) |o| self.allocator.free(o);
+                        owned = next;
+                        current = next;
                         node.deinit();
-                        maybe_node = null;
-                        return self.create_file_header(specinfo);
+                        continue :restart;
                     }
-                    return maybe_node orelse kernel.errno.ErrnoSet.NoEntry;
                 }
-            }
-
-            if (maybe_node) |*node| {
+                if (whole == part.path.len) {
+                    if (node.filetype() == FileType.HardLink) {
+                        try self.root.reload_file_header(node, @intCast(node.specinfo()));
+                    }
+                    return;
+                }
                 if (node.filetype() == FileType.Directory) {
-                    const specinfo = node.specinfo();
-                    node.deinit();
-                    maybe_node = try self.create_file_header(specinfo);
+                    try self.root.reload_file_header(node, @intCast(node.specinfo()));
                 }
             }
-        }
-
-        if (maybe_node) |*node| {
             if (node.filetype() == FileType.HardLink) {
-                // if hard link then get it
-                const specinfo = node.specinfo();
-                node.deinit();
-                return self.create_file_header(specinfo);
+                try self.root.reload_file_header(node, @intCast(node.specinfo()));
             }
+            return;
         }
-        return maybe_node orelse kernel.errno.ErrnoSet.NoEntry;
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
@@ -435,6 +436,20 @@ test "RomFs.ReadlinkReturnsTheTargetAndNothingElse" {
     var buffer: [64]u8 = undefined;
     const written = try ifs.interface.readlink("/subdir/other_dir/dir", buffer[0..]);
     try std.testing.expectEqual(@as(usize, @intCast(info.st_size)), written);
+}
+
+test "RomFs.PathContinuesThroughASymbolicLink" {
+    // A walk starts over at each link with the target in place of what led to
+    // it, so what follows the link in the path has to survive the restart.
+    var ifs = try load_test_romfs();
+    defer ifs.interface.delete();
+
+    var through_link: c.struct_stat = undefined;
+    try ifs.interface.stat("/subdir/other_dir/dir", &through_link, true);
+    try std.testing.expect((through_link.st_mode & c.S_IFMT) == c.S_IFDIR);
+    // ... and a name that is not there is still not there beyond it.
+    var missing: c.struct_stat = undefined;
+    try std.testing.expectError(error.NoEntry, ifs.interface.stat("/subdir/other_dir/dir/no_such_file", &missing, true));
 }
 
 test "RomFs.RepeatedLookupsAgreeWithTheFirst" {

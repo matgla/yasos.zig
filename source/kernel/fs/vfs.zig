@@ -28,6 +28,7 @@ const IDirectoryIterator = @import("idirectory.zig").IDirectoryIterator;
 const IFile = @import("ifile.zig").IFile;
 const MountPoints = @import("mount_points.zig").MountPoints;
 const MountPoint = @import("mount_points.zig").MountPoint;
+const MountMatch = @import("mount_points.zig").MountPoints.Match(*MountPoint);
 
 const kernel = @import("../kernel.zig");
 const perf = @import("../interrupts/perf_profile.zig");
@@ -58,6 +59,9 @@ fn mount_subtree_supports_symlinks(point: *const MountPoint) bool {
 pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     const Self = @This();
     mount_points: MountPoints,
+    /// Path buffers, gone by the end of the call and made on every lookup. Mount points
+    /// stay for good and are read on every lookup too, but are not allocated then.
+    paths_allocator: std.mem.Allocator,
 
     pub fn mount(self: *Self) i32 {
         _ = self;
@@ -106,6 +110,10 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, path);
         const t_fsget = if (perf.enabled) perf.read_cycles() else 0;
         if (perf.enabled) perf.vfs_mount(t_fsget -% t_mount);
+        return get_on(maybe_node, t_fsget);
+    }
+
+    fn get_on(maybe_node: ?MountMatch, t_fsget: u64) anyerror!kernel.fs.Node {
         if (maybe_node) |*node| {
             defer if (perf.enabled) perf.vfs_fsget(perf.read_cycles() -% t_fsget);
             var result = try node.point.filesystem.interface.get(node.left);
@@ -114,6 +122,47 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
             return result;
         }
         return kernel.errno.ErrnoSet.NoEntry;
+    }
+
+    // ------------------------------------------------------------------
+    // Bind mounts, taken out here for the calls that go deep. BindFs would hand
+    // the rewritten path back to the VFS, a whole dispatch and lookup further down
+    // the calling process's stack, under a filesystem that needs all it can get.
+    // ------------------------------------------------------------------
+    const ThroughBinds = struct {
+        /// The rewritten path, when a bind was crossed. The match's `left` points
+        /// into it.
+        owned: ?[]u8 = null,
+        read_only: bool = false,
+    };
+
+    /// The source of the bind mounted at `point`. Null for anything else, and for
+    /// a source too long for `MountInfo`, which BindFs still holds whole.
+    fn bind_source(point: *const MountPoint) ?[]const u8 {
+        if (!std.mem.eql(u8, point.info.fstype(), "bind")) return null;
+        if (point.info.source_len == point.info.source_buffer.len) return null;
+        return std.mem.trimEnd(u8, point.info.source(), "/");
+    }
+
+    fn find_through_binds(self: *Self, path: []const u8, through: *ThroughBinds) anyerror!?MountMatch {
+        const allocator = self.paths_allocator;
+        var match = self.mount_points.find_longest_matching_point(*MountPoint, path) orelse return null;
+        var crossed: u8 = 0;
+        while (bind_source(match.point)) |source| : (crossed += 1) {
+            // A bind that leads back to itself. BindFs would only find out by
+            // running off the end of the stack.
+            if (crossed == max_symlink_depth) return kernel.errno.ErrnoSet.TooManySymbolicLinks;
+            if (match.point.info.read_only()) through.read_only = true;
+            const relative = std.mem.trim(u8, match.left, "/");
+            const full = try allocator.alloc(u8, source.len + 1 + relative.len);
+            @memcpy(full[0..source.len], source);
+            full[source.len] = '/';
+            @memcpy(full[source.len + 1..], relative);
+            if (through.owned) |previous| allocator.free(previous);
+            through.owned = full;
+            match = self.mount_points.find_longest_matching_point(*MountPoint, full) orelse return null;
+        }
+        return match;
     }
 
     fn raw_stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
@@ -200,17 +249,65 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     fn prefix_can_hold_symlink(self: *Self, prefix: []const u8) bool {
         const maybe_node = self.mount_points.find_longest_matching_point(*MountPoint, prefix);
         if (maybe_node) |node| {
+            // A bind mount hands every call to the VFS again, which has already
+            // run this pass on the bind's source: asking twice only pays twice.
+            if (std.mem.eql(u8, node.point.info.fstype(), "bind")) return false;
             return node.point.filesystem.interface.supports_symlinks();
         }
         return false;
     }
 
+    // The miss that brought us here usually has a real directory as its parent.
+    // Filesystems walk a path literally, stopping at anything that is not a
+    // directory, so a parent that stats as a directory rules out a link on every
+    // component above it; only the final one is left to check. Without this, a
+    // miss stats each prefix from the root: quadratic in depth, per -I directory.
+    fn no_symlink_on_path(self: *Self, path: []const u8, follow_final: bool) anyerror!bool {
+        const trimmed = std.mem.trimEnd(u8, path, "/");
+        const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return false;
+        if (slash == 0) return false;
+        const parent = trimmed[0..slash];
+        if (!self.prefix_can_hold_symlink(parent)) return false;
+        var st: c.struct_stat = undefined;
+        self.raw_stat(parent, &st, false) catch return false;
+        if ((st.st_mode & c.S_IFMT) != c.S_IFDIR) return false;
+        if (!follow_final) return true;
+        self.raw_stat(trimmed, &st, false) catch return true;
+        return (st.st_mode & c.S_IFMT) != c.S_IFLNK;
+    }
+
+    /// These two are out of line for the stack: a stat and a 256-byte target are only
+    /// needed here, and every filesystem lookup below resolve_symlinks would pay for them.
+    fn prefix_is_symlink(self: *Self, prefix: []const u8) !bool {
+        var st: c.struct_stat = undefined;
+        try self.raw_stat(prefix, &st, false);
+        return (st.st_mode & c.S_IFMT) == c.S_IFLNK;
+    }
+
+    /// The path with the link at `prefix` replaced by its target; null when it cannot be read.
+    fn follow_symlink(self: *Self, prefix: []const u8, remainder: []const u8, parent: []const u8) anyerror!?[]u8 {
+        const allocator = self.paths_allocator;
+        // On the heap: the readlink below goes all the way through the filesystem.
+        const target_buffer = try allocator.alloc(u8, symlink_target_buffer);
+        defer allocator.free(target_buffer);
+        const n = self.raw_readlink(prefix, target_buffer) catch return null;
+        const target = target_buffer[0..n];
+        // Absolute target replaces from root; relative target resolves
+        // against the link's parent directory.
+        const base = if (target.len > 0 and target[0] == '/') "" else parent;
+        const joined = try vfmt.allocPrint(allocator, "{s}{s}{s}", .{ base, target, remainder });
+        defer allocator.free(joined);
+        return try std.fs.path.resolve(allocator, &.{joined});
+    }
+
     fn resolve_symlinks(self: *Self, path: []const u8, follow_final: bool) anyerror!?[]u8 {
-        const allocator = self.mount_points.allocator;
+        const allocator = self.paths_allocator;
+        if (try self.no_symlink_on_path(path, follow_final)) return null;
         var cur = try allocator.dupe(u8, path);
         errdefer allocator.free(cur);
         var changed = false;
         var depth: usize = 0;
+        var cur_next: []u8 = undefined;
 
         outer: while (true) {
             var i: usize = 0;
@@ -234,29 +331,18 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
                     continue;
                 }
 
-                var st: c.struct_stat = undefined;
-                self.raw_stat(prefix, &st, false) catch break;
-
-                if ((st.st_mode & c.S_IFMT) == c.S_IFLNK) {
-                    depth += 1;
-                    if (depth > max_symlink_depth) return kernel.errno.ErrnoSet.TooManySymbolicLinks;
-
-                    var target_buffer: [symlink_target_buffer]u8 = undefined;
-                    const n = self.raw_readlink(prefix, target_buffer[0..]) catch break;
-                    const target = target_buffer[0..n];
-                    const remainder = cur[i..];
-                    // Absolute target replaces from root; relative target resolves
-                    // against the link's parent directory (cur[0..comp_start]).
-                    const base = if (target.len > 0 and target[0] == '/') "" else cur[0..comp_start];
-                    const joined = try vfmt.allocPrint(allocator, "{s}{s}{s}", .{ base, target, remainder });
-                    defer allocator.free(joined);
-                    const normalized = try std.fs.path.resolve(allocator, &.{joined});
-                    allocator.free(cur);
-                    cur = normalized;
-                    changed = true;
-                    continue :outer;
+                if (!(@call(.never_inline, prefix_is_symlink, .{ self, prefix }) catch break)) {
+                    comp_start = i + 1;
+                    continue;
                 }
-                comp_start = i + 1;
+
+                depth += 1;
+                if (depth > max_symlink_depth) return kernel.errno.ErrnoSet.TooManySymbolicLinks;
+                cur_next = (try @call(.never_inline, follow_symlink, .{ self, prefix, cur[i..], cur[0..comp_start] })) orelse break;
+                allocator.free(cur);
+                cur = cur_next;
+                changed = true;
+                continue :outer;
             }
             break;
         }
@@ -272,7 +358,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_create(path, mode) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_create(resolved, mode);
             }
             return err;
@@ -283,7 +369,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_mkdir(path, mode) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_mkdir(resolved, mode);
             }
             return err;
@@ -294,7 +380,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_unlink(path) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_unlink(resolved);
             }
             return err;
@@ -307,14 +393,29 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
-        return self.raw_get(path) catch |err| {
-            const maybe_resolved = self.resolve_symlinks(path, true) catch return err;
-            if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
-                return self.raw_get(resolved);
-            }
-            return err;
-        };
+        var through: ThroughBinds = .{};
+        defer if (through.owned) |owned| self.paths_allocator.free(owned);
+        const t_mount = if (perf.enabled) perf.read_cycles() else 0;
+        const maybe_node = try @call(.never_inline, find_through_binds, .{ self, path, &through });
+        const t_fsget = if (perf.enabled) perf.read_cycles() else 0;
+        if (perf.enabled) perf.vfs_mount(t_fsget -% t_mount);
+        // On the source, so links under a bind resolve where they live.
+        var node = get_on(maybe_node, t_fsget) catch |err|
+            try @call(.never_inline, get_through_symlinks, .{ self, through.owned orelse path, err });
+        // What the bind's own mount says: it is not the romfs image, whatever the
+        // source is on.
+        if (through.owned != null) node.immutable_backing = false;
+        return node;
+    }
+
+    /// Out of line: its frame would otherwise sit under every lookup that works.
+    fn get_through_symlinks(self: *Self, path: []const u8, err: anyerror) anyerror!kernel.fs.Node {
+        const maybe_resolved = self.resolve_symlinks(path, true) catch return err;
+        if (maybe_resolved) |resolved| {
+            defer self.paths_allocator.free(resolved);
+            return self.raw_get(resolved);
+        }
+        return err;
     }
 
     pub fn delete(self: *Self) void {
@@ -331,7 +432,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_stat(path, data, follow_symlinks) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_stat(resolved, data, follow_symlinks);
             }
             return err;
@@ -345,7 +446,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_utimens(path, times, follow_symlinks) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_utimens(resolved, times, follow_symlinks);
             }
             return err;
@@ -356,7 +457,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_readlink(path, buffer) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, false) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_readlink(resolved, buffer);
             }
             return err;
@@ -367,7 +468,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_symlink(target, linkpath) catch |err| {
             const maybe_resolved = self.resolve_symlinks(linkpath, false) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_symlink(target, resolved);
             }
             return err;
@@ -386,6 +487,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     pub fn init(allocator: std.mem.Allocator) VirtualFileSystem {
         return VirtualFileSystem.init(.{
             .mount_points = MountPoints.init(allocator),
+            .paths_allocator = kernel.memory.heap.slow.fast_or(allocator),
         });
     }
 
@@ -409,7 +511,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_chmod(path, mode, follow_symlinks) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_chmod(resolved, mode, follow_symlinks);
             }
             return err;
@@ -421,7 +523,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_chown(path, uid, gid, follow_symlinks) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, follow_symlinks) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_chown(resolved, uid, gid, follow_symlinks);
             }
             return err;
@@ -483,7 +585,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return self.raw_access(path, mode, flags) catch |err| {
             const maybe_resolved = self.resolve_symlinks(path, true) catch return err;
             if (maybe_resolved) |resolved| {
-                defer self.mount_points.allocator.free(resolved);
+                defer self.paths_allocator.free(resolved);
                 return self.raw_access(resolved, mode, flags);
             }
             return err;
@@ -894,6 +996,156 @@ test "VirtualFileSystem.StillProbesForSymlinksWhereTheyArePossible" {
         .willReturn(kernel.errno.ErrnoSet.NoEntry);
 
     try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.get("/missing/file.txt"));
+}
+
+const SymlinkFixture = struct {
+    fn stat(_: ?*const anyopaque, args: @Tuple(&.{ []const u8, *c.struct_stat, bool })) anyerror!anyerror!void {
+        if (std.mem.endsWith(u8, args[0], "missing")) return @as(anyerror!void, kernel.errno.ErrnoSet.NoEntry);
+        args[1].* = std.mem.zeroes(c.struct_stat);
+        args[1].st_mode = if (std.mem.endsWith(u8, args[0], "link")) c.S_IFLNK else c.S_IFDIR;
+    }
+    fn readlink(_: ?*const anyopaque, args: @Tuple(&.{ []const u8, []u8 })) anyerror!anyerror!usize {
+        const target = "real";
+        @memcpy(args[1][0..target.len], target);
+        return target.len;
+    }
+};
+
+test "VirtualFileSystem.MissUnderARealDirectoryStatsOnlyParentAndName" {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    var fs_mock = try FileSystemMock.create(std.testing.allocator);
+    vfs_init(std.testing.allocator);
+    defer vfs_deinit();
+    const sut = get_vfs();
+    try sut.mount_filesystem("/", fs_mock.get_interface());
+
+    _ = fs_mock.expectCall("get").withArgs(.{"a/b/c/missing"}).willReturn(kernel.errno.ErrnoSet.NoEntry);
+    _ = fs_mock.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(true);
+    // Include search probes deep paths in bulk. Walking each prefix from the
+    // root would stat "a" and "a/b" too; the mock panics on either.
+    _ = fs_mock.expectCall("stat").withArgs(.{ "a/b/c", interface.mock.any{}, false }).invoke(&SymlinkFixture.stat, null);
+    _ = fs_mock.expectCall("stat").withArgs(.{ "a/b/c/missing", interface.mock.any{}, false }).invoke(&SymlinkFixture.stat, null);
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.get("/a/b/c/missing"));
+}
+
+test "VirtualFileSystem.LinkAsFinalComponentStillResolves" {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    var fs_mock = try FileSystemMock.create(std.testing.allocator);
+    vfs_init(std.testing.allocator);
+    defer vfs_deinit();
+    const sut = get_vfs();
+    try sut.mount_filesystem("/", fs_mock.get_interface());
+    var file_mock = try FileMock.create(std.testing.allocator);
+
+    _ = fs_mock.expectCall("get").withArgs(.{"a/link"}).willReturn(kernel.errno.ErrnoSet.NoEntry);
+    _ = fs_mock.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(true);
+    _ = fs_mock.expectCall("stat").withArgs(.{ interface.mock.any{}, interface.mock.any{}, false }).times(interface.mock.any{}).invoke(&SymlinkFixture.stat, null);
+    _ = fs_mock.expectCall("readlink").withArgs(.{ "a/link", interface.mock.any{} }).invoke(&SymlinkFixture.readlink, null);
+    _ = fs_mock.expectCall("get").withArgs(.{"a/real"}).willReturn(kernel.fs.Node.create_file(file_mock.get_interface()));
+
+    var node = try sut.get("/a/link");
+    defer node.delete();
+}
+
+test "VirtualFileSystem.LinkInTheMiddleOfAPathStillResolves" {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    var fs_mock = try FileSystemMock.create(std.testing.allocator);
+    vfs_init(std.testing.allocator);
+    defer vfs_deinit();
+    const sut = get_vfs();
+    try sut.mount_filesystem("/", fs_mock.get_interface());
+    var file_mock = try FileMock.create(std.testing.allocator);
+
+    _ = fs_mock.expectCall("get").withArgs(.{"a/link/file"}).willReturn(kernel.errno.ErrnoSet.NoEntry);
+    _ = fs_mock.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(true);
+    _ = fs_mock.expectCall("stat").withArgs(.{ interface.mock.any{}, interface.mock.any{}, false }).times(interface.mock.any{}).invoke(&SymlinkFixture.stat, null);
+    _ = fs_mock.expectCall("readlink").withArgs(.{ "a/link", interface.mock.any{} }).invoke(&SymlinkFixture.readlink, null);
+    _ = fs_mock.expectCall("get").withArgs(.{"a/real/file"}).willReturn(kernel.fs.Node.create_file(file_mock.get_interface()));
+
+    var node = try sut.get("/a/link/file");
+    defer node.delete();
+}
+
+test "VirtualFileSystem.MissThroughABindMountRunsOneSymlinkPassOnTheSource" {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    const Callbacks = struct {
+        fn stat(_: ?*const anyopaque, args: @Tuple(&.{ []const u8, *c.struct_stat, bool })) anyerror!anyerror!void {
+            // One pass, over the source's components and never the bind's.
+            try std.testing.expect(std.mem.startsWith(u8, args[0], "src"));
+            return @as(anyerror!void, kernel.errno.ErrnoSet.NoEntry);
+        }
+    };
+    var root = try FileSystemMock.create(std.testing.allocator);
+    var bound = try FileSystemMock.create(std.testing.allocator);
+    vfs_init(std.testing.allocator);
+    defer vfs_deinit();
+    const sut = get_vfs();
+    try sut.mount_filesystem_with_info("/", root.get_interface(), kernel.fs.MountInfo.init("root", "romfs", "rw"));
+    var mount_point_mock = try FileMock.create(std.testing.allocator);
+    _ = root.expectCall("get").withArgs(.{"bound"}).willReturn(kernel.fs.Node.create_file(mount_point_mock.get_interface()));
+    _ = bound.expectCall("mount").willReturn(@as(u32, 0));
+    try sut.mount_filesystem_with_info("/bound", bound.get_interface(), kernel.fs.MountInfo.init("/src", "bind", "rw"));
+
+    // The bind itself is not called: the mock would panic.
+    _ = root.expectCall("get").withArgs(.{"src/a/missing"}).willReturn(kernel.errno.ErrnoSet.NoEntry);
+    _ = root.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(true);
+    _ = bound.expectCall("supports_symlinks").times(interface.mock.any{}).willReturn(true);
+    _ = root.expectCall("stat").withArgs(.{ interface.mock.any{}, interface.mock.any{}, interface.mock.any{} }).times(interface.mock.any{}).invoke(&Callbacks.stat, null);
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.get("/bound/a/missing"));
+}
+
+test "VirtualFileSystem.GetGoesThroughABindWithoutCallingIt" {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    var root = try FileSystemMock.create(std.testing.allocator);
+    var bound = try FileSystemMock.create(std.testing.allocator);
+    vfs_init(std.testing.allocator);
+    defer vfs_deinit();
+    const sut = get_vfs();
+    try sut.mount_filesystem_with_info("/", root.get_interface(), kernel.fs.MountInfo.init("root", "romfs", "ro"));
+    var mount_point_mock = try FileMock.create(std.testing.allocator);
+    _ = root.expectCall("get").withArgs(.{"bound"}).willReturn(kernel.fs.Node.create_file(mount_point_mock.get_interface()));
+    _ = bound.expectCall("mount").willReturn(@as(u32, 0));
+    // A trailing slash on the source, and the bind's root as well as a path under it.
+    try sut.mount_filesystem_with_info("/bound", bound.get_interface(), kernel.fs.MountInfo.init("/src/", "bind", "rw"));
+
+    var under = try FileMock.create(std.testing.allocator);
+    _ = root.expectCall("get").withArgs(.{"src/a/file"}).willReturn(kernel.fs.Node.create_file(under.get_interface()));
+    var node = try sut.get("/bound/a/file");
+    defer node.delete();
+    // What the bind's own mount says, as before: it is not the romfs image.
+    try std.testing.expect(!node.immutable_backing);
+
+    var top = try FileMock.create(std.testing.allocator);
+    _ = root.expectCall("get").withArgs(.{"src"}).willReturn(kernel.fs.Node.create_file(top.get_interface()));
+    var top_node = try sut.get("/bound");
+    defer top_node.delete();
+}
+
+test "VirtualFileSystem.ASourceTooLongForTheMountInfoStillGoesThroughTheBind" {
+    const FileSystemMock = @import("tests/filesystem_mock.zig").FileSystemMock;
+    const FileMock = @import("tests/file_mock.zig").FileMock;
+    var root = try FileSystemMock.create(std.testing.allocator);
+    var bound = try FileSystemMock.create(std.testing.allocator);
+    vfs_init(std.testing.allocator);
+    defer vfs_deinit();
+    const sut = get_vfs();
+    try sut.mount_filesystem_with_info("/", root.get_interface(), kernel.fs.MountInfo.init("root", "romfs", "rw"));
+    var mount_point_mock = try FileMock.create(std.testing.allocator);
+    _ = root.expectCall("get").withArgs(.{"bound"}).willReturn(kernel.fs.Node.create_file(mount_point_mock.get_interface()));
+    _ = bound.expectCall("mount").willReturn(@as(u32, 0));
+    const long = "/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    try sut.mount_filesystem_with_info("/bound", bound.get_interface(), kernel.fs.MountInfo.init(long, "bind", "rw"));
+
+    var file = try FileMock.create(std.testing.allocator);
+    _ = bound.expectCall("get").withArgs(.{"a"}).willReturn(kernel.fs.Node.create_file(file.get_interface()));
+    var node = try sut.get("/bound/a");
+    defer node.delete();
 }
 
 test "VirtualFileSystem.GetShouldFailIfNoFilesystemMounted" {

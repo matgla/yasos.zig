@@ -2168,9 +2168,10 @@ TCL
     flash_log="$artifact_state_dir/flash-attempt.log"
     link_failures=0
     for flash_attempt in 1 2 3 4; do
+        # Both cores: OpenOCD programs from a work area at 0x20010000, the kernel's process
+        # pool on the PSRAM boards, and a core it does not halt keeps writing there.
         openocd_cmd=(
             openocd
-            -c "set USE_CORE 0"
             -f "$interface_cfg"
             -f "$target_cfg"
             -c "adapter speed $flash_speed"

@@ -33,7 +33,10 @@ const kernel = @import("kernel");
 
 /// The single FatFs lock. One instance for the whole system, matching the one
 /// `global_fs` it protects.
-pub var lock: kernel.sync.RankedMutex(.fs) = .{};
+/// A create on the board's card goes about 1.4 KB below this lock, more than QEMU
+/// shows: a FAT write reaches the SD driver at once. See
+/// scripts/stack_overflow_sweep.py and /proc/faultstat.
+pub var lock: kernel.sync.RankedMutex(.fs) = .{ .stack_needed = 1536 };
 
 /// `lock.lock()` paired with a `defer`, as the entry points use it.
 pub inline fn acquire() void {

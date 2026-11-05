@@ -11,7 +11,7 @@ transaction.  The board model adds that back:
     costs (core at 532 MHz, the XIP cache in front of flash and PSRAM, the
     uncached page clear) and keeps the guest's clock on modeled board time --
     so tcc's own -bench and PASS_TIME tables read board time, unchanged;
-  * an image is an an524 tree whose memory map is the board's (336 KB of
+  * an image is an an524 tree whose memory map is the board's (432 KB of
     process SRAM, 8 MB of PSRAM), so the kernel's tiering spills tcc's heap
     exactly where the board does;
   * the costs are fitted to board measurements (`calibrate`); against the
@@ -68,7 +68,7 @@ AN524_ARGS = ("-global sse-200.CPU0_FPU=on -global sse-200.CPU1_FPU=on "
 # romfs (programs execute in place from it, as from the board's flash).
 REGIONS = "flash=0x10000000:0x10080000,flash=0x60000000:0x64000000"
 # The board's memory, applied to an image's an524 linker script.
-BOARD_LENGTHS = {"process_ram": "336K", "psram": "8M"}
+BOARD_LENGTHS = {"process_ram": os.environ.get("BOARD_MODEL_PROCESS_RAM", "432K"), "psram": "8M"}
 
 # Image trees are copies of a checkout without these.
 COPY_EXCLUDE = {".git", ".cache", ".zig-cache", "zig-out", ".claude", ".qemu_smoke_venv", "yasos_venv"}
@@ -194,6 +194,11 @@ def board_shape(linker_script):
                        rf"\g<1>{length} /* board model */", s, flags=re.M)
         if n != 1:
             sys.exit(f"could not resize {region} in {linker_script}")
+    # .time_critical runs from RAM on the board; plain QEMU keeps it in flash.
+    code = "    *(.time_critical*)\n    *(.time_critical)\n"
+    if s.count(code) != 1 or s.count("    *(vtable)\n") != 1:
+        sys.exit(f"could not move .time_critical in {linker_script}")
+    s = s.replace(code, "").replace("    *(vtable)\n", "    *(vtable)\n" + code)
     linker_script.write_text(s)
 
 

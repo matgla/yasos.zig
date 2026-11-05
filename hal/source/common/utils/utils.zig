@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 pub const RingBuffer = @import("ring_buffer.zig").RingBuffer;
+pub const MovableRingBuffer = @import("ring_buffer.zig").MovableRingBuffer;
 pub const SpinLock = @import("spinlock.zig").SpinLock;
 
 // Both files are pure `std` -- no board, no registers, no arch hooks -- so

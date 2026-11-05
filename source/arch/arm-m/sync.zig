@@ -13,6 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+const builtin = @import("builtin");
+
 const hal = @import("hal");
 
 pub inline fn data_synchronization_barrier() void {
@@ -48,6 +50,56 @@ pub inline fn memory_barrier_release() void {
 
 pub inline fn memory_barrier_acquire() void {
     asm volatile ("dmb" ::: .{ .memory = true });
+}
+
+const has_stack_limit = builtin.cpu.has(.arm, .has_v8m);
+
+/// Stack a masked section may need below the point it masks. A fault in such a
+/// section cannot be survived: it holds a spinlock over core kernel state, and
+/// the exception frame does not fit either, so there is nothing to resume.
+/// Syscalls run on the process stack, so the process is killed here instead,
+/// before the section starts. No sweep in user_fault_test or
+/// scripts/stack_overflow_sweep.py gets through this much and still faults.
+const masked_section_stack: usize = 320;
+
+/// Kill the process rather than let it start something it may overflow halfway
+/// through. The undefined instruction takes the ordinary fault path, which sees a
+/// thread holding at most sleeping mutexes.
+noinline fn stack_would_overflow() void {
+    if (in_handler_mode()) return;
+    // A nested section cannot be left any more, so it uses up the margin instead.
+    const primask = asm volatile ("mrs %[ret], PRIMASK"
+        : [ret] "=r" (-> usize),
+    );
+    if (primask != 0) return;
+    // Thread mode on MSP is boot, where PSPLIM describes nothing.
+    const control = asm volatile ("mrs %[ret], CONTROL"
+        : [ret] "=r" (-> usize),
+    );
+    if ((control & 2) == 0) return;
+    asm volatile ("udf #0");
+}
+
+/// Kill the calling process unless it has `bytes` of stack left. A no-op from
+/// handlers and on the boot stack.
+pub inline fn require_stack(bytes: usize) void {
+    if (comptime !has_stack_limit) return;
+    const sp = asm volatile ("mov %[ret], sp"
+        : [ret] "=r" (-> usize),
+    );
+    const limit = asm volatile ("mrs %[ret], psplim"
+        : [ret] "=r" (-> usize),
+    );
+    // Wraps to a huge value on MSP, whose stack lies elsewhere; the slow path
+    // sorts out the rest.
+    if (sp -% limit < bytes) stack_would_overflow();
+}
+
+/// For a section about to take a spinlock. The bare masked sections, such as
+/// `preempt_disable`, are a few instructions deep and run far too often to pay
+/// for this.
+pub inline fn require_stack_for_masked_section() void {
+    require_stack(masked_section_stack);
 }
 
 pub inline fn save_and_disable_interrupts() usize {

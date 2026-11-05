@@ -44,7 +44,10 @@ const CTRL_ENABLE: u32 = 1 << 0;
 /// (tools/board_model) when the guest runs under the RP2350 board model; the
 /// plugin writes it every few thousand instructions.  Zero without the plugin,
 /// and the hardware timer is used then.
-pub export var yasos_modeled_clock_ns: u64 = 0;
+// The board model's plugin writes this under its own lock, and a write means dropping
+// translated code on the page. Code on this page (.time_critical is next to .data)
+// deadlocks QEMU: the translating CPU holds the page and waits for the plugin's lock.
+pub export var yasos_modeled_clock_ns: u64 align(4096) = 0;
 
 pub const Time = struct {
     pub const SysTick = core.SysTick;

@@ -29,15 +29,19 @@ cd ../toybox
 scripts/genconfig.sh
 touch .config
 
-TOYBOX_CFLAGS="-I$1/usr/include${TOYBOX_EXTRA_CFLAGS:+ }$TOYBOX_EXTRA_CFLAGS"
+TOYBOX_CFLAGS="-I$1/usr/include -fvisibility=hidden${TOYBOX_EXTRA_CFLAGS:+ }$TOYBOX_EXTRA_CFLAGS"
 export LDOPTIMIZE="-Wl,--gc-sections -Wl,--as-needed"
 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-Wl,-oformat=elf32-littlearm -lm" make toybox
 mv -f ../toybox/toybox ../toybox/toybox.elf
-# Per-image stack profile: toybox applets (and the shell) run in 16 KiB rather
-# than the 32 KiB default that tcc needs — sized via the YAFF stack_size hint
-# (-stack-size). Validated against the smoke suite; raise if deeper shell
-# recursion / complex scripts overflow (stack-overflow detection will flag it).
-CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-lm -stack-size=16384" make toybox
+# Per-image stack profile: toybox applets (and the shell) run in 8 KiB rather
+# than the 32 KiB default that tcc needs -- sized via the YAFF stack_size hint
+# (-stack-size). Syscalls run on this stack, and they are most of its depth: `cd`
+# into the ext4 bind mount at /root reaches 4.3 KiB and a deeper path 4.5 KiB on
+# QEMU, before the board's SD driver and hardware exception frames. 4 KiB passed the
+# smoke suite, which has no SD card, and overflowed on the first `cd /root`.
+# rp2350_timing's watch= measures it; test with qemu_mount.py --sdcard.
+# -slow-memory: a shell mostly waits for what it started, so that gets the SRAM.
+CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-lm -stack-size=8192 -slow-memory" make toybox
 PREFIX=$1 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t make install
 if [ -f "$1/bin/cal" ]; then
   mv "$1/bin/cal" "$(dirname "$1")/bin/cal"

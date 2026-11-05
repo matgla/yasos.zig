@@ -69,10 +69,9 @@ pub const max_volumes: u8 = 8;
 /// it at `delete`.
 var volume_in_use: [max_volumes]bool = @splat(false);
 
-/// mkfs scratch. Shared, and safe to share because `fs_lock` serialises every
-/// FatFs entry point -- unlike the volume state above, only one format can be
-/// running at a time.
-var workspace_buffer: [4096]u8 = undefined;
+/// What mkfs needs as scratch. Only while it runs: it is rare, and a static buffer
+/// would be 4 KB of SRAM for good.
+const workspace_bytes = 4096;
 
 fn claim_volume() ?u8 {
     for (&volume_in_use, 0..) |*taken, index| {
@@ -236,6 +235,13 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return "fatfs";
     }
 
+    /// Out of line for the stack: a FileInfo holds a long name, and copies of it in
+    /// `get` were on the stack for every open, 1.9 KB of frame.
+    fn stat_kind(filepath: [:0]const u8) ?fatfs.Kind {
+        const info = fatfs.stat(filepath) catch return null;
+        return info.kind;
+    }
+
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         fs_lock.acquire();
         defer fs_lock.release();
@@ -254,16 +260,15 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         // File.open resolves the path once and hands back the handle the node
         // needs, so the common case is now a single walk. A directory costs
         // that failed probe plus one stat, which is what it cost before.
-        if (FatFsFile.InstanceType.create_node(self._allocator, filepath)) |node| {
+        if (@call(.never_inline, FatFsFile.InstanceType.create_node, .{ self._allocator, filepath })) |node| {
             return node;
         } else |_| {}
 
         // Not a file: stat says whether it is a directory or nothing at all.
         // The check matters -- FatFsDirectory.create tolerates a failed stat
         // and would happily produce a node for a path that does not exist.
-        const maybe_info: ?fatfs.FileInfo = fatfs.stat(filepath) catch null;
-        if (maybe_info) |info| {
-            if (info.kind != .Directory) {
+        if (@call(.never_inline, stat_kind, .{filepath})) |kind| {
+            if (kind != .Directory) {
                 return kernel.errno.ErrnoSet.NoEntry;
             }
             return try FatFsDirectory.InstanceType.create_node(self._allocator, filepath);
@@ -277,6 +282,8 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn format(self: *Self) anyerror!void {
+        const workspace = try self._allocator.alloc(u8, workspace_bytes);
+        defer self._allocator.free(workspace);
         fs_lock.acquire();
         defer fs_lock.release();
         fatfs.disks[self._volume] = &self._disk_wrapper.interface;
@@ -287,7 +294,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             // clusters, which a small device (the 1 MB QEMU fatdisk window)
             // can never reach, so hardcoding it aborted mkfs there.
             .{ .filesystem = .any, .sector_align = 1, .use_partitions = false },
-            &workspace_buffer,
+            workspace,
         ) catch |err| {
             log.err("Failed to format FAT filesystem: {s}", .{@errorName(err)});
             return err;
@@ -584,12 +591,15 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             _ = self;
             shared.users += 1;
             if (!configured or shared.lines.len != 0) return;
-            const cache = allocator.alloc(u8, line_count * line_bytes) catch {
+            // SRAM: lines are copied out of on every read, and the driver can DMA into
+            // them directly only there. A board that wants this cache pays heap for it.
+            const fast = kernel.memory.heap.slow.fast_or(allocator);
+            const cache = fast.alloc(u8, line_count * line_bytes) catch {
                 log.warn("no room for the {d} KiB FAT cache; reading through", .{(line_count * line_bytes) / 1024});
                 return;
             };
-            const lines = allocator.alloc(Line, line_count) catch {
-                allocator.free(cache);
+            const lines = fast.alloc(Line, line_count) catch {
+                fast.free(cache);
                 return;
             };
             @memset(lines, .{});
@@ -597,7 +607,7 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             shared.lines = lines;
             // Write combining is independent of the read cache; without the
             // buffer every write simply goes through as before.
-            shared.combine = allocator.alloc(u8, combine_bytes) catch &.{};
+            shared.combine = fast.alloc(u8, combine_bytes) catch &.{};
         }
 
         /// This volume is going away: put its buffered run on the medium and
@@ -789,6 +799,11 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
             // Marked empty across the read so a failure cannot leave a line
             // that claims to hold sectors it never received.
             shared.lines[victim].sectors = 0;
+            // `read` only checked the sectors it was asked for, and the line
+            // spans more: a queued neighbour would be cached stale.
+            if (self.overlaps_combined(base, sectors)) {
+                try flush_combined();
+            }
             try self.read_through(self.line_data(victim).ptr, base, sectors);
             shared.lines[victim] = .{ .base = base, .sectors = sectors, .used = tick(), .owner = self.id };
             return victim;
@@ -885,6 +900,53 @@ pub fn create_fs_for_test() !kernel.fs.IFileSystem {
     var device_file = try (try FatFsDeviceFileStub.InstanceType.create(std.testing.allocator, null)).interface.new(std.testing.allocator);
     defer device_file.interface.delete();
     return try (try FatFs.InstanceType.init(std.testing.allocator, device_file)).interface.new(std.testing.allocator);
+}
+
+test "FatFs.LineFillSeesASectorStillInTheCombiningBuffer" {
+    // FAT sectors 9 and 10 share a cache line. A sector still queued for write
+    // used to be read back stale once a neighbour's miss filled the line: FatFs
+    // then saw an allocated cluster as free and failed the file with FR_INT_ERR.
+    const DeviceStub = @import("tests/device_stub.zig");
+    const Wrapper = FatFs.InstanceType.DiskWrapper;
+    if (!Wrapper.configured) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var device = try (try DeviceStub.FatFsDeviceFileStub.InstanceType.create(allocator, null)).interface.new(allocator);
+    defer device.interface.delete();
+    var wrapper = Wrapper{ .device = try device.clone(), .id = 3 };
+    wrapper.invalidate();
+    wrapper.attach_cache(allocator);
+    defer wrapper.device.interface.delete();
+    defer wrapper.release_cache(allocator);
+    const disk = &wrapper.interface;
+
+    const line_start: fatfs.LBA = 4 * Wrapper.line_sectors;
+    const queued = line_start + 1;
+    const neighbour = line_start + 2;
+    var written: [Wrapper.sector_size]u8 = undefined;
+    var seen: [Wrapper.sector_size]u8 = undefined;
+
+    // Queued, not on the device: nothing has gone out yet.
+    @memset(&written, 0xa5);
+    DeviceStub.io.reset();
+    try Wrapper.write(disk, &written, queued, 1);
+    try std.testing.expectEqual(0, DeviceStub.io.writes);
+
+    // A read elsewhere must leave the run queued: combining stays worthwhile.
+    const elsewhere = line_start + 8 * Wrapper.line_sectors;
+    try Wrapper.read(disk, &seen, elsewhere, 1);
+    try std.testing.expectEqual(0, DeviceStub.io.writes);
+
+    // The neighbour's miss fills the line that spans the queued sector.
+    try Wrapper.read(disk, &seen, neighbour, 1);
+    try Wrapper.read(disk, &seen, queued, 1);
+    try std.testing.expectEqualSlices(u8, &written, &seen);
+
+    // Later writes to the same line still refresh it.
+    @memset(&written, 0x3c);
+    try Wrapper.write(disk, &written, queued, 1);
+    try Wrapper.read(disk, &seen, queued, 1);
+    try std.testing.expectEqualSlices(u8, &written, &seen);
 }
 
 test "FatFs.TwoVolumesCoexistWithoutAliasingEachOther" {

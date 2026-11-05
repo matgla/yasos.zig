@@ -1,9 +1,9 @@
 /*
  * linker_script_pico2.ld -- the RP2350 memory map for a board with no PSRAM
- * (Raspberry Pi Pico 2).  linker_script.ld with kernel_ram 128K -> 64K and the
- * 64K given to process_ram (336K -> 400K): without PSRAM a process has only
- * SRAM, and the kernel's heap idles at ~12 KB on a board with no SD card.
- * The region comments below are the Plus 2 script's.
+ * (Raspberry Pi Pico 2).  The regions match linker_script.ld, but this is another
+ * trade: the PSRAM boards fit 64K with hot functions in it and their kernel objects
+ * in PSRAM, here the kernel objects are in it, and the kernel's heap idles at ~12 KB
+ * on a board with no SD card. The region comments below are the Plus 2 script's.
  */
 /*
 linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/Device/ARM/ARMCM0plus/Source/GCC/gcc_arm.ld

@@ -46,7 +46,10 @@ const UartStatFile = @import("uartstat_file.zig").UartStatFile;
 const XipStatFile = @import("xipstat_file.zig").XipStatFile;
 const CpusFile = @import("cpus_file.zig").CpusFile;
 const StorageFile = @import("mounts_file.zig").StorageFile;
+const FaultStatFile = @import("faultstat_file.zig").FaultStatFile;
 const MemPeakFile = @import("mempeak_file.zig").MemPeakFile;
+const PoolMapFile = @import("poolmap_file.zig").PoolMapFile;
+const stackuse_file = @import("stackuse_file.zig");
 const VregFile = @import("vreg_file.zig").VregFile;
 const TempFile = @import("temp_file.zig").TempFile;
 
@@ -107,8 +110,16 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try root_directory.data().append(xipstat);
         const cpus = try CpusFile.InstanceType.create_node(allocator);
         try root_directory.data().append(cpus);
+        const faultstat = try FaultStatFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(faultstat);
         const mempeak = try MemPeakFile.InstanceType.create_node(allocator);
         try root_directory.data().append(mempeak);
+        const poolmap = try PoolMapFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(poolmap);
+        if (stackuse_file.enabled) {
+            const stackuse = try stackuse_file.StackUseFile.InstanceType.create_node(allocator);
+            try root_directory.data().append(stackuse);
+        }
         const vreg = try VregFile.InstanceType.create_node(allocator);
         try root_directory.data().append(vreg);
         const temp = try TempFile.InstanceType.create_node(allocator);
@@ -143,12 +154,16 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         }
     }
 
+    fn resolve_for_lookup(self: *Self, path: []const u8) ![]u8 {
+        return std.fs.path.resolve(self._allocator, &.{path});
+    }
+
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
             return kernel.fs.Node.create_directory(self._root.share());
         }
 
-        const resolved_path = try std.fs.path.resolve(self._allocator, &.{path});
+        const resolved_path = try @call(.never_inline, resolve_for_lookup, .{ self, path });
         defer self._allocator.free(resolved_path);
         var it = std.fs.path.componentIterator(resolved_path);
         var current_directory = self._root;
@@ -234,6 +249,15 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return error.NotSupported;
     }
 
+    /// Out of line for the stack: `stat` otherwise holds a whole path through the lookup
+    /// below, which renders a /proc file.
+    fn stat_exe_link(self: *Self, path: []const u8, data: *c.struct_stat) anyerror!void {
+        var scratch: [config.fs.max_path_length]u8 = undefined;
+        const len = try self.readlink(path, scratch[0..]);
+        data.st_mode = c.S_IFLNK | 0o777;
+        data.st_size = @intCast(len);
+    }
+
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         _ = follow_links;
         initialize_stat_identity(data, path);
@@ -241,11 +265,7 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         // alone -- so describe it here rather than letting the lookup below
         // fail on a path that readlink(2) happily resolves.
         if (std.mem.endsWith(u8, path, "/exe")) {
-            var scratch: [config.fs.max_path_length]u8 = undefined;
-            const len = try self.readlink(path, scratch[0..]);
-            data.st_mode = c.S_IFLNK | 0o777;
-            data.st_size = @intCast(len);
-            return;
+            return @call(.never_inline, stat_exe_link, .{ self, path, data });
         }
         var node = try self.get(path);
         defer node.delete();

@@ -52,7 +52,11 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         // Those bytes are lost upstream of the ring, in the 32-byte PL011 FIFO,
         // whenever the RX interrupt is masked for longer than the FIFO can
         // cover (see on_uart_rx_irq).
-        var rx_buffer: common.utils.RingBuffer(u8, 4096) = common.utils.RingBuffer(u8, 4096).init();
+        //
+        // 4 KB of it from `set_rx_storage`, in PSRAM on the boards that have it.
+        // Until then a little in SRAM, as the interrupt is live before that memory.
+        var rx_boot_storage: [256]u8 = undefined;
+        var rx_buffer: common.utils.MovableRingBuffer(u8) = common.utils.MovableRingBuffer(u8).init(&rx_boot_storage);
         var is_initialized: bool = false;
 
         // Loss accounting, split by where the byte died, because the two have
@@ -318,6 +322,14 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             const flags = rx_lock_acquire();
             defer rx_lock_release(flags);
             return rx_buffer.read(buffer);
+        }
+
+        /// Where the ring lives from now on. Boot calls it once, with the receive
+        /// interrupt running.
+        pub fn set_rx_storage(_: Self, memory: []u8) void {
+            const flags = rx_lock_acquire();
+            defer rx_lock_release(flags);
+            rx_buffer.move_to(memory);
         }
 
         pub fn flush(_: Self) void {

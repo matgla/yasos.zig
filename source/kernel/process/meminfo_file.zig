@@ -94,6 +94,10 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
             written_length += buf.len;
             buf = vfmt.print(buffer[written_length..], "MemKernelLimit:  {s}\n", .{format_size(kernel.memory.heap.malloc.break_limit(), &sizebuf)});
             written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "MemKernelSlow:   {s}\n", .{format_size(kernel.memory.heap.slow.used_bytes(), &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "MemKernelSlowPk: {s}\n", .{format_size(kernel.memory.heap.slow.peak_bytes(), &sizebuf)});
+            written_length += buf.len;
             // Relocated-image templates (yasld template.zig): counted in
             // MemProcessUsed, but given back whenever the pool runs short.
             const cache = @import("yasld").template.stats;

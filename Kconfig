@@ -110,7 +110,7 @@ endchoice
 
 config CONFIG_PROCESS_MAX_PID_VALUE
   int "Max PID value"
-  default 2048
+  default 256
   help
     Maximum PID value, after reaching this value PID will wrap around to 1
 

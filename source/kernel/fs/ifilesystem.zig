@@ -129,7 +129,9 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "name", .{}, []const u8);
     }
 
-    pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
+    // Inline: otherwise a frame per call whose only job is copying the node from a
+    // buffer of its own into the caller's, and lookups nest these.
+    pub inline fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         return interface.VirtualCall(self, "get", .{path}, anyerror!kernel.fs.Node);
     }
 
