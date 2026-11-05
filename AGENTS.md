@@ -80,8 +80,9 @@ once — prefer that when a bug class repeats.
   compile-only check; `--stages 2` to skip the fixpoint.
 - **Storage layout** ([`docs/storage.md`](docs/storage.md)): the kernel mounts
   from `/etc/fstab` (in-tree `etc/fstab`) -- SD partitions by `LABEL=`: FAT
-  `/boot` (yasboot reads it), ext4 `/var /opt /home` (lwext4 fork in
-  `libs/lwext4`, driver `source/fs/ext4/`), `/root` bound to `/home/root`, `/tmp` spilling to
+  `/boot` (yasboot reads it), ext4 `/var /home` (lwext4 fork in
+  `libs/lwext4`, driver `source/fs/ext4/`), swap on a type-82 partition
+  (processes waiting in `waitpid` are written out when the pool is full), `/root` bound to `/home/root`, `/tmp` spilling to
   `/var/tmp`, kernel log in `/var/log`. Partitions are `/dev/mmc0p1..4`
   (1-based). `cardreformat` (romfs `/usr/bin`, in-tree `usr/bin/`) lays a card
   out with `fdisk` + `mkfs.fat`/`mkfs.ext4` (host builds for a PC:

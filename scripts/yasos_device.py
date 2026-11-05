@@ -85,8 +85,8 @@ FDISK_DIR = REPO_ROOT / "apps/fdisk"
 MKFS_DIR = REPO_ROOT / "apps/mkfs"
 CARDREFORMAT = REPO_ROOT / "usr/bin/cardreformat"
 # The card layout shrunk to QEMU's 16 MiB fatdisk window: fdisk "Last sector"
-# answers for /boot, /var and /opt; /home takes the rest.
-QEMU_SDCARD_SIZES = {"BOOT_SIZE": "+2M", "VAR_SIZE": "+4M", "OPT_SIZE": "+2M"}
+# answers for /boot, /var and swap; /home takes the rest.
+QEMU_SDCARD_SIZES = {"BOOT_SIZE": "+2M", "VAR_SIZE": "+4M", "SWAP_SIZE": "+2M"}
 
 
 def sdcard_image(image: Path, sizes=QEMU_SDCARD_SIZES) -> Path:

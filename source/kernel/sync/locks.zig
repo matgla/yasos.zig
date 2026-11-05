@@ -39,6 +39,9 @@ pub const Rank = enum(u8) {
     /// Transitional big kernel lock, taken at every kernel entry. Peeled away
     /// one subsystem at a time, then deleted.
     bkl = 5,
+    /// Swap space (memory/swap.zig): one transfer between the process pool and
+    /// the swap file or partition. Outside everything the file's I/O takes.
+    swap = 6,
     /// The kernel's own files on a mount -- the `file_log` file. Held across
     /// that file's whole open and I/O, path lookup included, so outside
     /// `mount` and `block`; `umount` takes it to close the file.
@@ -80,6 +83,9 @@ pub const Rank = enum(u8) {
     loader_cache = 78,
     /// `ProcessMemoryPool`.
     pagepool = 80,
+    /// Swap space's slot bitmap: given back from under `pagepool` when a
+    /// swapped-out process is reaped.
+    swap_slots = 82,
     /// The kernel's slow heap: below `kheap`, which it spills to outside the lock.
     kslow = 85,
     /// malloc's free list + `malloc.zig` accounting + `_sbrk`.

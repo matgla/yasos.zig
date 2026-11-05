@@ -105,6 +105,15 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
             written_length += buf.len;
             buf = vfmt.print(buffer[written_length..], "LoaderCacheHits: {d} hit {d} pre {d} miss {d} evicted\n", .{ cache.hits, cache.precache_hits, cache.misses, cache.evicted });
             written_length += buf.len;
+            // Swap space (memory/swap.zig): its size, what is out there now,
+            // and how many runs went out and came back since boot.
+            const swap = kernel.memory.swap.stats();
+            buf = vfmt.print(buffer[written_length..], "SwapTotal:       {s}\n", .{format_size(swap.total, &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "SwapUsed:        {s}\n", .{format_size(swap.used, &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "SwapRuns:        {d} out {d} in\n", .{ swap.outs, swap.ins });
+            written_length += buf.len;
             buf = vfmt.print(buffer[written_length..], "LoaderVerified:  {d} checked {d} failed\n", .{ cache.verified, cache.verification_failures });
             written_length += buf.len;
         }

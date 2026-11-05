@@ -260,6 +260,14 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _exited_children: std.DoublyLinkedList = .{},
         _stack_shared_with_parent: bool,
         _vfork_context: ?VForkContext = null,
+        /// Waiting in waitpid for a child, so none of its memory but its stack
+        /// is touched until that ends: a process the pool may swap out
+        /// (process_manager.zig, `swap_out_waiting`).
+        swap_eligible: bool = false,
+        /// Its memory, but the stack, is out on swap; waitpid brings it back
+        /// before it returns.  Set and cleared under `proctable_lock` and the
+        /// swap mutex.
+        swapped: bool = false,
         _initialized: bool = false,
         /// Sleeping-mutex ranks this process holds, parked here while it is not
         /// running. lockdep's held-set is per-core, which is right for the

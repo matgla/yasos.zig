@@ -3,22 +3,30 @@
 # file is read; `mount -a` runs it again from the shell.
 #
 # The SD card is laid out by /usr/bin/cardreformat (fdisk, then mkfs.fat and
-# mkfs.ext4): FAT /boot (the bootloader reads it), ext4 /var, /opt and /home,
-# found by label, so these lines fit any card -- and a partitioned image in
-# QEMU's fatdisk window. No card (QEMU, a board without
-# one): /var and /home fall back to RAM, /boot and /opt stay empty.
+# mkfs.ext4): FAT /boot (the bootloader reads it), ext4 /var and /home, found
+# by label, and a swap partition found by its type, so these lines fit any
+# card -- and a partitioned image in QEMU's fatdisk window. No card (QEMU, a
+# board without one): /var and /home fall back to RAM, /boot stays empty, and
+# there is no swap.
 #
 # Options beyond ro/rw/noauto/nofail:
 #   x-fallback=ramfs  mount an empty RamFs if the real mount fails
 #   x-format-blank    format the device if its first sector is all zero
 #   x-mkdir           bind: create the source directory first
 #   spill=DIR         tmpfs: where files too big for RAM go
+#   size=N[K|M]       swap file: create it at that size the first time
+#
+# Swap is where a process waiting in waitpid (make, while its compiler runs)
+# is written out when an allocation finds the process pool full; it reads it
+# back itself when the wait ends (kernel/memory/swap.zig). PARTTYPE=82 is the
+# first partition of type 82; a partition of any other type is never used as
+# swap, so a card with another layout loses nothing to this line.
 #
 # <source>      <target> <type> <options>                  <dump> <pass>
 proc            /proc    proc   defaults                   0 0
 LABEL=YASBOOT   /boot    vfat   nofail                     0 2
 LABEL=YASVAR    /var     ext4   nofail,x-fallback=ramfs    0 2
-LABEL=YASOPT    /opt     ext4   nofail                     0 2
+PARTTYPE=82     none     swap   nofail                     0 0
 LABEL=YASHOME   /home    ext4   nofail,x-fallback=ramfs    0 2
 /home/root      /root    bind   x-mkdir                    0 0
 tmpfs           /tmp     tmpfs  spill=/var/tmp             0 0

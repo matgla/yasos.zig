@@ -3,7 +3,7 @@
 #
 #   1  YASBOOT  FAT    64M   /boot  (the bootloader reads it)
 #   2  YASVAR   ext4  256M   /var
-#   3  YASOPT   ext4   25%   /opt
+#   3  (swap)   82    128M   swap, raw: the kernel writes waiting processes there
 #   4  YASHOME  ext4  rest   /home  (/root lives in /home/root)
 #
 # fdisk writes the table, mkfs.fat and mkfs.ext4 format the partitions; this is
@@ -14,7 +14,7 @@
 #
 # The sizes and tools come from the environment when set -- which is how
 # scripts/yasos_device.py makes QEMU's 16 MiB card image with the host builds:
-#   BOOT_SIZE VAR_SIZE OPT_SIZE  fdisk "Last sector" answers (+64M, +25%, ...)
+#   BOOT_SIZE VAR_SIZE SWAP_SIZE  fdisk "Last sector" answers (+64M, +128M, ...)
 #   FDISK MKFS_FAT MKFS_EXT4     the programs to run
 
 usage() {
@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
 done
 device=${device:-/dev/mmc0}
 
-: "${BOOT_SIZE:=+64M}" "${VAR_SIZE:=+256M}" "${OPT_SIZE:=+25%}"
+: "${BOOT_SIZE:=+64M}" "${VAR_SIZE:=+256M}" "${SWAP_SIZE:=+128M}"
 : "${FDISK:=fdisk}" "${MKFS_FAT:=mkfs.fat}" "${MKFS_EXT4:=mkfs.ext4}"
 
 if [ ! -e "$device" ]; then
@@ -60,10 +60,11 @@ if [ "$yes" != 1 ]; then
 fi
 
 # A new table, four primaries; util-linux asks no number for the last free
-# slot, and neither does ours.
-commands='o\nn\np\n1\n\n%s\nt\nc\nn\np\n2\n\n%s\nn\np\n3\n\n%s\nn\np\n\n\nw\n'
+# slot, and neither does ours. Slot 3 gets type 82, which is how the kernel
+# knows it is swap (`PARTTYPE=82` in /etc/fstab): no filesystem goes on it.
+commands='o\nn\np\n1\n\n%s\nt\nc\nn\np\n2\n\n%s\nn\np\n3\n\n%s\nt\n3\n82\nn\np\n\n\nw\n'
 # (Tested through $?: toysh gets `if ! a | b` wrong.)
-printf "$commands" "$BOOT_SIZE" "$VAR_SIZE" "$OPT_SIZE" | "$FDISK" "$device" > /dev/null
+printf "$commands" "$BOOT_SIZE" "$VAR_SIZE" "$SWAP_SIZE" | "$FDISK" "$device" > /dev/null
 if [ $? -ne 0 ]; then
   echo "cardreformat: fdisk failed; nothing written" >&2
   exit 1
@@ -74,7 +75,6 @@ fi
 # image file, and independent of the kernel having re-read the table yet.
 "$MKFS_FAT" -n YASBOOT -p 1 "$device" || exit 1
 "$MKFS_EXT4" -L YASVAR -p 2 "$device" || exit 1
-"$MKFS_EXT4" -L YASOPT -p 3 "$device" || exit 1
 "$MKFS_EXT4" -L YASHOME -p 4 "$device" || exit 1
 
 echo "done; mount -a mounts the new layout."
