@@ -172,8 +172,15 @@ pub fn reset() void {
 /// whose holder may block and resume on the other core. These bits travel with
 /// the process across a switch -- see `RoundRobin.update_current`. Every other
 /// rank is a spin_irq, held with interrupts masked, so it cannot migrate.
+/// `RankedMutex` refuses, at compile time, a rank missing here: `.swap` was,
+/// and the first swap on the board panicked releasing it on the other core.
 pub const migrating_ranks: HeldSet =
-    bit(.kernel_files) | bit(.loader) | bit(.block) | bit(.mount) | bit(.fs) | bit(.dev) | bit(.sdio);
+    bit(.kernel_files) | bit(.loader) | bit(.block) | bit(.mount) | bit(.fs) | bit(.dev) | bit(.sdio) | bit(.swap);
+
+/// Whether a sleeping mutex may take `rank` (see `migrating_ranks`).
+pub fn is_migrating(comptime rank: Rank) bool {
+    return migrating_ranks & bit(rank) != 0;
+}
 
 /// One sleeping mutex a process holds, on that process's list. The list exists
 /// for one reader: a process killed inside a syscall cannot unwind, so whatever
