@@ -108,11 +108,46 @@ pub const ProcessMemoryPool = struct {
         /// (`swap_out`): its pages are free then, and the entity only remembers
         /// which addresses the process expects them back at.
         swap_slot: u32 = no_swap_slot,
+        /// A resident run's copy still on swap from its last swap-in, and the
+        /// hash of the bytes it holds: the next swap-out of an unchanged run
+        /// reuses it instead of writing (`swap_out`). Dropped whenever the run
+        /// is freed, resized or reaped, so `kept_slot` always covers exactly
+        /// `address.len` bytes.
+        kept_slot: u32 = no_swap_slot,
+        // align(4): an 8-aligned field would make the entity 8-aligned, and
+        // every @fieldParentPtr from its list node an alignment increase.
+        kept_hash: u64 align(4) = 0,
 
         fn swapped(self: *const ProcessMemoryEntity) bool {
             return self.swap_slot != no_swap_slot;
         }
+
+        fn kept(self: *const ProcessMemoryEntity) bool {
+            return self.kept_slot != no_swap_slot;
+        }
     };
+
+    /// What a run's swap copy is checked against. A false match would bring
+    /// stale bytes back, so a 64-bit hash, not a checksum; it costs a read of
+    /// the run, against writing it to the card.
+    fn run_hash(data: []const u8) u64 {
+        return std.hash.XxHash64.hash(0x5759_4150, data);
+    }
+
+    /// Give back `entity`'s kept copy, if it has one. `pagepool_lock` held
+    /// or not: `drop` is safe either way.
+    fn drop_kept(entity: *ProcessMemoryEntity) void {
+        if (!entity.kept()) return;
+        if (swap_io) |io| io.drop(io.ctx, entity.kept_slot, entity.address.len);
+        entity.kept_slot = no_swap_slot;
+    }
+
+    /// Runs (and bytes) written out since boot, and swap-outs that found an
+    /// unchanged copy on swap and wrote nothing. Under `pagepool_lock`.
+    pub var swap_written_runs: usize = 0;
+    pub var swap_written_bytes: u64 = 0;
+    pub var swap_reused_runs: usize = 0;
+    pub var swap_reused_bytes: u64 = 0;
     const no_swap_slot = std.math.maxInt(u32);
 
     /// Where a swapped-out run's bytes go: kernel/memory/swap.zig on a board, a
@@ -367,6 +402,10 @@ pub const ProcessMemoryPool = struct {
             while (next) |node| {
                 const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
                 next = process.value_ptr.pop();
+                drop_kept(entity);
+                if (entity.swapped()) {
+                    if (swap_io) |io| io.drop(io.ctx, entity.swap_slot, entity.address.len);
+                }
                 slow_heap.allocator_or(self.allocator).destroy(entity);
             }
         }
@@ -700,6 +739,10 @@ pub const ProcessMemoryPool = struct {
             var next = mapping.value_ptr.first;
             while (next) |entity_node| {
                 const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
+                // A resident run's copy left on swap goes with it.
+                if (entity.kept()) {
+                    if (swap_io) |io| io.drop(io.ctx, entity.kept_slot, entity.address.len);
+                }
                 if (entity.swapped()) {
                     // Its pages are somebody else's by now: only the copy goes.
                     if (swap_io) |io| io.drop(io.ctx, entity.swap_slot, entity.address.len);
@@ -752,6 +795,7 @@ pub const ProcessMemoryPool = struct {
                 if (@as(*anyopaque, entity.address.ptr) == address) {
                     matched_bytes = entity.address.len;
                     found = true;
+                    drop_kept(entity);
                     _ = mapping.value_ptr.remove(entity_node);
                     slow_heap.allocator_or(self.allocator).destroy(entity);
                     break;
@@ -924,12 +968,35 @@ pub const ProcessMemoryPool = struct {
             // Outside the lock, which masks interrupts: this is SD card I/O.
             // The entity stays put: only `pid` itself changes its list, and it
             // is not running; `release_pages_for` only reaps the dead.
-            const slot = io.store(io.ctx, entity.address) catch |err| {
-                log.warn("swap: writing pid {d} out failed: {s}", .{ pid, @errorName(err) });
-                break;
+            //
+            // Unchanged since it came back? Then the copy it came back from is
+            // still right, and nothing is written: a build's make is written
+            // out once per compile and changes little in between.
+            var reused = false;
+            const slot = blk: {
+                if (entity.kept()) {
+                    if (run_hash(entity.address) == entity.kept_hash) {
+                        reused = true;
+                        break :blk entity.kept_slot;
+                    }
+                    io.drop(io.ctx, entity.kept_slot, entity.address.len);
+                    entity.kept_slot = no_swap_slot;
+                }
+                break :blk self.store_run(entity.address, io) catch |err| {
+                    log.warn("swap: writing pid {d} out failed: {s}", .{ pid, @errorName(err) });
+                    break;
+                };
             };
             const flags = pagepool_lock.lock_irqsave();
             defer pagepool_lock.unlock_irqrestore(flags);
+            entity.kept_slot = no_swap_slot;
+            if (reused) {
+                swap_reused_runs += 1;
+                swap_reused_bytes += entity.address.len;
+            } else {
+                swap_written_runs += 1;
+                swap_written_bytes += entity.address.len;
+            }
             const region = self.region_for_addr(@intFromPtr(entity.address.ptr)) orelse {
                 io.drop(io.ctx, slot, entity.address.len);
                 break;
@@ -943,6 +1010,33 @@ pub const ProcessMemoryPool = struct {
             freed += entity.address.len;
         }
         return freed;
+    }
+
+    /// `io.store`, making room first if swap is full: kept copies are only a
+    /// saving, so they go before a swap-out fails.
+    fn store_run(self: *ProcessMemoryPool, data: []const u8, io: SwapIo) !u32 {
+        return io.store(io.ctx, data) catch |err| {
+            if (!self.drop_all_kept()) return err;
+            return io.store(io.ctx, data);
+        };
+    }
+
+    /// Give back every kept copy; whether there was one.
+    fn drop_all_kept(self: *ProcessMemoryPool) bool {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        var any = false;
+        var it = self.memory_map.iterator();
+        while (it.next()) |kv| {
+            var node = kv.value_ptr.first;
+            while (node) |n| : (node = n.next) {
+                const e: *ProcessMemoryEntity = @fieldParentPtr("node", n);
+                if (!e.kept()) continue;
+                drop_kept(e);
+                any = true;
+            }
+        }
+        return any;
     }
 
     fn next_to_swap_out(self: *ProcessMemoryPool, pid: c.pid_t, keep: *const anyopaque) ?*ProcessMemoryEntity {
@@ -975,9 +1069,13 @@ pub const ProcessMemoryPool = struct {
                 self.unclaim_swapped_pages(pid);
                 return err;
             };
-            io.drop(io.ctx, entity.swap_slot, entity.address.len);
+            // The copy stays for the next swap-out, with what it holds: the
+            // hash is taken here, where the bytes are known to match it.
+            const hash = run_hash(entity.address);
             const flags = pagepool_lock.lock_irqsave();
             defer pagepool_lock.unlock_irqrestore(flags);
+            entity.kept_slot = entity.swap_slot;
+            entity.kept_hash = hash;
             entity.swap_slot = no_swap_slot;
         }
         return true;
@@ -1036,6 +1134,25 @@ pub const ProcessMemoryPool = struct {
             if (entity.swapped()) return entity;
         }
         return null;
+    }
+
+    /// Bytes out on swap (their pages free) and bytes resident with a copy
+    /// still on swap (`kept_slot`) -- /proc/meminfo's SwapUsed and SwapCached.
+    pub fn swap_bytes(self: *const ProcessMemoryPool) struct { out: usize, cached: usize } {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        var out: usize = 0;
+        var cached: usize = 0;
+        var it = self.memory_map.iterator();
+        while (it.next()) |kv| {
+            var node = kv.value_ptr.first;
+            while (node) |n| : (node = n.next) {
+                const e: *const ProcessMemoryEntity = @fieldParentPtr("node", n);
+                if (e.swapped()) out += e.address.len;
+                if (e.kept()) cached += e.address.len;
+            }
+        }
+        return .{ .out = out, .cached = cached };
     }
 
     /// Whether `pid` has runs out on swap.
@@ -1185,6 +1302,7 @@ pub const ProcessMemoryPool = struct {
             while (next) |entity_node| {
                 const entity: *ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
                 if (@as(*anyopaque, entity.address.ptr) == address) {
+                    drop_kept(entity);
                     entity.address = slicify(
                         @as([*]u8, @ptrFromInt(addr_int)),
                         new_region_pages * region.page_size,
@@ -1229,6 +1347,7 @@ pub const ProcessMemoryPool = struct {
             // a stale length would free pages this entity does not cover.
             if (entity.address.len != old_region_pages * region.page_size) return null;
             mark_free(region, start_index + new_region_pages, start_index + old_region_pages);
+            drop_kept(entity);
             entity.address = entity.address[0 .. new_region_pages * region.page_size];
             return entity.address;
         }
@@ -1894,7 +2013,10 @@ test "ProcessMemoryPool.ShouldFallBackToSecondRegionWhenFirstFull" {
 const FakeSwap = struct {
     slots: [16]?[]u8 = @splat(null),
     drops: usize = 0,
+    stores: usize = 0,
     fail_store: bool = false,
+    /// How many slots it has, at most 16.
+    capacity: usize = 16,
 
     fn io(self: *FakeSwap) ProcessMemoryPool.SwapIo {
         return .{ .ctx = self, .store = store, .load = load, .drop = drop };
@@ -1902,9 +2024,10 @@ const FakeSwap = struct {
     fn store(ctx: *anyopaque, data: []const u8) anyerror!u32 {
         const self: *FakeSwap = @ptrCast(@alignCast(ctx));
         if (self.fail_store) return error.NoSpaceLeft;
-        for (&self.slots, 0..) |*slot, i| {
+        for (self.slots[0..self.capacity], 0..) |*slot, i| {
             if (slot.* == null) {
                 slot.* = try std.testing.allocator.dupe(u8, data);
+                self.stores += 1;
                 return @intCast(i);
             }
         }
@@ -1921,12 +2044,19 @@ const FakeSwap = struct {
         self.slots[slot] = null;
         self.drops += 1;
     }
+    fn used(self: *const FakeSwap) usize {
+        var n: usize = 0;
+        for (self.slots) |slot| n += @intFromBool(slot != null);
+        return n;
+    }
 };
 
 test "ProcessMemoryPool.SwapOutKeepsTheStackAndSwapInRestoresAtTheSameAddresses" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
     var pool = try ProcessMemoryPool.init(std.testing.allocator);
     defer pool.deinit();
-    var swap = FakeSwap{};
     const pid: c.pid_t = 7;
 
     const stack = pool.allocate_pages(4, pid).?;
@@ -1953,13 +2083,99 @@ test "ProcessMemoryPool.SwapOutKeepsTheStackAndSwapInRestoresAtTheSameAddresses"
     for (data, 0..) |b, i| try std.testing.expectEqual(@as(u8, @truncate(i)), b);
     for (heap, 0..) |b, i| try std.testing.expectEqual(@as(u8, @truncate(i * 7)), b);
     for (stack) |b| try std.testing.expectEqual(@as(u8, 0x5a), b);
-    try std.testing.expectEqual(@as(usize, 2), swap.drops);
+    // The copies stay on swap for the next swap-out.
+    try std.testing.expectEqual(@as(usize, 0), swap.drops);
+    const bytes = pool.swap_bytes();
+    try std.testing.expectEqual(@as(usize, 0), bytes.out);
+    try std.testing.expectEqual(data.len + heap.len, bytes.cached);
+}
+
+test "ProcessMemoryPool.SwapOutWritesOnlyRunsThatChangedSinceTheyCameBack" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const pid: c.pid_t = 7;
+
+    const stack = pool.allocate_pages(4, pid).?;
+    const data = pool.allocate_pages(8, pid).?;
+    const heap = pool.allocate_pages_from(16, pid, .heap).?;
+    @memset(data, 0x11);
+    @memset(heap, 0x22);
+    _ = pool.swap_out(pid, stack.ptr, swap.io());
+    try std.testing.expect(try pool.swap_in(pid, swap.io()));
+    try std.testing.expectEqual(@as(usize, 2), swap.stores);
+    const written = ProcessMemoryPool.swap_written_runs;
+    const reused = ProcessMemoryPool.swap_reused_runs;
+
+    // Only the heap changed while the process ran.
+    heap[100] = 0x23;
+    try std.testing.expectEqual(data.len + heap.len, pool.swap_out(pid, stack.ptr, swap.io()));
+    try std.testing.expectEqual(@as(usize, 3), swap.stores);
+    try std.testing.expectEqual(@as(usize, 1), swap.drops); // the heap's stale copy
+    try std.testing.expectEqual(written + 1, ProcessMemoryPool.swap_written_runs);
+    try std.testing.expectEqual(reused + 1, ProcessMemoryPool.swap_reused_runs);
+    try std.testing.expectEqual(data.len + heap.len, pool.swap_bytes().out);
+
+    @memset(data, 0xee);
+    @memset(heap, 0xee);
+    try std.testing.expect(try pool.swap_in(pid, swap.io()));
+    for (data) |b| try std.testing.expectEqual(@as(u8, 0x11), b);
+    for (heap, 0..) |b, i| try std.testing.expectEqual(@as(u8, if (i == 100) 0x23 else 0x22), b);
+}
+
+test "ProcessMemoryPool.FreeingOrResizingARunGivesItsSwapCopyBack" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const pid: c.pid_t = 7;
+
+    const stack = pool.allocate_pages(4, pid).?;
+    const a = pool.allocate_pages_from(16, pid, .heap).?;
+    const b = pool.allocate_pages_from(16, pid, .heap).?;
+    _ = pool.swap_out(pid, stack.ptr, swap.io());
+    try std.testing.expect(try pool.swap_in(pid, swap.io()));
+    try std.testing.expectEqual(@as(usize, 2), swap.used());
+
+    pool.free_pages(a.ptr, 16, pid);
+    try std.testing.expectEqual(@as(usize, 1), swap.used());
+    _ = pool.try_shrink_pages(b.ptr, 16, 8, pid).?;
+    try std.testing.expectEqual(@as(usize, 0), swap.used());
+    try std.testing.expectEqual(@as(usize, 0), pool.swap_bytes().cached);
+}
+
+test "ProcessMemoryPool.AFullSwapGivesUpKeptCopiesBeforeASwapOutFails" {
+    var swap = FakeSwap{ .capacity = 2 };
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const first: c.pid_t = 7;
+    const second: c.pid_t = 8;
+
+    const stack1 = pool.allocate_pages(4, first).?;
+    _ = pool.allocate_pages_from(16, first, .heap).?;
+    _ = pool.allocate_pages_from(16, first, .heap).?;
+    _ = pool.swap_out(first, stack1.ptr, swap.io());
+    try std.testing.expect(try pool.swap_in(first, swap.io()));
+    try std.testing.expectEqual(@as(usize, 2), swap.used()); // both kept
+
+    const stack2 = pool.allocate_pages(4, second).?;
+    const heap2 = pool.allocate_pages_from(16, second, .heap).?;
+    try std.testing.expectEqual(heap2.len, pool.swap_out(second, stack2.ptr, swap.io()));
+    try std.testing.expect(pool.is_swapped_out(second));
+    try std.testing.expectEqual(@as(usize, 0), pool.swap_bytes().cached);
 }
 
 test "ProcessMemoryPool.SwapInWaitsUntilEveryPageIsFreeAgain" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
     var pool = try ProcessMemoryPool.init(std.testing.allocator);
     defer pool.deinit();
-    var swap = FakeSwap{};
     const parent: c.pid_t = 7;
     const child: c.pid_t = 8;
 
@@ -1980,11 +2196,11 @@ test "ProcessMemoryPool.SwapInWaitsUntilEveryPageIsFreeAgain" {
 }
 
 test "ProcessMemoryPool.ReleasingASwappedOutProcessDropsItsCopiesOnly" {
-    var pool = try ProcessMemoryPool.init(std.testing.allocator);
-    defer pool.deinit();
     var swap = FakeSwap{};
     ProcessMemoryPool.swap_io = swap.io();
     defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
     const pid: c.pid_t = 7;
     const other: c.pid_t = 9;
 
@@ -2002,9 +2218,11 @@ test "ProcessMemoryPool.ReleasingASwappedOutProcessDropsItsCopiesOnly" {
 }
 
 test "ProcessMemoryPool.SwapOutLeavesTheLoaderCacheAndStopsAtAFailingDevice" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
     var pool = try ProcessMemoryPool.init(std.testing.allocator);
     defer pool.deinit();
-    var swap = FakeSwap{};
     const pid: c.pid_t = 7;
 
     const stack = pool.allocate_pages(4, pid).?;

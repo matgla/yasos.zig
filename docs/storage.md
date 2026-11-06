@@ -201,7 +201,15 @@ over a filesystem. It is used in 4 KiB clusters; the bitmap, 4 KiB for 128 MiB,
 lives in PSRAM where there is PSRAM. One swap area at a time; there is no
 `swapoff`.
 
-`/proc/meminfo` shows `SwapTotal`, `SwapUsed` and `SwapRuns: N out M in`.
+A run that comes back keeps its copy on swap, with a 64-bit hash of what it
+holds. If the run is unchanged when its process is swapped out again, the copy
+is reused and nothing is written: make goes out once per compile and changes
+little in between. Kept copies go when the run is freed or resized, when the
+process exits, and whenever swap is too full for a new write.
+
+`/proc/meminfo` shows `SwapTotal`, `SwapUsed` (out on swap now), `SwapCached`
+(back in memory, copy kept), `SwapRuns: N out M in` and
+`SwapWrites: X KB written Y KB unchanged`.
 Reading `/proc/swapnext` makes the next allocation swap as if the pool were
 full (a test hook, `tests/smoke/swap_test.py`). The code is
 `source/kernel/memory/swap.zig` (space and I/O),
