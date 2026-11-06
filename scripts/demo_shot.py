@@ -1205,6 +1205,266 @@ def shot_xip(b, args):
         True, ""))
 
 
+# ---------------------------------------------------------------------------
+# The SMP beat: two cores, one cache, and the counters that say why it lost.
+# ---------------------------------------------------------------------------
+
+#: Where both SMP shots keep their files.  /tmp is the RAM arena (32 KiB, 8 of
+#: it metadata), so everything here is sized to fit it at once -- see SMP_JOBS.
+SMP_DIR = "/tmp/s"
+
+#: The compile every job runs: tests/smoke/prun_scaling_test.py's SOURCE_LINES,
+#: forty small functions, which lands a job near the corpus median rather than
+#: measuring a spawn with a `main` attached.  Copied, not imported, because
+#: this file is pushed to the rig on its own.
+SMP_SOURCE_LINES = (
+    "#include <stdio.h>",
+    "#define F(n) static int f##n(int x){int a=x;int i;"
+    "for(i=0;i<n%17+3;i++){a=a*3+i;a^=a>>2;}return a;}",
+    "#define T(p) F(p##0) F(p##1) F(p##2) F(p##3) F(p##4)"
+    " F(p##5) F(p##6) F(p##7) F(p##8) F(p##9)",
+    "T(10) T(11) T(12) T(13)",
+    "#define C(n) s+=f##n(s);",
+    "#define CT(p) C(p##0) C(p##1) C(p##2) C(p##3) C(p##4)"
+    " C(p##5) C(p##6) C(p##7) C(p##8) C(p##9)",
+    "int main(void){int s=1;CT(10) CT(11) CT(12) CT(13)"
+    "printf(\"%d\\n\",s);return 0;}",
+)
+
+#: The control: prun_scaling_test.py's COMPUTE_SOURCE_LINES, a tight ALU loop
+#: whose code is small enough to sit in the cache and which runs from /tmp, so
+#: from RAM.  If two cores do not speed *this* up, the compile result says
+#: nothing about the cache.
+SMP_COMPUTE_LINES = (
+    "#include <stdio.h>",
+    "#include <stdlib.h>",
+    "int main(int argc,char**argv){",
+    "long n=(argc>1)?atol(argv[1]):20000000L;",
+    "long i;int a=1;",
+    "for(i=0;i<n;i++){a=a*3+(int)i;a^=a>>2;}",
+    "printf(\"%d\\n\",a);return 0;}",
+)
+
+#: Four jobs per arm, as in the scaling test.  More does not fit: the four
+#: objects and four prun logs share the arena with the sources, and the
+#: compute binary is only built once the objects are gone.
+SMP_JOBS = 4
+SMP_COMPUTE_ITERATIONS = 8000000
+
+
+#: A shell function, defined by `smp_stage`, that reads /proc/xip on both sides
+#: of its arguments and prints only the difference.  The raw file is totals
+#: since boot -- eleven-digit numbers nobody subtracts in their head while the
+#: next line scrolls in -- so the take shows the file once, for what its
+#: fields are, and every window after that as what it cost.  The board's
+#: toysh has 64-bit `$(( ))`, functions and `read`, which is all this needs;
+#: tenths of a million by integer arithmetic because there is no awk.
+#:
+#: Bracketing inside one function keeps the property `XIP_LINE` is one line
+#: for: nothing typed lands inside the window.  `xip true` prices the
+#: bracketing itself, and reads 0.0 M.
+XIP_FN = (
+    'xip(){ { read k h0; read k a0; read k s0; } < /proc/xip; "$@"; '
+    '{ read k h1; read k a1; read k s1; } < /proc/xip; '
+    'a=$((a1-a0)); m=$((a-(h1-h0))); '
+    'echo "XIP  fetches $((a/1000000)).$((a/100000%10)) M  '
+    'misses $((m/1000000)).$((m/100000%10)) M  '
+    'hit $(((a-m)*100/a)).$(((a-m)*1000/a%10))%"; '
+    '[ $((s1-s0)) = 0 ] || echo "XIP  counters saturated"; }'
+)
+_XIP_FN_RE = re.compile(
+    r"^XIP  fetches (\d+\.\d) M  misses (\d+\.\d) M  hit (\d+\.\d)%\s*$", re.M)
+
+
+def smp_line(batch, parallel):
+    """One typed line: the batch at -j *parallel*, inside `xip`."""
+    return f"xip time prun -j {parallel} -o {SMP_DIR} {SMP_DIR}/{batch}"
+
+
+def shot_smp_stage(b, args):
+    """Write the SMP take's files into /tmp, then clear.  Not a take.
+
+    Run it before starting the recorder: the source goes in one `echo` a line,
+    which is minutes of typing nobody needs to watch, and /tmp keeps it until
+    the board reboots.
+    """
+    # From empty, so a second take starts where the first did: the arena
+    # cannot hold the control binary and the four objects at once.
+    b.command(f"rm -f {SMP_DIR}/*; mkdir -p {SMP_DIR}")
+    for index, line in enumerate(SMP_SOURCE_LINES):
+        b.command(f"echo '{line}' {'>' if index == 0 else '>>'} {SMP_DIR}/scal.c")
+    for index, line in enumerate(SMP_COMPUTE_LINES):
+        b.command(f"echo '{line}' {'>' if index == 0 else '>>'} {SMP_DIR}/comp.c")
+    for job in range(SMP_JOBS):
+        b.command(f"echo '/bin/tcc -O0 -c {SMP_DIR}/scal.c -o {SMP_DIR}/{job}.o' "
+                  f"{'>' if job == 0 else '>>'} {SMP_DIR}/cc.txt")
+        b.command(f"echo '{SMP_DIR}/comp {SMP_COMPUTE_ITERATIONS}' "
+                  f"{'>' if job == 0 else '>>'} {SMP_DIR}/cpu.txt")
+    out = b.command(f"tcc -O0 -c {SMP_DIR}/scal.c -o {SMP_DIR}/0.o; echo rc=$?", timeout=120)
+    b.check("the staged source compiles", "rc=0" in out, out.strip()[-200:])
+    b.command(f"ls -l {SMP_DIR}")
+    # The shell keeps it until the board reboots, like /tmp keeps the files.
+    b.command(XIP_FN)
+    out = b.command("xip true")
+    b.check("the xip function prints a window", _XIP_FN_RE.search(out) is not None,
+            out.strip()[-200:])
+    b.command("clear")
+
+
+def smp_arm(b, batch, parallel, label):
+    """Run one arm and return `(wall, acc, miss, saturated, all_ok, hit%)` or None.
+
+    acc and miss are the board's tenths of a million, as shown; the hit rate is
+    the board's own, taken from the exact counts rather than from those.
+    """
+    out = b.command(smp_line(batch, parallel), timeout=300)
+    wall = timing_in(out)
+    b.check(f"{label} printed a time", wall is not None,
+            "no `real` line -- is `time` in this rootfs?")
+    statuses = re.findall(r"^PRUN (\d+) (-?\d+)\s*$", out, re.M)
+    ok = len(statuses) == SMP_JOBS and all(code == "0" for _job, code in statuses)
+    b.check(f"{label}: all {SMP_JOBS} jobs exited 0", ok, f"PRUN lines {statuses}")
+    found = _XIP_FN_RE.search(out)
+    b.check(f"{label} printed its XIP window", found is not None,
+            "no `XIP  fetches` line -- was smp_stage run on this boot?")
+    if found is None or wall is None:
+        return None
+    acc = round(float(found.group(1)) * 1e6)
+    miss = round(float(found.group(2)) * 1e6)
+    saturated = int("counters saturated" in out)
+    return wall, acc, miss, saturated, ok, float(found.group(3))
+
+
+def shot_smp(b, args):
+    """Scene 6, on the board: two cores compile slower, and /proc/xip says why.
+
+    Needs `smp_stage` first, on the same boot (it defines `xip`, see XIP_FN).
+    The take is four beats:
+
+    * **`/proc/xip` on its own.**  Three totals since boot: `xip_hit`, the
+      fetches the 16 KiB XIP cache answered; `xip_acc`, every fetch; and
+      `xip_saturated`, which must stay 0.  A miss is `acc - hit`, and every
+      miss is a trip over the QSPI bus to flash.  Shown raw once, for what
+      the fields are; every window after it is printed as a difference.
+    * **What prun is.**  Run bare it prints its usage, and `cat` shows the
+      batch: four identical `tcc` lines.  prun (apps/prun) runs a file of
+      commands and keeps up to `-j N` of them going at once -- the shell's
+      `cmd &` cannot, because this kernel has only vfork() -- and prints
+      `PRUN <job> <exit status>` as each one finishes.  -j 1 is one at a time
+      on one core, -j 2 one on each.
+    * **The same four compiles at -j1, then at -j2**, each run inside `xip`.
+      Same work both times, so any change in the counters is what running two
+      copies of tcc at once did to the cache.
+    * **The control at -j1 and -j2**: a loop from RAM that gets nearly 2x from
+      the second core and leaves the counters still -- which is what makes the
+      compile result about the cache rather than about the cores.
+
+    The verdicts price the windows and compare the arms; they are what the
+    card and the VO quote.  One run per arm, so a figure that matters wants a
+    second take before it goes on screen.
+    """
+    b.command(XIP_READ)
+    b.beat(4.0)                      # the VO explains the three fields here
+
+    out = b.command("prun")
+    b.check("prun printed its usage", "usage: prun" in out, out.strip()[-200:])
+    b.beat(2.5)
+    b.command(f"cat {SMP_DIR}/cc.txt")
+    b.beat(3.0)                      # and what it is about to run
+
+    arms = {}
+    for batch, parallel, label in (("cc.txt", 1, "compile -j1"),
+                                   ("cc.txt", 2, "compile -j2")):
+        arms[label] = smp_arm(b, batch, parallel, label)
+        b.beat(3.0)
+
+    b.command(f"rm -f {SMP_DIR}/0.o {SMP_DIR}/1.o {SMP_DIR}/2.o {SMP_DIR}/3.o")
+    out = b.command(f"tcc -O0 {SMP_DIR}/comp.c -o {SMP_DIR}/comp; echo rc=$?", timeout=120)
+    b.check("the control built", "rc=0" in out, out.strip()[-200:])
+    b.command(f"cat {SMP_DIR}/cpu.txt")
+    b.beat(2.5)
+    for batch, parallel, label in (("cpu.txt", 1, "control -j1"),
+                                   ("cpu.txt", 2, "control -j2")):
+        arms[label] = smp_arm(b, batch, parallel, label)
+        b.beat(3.0)
+    b.beat(2.0)                      # the last pair of reads is the shot: hold
+
+    # --- what the take measured, after it has ended -------------------------
+    saturated = sum(a[3] for a in arms.values() if a)
+    b.check("the counters never saturated", saturated == 0,
+            f"{saturated} pinned sample(s) -- every figure is a floor.  RETAKE")
+    for label, arm in arms.items():
+        if not arm:
+            continue
+        wall, acc, miss, _sat, _ok, hit = arm
+        stall = miss * XIP_MISS_CYCLES / XIP_CORE_HZ
+        b.checks.append((
+            f"{label}: wall={wall:.3f}s  acc={acc / 1e6:6.1f} M  miss={miss / 1e6:5.1f} M  "
+            f"hit={hit:5.1f}%  stall<={stall:.3f}s", True, ""))
+    for kind in ("compile", "control"):
+        one, two = arms.get(f"{kind} -j1"), arms.get(f"{kind} -j2")
+        if not (one and two):
+            continue
+        b.checks.append((
+            f"{kind}: -j2 is {one[0] / two[0]:.2f}x the speed of -j1 "
+            f"({one[0]:.3f}s -> {two[0]:.3f}s); accesses {100.0 * (two[1] / one[1] - 1):+.0f}%, "
+            f"misses {100.0 * (two[2] / one[2] - 1) if one[2] else 0.0:+.0f}%", True, ""))
+    compile_one, compile_two = arms.get("compile -j1"), arms.get("compile -j2")
+    if compile_one and compile_two:
+        b.check("two cores compiled slower than one", compile_two[0] > compile_one[0],
+                f"-j1 {compile_one[0]:.3f}s, -j2 {compile_two[0]:.3f}s -- not the scene's result")
+        b.check("and missed more for the same work", compile_two[2] > compile_one[2],
+                f"misses {compile_one[2]:,} -> {compile_two[2]:,}")
+    control_one, control_two = arms.get("control -j1"), arms.get("control -j2")
+    if control_one and control_two:
+        b.check("the control got faster on two cores", control_two[0] < control_one[0],
+                f"-j1 {control_one[0]:.3f}s, -j2 {control_two[0]:.3f}s")
+
+
+# ---------------------------------------------------------------------------
+# The self-host beat: the board's tcc compiles tinycc, and the result again.
+# ---------------------------------------------------------------------------
+
+#: Where scripts/tcc_selfhost.py put the payload (`--uart --dest`, or a
+#: yasos_device.uart_send of `--prepare-only`'s payload): src.tar, ref.tar and
+#: selfhost.sh, on the SD card's /root.  The work tree goes beside it, on ext4
+#: rather than in the 32 KiB /tmp arena, which two stages of objects outgrow.
+SELFHOST_DIR = "/root/selfhost"
+
+#: Stage 2 then stage 3 (the fixpoint), linking: the full run tcc_selfhost.py
+#: does by default.  Hours on the board, so the take is filmed whole and sped
+#: up in the edit.
+SELFHOST_CMD = (f"time sh {SELFHOST_DIR}/selfhost.sh {SELFHOST_DIR} "
+                f"{SELFHOST_DIR}/work 3 1")
+SELFHOST_TIMEOUT = 8 * 3600
+
+
+def shot_selfhost(b, args):
+    """TinyCC compiling itself on the board, to a fixpoint.
+
+    Needs the payload on the card first (see SELFHOST_DIR).  `selfhost.sh`
+    prints a line per stage and a verdict per comparison: stage 2 is the
+    rootfs tcc compiling every TU and linking a new tcc, which must compile and
+    run a hello world; stage 3 is that new tcc doing it all again, and every
+    object and the linked compiler must come out byte-identical to stage 2 and
+    to the host cross's.  `SELFHOST RESULT PASS fixpoint` is the payoff line.
+    """
+    b.command(f"ls -l {SELFHOST_DIR}")
+    b.beat(3.0)
+    out = b.command(SELFHOST_CMD, timeout=SELFHOST_TIMEOUT)
+    b.check("the run reached a verdict", "SELFHOST RESULT" in out,
+            "no SELFHOST RESULT line -- read the transcript")
+    b.check("tcc compiled itself to a fixpoint", "SELFHOST RESULT PASS fixpoint" in out,
+            "; ".join(line for line in out.splitlines() if "SELFHOST" in line)[-400:])
+    wall = timing_in(out)
+    for line in out.splitlines():
+        if line.startswith("SELFHOST"):
+            b.checks.append((line.strip(), True, ""))
+    if wall is not None:
+        b.checks.append((f"wall {wall / 60:.1f} min", True, ""))
+    b.beat(6.0)                      # the PASS line is the shot: hold
+
+
 def shot_ir(b, args):
     """The compiler showing its own IR -- NEEDS a CONFIG_TCC_DEBUG device tcc.
 
@@ -1755,6 +2015,9 @@ SHOTS = {
     "width": shot_width,
     "fpbench": shot_fpbench,
     "xip": shot_xip,
+    "smp_stage": shot_smp_stage,
+    "smp": shot_smp,
+    "selfhost": shot_selfhost,
     "tests": shot_tests,
     "full": shot_full,
 }
