@@ -24,6 +24,7 @@ const IntegerHashMap = @import("yasld").IntegerHashMap;
 const c = @import("libc_imports").c;
 
 const config = @import("config");
+const interface = @import("interface");
 const kernel = @import("kernel.zig");
 const preempt = @import("sync/preempt.zig");
 
@@ -259,6 +260,14 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _exited_children: std.DoublyLinkedList = .{},
         _stack_shared_with_parent: bool,
         _vfork_context: ?VForkContext = null,
+        /// Waiting in waitpid for a child, so none of its memory but its stack
+        /// is touched until that ends: a process the pool may swap out
+        /// (process_manager.zig, `swap_out_waiting`).
+        swap_eligible: bool = false,
+        /// Its memory, but the stack, is out on swap; waitpid brings it back
+        /// before it returns.  Set and cleared under `proctable_lock` and the
+        /// swap mutex.
+        swapped: bool = false,
         _initialized: bool = false,
         /// Sleeping-mutex ranks this process holds, parked here while it is not
         /// running. lockdep's held-set is per-core, which is right for the
@@ -345,16 +354,22 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         fn dupe_filehandle(handle: *FileHandle) !FileHandle {
+            // First: nothing is shared yet if this fails.
+            const path = try handle.allocator.dupe(u8, handle.path);
             return .{
                 .allocator = handle.allocator,
-                .diriter = handle.diriter,
+                // Part of the same description as the offset below. Copied by
+                // value this was owned twice: make keeps directory streams open
+                // across a spawn, so the child's exit destroyed the iterator the
+                // parent was reading, and the parent's close destroyed it again.
+                .diriter = if (handle.diriter) |*d| d.share() else null,
                 // A reference to the same open file, as dup(2) takes: fork and
                 // vfork share the file description (and its offset) with the
                 // parent. clone() copied the object memberwise instead, so a
                 // FatFs file's name buffer and FIL were owned twice -- closing
                 // both copies freed the name twice and corrupted the kernel heap.
                 .node = handle.node.share(),
-                .path = try handle.allocator.dupe(u8, handle.path),
+                .path = path,
                 // fork/vfork copy the table flags and all
                 .cloexec = handle.cloexec,
             };
@@ -1762,6 +1777,87 @@ test "FileHandle.ShouldRemoveIterator" {
     try std.testing.expect(handle.diriter != null);
     handle.remove_iterator();
     try std.testing.expectEqual(null, handle.diriter);
+}
+
+/// Counts what actually tears the iterator down: a mock's interface has no
+/// refcount, and the refcount is the thing under test.
+const DeleteCountingIterator = interface.DeriveFromBase(IDirectoryIterator, struct {
+    const Self = @This();
+    deletes: *usize,
+
+    pub fn next(_: *Self) ?kernel.fs.DirectoryEntry {
+        return null;
+    }
+
+    pub fn delete(self: *Self) void {
+        self.deletes.* += 1;
+    }
+});
+
+// make leaves directory streams half read and spawns: the vfork child's handle
+// went away first and destroyed the iterator the parent was still reading, whose
+// own close then destroyed it again and corrupted the kernel heap.
+test "FileHandle.ForkedCopyShouldShareIteratorUntilLastClose" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+
+    var deletes: usize = 0;
+    const iterator = try DeleteCountingIterator.init(.{ .deletes = &deletes }).interface.new(std.testing.allocator);
+    _ = directory_mock
+        .expectCall("iterator")
+        .willReturn(iterator);
+    const parent_iterator = try handle.get_iterator();
+
+    var child = try Process.dupe_filehandle(&handle);
+    try std.testing.expectEqual(parent_iterator.__ptr, child.diriter.?.__ptr);
+
+    child.close();
+    try std.testing.expectEqual(0, deletes);
+
+    _ = (try handle.get_iterator()).interface.next();
+    try std.testing.expectEqual(0, deletes);
+
+    handle.close();
+    try std.testing.expectEqual(1, deletes);
+}
+
+test "FileHandle.ForkedCopyShouldOutliveParentsIterator" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+
+    var deletes: usize = 0;
+    const iterator = try DeleteCountingIterator.init(.{ .deletes = &deletes }).interface.new(std.testing.allocator);
+    _ = directory_mock
+        .expectCall("iterator")
+        .willReturn(iterator);
+    _ = try handle.get_iterator();
+
+    var child = try Process.dupe_filehandle(&handle);
+    handle.close();
+    try std.testing.expectEqual(0, deletes);
+
+    _ = (try child.get_iterator()).interface.next();
+    child.close();
+    try std.testing.expectEqual(1, deletes);
+}
+
+test "FileHandle.ForkedCopyWithoutIteratorShouldHaveNone" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+    defer handle.close();
+
+    var child = try Process.dupe_filehandle(&handle);
+    defer child.close();
+    try std.testing.expectEqual(null, child.diriter);
 }
 
 test "FileHandle.ShouldRejectIteratorForFileDescriptor" {

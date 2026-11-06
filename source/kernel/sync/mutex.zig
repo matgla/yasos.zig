@@ -33,6 +33,9 @@ const Process = @import("../process.zig").Process;
 
 /// A sleeping mutex at a fixed point in the lock hierarchy.
 pub fn RankedMutex(comptime rank: locks.Rank) type {
+    // The holder can block and resume on the other core, so the rank has to
+    // travel with it; one left on the core panics at release.
+    if (!locks.is_migrating(rank)) @compileError("RankedMutex(." ++ @tagName(rank) ++ "): add the rank to locks.migrating_ranks");
     return struct {
         /// Guards `held` and `owner` only. Never held across the yield.
         guard: spinlock.SpinLock align(spinlock.reservation_granule_bytes) = .{},

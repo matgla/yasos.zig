@@ -19,13 +19,14 @@
 
 On the rp2350 the kernel heap is what kernel_ram keeps after .data/.bss, and
 every mounted filesystem keeps part of it for good: 2026-10-01 the card's full
-layout (FAT /boot, ext4 /var /opt /home) left 1.5 KB of a 71.5 KB heap, and
+layout (FAT /boot, ext4 /var /opt /home, since folded to /var /home) left 1.5 KB of a 71.5 KB heap, and
 the first pipe -- a 4 KB ring -- panicked the kernel.
 
 The test walks the storage through a working set -- metadata on /root, a copy
-onto /opt, a listing of every volume, a pipe -- and prints /proc/meminfo after
+onto /home, a listing of every volume, a pipe -- and prints /proc/meminfo after
 each step (`HEAPBENCH <step>` marks them in the transcript), then measures what
-unmounting and remounting /opt and /boot gives back. Only the last step
+unmounting and remounting /boot gives back (/home cannot go: /root is
+bound into it). Only the last step
 asserts, so a failing run still records every number. On QEMU the heap is
 megabytes and the check passes trivially; it is the board it is for.
 """
@@ -109,16 +110,15 @@ def test_storage_leaves_kernel_heap_headroom(request):
     _timed(session, "ls -l /root/heapbench > /dev/null")
     _sample(session, "after-root-files", samples)
 
-    opt = _mounted(session, "/opt")
-    if opt:
-        _timed(session, "cp /usr/bin/toybox /opt/heapbench.bin && sha256sum /opt/heapbench.bin")
-    _timed(session, "ls -la /var /opt /home /boot /root > /dev/null")
+    if _mounted(session, "/home"):
+        _timed(session, "cp /usr/bin/toybox /home/heapbench.bin && sha256sum /home/heapbench.bin")
+    _timed(session, "ls -la /var /home /boot /root > /dev/null")
     _sample(session, "after-all-volumes", samples)
 
-    _timed(session, "rm -rf /root/heapbench /opt/heapbench.bin")
+    _timed(session, "rm -rf /root/heapbench /home/heapbench.bin")
     _sample(session, "after-cleanup", samples)
 
-    for target in ("/opt", "/boot"):
+    for target in ("/boot",):
         if not _mounted(session, target):
             continue
         before = _meminfo(session).get("MemKernelUsed", 0)

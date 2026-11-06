@@ -83,9 +83,11 @@ def test_proc_describes_storage(request):
 
 def test_etc_ships_fstab_and_the_layout_script(request):
     session = request.node.stash[session_key]
-    out = _run(session, "grep -c LABEL=YAS /etc/fstab; grep -c -- '-p [1-4]' /usr/bin/cardreformat")
+    # Three labelled filesystems, made by three mkfs runs; the swap partition
+    # is found by its type.
+    out = _run(session, "grep -c LABEL=YAS /etc/fstab; grep -c -- '-p [1-4]' /usr/bin/cardreformat; grep -c '^PARTTYPE=82' /etc/fstab")
     counts = [line.strip() for line in out.splitlines() if line.strip().isdigit()]
-    assert counts[:2] == ["4", "4"], out
+    assert counts[:3] == ["3", "3", "1"], out
 
 
 def test_cardreformat_runs_and_refuses_a_missing_device(request):

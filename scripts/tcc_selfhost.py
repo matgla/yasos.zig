@@ -227,8 +227,8 @@ def link_plan(link, tree: Path):
     """(first object, whole-archive members in order, libarm members, tail args).
 
     --whole-archive archives become their members listed in place; libarm.a
-    stays an archive, rebuilt on the device (its members come from ar t, since
-    make assembled it with an MRI script tcc -ar does not speak)."""
+    stays an archive, rebuilt on the device from the members ar t lists, in
+    that order."""
     def members(archive):
         out = subprocess.run(["ar", "t", str(tree / archive)], capture_output=True, text=True, check=True).stdout
         return out.split()

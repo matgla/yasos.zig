@@ -41,6 +41,7 @@ const ProcInfo = @import("procfs_iterator.zig").ProcInfo;
 const ProcInfoType = @import("procfs_iterator.zig").ProcInfoType;
 const MaxProcFile = @import("maxproc_file.zig").MaxProcFile;
 const LeakStartFile = @import("leakdetect_file.zig").LeakStartFile;
+const SwapNextFile = @import("swapnext_file.zig").SwapNextFile;
 const LeakDumpFile = @import("leakdetect_file.zig").LeakDumpFile;
 const UartStatFile = @import("uartstat_file.zig").UartStatFile;
 const XipStatFile = @import("xipstat_file.zig").XipStatFile;
@@ -114,6 +115,8 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         try root_directory.data().append(faultstat);
         const mempeak = try MemPeakFile.InstanceType.create_node(allocator);
         try root_directory.data().append(mempeak);
+        const swapnext = try SwapNextFile.InstanceType.create_node(allocator);
+        try root_directory.data().append(swapnext);
         const poolmap = try PoolMapFile.InstanceType.create_node(allocator);
         try root_directory.data().append(poolmap);
         if (stackuse_file.enabled) {

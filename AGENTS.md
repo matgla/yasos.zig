@@ -62,6 +62,16 @@ once — prefer that when a bug class repeats.
   only changed files (rz up, `sz` down). Both are three-way: a file changed on
   both sides is never overwritten -- the target's copy lands as `<file>.target`,
   and push holds that file back until the `.target` is deleted.
+- **`scripts/tinycc_board.py push | make | run CMD | pull | all`** — work on
+  tinycc on the board: the whole repository (or `--sources-only`) goes to
+  `/root/tinycc/tree/src` as a compressed delta (first push ~5.5 min, then only
+  what changed), `make` runs `./configure && make` there (`--configure=` for
+  options; plain `./configure` needs none on YasOS), `pull` brings the board's
+  edits back with the target_sync three-way merge, and a push refuses to
+  overwrite a file edited on the board. Default is the rig's board under its
+  lock (`--flash` installs this checkout's images first); `--serial DEV` for a
+  probe on this PC, `--qemu all` for a guest (sources in `/tmp`: QEMU's RAM
+  `/root` holds ~14 MB). tinycc side: `libs/tinycc/docs/native_build.md`.
 - **`scripts/tcc_selfhost.py --qemu | --uart --dest /abs/dir`** — the tinycc
   self-host test: builds the stage-2 native tcc with the cross in
   `.cache/tcc_selfhost`, sends sources + host-cross objects, the device's tcc
@@ -70,8 +80,9 @@ once — prefer that when a bug class repeats.
   compile-only check; `--stages 2` to skip the fixpoint.
 - **Storage layout** ([`docs/storage.md`](docs/storage.md)): the kernel mounts
   from `/etc/fstab` (in-tree `etc/fstab`) -- SD partitions by `LABEL=`: FAT
-  `/boot` (yasboot reads it), ext4 `/var /opt /home` (lwext4 fork in
-  `libs/lwext4`, driver `source/fs/ext4/`), `/root` bound to `/home/root`, `/tmp` spilling to
+  `/boot` (yasboot reads it), ext4 `/var /home` (lwext4 fork in
+  `libs/lwext4`, driver `source/fs/ext4/`), swap on a type-82 partition
+  (processes waiting in `waitpid` are written out when the pool is full), `/root` bound to `/home/root`, `/tmp` spilling to
   `/var/tmp`, kernel log in `/var/log`. Partitions are `/dev/mmc0p1..4`
   (1-based). `cardreformat` (romfs `/usr/bin`, in-tree `usr/bin/`) lays a card
   out with `fdisk` + `mkfs.fat`/`mkfs.ext4` (host builds for a PC:

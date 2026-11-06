@@ -29,6 +29,9 @@
 //   tmpfs              the tiered RAM/disk /tmp (at most one; `spill=DIR`)
 //   proc               procfs
 //   bind               another directory, reachable here too
+//   swap               swap space, not a mount: a partition of type 82
+//                      (`PARTTYPE=82` finds the first, or `/dev/<name>`), or a
+//                      file on real storage; the target is ignored
 //
 // Sources: `/dev/<name>`, `LABEL=<fat label>`, a directory (bind), or anything
 // for the types that need none.
@@ -42,6 +45,7 @@
 //   x-format-blank    vfat: format the device if its first sector is all zero
 //   x-mkdir           bind: create the source directory if it is missing
 //   spill=DIR         tmpfs: where bodies too big for RAM go
+//   size=N[K|M]       swap: create or grow the file to N bytes (once)
 
 const std = @import("std");
 
@@ -229,6 +233,7 @@ pub fn mkdir_parents(path: []const u8) !void {
 
 /// The mount(2) backend.
 pub fn mount(request: Request) anyerror!void {
+    if (std.mem.eql(u8, request.fstype, "swap")) return @call(.never_inline, swap_on, .{request});
     if (request.target.len == 0 or request.target[0] != '/') return kernel.errno.ErrnoSet.InvalidArgument;
     const fstype = request.fstype;
     if (std.mem.eql(u8, fstype, "vfat") or std.mem.eql(u8, fstype, "fat") or std.mem.eql(u8, fstype, "msdos")) {
@@ -243,6 +248,45 @@ pub fn mount(request: Request) anyerror!void {
     if (std.mem.eql(u8, fstype, "proc")) return @call(.never_inline, mount_proc, .{request});
     if (std.mem.eql(u8, fstype, "bind")) return @call(.never_inline, mount_bind, .{request});
     return kernel.errno.ErrnoSet.NoSuchDevice;
+}
+
+/// A `swap` line: kernel/memory/swap.zig.  A file has to be on real storage --
+/// on a RAM filesystem (a board without its card) it would take the memory it
+/// is meant to give back.
+fn swap_on(request: Request) !void {
+    var device_buffer: [32]u8 = undefined;
+    var name_buffer: [24]u8 = undefined;
+    const source = request.source;
+    if (std.mem.startsWith(u8, source, "PARTTYPE=")) {
+        const kind = std.fmt.parseInt(u8, source["PARTTYPE=".len..], 16) catch return kernel.errno.ErrnoSet.InvalidArgument;
+        const name = kernel.driver.block.find_by_type(kind, &name_buffer) orelse return kernel.errno.ErrnoSet.NoSuchDevice;
+        const swap_path = std.fmt.bufPrint(&device_buffer, "/dev/{s}", .{name}) catch return kernel.errno.ErrnoSet.NameTooLong;
+        return kernel.memory.swap.activate(kernel_allocator, swap_path, 0);
+    }
+    const is_device = std.mem.startsWith(u8, source, "/dev/") or std.mem.startsWith(u8, source, "LABEL=");
+    const swap_path = if (is_device) try resolve_device(source, &device_buffer) else source;
+    if (is_device) {
+        // Only a partition marked as swap: the slot that is swap on one card
+        // layout is somebody's filesystem on another (it was /opt).
+        if (kernel.driver.block.partition_type_of(swap_path["/dev/".len..]) != 0x82)
+            return kernel.errno.ErrnoSet.InvalidArgument;
+        return kernel.memory.swap.activate(kernel_allocator, swap_path, 0);
+    }
+    if (!is_persistent(swap_path)) return kernel.errno.ErrnoSet.NoSuchDevice;
+    const size = if (kernel.fs.fstab.option_value_in(request.options, "size")) |text| try parse_size(text) else 0;
+    try kernel.memory.swap.activate(kernel_allocator, swap_path, size);
+}
+
+fn parse_size(text: []const u8) !u64 {
+    if (text.len == 0) return kernel.errno.ErrnoSet.InvalidArgument;
+    const unit: u64 = switch (text[text.len - 1]) {
+        'k', 'K' => 1024,
+        'm', 'M' => 1024 * 1024,
+        else => 1,
+    };
+    const digits = if (unit == 1) text else text[0 .. text.len - 1];
+    const n = std.fmt.parseInt(u64, digits, 10) catch return kernel.errno.ErrnoSet.InvalidArgument;
+    return n * unit;
 }
 
 /// Is `path` a mount whose data outlives a reboot -- i.e. real storage, not a

@@ -85,8 +85,8 @@ FDISK_DIR = REPO_ROOT / "apps/fdisk"
 MKFS_DIR = REPO_ROOT / "apps/mkfs"
 CARDREFORMAT = REPO_ROOT / "usr/bin/cardreformat"
 # The card layout shrunk to QEMU's 16 MiB fatdisk window: fdisk "Last sector"
-# answers for /boot, /var and /opt; /home takes the rest.
-QEMU_SDCARD_SIZES = {"BOOT_SIZE": "+2M", "VAR_SIZE": "+4M", "OPT_SIZE": "+2M"}
+# answers for /boot, /var and swap; /home takes the rest.
+QEMU_SDCARD_SIZES = {"BOOT_SIZE": "+2M", "VAR_SIZE": "+4M", "SWAP_SIZE": "+2M"}
 
 
 def sdcard_image(image: Path, sizes=QEMU_SDCARD_SIZES) -> Path:
@@ -167,11 +167,13 @@ def _session_class():
     return Session
 
 
-def run(session, command: str, silence: float = 600.0, echo=True, on_line=None) -> int:
+def run(session, command: str, silence: float = 600.0, echo=True, on_line=None, kernel_log=False) -> int:
     """Run *command* in the target shell and return its exit status.
 
     *silence* bounds the time between two output lines, not the whole run, so a
-    long build is fine as long as it keeps printing."""
+    long build is fine as long as it keeps printing. *kernel_log* passes the
+    kernel's own lines ([ERR]... on the console) through with the command's:
+    the session drops them otherwise."""
     rc = None
 
     def line(text):
@@ -194,8 +196,17 @@ def run(session, command: str, silence: float = 600.0, echo=True, on_line=None) 
     # printing the postmortem at HardFault priority spins forever on TX-full.
     # Keep reading through it; a genuinely dead kernel still fails on *silence*
     # ("Prompt not found"), just a little later.
-    with session.expect_process_fault():
-        session.wait_for_prompt_streaming(on_line=line, timeout=silence)
+    # The session's reader looks LOG_PREFIXES up in its module on every line,
+    # and this works with whichever framework the machine has (the rig's own).
+    framework = sys.modules[type(session).__module__]
+    prefixes = framework.LOG_PREFIXES
+    if kernel_log:
+        framework.LOG_PREFIXES = ()
+    try:
+        with session.expect_process_fault():
+            session.wait_for_prompt_streaming(on_line=line, timeout=silence)
+    finally:
+        framework.LOG_PREFIXES = prefixes
     if rc is None:
         raise DeviceError(f"no exit status seen for: {command}")
     return rc
@@ -539,6 +550,8 @@ def _archive_entries(payload: Path):
     import tarfile
     entries = {}
     for name, prefix in (("src.tar.gz", "src"), ("ref.tar.gz", "ref")):
+        if not (payload / name).is_file():
+            continue
         with tarfile.open(payload / name) as tar:
             for member in tar:
                 if member.isfile():
@@ -586,7 +599,9 @@ def uart_send_manifest(session, payload: Path, dest: str, full: bool = False, ti
                     source = sources.setdefault(archive, tarfile.open(payload / archive))
                     info = tarfile.TarInfo(path)
                     data = source.extractfile(member).read()
-                    info.size, info.mode, info.mtime = len(data), 0o644, 0
+                    # configure has to stay executable, and a changed file has to
+                    # look changed to make on the board.
+                    info.size, info.mode, info.mtime = len(data), source.getmember(member).mode, int(time.time())
                     out.addfile(info, io.BytesIO(data))
             for source in sources.values():
                 source.close()

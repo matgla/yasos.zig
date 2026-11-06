@@ -61,6 +61,8 @@ const Disk = struct {
     /// Names of the partition nodes currently published for this disk, so a
     /// rescan can take exactly those away again.
     partitions: [max_partitions]?[]u8 = @splat(null),
+    /// Each published partition's MBR type byte (0x82: Linux swap).
+    partition_types: [max_partitions]u8 = @splat(0),
 
     fn name(self: *const Disk) []const u8 {
         return self.name_buffer[0..self.name_len];
@@ -254,7 +256,9 @@ fn probe_locked(disk: *Disk) void {
         }
         publish_partition(disk, index, part.start_lba, part.size_in_sectors) catch |err| {
             log.err("{s}: can't publish partition {d}: {s}", .{ disk.name(), index + 1, @errorName(err) });
+            continue;
         };
+        disk.partition_types[index] = part.partition_type;
     }
 }
 
@@ -322,6 +326,38 @@ fn for_each_volume(context: anytype, comptime visit: fn (@TypeOf(context), []con
         }
         if (!any_partition and visit(context, disk.name())) return;
     }
+}
+
+/// The `/dev` name of the first partition whose MBR type byte is `wanted`,
+/// written into `out` -- `PARTTYPE=82` in /etc/fstab, the swap partition.
+pub fn find_by_type(wanted: u8, out: []u8) ?[]const u8 {
+    lock.lock();
+    defer lock.unlock();
+    for (&disks) |*disk| {
+        if (disk.file == null) continue;
+        for (disk.partitions, disk.partition_types) |maybe_name, kind| {
+            const node_name = maybe_name orelse continue;
+            if (kind != wanted or node_name.len > out.len) continue;
+            @memcpy(out[0..node_name.len], node_name);
+            return out[0..node_name.len];
+        }
+    }
+    return null;
+}
+
+/// The MBR type byte of the partition `/dev/<node_name>`; null if it is not
+/// one (a whole disk, a FAT volume without a table, anything else).
+pub fn partition_type_of(node_name: []const u8) ?u8 {
+    lock.lock();
+    defer lock.unlock();
+    for (&disks) |*disk| {
+        if (disk.file == null) continue;
+        for (disk.partitions, disk.partition_types) |maybe_name, kind| {
+            const partition = maybe_name orelse continue;
+            if (std.mem.eql(u8, partition, node_name)) return kind;
+        }
+    }
+    return null;
 }
 
 /// The `/dev` name of the volume whose label (FAT or ext) is `wanted`, written into

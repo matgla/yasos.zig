@@ -42,14 +42,16 @@ pub const DirectoryEntry = struct {
     kind: kernel.fs.FileType,
 };
 
-pub const IDirectoryIterator = interface.ConstructInterface(struct {
+// Counted because a read position belongs to the open file description, which
+// fork and vfork share: parent and child each hold a reference to one iterator.
+pub const IDirectoryIterator = interface.ConstructCountingInterface(struct {
     pub const Self = @This();
 
     pub fn next(self: *Self) ?DirectoryEntry {
-        return interface.VirtualCall(self, "next", .{}, ?DirectoryEntry);
+        return interface.CountingInterfaceVirtualCall(self, "next", .{}, ?DirectoryEntry);
     }
 
     pub fn delete(self: *Self) void {
-        interface.DestructorCall(self);
+        interface.CountingInterfaceDestructorCall(self);
     }
 });

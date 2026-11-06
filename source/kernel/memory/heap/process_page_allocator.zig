@@ -142,7 +142,9 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
             if (self._page_limit == std.math.maxInt(usize)) return false;
             if (requested <= 0) return false;
             const used = self._pool.used_pages_for(self._pid);
-            return used + @as(usize, @intCast(requested)) > self._page_limit;
+            if (used + @as(usize, @intCast(requested)) <= self._page_limit) return false;
+            log.err("pid {d}: heap_size limit, {d} pages used + {d} > {d}", .{ self._pid, used, requested, self._page_limit });
+            return true;
         }
 
         const vtable: std.mem.Allocator.VTable = .{
