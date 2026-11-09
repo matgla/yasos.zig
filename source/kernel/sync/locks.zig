@@ -295,6 +295,11 @@ pub fn Ranked(comptime rank: Rank) type {
         // Granule-aligned so two adjacent named locks never share a reservation
         // granule and steal each other's in-flight acquires.
         inner: SpinLock align(reservation_granule) = .{},
+        /// Stack a section under this lock may need, when that is more than
+        /// the masked-section default (arch.sync's masked_section_stack): a
+        /// section that can reach the kernel heap goes far deeper, and on the
+        /// process stack an overflow there is a kernel panic, not a kill.
+        stack_needed: u16 = 0,
 
         const Self = @This();
         pub const lock_rank = rank;
@@ -304,7 +309,10 @@ pub fn Ranked(comptime rank: Rank) type {
             // in which a PendSV can migrate the caller, stranding a per-core
             // rank bit on the core it left. The order check still runs before
             // the acquire, so a violation is reported at the offending call.
-            arch.sync.require_stack_for_masked_section();
+            if (self.stack_needed != 0)
+                arch.sync.require_stack(self.stack_needed)
+            else
+                arch.sync.require_stack_for_masked_section();
             const flags = arch.sync.save_and_disable_interrupts();
             enter(rank);
             self.inner.lock();

@@ -46,3 +46,5 @@ pub const set_load_map_logging = loader.set_load_map_logging;
 pub const Image = @import("loader.zig").Image;
 
 pub const header_size: usize = 132;
+/// What the kernel reads of a YAFF header without loading the image (the stack hint).
+pub const Header = extern struct { magic: u32, _rest: [124]u8, stack_size: u32 };

@@ -213,6 +213,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             // every library it pulled in. A process cannot measure this itself, so
             // it is handed back through sys_perf_dump. 0 = never exec'd.
             _load_us: u64 = 0,
+            // The next image's stack, allocated by an exec before the image's
+            // sections (`preallocate_stack`) and taken by `reallocate_stack`.
+            _pending_stack: ?[]align(8) u8 = null,
         };
 
         state: State,
@@ -871,7 +874,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
-                const tier: @TypeOf(self.cold._process_memory_allocator).Tier = if ((flags & c.MAP_SLOW) != 0) .slow else if ((flags & c.MAP_FAST) != 0) .fast else .any;
+                const tier: @TypeOf(self.cold._process_memory_allocator).Tier = if ((flags & c.MAP_TOP) != 0) .top else if ((flags & c.MAP_SLOW) != 0) .slow else if ((flags & c.MAP_FAST) != 0) .fast else .any;
                 const maybe_address = self.cold._process_memory_allocator.allocate_pages_tiered(number_of_pages, tier, (flags & c.MAP_UNINITIALIZED) != 0);
                 if (maybe_address) |address| {
                     return address.ptr;
@@ -884,7 +887,38 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             const stack_limit = try self.get_resource_limit(c.RLIMIT_STACK);
             const requested_stack_size = std.math.cast(u32, stack_limit.rlim_cur) orelse return kernel.errno.ErrnoSet.InvalidArgument;
             log.debug("Reallocating stack to new size: {d}", .{requested_stack_size});
+            if (comptime @hasDecl(ImplType, "adopt_stack")) {
+                if (self.cold._pending_stack) |stack| {
+                    if (stack.len == requested_stack_size) {
+                        self.cold._pending_stack = null;
+                        self.impl.adopt_stack(stack);
+                        return;
+                    }
+                }
+            }
+            self.drop_pending_stack();
             try self.impl.reallocate_stack(requested_stack_size);
+        }
+
+        /// The stack an exec is about to give this process, allocated before the
+        /// image is loaded: the pool hands out SRAM first come, first served, and
+        /// a stack is the hottest memory of nearly every program.  Loaded after
+        /// the image, the device zig's 320 KB stack found the SRAM taken by its
+        /// .data and cold heap and ran from PSRAM: 62% of its data misses, and
+        /// evicting its code from the XIP cache they share.  In SRAM the kernel
+        /// render on the Pico Plus 2 took 439 s instead of 606 (2026-11-09).  A
+        /// failed allocation only means the stack is allocated later, as before.
+        pub fn preallocate_stack(self: *Self, stack_size: u32) void {
+            if (comptime !@hasDecl(ImplType, "adopt_stack")) return;
+            self.drop_pending_stack();
+            self.cold._pending_stack = self.cold._process_memory_allocator.allocator().alignedAlloc(u8, .@"8", stack_size) catch null;
+        }
+
+        pub fn drop_pending_stack(self: *Self) void {
+            if (self.cold._pending_stack) |stack| {
+                self.cold._process_memory_allocator.allocator().free(stack);
+                self.cold._pending_stack = null;
+            }
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {

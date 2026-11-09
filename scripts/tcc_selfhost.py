@@ -21,6 +21,7 @@
     scripts/tcc_selfhost.py --qemu                      # an524 guest, sources on /mnt
     scripts/tcc_selfhost.py --uart --dest /sd/selfhost  # a board on the debug probe
     scripts/tcc_selfhost.py --prepare-only              # just build the payload
+    scripts/tcc_selfhost.py --uart --payload DIR        # run a payload built elsewhere (CI)
     scripts/tcc_selfhost.py --qemu --tu 'unity/ir_'    # a few TUs, no link: quick
 
 Host side (prepare): tinycc is copied to a private tree, configured the way
@@ -567,6 +568,8 @@ def main(argv=None) -> int:
                         help="optimisation of the compiler being built (default: build_rootfs.sh's, %(default)s)")
     parser.add_argument("--stages", type=int, choices=(2, 3), default=3,
                         help="2: device builds tcc; 3: and that tcc rebuilds itself to a fixpoint (default)")
+    parser.add_argument("--payload", type=Path, metavar="DIR",
+                        help="run this payload (--prepare-only's work/payload, built elsewhere) instead of preparing one")
     parser.add_argument("--tu", metavar="REGEX", help="only the TUs whose source matches; compiles only, no link")
     parser.add_argument("--silence", type=float, default=3600.0, metavar="SEC",
                         help="give up after this long without output (default: %(default)s)")
@@ -578,6 +581,13 @@ def main(argv=None) -> int:
         parser.error("choose --qemu, --uart or --prepare-only")
 
     try:
+        if args.payload:
+            if args.prepare_only:
+                parser.error("--payload runs a prepared payload; there is nothing to prepare")
+            if not (args.payload / "selfhost.sh").is_file():
+                parser.error(f"{args.payload}: no selfhost.sh -- not a --prepare-only payload")
+            args.work.mkdir(parents=True, exist_ok=True)
+            return run_on_target(args, args.payload.resolve())
         payload = prepare(args)
         if args.prepare_only:
             return 0

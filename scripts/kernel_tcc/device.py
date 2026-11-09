@@ -13,10 +13,11 @@ the host: those generated C files are shipped like any other source.
 
 Each command needs its inputs and headers (from the host compile's depfile)
 at the same paths relative to the repository; absolute paths outside it (the
-Zig lib directory) go under ext/N/.  The fatdisk window holds 16 MB, which
-the 12 MB kernel.c and the 4 MB romfs image do not fit into together, so the
-commands are packed in order into boots that each fit, and what one boot
-makes is pulled home and shipped to the boots that need it.
+Zig lib directory) go under ext/N/.  The commands are packed in order into
+boots that each fit the fatdisk window, and what one boot makes is pulled
+home and shipped to the boots that need it (the window was 16 MB, which the
+12 MB kernel.c and the 4 MB romfs image did not fit into together; at
+256 MB one boot does it all).
 
 Every output is compared with the host's; the device's kernel ELF ends up in
 WORK/yasos_kernel.
@@ -35,8 +36,11 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tool  # noqa: E402
 
-# The window is 16 MiB; leave room for the FAT itself and directory entries.
-DEFAULT_LIMIT = 15 * 1024 * 1024
+sys.path.insert(0, str(REPO / "scripts"))
+from build_smoke_fatdisk import FATDISK_SIZE  # noqa: E402  (read from the board's linker script)
+
+# Leave room for the FAT itself and directory entries.
+DEFAULT_LIMIT = FATDISK_SIZE - FATDISK_SIZE // 16
 
 
 def parse_depfile(path):

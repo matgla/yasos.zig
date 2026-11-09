@@ -22,7 +22,9 @@ MEMORY
    * tail -- fdisk's .text -- sat past the MPU's executable window, so the
    * program faulted (IACCVIOL) on its first instruction.  Both rp2350 boards
    * carry 16 MB of flash. */
-  romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 8192K
+  /* 8192K -> 15360K (2026-11-08): the rest of the 16 MB flash after the first 1 MB (the
+   * bootloader's); images are updated from the SD card. The device zig alone is 3.7 MB. */
+  romfs(rx!w)       : ORIGIN = 0x10100000, LENGTH = 15360K
   /* .data + .bss + the kernel heap (malloc via _sbrk, which panics at the top).
    * 76K -> 108K (2026-09-30), taken off process_ram: .bss had grown to ~28 KB,
    * leaving a 48 KB heap, and the fstab/SD layout (four FAT volumes, the shared

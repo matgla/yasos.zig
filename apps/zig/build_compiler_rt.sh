@@ -43,5 +43,7 @@ python3 "$HERE/strip_naked_asm.py" "$WORK/compiler_rt.c" "$WORK/compiler_rt_tcc.
 # -O2: these routines are on the Zig compiler's hot paths (wyhash's 64x64->128
 # multiply is __multi3, ~2.9M calls per compile), and at -O0 __multi3 alone is
 # ~1000 instructions a call.
-"$TCC" -O2 -c "$WORK/compiler_rt_tcc.c" -o "$OUT" \
+# -ffunction-sections: the device zig's --hot-text list names its atomics, among the
+# hottest code of a compile.
+"$TCC" -O2 -c "$WORK/compiler_rt_tcc.c" -o "$OUT" -ffunction-sections \
     -I "$ZIG_SRC/lib" -include "$HERE/zig_c_prelude.h" -fvisibility=hidden

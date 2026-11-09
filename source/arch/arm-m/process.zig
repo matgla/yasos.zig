@@ -414,6 +414,12 @@ pub const ArmProcess = struct {
         self.stack_is_shared = false;
     }
 
+    /// reallocate_stack with a stack the caller allocated from process_allocator.
+    pub fn adopt_stack(self: *Self, stack: []align(8) u8) void {
+        self.stack = stack;
+        self.stack_is_shared = false;
+    }
+
     pub fn reinitialize_stack(self: *Self, process_entry: anytype, argc: usize, argv: usize, symbol: usize, got: usize, exit_handler_impl: anytype) !void {
         const args = [_]usize{
             argc,

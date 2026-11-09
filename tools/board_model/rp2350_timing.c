@@ -47,12 +47,18 @@
  *   watch=LO:HI           log each new lowest address written in the range and the PC
  *                         that wrote it, to see what makes a stack as deep as it is
  *   watchskip=LO:HI       (up to four) ...ignoring writes from these PCs (memset, painting a new stack)
+ *   watchonly=LO:HI       ...and counting only writes from these PCs (one program's text)
  *                         At exit, log the code-looking words on the stack as it stood at
  *                         its deepest: return addresses, so the call chain that got there.
  *   allocprof=FILE        at exit write accesses and misses per allocation site. The
  *                         guest declares its allocations through a port: the word it
  *                         first stores ALLOCPROF_HELLO to, then for each event
  *                         1<<28|site, address, size (alloc) or 2<<28, address (free).
+ *   io=LO:HI              a storage window (QEMU's fatdisk) standing in for the SD card: its
+ *                         accesses cost the card's time instead of nothing.  A request
+ *                         starts at a non-sequential access or after io_gap_ns without one,
+ *                         and costs io_req_ns; each byte costs io_rd_ps / io_wr_ps
+ *                         (picoseconds).  Defaults: the Pico Plus 2's SDIO card, 2026-11-09.
  *   fast=FILE             what if these were in SRAM: sorted "lo hi" lines of hex, free of
  *                         XIP costs (selfhost_profile.py run --fast)
  *   callers=FILE          hex entry PCs, whose callers to count, ...
@@ -79,7 +85,11 @@ typedef struct
   uint64_t lo, hi;
 } Region;
 
-static Region flash_r[MAX_REGIONS], psram_r[MAX_REGIONS], nocache_pc;
+static Region flash_r[MAX_REGIONS], psram_r[MAX_REGIONS], nocache_pc, io_r;
+/* the SD card behind io=: per request, per byte read / written, and the pause that ends a request */
+static uint64_t io_req_ns = 2000000, io_rd_ps = 75700, io_wr_ps = 600000, io_gap_ns = 20000;
+static uint64_t io_next, io_last_ns, io_ps_carry;
+static uint64_t st_io_req, st_io_rd, st_io_wr, st_io_cycles;
 static int n_flash, n_psram;
 
 static uint64_t clock_addr;
@@ -109,8 +119,12 @@ typedef struct
 static Region watch_r, watch_skip[4];
 static int watch_skip_count;
 
+static Region watch_only;
+
 static bool watch_pc_skipped(uint64_t pc)
 {
+  if (watch_only.hi && (pc < watch_only.lo || pc >= watch_only.hi))
+    return true;
   for (int i = 0; i < watch_skip_count; i++)
     if (pc >= watch_skip[i].lo && pc < watch_skip[i].hi)
       return true;
@@ -205,6 +219,34 @@ static uint64_t host_ns(void)
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t modeled_ns(void);
+
+/* One access to the io= window: the card's time, charged to the instruction that made it. */
+static void io_access(PcStat *st, uint64_t vaddr, unsigned size, int is_write)
+{
+  pthread_mutex_lock(&lock);
+  uint64_t now = modeled_ns(), ns = 0;
+  if (vaddr < io_next || vaddr >= io_next + 512 || now - io_last_ns > io_gap_ns)
+  {
+    ns += io_req_ns;
+    st_io_req++;
+  }
+  io_next = vaddr + size;
+  io_ps_carry += (uint64_t)size * (is_write ? io_wr_ps : io_rd_ps);
+  ns += io_ps_carry / 1000;
+  io_ps_carry %= 1000;
+  if (is_write)
+    st_io_wr += size;
+  else
+    st_io_rd += size;
+  uint64_t c = ns * mhz / 1000;
+  extra_cycles += c;
+  st->extra += c;
+  st_io_cycles += c;
+  io_last_ns = modeled_ns();
+  pthread_mutex_unlock(&lock);
 }
 
 enum
@@ -359,6 +401,11 @@ static void on_tb_fetch(unsigned int cpu_index, void *udata)
 static void on_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info, uint64_t vaddr, void *udata)
 {
   PcStat *st = udata;
+  if (io_r.hi && vaddr >= io_r.lo && vaddr < io_r.hi)
+  {
+    io_access(st, vaddr, 1u << qemu_plugin_mem_size_shift(info), qemu_plugin_mem_is_store(info));
+    return;
+  }
   int kind = region_kind(vaddr);
   if (watch_r.hi && vaddr >= watch_r.lo && vaddr < watch_r.hi && qemu_plugin_mem_is_store(info) &&
       !watch_pc_skipped(st->pc))
@@ -709,6 +756,13 @@ static void on_plugin_exit(void *p)
            total_insns, base, extra_cycles, modeled_ns() / 1e6, idle_ns / 1e6, st_ifetch_hit, st_ifetch_miss,
            st_dread_hit, st_dread_miss, st_dwrite_hit, st_dwrite_miss, st_wb, st_flash_data, st_psram_data, st_uncached_w);
   qemu_plugin_outs(buf);
+  if (io_r.hi)
+  {
+    snprintf(buf, sizeof(buf),
+             "rp2350_timing: io requests %" PRIu64 " read %" PRIu64 " KB written %" PRIu64 " KB, %.1f ms\n",
+             st_io_req, st_io_rd / 1024, st_io_wr / 1024, st_io_cycles / (double)mhz / 1000.0);
+    qemu_plugin_outs(buf);
+  }
   for (int b = 0; b < 32; b++)
     if (clear_hist[b])
     {
@@ -795,6 +849,16 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
       n_psram++;
     else if (!strcmp(k, "nocache") && !parse_region(v, &nocache_pc))
       ;
+    else if (!strcmp(k, "io") && !parse_region(v, &io_r))
+      ;
+    else if (!strcmp(k, "io_req_ns"))
+      io_req_ns = strtoull(v, NULL, 0);
+    else if (!strcmp(k, "io_rd_ps"))
+      io_rd_ps = strtoull(v, NULL, 0);
+    else if (!strcmp(k, "io_wr_ps"))
+      io_wr_ps = strtoull(v, NULL, 0);
+    else if (!strcmp(k, "io_gap_ns"))
+      io_gap_ns = strtoull(v, NULL, 0);
     else if (!strcmp(k, "ucw"))
       ucw_c = strtoull(v, NULL, 0);
     else if (!strcmp(k, "mhz"))
@@ -822,6 +886,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     else if (!strcmp(k, "pcprof"))
       pcprof_path = strdup(v);
     else if (!strcmp(k, "watch") && !parse_region(v, &watch_r))
+      ;
+    else if (!strcmp(k, "watchonly") && !parse_region(v, &watch_only))
       ;
     else if (!strcmp(k, "watchskip") && (watch_skip_count == 4 || !parse_region(v, &watch_skip[watch_skip_count++])))
       ;

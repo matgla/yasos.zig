@@ -194,13 +194,14 @@ def write_corpus(path):
 # on-board invocation is the one docs/kernel_bench_insn_2026-10-08.md used:
 # render a .zig to C with build-obj -ofmt=c, then let tcc compile that C.
 # One chain, because every workload boots fresh and cannot see another's files.
+CARD_ZIG_LIB = REPO / "sdcard/var/lib/zig"
 ZIG_CHAIN = ("mkdir -p /tmp/zig-cache /tmp/zighome"
              " && HOME=/tmp/zighome zig build-obj -ofmt=c"
              " -target thumb-freestanding -mcpu=cortex_m33 -OReleaseSmall"
-             " /tmp/work/hello.zig --zig-lib-dir /usr/lib/zig"
+             " /tmp/work/hello.zig --zig-lib-dir /mnt/lib/zig"
              " --cache-dir /tmp/zig-cache -femit-bin=/tmp/work/hello_zig.c"
              " && sha256sum /tmp/work/hello_zig.c"
-             " && tcc -c -I/usr/lib/zig -include /usr/lib/zig/zig_c_prelude.h"
+             " && tcc -c -I/mnt/lib/zig -include /mnt/lib/zig/zig_c_prelude.h"
              " /tmp/work/hello_zig.c -o /tmp/work/hello_zig.o")
 
 # The battery, run against every kernel.  Fields:
@@ -384,8 +385,15 @@ def run_workload(variant, wl, elf, payload, args):
         from yasos_device import DeviceError, QemuMount, run
 
         lines = []
-        with QemuMount([(boot, "")], kernel=elf, keep_work=args.keep) as guest:
-            rc = run(guest.session, "mkdir -p /tmp/work && cp -r /mnt/* /tmp/work/",
+        # The device Zig's lib lives on the boards' SD card (/var/lib/zig, staged in
+        # sdcard/ by apps/zig/build_zig.sh); here it rides on the volume at
+        # /mnt/lib/zig, read in place rather than copied to /tmp with the payload.
+        sources = [(boot, "")]
+        if wl.get("needs") == "zig" and CARD_ZIG_LIB.is_dir():
+            sources.append((CARD_ZIG_LIB, "lib/zig"))
+        with QemuMount(sources, kernel=elf, keep_work=args.keep) as guest:
+            rc = run(guest.session, "mkdir -p /tmp/work && cd /mnt"
+                     " && for f in *; do [ \"$f\" = lib ] || cp -r \"$f\" /tmp/work/ || exit 1; done",
                      silence=args.silence, echo=False)
             if rc:
                 result["error"] = f"payload copy failed (rc={rc})"

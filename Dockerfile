@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ARG TARGETPLATFORM
-ARG ZIG_VERSION="0.18.0-dev.253+16d31ceed"
+ARG ZIG_VERSION="0.17.1"
 
 ARG ARM_NONE_EABI_GCC_VERSION="15.2.rel1"
 
@@ -34,7 +34,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
     echo "Unknown TARGET_PLATFORM: $TARGETPLATFORM"; \
     exit 1; \
     fi \
-    && wget "https://ziglang.org/builds/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -O /opt/zig/zig.tar.xz \
+    && wget "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -O /opt/zig/zig.tar.xz \
     && wget "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_NONE_EABI_GCC_VERSION}/binrel/arm-gnu-toolchain-${ARM_NONE_EABI_GCC_VERSION}-${ZIG_ARCH}-arm-none-eabi.tar.xz" -O /opt/arm-none-eabi-gcc/gcc.tar.xz \
     && cd /opt/zig && tar -xf zig.tar.xz --strip-components=1 \
     && cd /opt/arm-none-eabi-gcc && tar -xf gcc.tar.xz --strip-components=1 \
@@ -49,7 +49,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
 # (infrequent) image build, then assert the package landed so we never publish
 # an image silently missing it.
 #
-# Zig 0.17-dev and later (checked again on 0.18.0-dev.253) keep a fetched
+# Zig 0.17-dev and later (checked again on 0.17.1) keep a fetched
 # package as `p/<hash>.tar.gz`; older Zig unpacked it into a `p/<hash>/`
 # directory. Accept either, so a cache-layout change does not fail the image
 # build with a misleading "the fetch is flaky" symptom.

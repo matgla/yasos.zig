@@ -36,12 +36,16 @@ def test_zig_build_obj_emits_c_and_tcc_compiles_it(request):
             redirect = ">" if index == 0 else ">>"
             session.write_command(f"echo {shlex.quote(line)} {redirect} {work}/probe.zig")
             session.wait_for_prompt()
+        # The lib lives on the SD card (/var/lib/zig, which the compiler searches);
+        # QEMU smoke runs have no card and carry it on the fatdisk volume instead
+        # (scripts/build_smoke_fatdisk.py).
         session.write_command(
+            "ZL=/var/lib/zig; test -f /mnt/var/lib/zig/std/std.zig && ZL=/mnt/var/lib/zig; "
             f"HOME={work}/home zig build-obj -ofmt=c -target thumb-freestanding "
             f"-mcpu=cortex_m33 -OReleaseSmall {work}/probe.zig "
-            f"--zig-lib-dir /usr/lib/zig --cache-dir {work}/cache "
+            f"--zig-lib-dir $ZL --cache-dir {work}/cache "
             f"-femit-bin={work}/probe.c && test -s {work}/probe.c "
-            f"&& tcc -c -I/usr/lib/zig -include /usr/lib/zig/zig_c_prelude.h "
+            f"&& tcc -c -I$ZL -include $ZL/zig_c_prelude.h "
             f"{work}/probe.c -o {work}/probe.o && test -s {work}/probe.o; "
             "echo ZIG_BUILDOBJ_RC=$?"
         )

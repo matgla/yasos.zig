@@ -1,0 +1,5 @@
+# The Zig fork the device compiler is built from (apps/zig/fetch_fork.sh, CI).
+# Bump `commit` with the fork; it must be reachable from `branch` on `url`.
+url https://github.com/matgla/zig.git
+branch tinyzig
+commit 300788e0379cd992c8ad2800a5c539c537c4d6d4

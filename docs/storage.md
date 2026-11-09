@@ -9,7 +9,7 @@ on the SD card, in four MBR partitions that `cardreformat` lays out (see
 | # | Label     | Type | Default size | Mounted at | Holds                                              |
 |---|-----------|------|--------------|------------|----------------------------------------------------|
 | 1 | `YASBOOT` | FAT  | 64 MiB       | `/boot`    | `yasboot/*.ybi` update images (docs/bootloader_plan.md §4.5) |
-| 2 | `YASVAR`  | ext4 | 256 MiB      | `/var`     | `log/kernel.log`, `tmp/` (the /tmp spill)          |
+| 2 | `YASVAR`  | ext4 | 256 MiB      | `/var`     | `log/kernel.log`, `tmp/` (the /tmp spill), `lib/zig/` (the device Zig's lib, ~33 MB: `apps/zig/build_zig.sh` stages it in `sdcard/`) |
 | 3 | (none)    | swap (type 82) | 128 MiB | --      | processes waiting in `waitpid`, written out ([Swap](#swap)) |
 | 4 | `YASHOME` | ext4 | the rest     | `/home`    | `root/`, which is bind-mounted at `/root`          |
 
@@ -218,8 +218,8 @@ full (a test hook, `tests/smoke/swap_test.py`). The code is
 
 ## In QEMU
 
-`scripts/qemu_mount.py --sdcard` puts a 16 MiB partitioned image (made by
-`cardreformat` with the host tools, sizes shrunk to fit) in the an524's fatdisk
+`scripts/qemu_mount.py --sdcard` puts a 256 MiB partitioned image (made by
+`cardreformat` with the host tools, sizes fitted to it) in the an524's fatdisk
 window, where it
 shows up as `/dev/fatdisk0p1`..`p4` and /etc/fstab mounts it like a card.
 

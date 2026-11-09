@@ -176,10 +176,23 @@ fn release_tmp_spill() anyerror!void {
 }
 
 fn reattach_tmp_spill() void {
+    // Spilling only pays when the directory is real storage. A RAM /var (the
+    // x-fallback when there is no card) would take the bodies onto the kernel
+    // heap, which is smaller than the arena: a 12.7 MB file the 64 MB an524
+    // arena holds failed there with ENOMEM. Stay detached instead -- a body due
+    // to spill then stays in the arena while it has room (Tier.keeps_in_arena).
+    if (!spill_pays(tmp_memory_pool != null, mounter.is_persistent(tmp_tier.?.directory))) return;
     mounter.mkdir_parents(tmp_tier.?.directory) catch |err| {
         kernel.log.warn("/tmp: can't create spill directory {s}: {s}", .{ tmp_tier.?.directory, @errorName(err) });
     };
     tmp_tier.?.reattach();
+}
+
+/// Whether /tmp bodies should go to the spill directory. With an arena, only
+/// when that directory is real storage; without one the spill directory is the
+/// only place a body can live, RAM or not.
+fn spill_pays(has_arena: bool, spill_is_persistent: bool) bool {
+    return !has_arena or spill_is_persistent;
 }
 
 /// The kernel log lets go of /var the same way, and logs to it again once it
@@ -294,6 +307,12 @@ fn make_tmp_filesystem(kernel_allocator: std.mem.Allocator, requested_spill: []c
             .context = &tmp_memory_pool.?,
             .free_bytes = &tmp_arena_free_bytes,
         }, tmpfs.arena_reserve);
+    }
+    // /var is mounted before /tmp (etc/fstab); when it came up as RAM, start
+    // detached so nothing spills onto the kernel heap (see reattach_tmp_spill).
+    if (!spill_pays(maybe_arena != null, mounter.is_persistent(spill_directory))) {
+        tmp_tier.?.detach() catch unreachable; // no body exists yet
+        kernel.log.info("/tmp: {s} is not storage; files stay in the arena", .{spill_directory});
     }
 
     return try (try RamFs.InstanceType.init_tiered(allocator, &tmp_tier.?)).interface.new(allocator);

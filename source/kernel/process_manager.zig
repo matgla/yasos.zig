@@ -960,6 +960,16 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // Not a YAFF image (a script without "#!", data, ...) is ENOEXEC,
             // which is what a shell falls back on to run it itself.
             const load_allocator = current_process.get_process_memory_allocator();
+            // The stack first (see Process.preallocate_stack), at the size
+            // finish_exec will give it. Only with the node sys_execve resolved:
+            // its header costs no second path lookup.
+            if (node) |resolved| {
+                const hint = dynamic_loader.node_stack_hint(resolved);
+                const cur_stack = try current_process.get_resource_limit(c.RLIMIT_STACK);
+                const stack_limit = exec_stack_limit(cur_stack, current_process.stack_limit_from_image, self.runtime_configuration.default_stack_size, hint) orelse cur_stack;
+                if (std.math.cast(u32, stack_limit.rlim_cur)) |size| current_process.preallocate_stack(size);
+            }
+            errdefer current_process.drop_pending_stack();
             const loaded = blk: {
                 if (node) |resolved| break :blk dynamic_loader.load_executable_node(resolved, path, load_allocator, current_process.pid, load_start_us);
                 break :blk dynamic_loader.load_executable(path, load_allocator, current_process.pid);
