@@ -18,7 +18,7 @@ jobs:
   qemu_gate:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.20
+      image: ghcr.io/matgla/yasos.zig:v0.21
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -118,7 +118,7 @@ jobs:
   build_hw:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.20
+      image: ghcr.io/matgla/yasos.zig:v0.21
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -165,7 +165,7 @@ jobs:
   build_hw_zig:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.20
+      image: ghcr.io/matgla/yasos.zig:v0.21
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
