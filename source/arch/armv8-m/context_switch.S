@@ -299,6 +299,15 @@ process_syscall_entry:
   push {r4, r5, r6, r7}
   mrs r4, psp
   isb
+  // The simulated frame below is 10 words stored with stmdb: plain stores in
+  // handler mode, which PSPLIM does not check. With under 40 bytes left they
+  // land below the stack, in whatever the pool put there -- since an exec
+  // allocates the stack before the image, libc's shared --hot-text copy, which
+  // every process then runs corrupted. Too little room is a stack overflow.
+  mrs r5, psplim
+  sub r6, r4, #40
+  cmp r6, r5
+  blo process_syscall_entry_overflow
   ldr r6, [r4, #28] // get psr
   ldr r3, =return_from_syscall
   ldr r5, =dispatch_syscall
@@ -331,6 +340,16 @@ process_syscall_entry:
   pop {r4, r5, r6, r7}
   // process stack is modified, but not yet ready to be switched, block context switch till prepared
   bx r3 // we are taking back context from 134
+process_syscall_entry_overflow:
+  pop {r4, r5, r6, r7}
+  push {r0, lr}
+  bl syscall_entry_stack_overflow // r0 = PSP of a frame that runs _exit(-1)
+  msr psp, r0
+  isb
+  pop {r0, lr}
+  // A basic frame, thread mode on PSP, like the entry path's own return.
+  ldr lr, =0xfffffffd
+  bx lr
 process_syscall_internal_noop:
   // lr is still the EXC_RETURN this handler was entered with, and nothing here
   // has touched CONTROL, so the thread resumes at its own privilege level with

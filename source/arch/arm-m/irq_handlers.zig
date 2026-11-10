@@ -500,6 +500,17 @@ fn uses_process_stack(exc_return: usize) bool {
     return (exc_return & 0x4) != 0;
 }
 
+/// A syscall with too little process stack for the entry's simulated frame
+/// (context_switch.S process_syscall_entry): killed like an overflow the hardware
+/// caught, before anything was written below the stack.
+export fn syscall_entry_stack_overflow() usize {
+    if (!abandon_faulting_thread()) {
+        @panic("syscall stack overflow in a process that cannot be unwound");
+    }
+    log.err("Process stack overflow at syscall entry, terminating current process", .{});
+    return prepare_stack_overflow_exit_frame();
+}
+
 fn prepare_stack_overflow_exit_frame() usize {
     // Not the top of the stack: a vfork child shares its parent's, whose top is
     // the parent's live frames. `get_exit_frame_ceiling` reports the top of the
