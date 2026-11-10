@@ -72,8 +72,8 @@ def main(argv=None) -> int:
     parser.add_argument("--keep", action="store_true", help="keep the work directory (qemu log, images)")
     parser.add_argument("--sdcard", action="store_true",
                         help="put a partitioned SD card image in the window instead of /mnt, laid out by "
-                             "usr/bin/cardreformat (shrunk to 16 MiB); /etc/fstab "
-                             "then mounts /boot, /var, /opt and /home from it")
+                             "usr/bin/cardreformat (fitted to the 256 MiB window); /etc/fstab "
+                             "then mounts /boot, /var and /home from it and swaps to its swap partition")
     args = parser.parse_args(argv)
 
     if args.sdcard and args.directory:

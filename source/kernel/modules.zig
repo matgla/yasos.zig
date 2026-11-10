@@ -622,6 +622,18 @@ fn read_executable_header(path: []const u8) ?yasld.Header {
     return header;
 }
 
+/// The stack hint of the image at `node` (0xFFFFFFFF: none), read from its header
+/// alone; the node stays the caller's.
+pub fn node_stack_hint(node: *kernel.fs.Node) u32 {
+    var file = node.as_file() orelse return 0xFFFFFFFF;
+    var header: yasld.Header = undefined;
+    const bytes = std.mem.asBytes(&header);
+    if ((file.interface.seek(0, c.SEEK_SET) catch return 0xFFFFFFFF) != 0) return 0xFFFFFFFF;
+    if (file.interface.read(bytes) != @as(isize, @intCast(bytes.len))) return 0xFFFFFFFF;
+    if (!std.mem.eql(u8, std.mem.asBytes(&header.magic), "YAFF")) return 0xFFFFFFFF;
+    return if (header.stack_size == 0) 0xFFFFFFFF else header.stack_size;
+}
+
 pub fn executable_stack_hint(path: []const u8) ?u32 {
     const header = read_executable_header(path) orelse return null;
     if (header.stack_size == 0 or header.stack_size == 0xFFFFFFFF) return null;

@@ -105,6 +105,24 @@ pub const MemInfoFile = interface.DeriveFromBase(BufferedFileForMeminfo, struct 
             written_length += buf.len;
             buf = vfmt.print(buffer[written_length..], "LoaderCacheHits: {d} hit {d} pre {d} miss {d} evicted\n", .{ cache.hits, cache.precache_hits, cache.misses, cache.evicted });
             written_length += buf.len;
+            // Swap space (memory/swap.zig): its size; what is out there now
+            // (SwapUsed) and what is back in memory with its copy kept there
+            // (SwapCached, reused when it goes out again unchanged); runs out
+            // and in since boot, and of what went out, the bytes written and
+            // the bytes an unchanged copy saved.
+            const swap = kernel.memory.swap.stats();
+            const Pool = kernel.memory.heap.ProcessMemoryPool;
+            const held = kernel.process.process_manager.instance.get_process_memory_pool().swap_bytes();
+            buf = vfmt.print(buffer[written_length..], "SwapTotal:       {s}\n", .{format_size(swap.total, &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "SwapUsed:        {s}\n", .{format_size(held.out, &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "SwapCached:      {s}\n", .{format_size(held.cached, &sizebuf)});
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "SwapRuns:        {d} out {d} in\n", .{ Pool.swap_written_runs + Pool.swap_reused_runs, swap.ins });
+            written_length += buf.len;
+            buf = vfmt.print(buffer[written_length..], "SwapWrites:      {d} KB written {d} KB unchanged\n", .{ Pool.swap_written_bytes / 1024, Pool.swap_reused_bytes / 1024 });
+            written_length += buf.len;
             buf = vfmt.print(buffer[written_length..], "LoaderVerified:  {d} checked {d} failed\n", .{ cache.verified, cache.verification_failures });
             written_length += buf.len;
         }

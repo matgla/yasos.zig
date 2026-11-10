@@ -960,6 +960,16 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // Not a YAFF image (a script without "#!", data, ...) is ENOEXEC,
             // which is what a shell falls back on to run it itself.
             const load_allocator = current_process.get_process_memory_allocator();
+            // The stack first (see Process.preallocate_stack), at the size
+            // finish_exec will give it. Only with the node sys_execve resolved:
+            // its header costs no second path lookup.
+            if (node) |resolved| {
+                const hint = dynamic_loader.node_stack_hint(resolved);
+                const cur_stack = try current_process.get_resource_limit(c.RLIMIT_STACK);
+                const stack_limit = exec_stack_limit(cur_stack, current_process.stack_limit_from_image, self.runtime_configuration.default_stack_size, hint) orelse cur_stack;
+                if (std.math.cast(u32, stack_limit.rlim_cur)) |size| current_process.preallocate_stack(size);
+            }
+            errdefer current_process.drop_pending_stack();
             const loaded = blk: {
                 if (node) |resolved| break :blk dynamic_loader.load_executable_node(resolved, path, load_allocator, current_process.pid, load_start_us);
                 break :blk dynamic_loader.load_executable(path, load_allocator, current_process.pid);
@@ -1070,6 +1080,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             current_process.set_heap_limit_bytes(executable.module.heap_size);
 
             try current_process.reinitialize_stack(&call_main, argc, @intFromPtr(argv_copy.argv), symbol.address, symbol.target_got_address);
+            // A vfork child stops sharing its parent's stack here: it has its own
+            // now (reallocate_stack), and the parent is handed back below. Left
+            // set, it outlived the exec for good: the exit-frame ceiling of a
+            // later fault came from the parent's next vfork, and swap passed over
+            // every exec'd process -- make included.
+            current_process._stack_shared_with_parent = false;
 
             // Under `proctable_lock`, like the identical hand-off in
             // `delete_process`: `set_next` claims the parent and, through
@@ -1287,24 +1303,30 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     }
                     if (nohang) return 0;
 
+                    // The status comes from the child's exit record, read below
+                    // once this process runs again: written from the child's
+                    // exit, it went into this process's memory while that may
+                    // have been out on swap -- into somebody else's pages.
                     const Action = struct {
-                        pub fn on_process_finished(context: ?*anyopaque, rc: i32) void {
-                            const s: *i32 = @ptrCast(@alignCast(context));
-                            s.* = rc;
-                        }
+                        pub fn on_process_finished(_: ?*anyopaque, _: i32) void {}
                     };
-                    current_process.wait_for_process(p, &Action.on_process_finished, status) catch {
+                    current_process.wait_for_process(p, &Action.on_process_finished, null) catch {
                         return -1;
                     };
                 }
             }
 
             // Preemption is enabled here, which is the point: yielding is the
-            // only way the child ever runs.
+            // only way the child ever runs.  Nothing below touches this
+            // process's memory but its stack until the swap-in, so the pool may
+            // write the rest out meanwhile (`swap_out_waiting`).
+            current_process.swap_eligible = true;
             while (current_process.state == Process.State.Blocked) {
                 hal.irq.trigger(.pendsv);
                 current_process.reevaluate_state();
             }
+            current_process.swap_eligible = false;
+            if (current_process.swapped) self.swap_in_current(current_process);
 
             // Woken because a child finished: which one is known only from the
             // record it left, so `waitpid(-1)` reports the pid it collected.
@@ -1316,6 +1338,131 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
             status.* = current_process.child_exit_code;
             return pid;
+        }
+
+        /// ProcessMemoryPool.swap_hook: an allocation by the running process
+        /// found the pool full.  Write out processes waiting in waitpid, the
+        /// largest first, until about `bytes` are free; returns how much was.
+        pub fn swap_out_waiting(self: *Self, bytes: usize) usize {
+            // The swap file's I/O sleeps; an allocation that cannot wait for
+            // it gets nothing (its caller holds a spinlock, or is the idle
+            // process).
+            if (preempt.preempt_disabled() or !kernel.memory.swap.active()) {
+                log.err("swap: not for {d} bytes: preempt off {}, swap on {}", .{ bytes, preempt.preempt_disabled(), kernel.memory.swap.active() });
+                return 0;
+            }
+            const io = kernel.memory.heap.ProcessMemoryPool.swap_io orelse return 0;
+            const pool = self.get_process_memory_pool();
+            const current = self.get_current_process();
+            kernel.memory.swap.io_lock.lock();
+            defer kernel.memory.swap.io_lock.unlock();
+            var freed: usize = 0;
+            var tried: usize = 0;
+            while (freed < bytes and tried < 8) : (tried += 1) {
+                const victim = self.claim_swap_victim(current) orelse {
+                    if (tried == 0) self.log_swap_candidates(current);
+                    break;
+                };
+                const out = pool.swap_out(victim.pid, victim.get_stack_bottom(), io);
+                log.info("swap: pid {d} out, {d} KiB, for pid {d}", .{ victim.pid, out / 1024, current.pid });
+                if (!pool.is_swapped_out(victim.pid)) {
+                    const flags = proctable_lock.lock_irqsave();
+                    defer proctable_lock.unlock_irqrestore(flags);
+                    victim.swapped = false;
+                }
+                freed += out;
+            }
+            return freed;
+        }
+
+        /// The largest process waiting in waitpid, marked swapped: from here
+        /// until its swap-in it goes no further than that, even woken.
+        fn claim_swap_victim(self: *Self, current: *Process) ?*Process {
+            const pool = self.get_process_memory_pool();
+            var best: ?*Process = null;
+            var best_pages: usize = 0;
+            var candidates: [8]*Process = undefined;
+            var count: usize = 0;
+            {
+                const flags = proctable_lock.lock_irqsave();
+                defer proctable_lock.unlock_irqrestore(flags);
+                var next = self.processes.first;
+                while (next) |node| : (next = node.next) {
+                    const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                    if (p == current or !swappable(p)) continue;
+                    if (count == candidates.len) break;
+                    candidates[count] = p;
+                    count += 1;
+                }
+            }
+            // Sized outside the table lock: the pool's is a spinlock of its own.
+            for (candidates[0..count]) |p| {
+                const pages = pool.used_pages_for(p.pid);
+                if (pages > best_pages) {
+                    best = p;
+                    best_pages = pages;
+                }
+            }
+            const chosen = best orelse return null;
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            // Still waiting?  It may have been woken while it was being sized.
+            if (!swappable(chosen)) return null;
+            chosen.swapped = true;
+            return chosen;
+        }
+
+        /// Why nothing could be swapped: every other process and what
+        /// `swappable` looks at.
+        fn log_swap_candidates(self: *Self, current: *Process) void {
+            const Row = struct { pid: c.pid_t, eligible: bool, swapped: bool, blocked: bool, shared: bool };
+            var rows: [12]Row = undefined;
+            var count: usize = 0;
+            {
+                const flags = proctable_lock.lock_irqsave();
+                defer proctable_lock.unlock_irqrestore(flags);
+                var next = self.processes.first;
+                while (next) |node| : (next = node.next) {
+                    const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                    if (p == current) continue;
+                    if (count == rows.len) break;
+                    rows[count] = .{ .pid = p.pid, .eligible = p.swap_eligible, .swapped = p.swapped, .blocked = p.state == Process.State.Blocked, .shared = p._stack_shared_with_parent };
+                    count += 1;
+                }
+            }
+            log.err("swap: nothing to swap for pid {d}", .{current.pid});
+            for (rows[0..count]) |r| log.err("  pid {d}: waiting {} swapped {} blocked {} vfork-stack {}", .{ r.pid, r.eligible, r.swapped, r.blocked, r.shared });
+        }
+
+        fn swappable(p: *const Process) bool {
+            return p.swap_eligible and !p.swapped and p.state == Process.State.Blocked and !p._stack_shared_with_parent;
+        }
+
+        /// Bring the calling process's memory back from swap, waiting until
+        /// the pages it had are free again -- normally until the child it was
+        /// waiting for is reaped, which this does itself rather than wait for
+        /// the idle process.
+        fn swap_in_current(self: *Self, current: *Process) void {
+            const io = kernel.memory.heap.ProcessMemoryPool.swap_io orelse return;
+            const pool = self.get_process_memory_pool();
+            var waits: usize = 0;
+            while (true) : (waits += 1) {
+                {
+                    kernel.memory.swap.io_lock.lock();
+                    defer kernel.memory.swap.io_lock.unlock();
+                    const back = pool.swap_in(current.pid, io) catch |err| {
+                        log.err("swap: pid {d} lost its memory: {s}", .{ current.pid, @errorName(err) });
+                        break;
+                    };
+                    if (back) break;
+                }
+                self.reap_terminated();
+                if (waits == 1000) log.warn("swap: pid {d} still waiting for its pages", .{current.pid});
+                current.sleep_for_us(1000);
+            }
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            current.swapped = false;
         }
 
         /// The process running on this core. The slot needs no lock: `core[]`
@@ -1374,6 +1521,11 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
 pub const ProcessManager = ProcessManagerGenerator(Scheduler);
 
 pub var instance: ProcessManager = undefined;
+
+/// ProcessMemoryPool.swap_hook, set once swap is active.
+pub fn swap_hook(bytes: usize) usize {
+    return instance.swap_out_waiting(bytes);
+}
 var instance_initialized: bool = false;
 
 pub fn initialize_process_manager(allocator: std.mem.Allocator) void {

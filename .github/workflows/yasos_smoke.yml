@@ -18,7 +18,7 @@ jobs:
   qemu_gate:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.20
+      image: ghcr.io/matgla/yasos.zig:v0.21
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -118,7 +118,7 @@ jobs:
   build_hw:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/matgla/yasos.zig:v0.20
+      image: ghcr.io/matgla/yasos.zig:v0.21
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -145,6 +145,65 @@ jobs:
         with:
           name: hw_smoke_package
           path: output/*.tar.gz
+      # hardware_selfhost's payload, from the same checkout as the image: the board's
+      # rootfs tcc compiles these tinycc sources, and its objects must equal the ones
+      # the cross made here from the same command lines.
+      - name: Prepare tcc self-host payload
+        shell: bash
+        run: python3 scripts/tcc_selfhost.py --prepare-only
+      - name: Upload tcc self-host payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhost_payload
+          path: .cache/tcc_selfhost/payload
+
+  # The board image with the device Zig compiler in its rootfs (the pinned fork,
+  # apps/zig/zig_fork.txt), and the kernel as the board will build it: the tree of
+  # sources, the zig lib, and the hash of every output the host reference makes --
+  # the fork's single-threaded host compiler and the cross running the same
+  # build_all.sh (scripts/kernel_tcc/zig_device.py).
+  build_hw_zig:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/matgla/yasos.zig:v0.21
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+      - name: Install GNU make bootstrap tools
+        shell: bash
+        run: |
+          command -v autopoint >/dev/null && command -v makeinfo >/dev/null ||
+            { apt-get update -y && apt-get install -y autoconf automake autopoint gettext texinfo; }
+      - name: Fetch the pinned Zig fork
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./apps/zig/fetch_fork.sh .cache/zig-fork
+      - name: Build hardware image with the device zig (ReleaseSafe kernel + rootfs)
+        shell: bash
+        env:
+          YASOS_KERNEL_OPTIMIZE: ReleaseSafe
+        run: |
+          YASOS_IMAGE_ZIG="$PWD/.cache/zig-fork" ./build_image.sh pimoroni_pico_plus2_and_vga_defconfig
+      - name: Kernel tree and host references for the board
+        shell: bash
+        run: |
+          python3 scripts/kernel_tcc/zig_device.py prepare
+          python3 scripts/kernel_tcc/zig_device.py full --package zig_kernel_package
+      - name: Upload hardware zig package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hw_zig_package
+          path: output/*.tar.gz
+      - name: Upload zig kernel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig_kernel_package
+          path: zig_kernel_package
 
   # Flash the prebuilt package onto the real RP2350 and run the on-device suite
   # at -O0/-O1/-O2 incl. gcc-torture. No host build happens here — the kernel +
@@ -170,25 +229,7 @@ jobs:
           name: hw_smoke_package
           path: artifact
       - name: Stage prebuilt kernel + rootfs (no rebuild on the board)
-        run: |
-          pkg=$(find artifact -name '*.tar.gz' | head -n1)
-          if [ -z "$pkg" ]; then echo "no package tarball found in artifact/" >&2; exit 1; fi
-          tar -xzf "$pkg" -C artifact
-          # Exclude the decode_bundle/ copies so we pick the package top-level
-          # kernel + rootfs (the bundle holds symbol ELFs for decoding only).
-          kernel=$(find artifact -name yasos_kernel -not -path '*/decode_bundle/*' | head -n1)
-          rootfs=$(find artifact -name rootfs.img -not -path '*/decode_bundle/*' | head -n1)
-          # yaff_arch_test.py corrupts this executable field by field and checks
-          # the loader refuses it; rootfs/ is gitignored, so the checkout has no
-          # copy and it has to come from the package.
-          donor=$(find artifact -path '*/rootfs/usr/bin/hello' -not -path '*/decode_bundle/*' | head -n1)
-          if [ -z "$kernel" ] || [ -z "$rootfs" ] || [ -z "$donor" ]; then
-            echo "package missing yasos_kernel, rootfs.img or rootfs/usr/bin/hello" >&2; exit 1
-          fi
-          mkdir -p zig-out/bin rootfs/usr/bin
-          cp "$kernel" zig-out/bin/yasos_kernel
-          cp "$rootfs" rootfs.img
-          cp "$donor" rootfs/usr/bin/hello
+        run: ./scripts/stage_hw_package.sh artifact
       # Same reasoning as the QEMU gate: the levels are explicit. Comma-separated
       # because make hands the command to run_container.sh, which expands it
       # unquoted -- a space-separated value would word-split before it reached
@@ -228,3 +269,88 @@ jobs:
         with:
           name: smoke_test_logs
           path: ${{ github.workspace }}/tests/smoke/logs/*
+
+  # The board compiles its own compiler: the rootfs tcc builds tinycc (object for
+  # object equal to the host cross's), and the tcc it built rebuilds itself to a
+  # byte-identical fixpoint (scripts/tcc_selfhost.py, stage 3).  Same package as
+  # hardware_smoke; the single board runner runs the two one after the other.
+  hardware_selfhost:
+    needs: build_hw
+    runs-on: [self-hosted, pimoroni_pico_plus2]
+    steps:
+      - name: Cleanup workspace
+        run: |
+          rm -rf "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+      - uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+      - name: Download hardware smoke package
+        uses: actions/download-artifact@v4
+        with:
+          name: hw_smoke_package
+          path: artifact
+      - name: Download tcc self-host payload
+        uses: actions/download-artifact@v4
+        with:
+          name: selfhost_payload
+          path: selfhost_payload
+      - name: Stage prebuilt kernel + rootfs (no rebuild on the board)
+        run: ./scripts/stage_hw_package.sh artifact
+      # The board lock, as in hardware_smoke: matgla/tinycc's metrics runner shares
+      # the probe.
+      - name: tcc self-host on the board (stage 2 + fixpoint)
+        run: |
+          exec 9>/var/lock/rp2350-board.lock
+          flock -w 7200 9 || {
+            echo "::error::RP2350 board lock still held after 2h --" \
+                 "another run (likely matgla/tinycc metrics on this Pi) owns the probe"
+            exit 1
+          }
+          make run_selfhost_packaged SELFHOST_PAYLOAD=selfhost_payload
+      - name: Upload self-host logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhost_logs
+          path: ${{ github.workspace }}/.cache/tcc_selfhost/run_*.log
+
+  # The kernel built on the board: the device zig renders it to C, tcc compiles it
+  # and links it, and every output -- the kernel ELF included -- must equal the host
+  # reference's (scripts/kernel_tcc/zig_device.py board-run).
+  hardware_zig_kernel:
+    needs: build_hw_zig
+    runs-on: [self-hosted, pimoroni_pico_plus2]
+    steps:
+      - name: Cleanup workspace
+        run: |
+          rm -rf "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+      - uses: actions/checkout@v3
+      - name: Download hardware zig package
+        uses: actions/download-artifact@v4
+        with:
+          name: hw_zig_package
+          path: artifact
+      - name: Download zig kernel package
+        uses: actions/download-artifact@v4
+        with:
+          name: zig_kernel_package
+          path: zig_kernel_package
+      - name: Stage prebuilt kernel + rootfs (no rebuild on the board)
+        run: ./scripts/stage_hw_package.sh artifact
+      - name: Kernel built on the board (zig render, zigfix, tcc, link)
+        run: |
+          exec 9>/var/lock/rp2350-board.lock
+          flock -w 7200 9 || {
+            echo "::error::RP2350 board lock still held after 2h --" \
+                 "another run (likely matgla/tinycc metrics on this Pi) owns the probe"
+            exit 1
+          }
+          make run_zig_kernel_packaged ZIG_KERNEL_PACKAGE=zig_kernel_package
+      - name: Upload board build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig_kernel_logs
+          path: ${{ github.workspace }}/.cache/zig_device/board_run.log

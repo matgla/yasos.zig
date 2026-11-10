@@ -49,7 +49,7 @@ once — prefer that when a bug class repeats.
   `qemu_mount.py` relies on them; the old 8.3-only / `ls /mnt` panic notes were
   from an earlier kernel.)
 - **`scripts/qemu_mount.py DIR`** — boot the an524 kernel with a host directory
-  at `/mnt` (long names, subdirectories, ≤16 MB): `-c CMD` runs commands and
+  at `/mnt` (long names, subdirectories, ≤256 MB): `-c CMD` runs commands and
   exits with their status, no `-c` gives a console (Ctrl-] quits), `--dest`
   copies it into a guest directory, `--pull OUT` brings `/mnt` back afterwards.
   The real-board counterpart is **`scripts/transfer.py -r DIR /abs/dest`**
@@ -62,6 +62,38 @@ once — prefer that when a bug class repeats.
   only changed files (rz up, `sz` down). Both are three-way: a file changed on
   both sides is never overwritten -- the target's copy lands as `<file>.target`,
   and push holds that file back until the `.target` is deleted.
+- **`scripts/tinycc_board.py push | make | run CMD | pull | all`** — work on
+  tinycc on the board: the whole repository (or `--sources-only`) goes to
+  `/root/tinycc/tree/src` as a compressed delta (first push ~5.5 min, then only
+  what changed), `make` runs `./configure && make` there (`--configure=` for
+  options; plain `./configure` needs none on YasOS), `pull` brings the board's
+  edits back with the target_sync three-way merge, and a push refuses to
+  overwrite a file edited on the board. Default is the rig's board under its
+  lock (`--flash` installs this checkout's images first); `--serial DEV` for a
+  probe on this PC, `--qemu all` for a guest (sources in `/tmp`: QEMU's RAM
+  `/root` holds ~14 MB). tinycc side: `libs/tinycc/docs/native_build.md`.
+- **`scripts/kernel_tcc/zig_device.py prepare | qemu | tcc | full`** — the whole kernel
+  built ON the target: `prepare` captures the two C-backend compiles of `zig build
+  kernel-tcc-plan` (kernel, compiler-rt) and ships every source, generated .zig and the
+  device zig lib; `qemu` renders them with the device zig (must equal the fork's host
+  compiler at `-j1`); `full` does renders + `scripts/kernel_tcc/zigfix.c` (the Python
+  fix-ups in C, built by tcc on the device) + all plan commands through the link in one
+  QEMU boot, compared output by output with the same script run on the host.
+- **Board self-build CI** (`.github/workflows/yasos_smoke.yml`): `hardware_selfhost` runs
+  `scripts/run_hw_selfhost.sh` (the build_hw package + a `tcc_selfhost.py --prepare-only`
+  payload, `tcc_selfhost.py --uart --payload`, stage 3 fixpoint); `hardware_zig_kernel` runs
+  `scripts/run_hw_zig_kernel.sh` (an image built with `YASOS_IMAGE_ZIG=<fork>` from
+  `apps/zig/fetch_fork.sh`, the fork pinned in `apps/zig/zig_fork.txt`, and a
+  `zig_device.py full --package` package; `zig_device.py board-run` compares every output
+  with the host reference). From this PC: `zig_device.py full --board [--flash]` (rig).
+  Host references use the fork's SINGLE-THREADED host compiler
+  (`.cache/zig-build/host-st`, built by build_zig.sh): single-threaded, the fork creates a
+  declaration's Nav on first use, which numbers the C differently from a threaded build.
+- **`scripts/zig_board.py [--flash] push | run CMD`** — the device zig on the rig's board:
+  `./build_rootfs.sh -c -o rootfs.img --zig ~/repos/zig-0171` keeps it in an rp2350 image
+  (3.7 MB; the build fails if the image passes the 8 MB romfs region), `push` puts its lib
+  on the card (`/var/lib/zig` -> `/var/lib/zigm/tree/src`), `run` runs a command under the
+  board lock. A `std.fmt` build-obj takes ~10 s and 2.5 MB on the Pico Plus 2.
 - **`scripts/tcc_selfhost.py --qemu | --uart --dest /abs/dir`** — the tinycc
   self-host test: builds the stage-2 native tcc with the cross in
   `.cache/tcc_selfhost`, sends sources + host-cross objects, the device's tcc
@@ -70,8 +102,9 @@ once — prefer that when a bug class repeats.
   compile-only check; `--stages 2` to skip the fixpoint.
 - **Storage layout** ([`docs/storage.md`](docs/storage.md)): the kernel mounts
   from `/etc/fstab` (in-tree `etc/fstab`) -- SD partitions by `LABEL=`: FAT
-  `/boot` (yasboot reads it), ext4 `/var /opt /home` (lwext4 fork in
-  `libs/lwext4`, driver `source/fs/ext4/`), `/root` bound to `/home/root`, `/tmp` spilling to
+  `/boot` (yasboot reads it), ext4 `/var /home` (lwext4 fork in
+  `libs/lwext4`, driver `source/fs/ext4/`), swap on a type-82 partition
+  (processes waiting in `waitpid` are written out when the pool is full), `/root` bound to `/home/root`, `/tmp` spilling to
   `/var/tmp`, kernel log in `/var/log`. Partitions are `/dev/mmc0p1..4`
   (1-based). `cardreformat` (romfs `/usr/bin`, in-tree `usr/bin/`) lays a card
   out with `fdisk` + `mkfs.fat`/`mkfs.ext4` (host builds for a PC:

@@ -76,6 +76,20 @@ def _corpus():
     return mapping
 
 
+# The device Zig's lib (std, zig.h, compiler-rt) lives on the boards' SD card
+# at /var/lib/zig; apps/zig/build_zig.sh stages it in sdcard/. QEMU has no card
+# in the smoke runs, so it rides on this volume instead: /mnt/var/lib/zig.
+CARD_ZIG_LIB = REPO / "sdcard/var/lib/zig"
+CARD_ZIG_PREFIX = "var/lib/zig"
+
+
+def _card_zig_lib():
+    if not CARD_ZIG_LIB.is_dir():
+        return {}
+    return {f"{CARD_ZIG_PREFIX}/{p.relative_to(CARD_ZIG_LIB).as_posix()}": str(p)
+            for p in CARD_ZIG_LIB.rglob("*") if p.is_file()}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backing", required=True,
@@ -93,9 +107,10 @@ def main():
     corpus = _corpus()
     if not corpus:
         sys.exit("corpus is empty -- nothing to map")
+    corpus.update(_card_zig_lib())
 
     # One mount for the whole corpus: a fatimg run per file would spend all its
-    # time mounting and unmounting a 16 MB image.
+    # time mounting and unmounting the window-sized image.
     listing = image.with_suffix(".list")
     listing.write_text(
         "".join(f"{host}\t0:/{fat}\n" for fat, host in sorted(corpus.items())),

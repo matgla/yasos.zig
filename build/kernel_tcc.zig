@@ -319,8 +319,24 @@ pub fn build(b: *Build, kernel: *Compile, opts: Options) Result {
     strip.setCwd(b.path("."));
     strip.addFileInput(b.path("apps/zig/strip_naked_asm.py"));
     strip.addFileArg(crt_c);
-    const crt_tcc = strip.addOutputFileArg("compiler_rt_tcc.c");
+    const crt_strip = strip.addOutputFileArg("compiler_rt_strip.c");
     strip.addFileArg(provided);
+    // Only what the rest of the link reaches: the kernel keeps 7 of compiler-rt's 554
+    // functions, and on the board tcc spent 9 of the build's 28 minutes on the others.
+    const need = b.addSystemCommand(&.{ "python3", "scripts/kernel_tcc/tool.py", "needed" });
+    need.setCwd(b.path("."));
+    need.addFileInput(b.path("scripts/kernel_tcc/tool.py"));
+    const needed = need.addOutputFileArg("needed.txt");
+    for (objs.items) |o| need.addFileArg(o);
+    for (archives.items) |a| need.addFileArg(a);
+    need.addFileArg(kfp);
+    need.addFileArg(krt);
+    const prune = b.addSystemCommand(&.{ "python3", "scripts/kernel_tcc/tool.py", "prune-crt" });
+    prune.setCwd(b.path("."));
+    prune.addFileInput(b.path("scripts/kernel_tcc/tool.py"));
+    const crt_tcc = prune.addOutputFileArg("compiler_rt_tcc.c");
+    prune.addFileArg(crt_strip);
+    prune.addFileArg(needed);
     const crt_obj = blk: {
         const c = ctx.base("-O2");
         c.args(ctx.fp_flags);

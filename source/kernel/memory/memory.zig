@@ -18,3 +18,4 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 pub const heap = @import("heap/heap.zig");
+pub const swap = @import("swap.zig");

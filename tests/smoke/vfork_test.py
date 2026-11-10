@@ -22,6 +22,8 @@
  left) and one that collects a child it did not name up front.
  """
 
+import re
+
 from .conftest import session_key
 
 
@@ -298,3 +300,50 @@ def test_failed_exec_in_a_subshell_leaves_its_heap_alone(request):
     session.write_command('y=$(no_such_command_at_all; echo a; echo b | cat); echo "two[$y]"')
     assert "b" in session.read_until_prompt()
     assert faults() == before
+
+
+# Reads the same directory twice: once alone, once with a vfork child coming and
+# going after the first entry.
+_INHERITED_DIR_STREAM_PROBE = [
+    "#include <dirent.h>",
+    "#include <stdio.h>",
+    "#include <sys/wait.h>",
+    "#include <unistd.h>",
+    "static int count(DIR *d) { int n = 0; while (readdir(d)) n++; return n; }",
+    "int main(void) {",
+    "int st = 0;",
+    "pid_t p;",
+    "DIR *d = opendir(\"/usr/bin\");",
+    "int all = count(d);",
+    "int rest;",
+    "closedir(d);",
+    "d = opendir(\"/usr/bin\");",
+    "readdir(d);",
+    "p = vfork();",
+    "if (p == 0) _exit(0);",
+    "waitpid(p, &st, 0);",
+    "rest = 1 + count(d);",
+    "closedir(d);",
+    "printf(\"ENTRIES all=%d rest=%d\\n\", all, rest);",
+    "return 0;",
+    "}",
+]
+
+
+def test_child_exit_leaves_the_parents_directory_stream_open(request):
+    """A parent keeps reading a directory after a vfork child has gone.
+
+    The child's descriptor table copied the directory iterator by value, so the
+    child's exit destroyed the one the parent was reading: the parent lost the
+    remaining entries, and its closedir destroyed the iterator a second time.
+    GNU make spawns with directory streams half read, so a build in a tree of any
+    size panicked the kernel on the corrupted heap.
+    """
+    session = request.node.stash[session_key]
+    output = _compile_and_run(session, _INHERITED_DIR_STREAM_PROBE, "dirstream")
+
+    match = re.search(r"ENTRIES all=(\d+) rest=(\d+)", output)
+    assert match, output
+    all_entries, rest = int(match.group(1)), int(match.group(2))
+    assert all_entries > 1, output
+    assert rest == all_entries, output

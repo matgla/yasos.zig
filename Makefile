@@ -1,4 +1,4 @@
-CONTAINER_VERSION ?= v0.19
+CONTAINER_VERSION ?= v0.21
 RUN_CONTAINER ?= ./scripts/run_container.sh -v ${CONTAINER_VERSION}
 
 # tcc -O levels the smoke suites run at. Every suite (tests2, ir_tests,
@@ -35,6 +35,17 @@ run_smoke_tests: prepare_smoke
 # the build_hw CI artifact) and run the on-device smoke suite without rebuilding.
 run_smoke_tests_packaged: pull_container
 	${RUN_CONTAINER} -c "./scripts/run_hw_smoke.sh --opt-levels ${SMOKE_OPT_LEVELS}"
+
+# The board builds itself (CI's hardware_selfhost / hardware_zig_kernel jobs):
+# images staged as for run_smoke_tests_packaged, plus the prepared payload/package.
+SELFHOST_PAYLOAD ?= selfhost_payload
+ZIG_KERNEL_PACKAGE ?= zig_kernel_package
+
+run_selfhost_packaged: pull_container
+	${RUN_CONTAINER} -c "./scripts/run_hw_selfhost.sh ${SELFHOST_PAYLOAD}"
+
+run_zig_kernel_packaged: pull_container
+	${RUN_CONTAINER} -c "./scripts/run_hw_zig_kernel.sh ${ZIG_KERNEL_PACKAGE}"
 
 run_smoke_tests_qemu: prepare_smoke
 	${RUN_CONTAINER} -c "./scripts/run_qemu_smoke.sh --opt-levels ${SMOKE_OPT_LEVELS}"

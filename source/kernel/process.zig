@@ -24,6 +24,7 @@ const IntegerHashMap = @import("yasld").IntegerHashMap;
 const c = @import("libc_imports").c;
 
 const config = @import("config");
+const interface = @import("interface");
 const kernel = @import("kernel.zig");
 const preempt = @import("sync/preempt.zig");
 
@@ -212,6 +213,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             // every library it pulled in. A process cannot measure this itself, so
             // it is handed back through sys_perf_dump. 0 = never exec'd.
             _load_us: u64 = 0,
+            // The next image's stack, allocated by an exec before the image's
+            // sections (`preallocate_stack`) and taken by `reallocate_stack`.
+            _pending_stack: ?[]align(8) u8 = null,
         };
 
         state: State,
@@ -259,6 +263,14 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         _exited_children: std.DoublyLinkedList = .{},
         _stack_shared_with_parent: bool,
         _vfork_context: ?VForkContext = null,
+        /// Waiting in waitpid for a child, so none of its memory but its stack
+        /// is touched until that ends: a process the pool may swap out
+        /// (process_manager.zig, `swap_out_waiting`).
+        swap_eligible: bool = false,
+        /// Its memory, but the stack, is out on swap; waitpid brings it back
+        /// before it returns.  Set and cleared under `proctable_lock` and the
+        /// swap mutex.
+        swapped: bool = false,
         _initialized: bool = false,
         /// Sleeping-mutex ranks this process holds, parked here while it is not
         /// running. lockdep's held-set is per-core, which is right for the
@@ -345,16 +357,22 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         }
 
         fn dupe_filehandle(handle: *FileHandle) !FileHandle {
+            // First: nothing is shared yet if this fails.
+            const path = try handle.allocator.dupe(u8, handle.path);
             return .{
                 .allocator = handle.allocator,
-                .diriter = handle.diriter,
+                // Part of the same description as the offset below. Copied by
+                // value this was owned twice: make keeps directory streams open
+                // across a spawn, so the child's exit destroyed the iterator the
+                // parent was reading, and the parent's close destroyed it again.
+                .diriter = if (handle.diriter) |*d| d.share() else null,
                 // A reference to the same open file, as dup(2) takes: fork and
                 // vfork share the file description (and its offset) with the
                 // parent. clone() copied the object memberwise instead, so a
                 // FatFs file's name buffer and FIL were owned twice -- closing
                 // both copies freed the name twice and corrupted the kernel heap.
                 .node = handle.node.share(),
-                .path = try handle.allocator.dupe(u8, handle.path),
+                .path = path,
                 // fork/vfork copy the table flags and all
                 .cloexec = handle.cloexec,
             };
@@ -856,7 +874,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 if (@rem(length, ProcessMemoryPoolType.page_size) != 0) {
                     number_of_pages += 1;
                 }
-                const tier: @TypeOf(self.cold._process_memory_allocator).Tier = if ((flags & c.MAP_SLOW) != 0) .slow else if ((flags & c.MAP_FAST) != 0) .fast else .any;
+                const tier: @TypeOf(self.cold._process_memory_allocator).Tier = if ((flags & c.MAP_TOP) != 0) .top else if ((flags & c.MAP_SLOW) != 0) .slow else if ((flags & c.MAP_FAST) != 0) .fast else .any;
                 const maybe_address = self.cold._process_memory_allocator.allocate_pages_tiered(number_of_pages, tier, (flags & c.MAP_UNINITIALIZED) != 0);
                 if (maybe_address) |address| {
                     return address.ptr;
@@ -869,7 +887,38 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             const stack_limit = try self.get_resource_limit(c.RLIMIT_STACK);
             const requested_stack_size = std.math.cast(u32, stack_limit.rlim_cur) orelse return kernel.errno.ErrnoSet.InvalidArgument;
             log.debug("Reallocating stack to new size: {d}", .{requested_stack_size});
+            if (comptime @hasDecl(ImplType, "adopt_stack")) {
+                if (self.cold._pending_stack) |stack| {
+                    if (stack.len == requested_stack_size) {
+                        self.cold._pending_stack = null;
+                        self.impl.adopt_stack(stack);
+                        return;
+                    }
+                }
+            }
+            self.drop_pending_stack();
             try self.impl.reallocate_stack(requested_stack_size);
+        }
+
+        /// The stack an exec is about to give this process, allocated before the
+        /// image is loaded: the pool hands out SRAM first come, first served, and
+        /// a stack is the hottest memory of nearly every program.  Loaded after
+        /// the image, the device zig's 320 KB stack found the SRAM taken by its
+        /// .data and cold heap and ran from PSRAM: 62% of its data misses, and
+        /// evicting its code from the XIP cache they share.  In SRAM the kernel
+        /// render on the Pico Plus 2 took 439 s instead of 606 (2026-11-09).  A
+        /// failed allocation only means the stack is allocated later, as before.
+        pub fn preallocate_stack(self: *Self, stack_size: u32) void {
+            if (comptime !@hasDecl(ImplType, "adopt_stack")) return;
+            self.drop_pending_stack();
+            self.cold._pending_stack = self.cold._process_memory_allocator.allocator().alignedAlloc(u8, .@"8", stack_size) catch null;
+        }
+
+        pub fn drop_pending_stack(self: *Self) void {
+            if (self.cold._pending_stack) |stack| {
+                self.cold._process_memory_allocator.allocator().free(stack);
+                self.cold._pending_stack = null;
+            }
         }
 
         pub fn munmap(self: *Self, maybe_address: ?*anyopaque, length: i32) void {
@@ -1762,6 +1811,87 @@ test "FileHandle.ShouldRemoveIterator" {
     try std.testing.expect(handle.diriter != null);
     handle.remove_iterator();
     try std.testing.expectEqual(null, handle.diriter);
+}
+
+/// Counts what actually tears the iterator down: a mock's interface has no
+/// refcount, and the refcount is the thing under test.
+const DeleteCountingIterator = interface.DeriveFromBase(IDirectoryIterator, struct {
+    const Self = @This();
+    deletes: *usize,
+
+    pub fn next(_: *Self) ?kernel.fs.DirectoryEntry {
+        return null;
+    }
+
+    pub fn delete(self: *Self) void {
+        self.deletes.* += 1;
+    }
+});
+
+// make leaves directory streams half read and spawns: the vfork child's handle
+// went away first and destroyed the iterator the parent was still reading, whose
+// own close then destroyed it again and corrupted the kernel heap.
+test "FileHandle.ForkedCopyShouldShareIteratorUntilLastClose" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+
+    var deletes: usize = 0;
+    const iterator = try DeleteCountingIterator.init(.{ .deletes = &deletes }).interface.new(std.testing.allocator);
+    _ = directory_mock
+        .expectCall("iterator")
+        .willReturn(iterator);
+    const parent_iterator = try handle.get_iterator();
+
+    var child = try Process.dupe_filehandle(&handle);
+    try std.testing.expectEqual(parent_iterator.__ptr, child.diriter.?.__ptr);
+
+    child.close();
+    try std.testing.expectEqual(0, deletes);
+
+    _ = (try handle.get_iterator()).interface.next();
+    try std.testing.expectEqual(0, deletes);
+
+    handle.close();
+    try std.testing.expectEqual(1, deletes);
+}
+
+test "FileHandle.ForkedCopyShouldOutliveParentsIterator" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+
+    var deletes: usize = 0;
+    const iterator = try DeleteCountingIterator.init(.{ .deletes = &deletes }).interface.new(std.testing.allocator);
+    _ = directory_mock
+        .expectCall("iterator")
+        .willReturn(iterator);
+    _ = try handle.get_iterator();
+
+    var child = try Process.dupe_filehandle(&handle);
+    handle.close();
+    try std.testing.expectEqual(0, deletes);
+
+    _ = (try child.get_iterator()).interface.next();
+    child.close();
+    try std.testing.expectEqual(1, deletes);
+}
+
+test "FileHandle.ForkedCopyWithoutIteratorShouldHaveNone" {
+    var directory_mock = try DirectoryMock.create(std.testing.allocator);
+    defer directory_mock.delete();
+    const dir_node = kernel.fs.Node.create_directory(directory_mock.interface);
+
+    var handle = try Process.FileHandle.create(std.testing.allocator, "/some/dir", dir_node);
+    defer handle.close();
+
+    var child = try Process.dupe_filehandle(&handle);
+    defer child.close();
+    try std.testing.expectEqual(null, child.diriter);
 }
 
 test "FileHandle.ShouldRejectIteratorForFileDescriptor" {

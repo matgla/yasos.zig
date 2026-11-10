@@ -97,6 +97,7 @@ fn addBoardMacros(t: anytype) void {
 
 fn addBoardHeaders(
     b: *std.Build,
+    filter: Filter,
     picosdk: []const u8,
     arm: toolchain.ArmToolchain,
     target: std.Build.ResolvedTarget,
@@ -128,13 +129,57 @@ fn addBoardHeaders(
     pp.addArg("-o");
     const expanded = pp.addOutputFileArg(b.fmt("{s}_pp.h", .{import_name}));
 
+    // Only the macros the HAL's Zig code reads (tools/define_filter.c): the register
+    // headers define ~32k per header, which every compile of the module parsed and
+    // lowered -- more than the device Zig compiler can hold.
+    const used = b.addRunArtifact(filter.exe);
+    const filtered = used.addOutputFileArg(b.fmt("{s}_used.h", .{import_name}));
+    used.addFileArg(expanded);
+    for (filter.zig_files) |file| used.addFileArg(b.path(file));
+
     const step = b.addTranslateC(.{
-        .root_source_file = expanded,
+        .root_source_file = filtered,
         .target = target,
         .optimize = optimize,
         .link_libc = false,
     });
     owner.addImport(import_name, step.createModule());
+}
+
+const Filter = struct {
+    exe: *std.Build.Step.Compile,
+    /// The HAL's Zig files, relative to this directory: the names they mention are the
+    /// macros kept.
+    zig_files: []const []const u8,
+};
+
+fn buildDefineFilter(b: *std.Build) !Filter {
+    const module = b.createModule(.{
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    module.addCSourceFile(.{ .file = b.path("tools/define_filter.c"), .flags = &.{"-std=c11"} });
+    var files: std.ArrayList([]const u8) = .empty;
+    try files.appendSlice(b.allocator, &.{ "rp2350.zig", "cmsis.zig" });
+    for ([_][]const u8{ "source", "startup" }) |sub| {
+        const root = try b.root.toString(b.graph.arena);
+        var dir = try std.Io.Dir.cwd().openDir(b.graph.io, b.pathJoin(&.{ root, sub }), .{ .iterate = true });
+        defer dir.close(b.graph.io);
+        var walker = try dir.walk(b.allocator);
+        defer walker.deinit();
+        while (try walker.next(b.graph.io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+            try files.append(b.allocator, b.pathJoin(&.{ sub, entry.path }));
+        }
+    }
+    // Sorted, so the step's inputs (and its cache key) do not follow the directory order.
+    std.mem.sort([]const u8, files.items, {}, struct {
+        fn lessThan(_: void, l: []const u8, r: []const u8) bool {
+            return std.mem.lessThan(u8, l, r);
+        }
+    }.lessThan);
+    return .{ .exe = b.addExecutable(.{ .name = "define_filter", .root_module = module }), .zig_files = files.items };
 }
 
 fn configureCmake(b: *std.Build) ![]const u8 {
@@ -161,10 +206,40 @@ fn configureCmake(b: *std.Build) ![]const u8 {
 
         const configure_project = b.run(&.{ cmake_exe, "-S", @as([]const u8, pico_sdk_path), "-B", @as([]const u8, cmake_binary_dir) });
         std.log.info("{s}", .{configure_project});
+        try relativizeConfigAutogen(b, cmake_binary_dir);
         return cmake_binary_dir;
     };
 
+    try relativizeConfigAutogen(b, cmake_binary_dir);
     return cmake_binary_dir;
+}
+
+// cmake writes the board and CMSIS headers into config_autogen.h by absolute
+// path, so a copy of the tree -- the kernel built on the device from
+// scripts/kernel_tcc's plan -- read this checkout's headers, or none at all.
+// Relative to the header itself they are the same files wherever the tree is.
+fn relativizeConfigAutogen(b: *std.Build, cmake_binary_dir: []const u8) !void {
+    const io = b.graph.io;
+    const header_dir = b.pathJoin(&.{ cmake_binary_dir, "generated", "pico_base", "pico" });
+    const header = b.pathJoin(&.{ header_dir, "config_autogen.h" });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, header, b.allocator, .limited(1 << 20)) catch return;
+    const cwd = try std.process.currentPathAlloc(io, b.allocator);
+    var out: std.ArrayList(u8) = .empty;
+    var changed = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(b.allocator, '\n');
+        first = false;
+        const prefix = "#include \"/";
+        if (std.mem.startsWith(u8, line, prefix) and std.mem.endsWith(u8, line, "\"")) {
+            const target = line[prefix.len - 1 .. line.len - 1];
+            const rel = try std.fs.path.relativeAlloc(b.allocator, cwd, null, header_dir, target);
+            try out.print(b.allocator, "#include \"{s}\"", .{rel});
+            changed = true;
+        } else try out.appendSlice(b.allocator, line);
+    }
+    if (changed) try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = header, .data = out.items });
 }
 
 // The C port of the SDK's pioasm (apps/pioasm), built for this machine. The
@@ -194,7 +269,7 @@ fn generate_pio(b: *std.Build, pioasm: *std.Build.Step.Compile, file: []const u8
 }
 
 pub fn build(b: *std.Build) !void {
-    const optimize = b.standardOptimizeOption(.{}) orelse .debug;
+    const optimize = b.standardOptimizeOption(.{});
     const target = b.resolveTargetQuery(targetOptions);
 
     const hal = b.addModule("hal", .{
@@ -265,12 +340,13 @@ pub fn build(b: *std.Build) !void {
     addBoardMacros(hal);
 
     const arm = try toolchain.resolveArmToolchain(b, target);
-    addBoardHeaders(b, picosdk, arm, target, optimize, hal, "picosdk_headers", "source/picosdk_c.h");
-    addBoardHeaders(b, picosdk, arm, target, optimize, hal, "clocks_headers", "source/cpu_c.h");
-    addBoardHeaders(b, picosdk, arm, target, optimize, hal, "external_memory_headers", "source/external_memory_c.h");
-    addBoardHeaders(b, picosdk, arm, target, optimize, hal, "mmc_spi_headers", "source/mmc/mmc_spi_c.h");
-    addBoardHeaders(b, picosdk, arm, target, optimize, hal, "mmc_sdio_headers", "source/mmc/mmc_sdio_c.h");
-    addBoardHeaders(b, picosdk, arm, target, optimize, hal, "crt_headers", "startup/crt_c.h");
+    const filter = try buildDefineFilter(b);
+    addBoardHeaders(b, filter, picosdk, arm, target, optimize, hal, "picosdk_headers", "source/picosdk_c.h");
+    addBoardHeaders(b, filter, picosdk, arm, target, optimize, hal, "clocks_headers", "source/cpu_c.h");
+    addBoardHeaders(b, filter, picosdk, arm, target, optimize, hal, "external_memory_headers", "source/external_memory_c.h");
+    addBoardHeaders(b, filter, picosdk, arm, target, optimize, hal, "mmc_spi_headers", "source/mmc/mmc_spi_c.h");
+    addBoardHeaders(b, filter, picosdk, arm, target, optimize, hal, "mmc_sdio_headers", "source/mmc/mmc_sdio_c.h");
+    addBoardHeaders(b, filter, picosdk, arm, target, optimize, hal, "crt_headers", "startup/crt_c.h");
 
     hal.addCSourceFiles(.{
         .files = &.{

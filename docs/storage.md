@@ -9,8 +9,8 @@ on the SD card, in four MBR partitions that `cardreformat` lays out (see
 | # | Label     | Type | Default size | Mounted at | Holds                                              |
 |---|-----------|------|--------------|------------|----------------------------------------------------|
 | 1 | `YASBOOT` | FAT  | 64 MiB       | `/boot`    | `yasboot/*.ybi` update images (docs/bootloader_plan.md §4.5) |
-| 2 | `YASVAR`  | ext4 | 256 MiB      | `/var`     | `log/kernel.log`, `tmp/` (the /tmp spill)          |
-| 3 | `YASOPT`  | ext4 | 25% of card  | `/opt`     | installed software                                 |
+| 2 | `YASVAR`  | ext4 | 256 MiB      | `/var`     | `log/kernel.log`, `tmp/` (the /tmp spill), `lib/zig/` (the device Zig's lib, ~33 MB: `apps/zig/build_zig.sh` stages it in `sdcard/`) |
+| 3 | (none)    | swap (type 82) | 128 MiB | --      | processes waiting in `waitpid`, written out ([Swap](#swap)) |
 | 4 | `YASHOME` | ext4 | the rest     | `/home`    | `root/`, which is bind-mounted at `/root`          |
 
 Partitions start on 1 MiB boundaries, the first at 1 MiB, which leaves the gap
@@ -64,7 +64,7 @@ default (`mounter.default_fstab`) and says so.
 proc            /proc    proc   defaults                   0 0
 LABEL=YASBOOT   /boot    vfat   nofail                     0 2
 LABEL=YASVAR    /var     ext4   nofail,x-fallback=ramfs    0 2
-LABEL=YASOPT    /opt     ext4   nofail                     0 2
+PARTTYPE=82     none     swap   nofail                     0 0
 LABEL=YASHOME   /home    ext4   nofail,x-fallback=ramfs    0 2
 /home/root      /root    bind   x-mkdir                    0 0
 tmpfs           /tmp     tmpfs  spill=/var/tmp             0 0
@@ -72,10 +72,11 @@ tmpfs           /tmp     tmpfs  spill=/var/tmp             0 0
 ```
 
 Sources: `/dev/<device>`, `LABEL=<label>` (FAT or ext, looked up across every
-disk's partitions), a directory for `bind`, anything for the types that need no
-device. Types: `ext4` (`ext2`, `ext3` mean the same), `vfat` (`fat`, `msdos`),
-`auto` (whichever of the two the device holds), `ramfs`, `tmpfs`, `proc`,
-`bind`.
+disk's partitions), `PARTTYPE=<hex>` (the first partition of that MBR type, for
+`swap`), a directory for `bind`, a file for `swap`, anything for the types that
+need no device. Types: `ext4` (`ext2`, `ext3` mean the same), `vfat` (`fat`,
+`msdos`), `auto` (whichever of the two the device holds), `ramfs`, `tmpfs`,
+`proc`, `bind`, `swap`.
 
 Options, beyond `ro` (enforced by the VFS), `rw`, `defaults`:
 
@@ -87,6 +88,7 @@ Options, beyond `ro` (enforced by the VFS), `rw`, `defaults`:
 | `x-format-blank`   | `vfat`/`ext4`: format the device if its first sectors are all zeros |
 | `x-mkdir`          | `bind`: create the source directory first                        |
 | `spill=DIR`        | `tmpfs`: where files too big for the RAM arena go (default `CONFIG_TMPFS_SPILL_DIRECTORY`, `/var/tmp`) |
+| `size=N[K\|M]`     | `swap` on a file: create or grow the file to that size first      |
 
 With PSRAM the /tmp arena is 128 KiB at the top of PSRAM and the 32 KiB `temp_ram`
 joins the process pool. Only the tree's reference counters stay on the kernel heap,
@@ -94,15 +96,15 @@ because an exclusive store to PSRAM never succeeds (`CountersApartAllocator`). W
 PSRAM the arena is `temp_ram`, as the linker script has it.
 
 Without a card (QEMU, or a board with the slot empty), `/var` and `/home` are
-RAM fallbacks, `/root` is bound into the RAM `/home`, and `/boot` and `/opt`
-are the empty romfs directories. The kernel log goes to
+RAM fallbacks, `/root` is bound into the RAM `/home`, `/boot` is the empty
+romfs directory, and there is no swap. The kernel log goes to
 `/var/log/kernel.log` only when `/var` is real storage.
 
 ## At run time
 
 - `mount`, `umount`, `df`, `blkid` (toybox) work as on Linux; `mount -a`
   mounts what is not mounted yet and skips the rest, so it is safe to repeat.
-  `mount LABEL=YASOPT /opt` resolves the label in the kernel.
+  `mount LABEL=YASVAR /var` resolves the label in the kernel.
 - `umount` refuses (EBUSY) while a process works inside the mount or has a
   file open under it, while something is mounted below it, and while it holds
   the source of a bind mount (so `/home` stays while `/root` is bound to it).
@@ -147,17 +149,18 @@ Three tools, as on Linux, and a script that runs them with the layout above:
   of DEVICE's table instead of all of it -- how an image file on a PC, which
   has no partition nodes, is formatted.
 - **`cardreformat [-y] [DEVICE]`** (`/usr/bin/cardreformat`, in the tree
-  `usr/bin/cardreformat`) is the layout written down: `fdisk`, then the four
-  `mkfs` runs. It defaults to `/dev/mmc0`, asks for YES unless `-y`, and
+  `usr/bin/cardreformat`) is the layout written down: `fdisk` (which also sets
+  partition 3's type to 82), then the three `mkfs` runs. It defaults to `/dev/mmc0`, asks for YES unless `-y`, and
   refuses a disk with anything mounted from it.
 
 On the device -- everything on the card is lost:
 
 ```
 cd /                                   # a shell inside a mount keeps it busy
-umount /root /home /var /opt /boot     # /root first: it is bound into /home
+umount /root /home /var /boot          # /root first: it is bound into /home
 cardreformat                           # asks for YES
-mount -a                               # the new layout, no reboot needed
+reboot                                 # mount -a mounts it all, but swap that is
+                                       # already on stays on the old partition
 ```
 
 A card that boots with RAM fallbacks (`cat /proc/mounts` shows `ramfs` on
@@ -175,16 +178,48 @@ FDISK=apps/fdisk/build/host/fdisk MKFS_FAT=apps/mkfs/build/host/mkfs.fat \
   MKFS_EXT4=apps/mkfs/build/host/mkfs.ext4 usr/bin/cardreformat /dev/sdX   # or an image file
 ```
 
-`BOOT_SIZE`, `VAR_SIZE` and `OPT_SIZE` override the sizes (fdisk answers:
+`BOOT_SIZE`, `VAR_SIZE` and `SWAP_SIZE` override the sizes (fdisk answers:
 `+2M`, `+25%`, ...). `make -C apps/fdisk test` runs the table unit tests and an
 image test that lays out a 16 MiB image and checks it with `sfdisk`, `blkid`,
 `fsck.fat` and `e2fsck`. A card can also be checked on a PC:
 `e2fsck -f /dev/sdX2` (yasos has no fsck).
 
+## Swap
+
+When an allocation finds the process pool full, the kernel writes out the
+largest process that is waiting in `waitpid` -- make while its compiler runs,
+a shell while make runs -- and hands its pages to the allocation. The waiting
+process reads itself back, at the same addresses, when its wait ends: before
+`waitpid` returns, so it never sees the difference. Its stack stays resident.
+Only heap, data and bss go out; a running process is never touched. With
+nothing waiting, an allocation that does not fit fails as before.
+
+Swap space is a partition of MBR type 82 (`PARTTYPE=82` in /etc/fstab, what
+`cardreformat` makes) or a file (`/var/swap none swap size=8M`). A device given
+by `/dev/` or `LABEL=` must be type 82 too, so a mistyped line cannot write
+over a filesystem. It is used in 4 KiB clusters; the bitmap, 4 KiB for 128 MiB,
+lives in PSRAM where there is PSRAM. One swap area at a time; there is no
+`swapoff`.
+
+A run that comes back keeps its copy on swap, with a 64-bit hash of what it
+holds. If the run is unchanged when its process is swapped out again, the copy
+is reused and nothing is written: make goes out once per compile and changes
+little in between. Kept copies go when the run is freed or resized, when the
+process exits, and whenever swap is too full for a new write.
+
+`/proc/meminfo` shows `SwapTotal`, `SwapUsed` (out on swap now), `SwapCached`
+(back in memory, copy kept), `SwapRuns: N out M in` and
+`SwapWrites: X KB written Y KB unchanged`.
+Reading `/proc/swapnext` makes the next allocation swap as if the pool were
+full (a test hook, `tests/smoke/swap_test.py`). The code is
+`source/kernel/memory/swap.zig` (space and I/O),
+`kernel/memory/heap/process_memory_pool.zig` (what is swapped) and
+`kernel/process_manager.zig` (who, and when it comes back).
+
 ## In QEMU
 
-`scripts/qemu_mount.py --sdcard` puts a 16 MiB partitioned image (made by
-`cardreformat` with the host tools, sizes shrunk to fit) in the an524's fatdisk
+`scripts/qemu_mount.py --sdcard` puts a 256 MiB partitioned image (made by
+`cardreformat` with the host tools, sizes fitted to it) in the an524's fatdisk
 window, where it
 shows up as `/dev/fatdisk0p1`..`p4` and /etc/fstab mounts it like a card.
 

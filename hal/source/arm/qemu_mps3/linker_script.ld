@@ -19,8 +19,8 @@
  *       process_ram (fast user pool)                               96 MB
  *       temp_ram    (the hybrid /tmp arena)                        64 MB
  *       psram       (large "slow" user pool)                      256 MB
- *       fatdisk     (host-readable FAT block-device window)        16 MB
  *       kstack      (kernel MSP stack)                              1 MB
+ *       fatdisk     (host-readable FAT block-device window)       256 MB
  *
  * kstack sits ABOVE every process pool so the vfork register-rescue path
  * (`mov sp, <kernel rescue block>`, checked against PSPLIM by ARMv8-M) never sees
@@ -57,9 +57,9 @@ MEMORY
   /* "Slow" user process pool (memory region[2], the bulk pool every process
      allocates from — see process_memory_pool.zig). 256 MB: no compile OOMs. */
   psram       (rw)   : ORIGIN = 0x70000000, LENGTH = 256M
-  /* fatdisk: 16 MB window for a host-readable FAT block device (board fatdisk0).
-     Under a host-mmap'd RAM launch it maps to a fixed file offset that scripts/*
-     reference (0x80000000 - 0x60000000 = 0x20000000). NOT a LOADed section; on a
+  /* fatdisk: 256 MB window for a host-readable FAT block device (board fatdisk0).
+     Under a host-mmap'd RAM launch it maps to a fixed file offset, which scripts/*
+     read from this script (0x82000000 - 0x60000000 = 0x22000000). NOT a LOADed section; on a
      plain-RAM launch the window is garbage so the FatFs mount fails and is
      skipped (source/main.zig). Keep `fatdisk_address` in
      hal/boards/qemu_mps3_an524 in step with the ORIGIN here.
@@ -69,9 +69,16 @@ MEMORY
      guest compiles back into it. That is the point of the window on this board:
      the host builds the corpus into a FAT image once and maps it, instead of the
      harness pushing 4.13 MiB over ZMODEM after every relaunch. DDR is 2 GB here,
-     so the 15 MB comes out of nothing else. */
-  fatdisk     (rw)   : ORIGIN = 0x80000000, LENGTH = 16M
-  /* Kernel MSP stack — highest address, above every process pool (PSPLIM, above). */
+     so the space comes out of nothing else.
+
+     256 MB rather than the first 16: an on-device build of the kernel ships its
+     sources and the Zig lib in and the 12.7 MB of generated C out, and a
+     partitioned card image (qemu_mount.py --sdcard) carries the Zig lib on /var
+     as the boards' SD cards do. It sits above kstack and yasboot's RAM
+     (0x81100000, yasboot/link/qemu_mps3_an524.ld), which stay where they were,
+     and ends at 0x92000000, inside the 2 GB of DDR. */
+  fatdisk     (rw)   : ORIGIN = 0x82000000, LENGTH = 256M
+  /* Kernel MSP stack, above every process pool (PSPLIM, above). */
   kstack      (rw)   : ORIGIN = 0x81000000, LENGTH = 1M
 }
 

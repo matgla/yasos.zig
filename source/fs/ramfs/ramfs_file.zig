@@ -159,7 +159,10 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
 
     pub fn truncate(self: *Self, length: u64) anyerror!void {
         const len: usize = @intCast(length);
-        self._data.resize(len, 0) catch {
+        self._data.resize(len, 0) catch |err| {
+            // ENOSPC (no room: a full arena, a heap at its reserve, a detached
+            // spill) is what it is; only an allocator failure is ENOMEM.
+            if (err == kernel.errno.ErrnoSet.NoSpaceLeftOnDevice) return err;
             return kernel.errno.ErrnoSet.OutOfMemory;
         };
         if (self._position > @as(isize, @intCast(len))) {

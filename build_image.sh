@@ -25,8 +25,15 @@ export YASOS_KERNEL_OPTIMIZE="$KERNEL_OPTIMIZE"
 # rootfs.img, so building it first only produced a kernel the rootfs step then
 # had to rebuild anyway. --no-kernel: the kernel is built once, below, where a
 # failure stops the package instead of being one of build_rootfs.sh's skips.
+# YASOS_IMAGE_ZIG=<zig fork source>: the device Zig compiler goes into the image too
+# (build_rootfs.sh --zig; apps/zig/fetch_fork.sh fetches the pinned fork), for the
+# board jobs that build the kernel on the board.
+ZIG_ARGS=""
+if [ -n "${YASOS_IMAGE_ZIG:-}" ]; then
+    ZIG_ARGS="--zig $YASOS_IMAGE_ZIG"
+fi
 echo "Building root filesystem..."
-./build_rootfs.sh -c -o rootfs.img --no-kernel
+./build_rootfs.sh -c -o rootfs.img --no-kernel $ZIG_ARGS
 if [ $? -ne 0 ]; then
     echo "Failed to build root filesystem. Please check build_rootfs.sh output."
     exit 1

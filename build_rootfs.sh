@@ -472,13 +472,13 @@ build_cross_compiler()
   # reorg) — dropping only armv8m-arch/armv8m-ir would reuse the other stage's
   # objects and fail the link with "unrecognized file type".
   rm -rf armv8m-arch armv8m-ir armv8m-source armv8m-*.o *.o
-  make -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
+  make -j$JOBS AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
   PATH=$SCRIPT_DIR/libs/tinycc/bin:$PATH
   echo "Installing cross compiler..."
-  make install AR="$HOST_AR" MRI_AR="$HOST_AR" INC-armv8m="$YASOS_SYSINCLUDES"
+  make install AR="$HOST_AR" INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -598,12 +598,10 @@ build_c_compiler()
     # reorg) — dropping only armv8m-arch/armv8m-ir would reuse the other
     # stage's objects and fail the link with "unrecognized file type".
     rm -rf armv8m-arch armv8m-ir armv8m-source armv8m-*.o *.o
-    # Archive the backend library with the host `ar`, not the cross-prefixed
-    # `armv8m-tcc -ar`: the arch Makefile bundles libthumb.a into libarm.a via
-    # ar's MRI batch mode (`ar -M`), which tcc's built-in archiver does not
-    # support.  Archiving is target-agnostic, so the host ar handles the ARM
-    # objects fine.
-    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
+    # Archive with the host `ar`: archiving is target-agnostic, and the cross
+    # stage's objects are not the target's.  (The tree builds with `tcc -ar`
+    # too: that is how it builds on the board.)
+    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$YASOS_SYSINCLUDES"
 
     if [ $? -ne 0 ]; then
       exit -1;
@@ -664,8 +662,8 @@ build_c_compiler()
         fi
       done
     fi
-    # Use the host `ar` for the backend archive (MRI mode); see stage 1 above.
-    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" MRI_AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
+    # Host `ar`, as in stage 1 above.
+    VERBOSE=1 make armv8m-tcc -j$JOBS AR="$HOST_AR" LIBS="$YASOS_LIBS" INC-armv8m="$NATIVE_SYSINCLUDES"
     if [ $? -ne 0 ]; then
       exit -1;
     fi
@@ -805,12 +803,30 @@ build_gnumake()
   cd ..
 }
 
+# These Makefiles do not depend on the compiler, so a new cross (a YAFF version
+# bump, a codegen fix) left every app as it was: 25 programs, rz/sz and fdisk
+# among them, kept YAFF v4 binaries the loader refuses ("UnsupportedYaffVersion").
+# Each app remembers which cross built it and starts clean when that changes.
+clean_if_compiler_changed()
+{
+  # Kept under .cache, not in the app directory: several apps are submodules.
+  local stamp="$SCRIPT_DIR/.cache/cc-stamps/$(basename "$PWD")"
+  local id
+  id=$(sha256sum "$(command -v "$CC")" 2>/dev/null | cut -d' ' -f1)
+  if [ -n "$id" ] && [ "$(cat "$stamp" 2>/dev/null)" != "$id" ]; then
+    make clean > /dev/null 2>&1
+    mkdir -p "$(dirname "$stamp")"
+    echo "$id" > "$stamp"
+  fi
+}
+
 build_makefile()
 {
   cd $1
   if [ $CLEAR = true ]; then
     make clean
   fi
+  clean_if_compiler_changed
   make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" -j$JOBS
   if [ $? -ne 0 ]; then
     exit -1;
@@ -826,6 +842,7 @@ build_makefile()
 build_zork_makefile()
 {
   cd $1
+  clean_if_compiler_changed
   make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" CFLAGS="$DEBUG_CFLAGS $TARGET_BUILD_EXTRA_CFLAGS -Wl,-oformat=elf32-littlearm" -j$JOBS
   if [ $? -ne 0 ]; then
     exit -1;
@@ -1132,11 +1149,12 @@ if $BUILD_IMAGE; then
   rm -f rootfs/bin/armv8m-tcc
   rm -f rootfs/lib/libc.a
   rm -rf rootfs/usr/share
-  # Nothing here installs the Zig compiler, but rootfs/ is a staging dir only
-  # --clear wipes, so a zig copied in by hand (for QEMU) rides along into every
-  # later image. It is not ready on rp2350, and at 11.6 MB it was three
-  # quarters of the image the board is flashed with.
-  if [ -f "$KERNEL_CONFIG_JSON" ] && grep -q '"cpu": *"rp2350"' "$KERNEL_CONFIG_JSON"; then
+  # rootfs/ is a staging dir only --clear wipes, so a zig copied in by hand
+  # (for QEMU) rides along into every later image; at 11.6 MB it was three
+  # quarters of the image the board is flashed with.  On rp2350 the compiler
+  # stays only when this build was asked for it (--zig): 3.7 MB, its lib on the
+  # card (/var/lib/zig).
+  if [ -z "$ZIG_SOURCE" ] && [ -f "$KERNEL_CONFIG_JSON" ] && grep -q '"cpu": *"rp2350"' "$KERNEL_CONFIG_JSON"; then
     if [ -e rootfs/usr/bin/zig ] || [ -e rootfs/usr/lib/zig ]; then
       echo "Leaving the Zig compiler out of the rp2350 rootfs (not ready yet)."
     fi
@@ -1156,6 +1174,17 @@ if $BUILD_IMAGE; then
   if ! genromfs -f "$OUTPUT_FILE" -d rootfs -V rootfs; then
     echo "ERROR: genromfs failed; $OUTPUT_FILE was not written."
     exit 1
+  fi
+  # The board's romfs flash region (rp2350 linker_script*.ld): an image past it
+  # faults on the first instruction of whatever lies beyond (IACCVIOL).
+  if [ -f "$KERNEL_CONFIG_JSON" ] && grep -q '"cpu": *"rp2350"' "$KERNEL_CONFIG_JSON"; then
+    romfs_kb=$(sed -n 's/^ *romfs[^:]*: *ORIGIN *= *0x[0-9a-fA-F]*, *LENGTH *= *\([0-9]*\)K.*/\1/p' \
+               hal/source/raspberry/rp2350/linker_script.ld | head -1)
+    size=$(stat -c %s "$OUTPUT_FILE")
+    if [ -n "$romfs_kb" ] && [ "$size" -gt $((romfs_kb * 1024)) ]; then
+      echo "ERROR: $OUTPUT_FILE is $size bytes, past the ${romfs_kb}K romfs region of rp2350."
+      exit 1
+    fi
   fi
 fi
 

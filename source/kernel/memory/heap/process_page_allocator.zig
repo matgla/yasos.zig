@@ -142,7 +142,9 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
             if (self._page_limit == std.math.maxInt(usize)) return false;
             if (requested <= 0) return false;
             const used = self._pool.used_pages_for(self._pid);
-            return used + @as(usize, @intCast(requested)) > self._page_limit;
+            if (used + @as(usize, @intCast(requested)) <= self._page_limit) return false;
+            log.err("pid {d}: heap_size limit, {d} pages used + {d} > {d}", .{ self._pid, used, requested, self._page_limit });
+            return true;
         }
 
         const vtable: std.mem.Allocator.VTable = .{
@@ -212,8 +214,9 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
         /// Which memory a mapping wants.  `.any` takes the fastest with room,
         /// and a parked run of either tier.  `.slow` (MAP_SLOW) prefers the
         /// slowest tier and falls back; `.fast` (MAP_FAST) is the fastest tier
-        /// or nothing, so a program can tell whether it got it.
-        pub const Tier = enum { any, fast, slow };
+        /// or nothing, so a program can tell whether it got it.  `.top` (MAP_TOP)
+        /// is a short-lived block: the highest free run of the slowest tier.
+        pub const Tier = enum { any, fast, slow, top };
 
         pub fn allocate_pages_tiered(self: *Self, number_of_pages: i32, tier: Tier, may_keep_own: bool) ?[]u8 {
             if (self.cache_take(number_of_pages, tier)) |memory| {
@@ -236,6 +239,7 @@ pub fn ProcessPageAllocator(comptime MemoryPoolType: anytype) type {
                 .any => self._pool.allocate_pages_cleared(number_of_pages, self._pid, .heap, may_keep_own),
                 .slow => self._pool.allocate_pages_cleared(number_of_pages, self._pid, .heap_slow, may_keep_own),
                 .fast => self._pool.allocate_pages_cleared(number_of_pages, self._pid, .heap_fast, may_keep_own),
+                .top => self._pool.allocate_pages_cleared(number_of_pages, self._pid, .heap_top, may_keep_own),
             };
         }
 
