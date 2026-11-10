@@ -121,13 +121,83 @@ def fp_define(tinycc: Path) -> str:
     return define
 
 
+def mirror(src: Path, dst: Path, excludes: list[str]) -> None:
+    """`rsync -a --delete --exclude=...` without rsync (CI's container has none).
+
+    A pattern with a leading / matches a top-level entry, any other matches a name at any
+    depth (fnmatch). Files whose size and mtime match are left alone, so the in-place make
+    stays incremental; excluded entries already in *dst* (the build's .o, bin/) are kept,
+    as rsync keeps them without --delete-excluded."""
+    import fnmatch
+    import stat
+
+    def excluded(rel: str) -> bool:
+        name = rel.rsplit("/", 1)[-1]
+        return any(("/" not in rel and fnmatch.fnmatch(rel, e[1:])) if e.startswith("/") else fnmatch.fnmatch(name, e)
+                   for e in excludes)
+
+    keep = set()
+    for dirpath, dirs, files in os.walk(src):
+        base = os.path.relpath(dirpath, src)
+        base = "" if base == "." else base + "/"
+        dirs[:] = [d for d in dirs if not excluded(base + d)]
+        for d in dirs:
+            keep.add(base + d)
+            s_d, d_d = src / (base + d), dst / (base + d)
+            if os.path.islink(s_d):
+                continue  # recreated below with the files
+            if d_d.is_symlink() or (d_d.exists() and not d_d.is_dir()):
+                d_d.unlink()
+            d_d.mkdir(parents=True, exist_ok=True)
+        for f in files + [d for d in dirs if os.path.islink(src / (base + d))]:
+            rel = base + f
+            if excluded(rel):
+                continue
+            keep.add(rel)
+            s_f, d_f = src / rel, dst / rel
+            if os.path.islink(s_f):
+                target = os.readlink(s_f)
+                if not (d_f.is_symlink() and os.readlink(d_f) == target):
+                    if d_f.is_symlink() or d_f.is_file():
+                        d_f.unlink()
+                    elif d_f.is_dir():
+                        shutil.rmtree(d_f)
+                    os.symlink(target, d_f)
+                continue
+            st = s_f.stat()
+            try:
+                dt = d_f.lstat()
+                if stat.S_ISREG(dt.st_mode) and dt.st_size == st.st_size and int(dt.st_mtime) == int(st.st_mtime):
+                    continue
+                if stat.S_ISDIR(dt.st_mode):
+                    shutil.rmtree(d_f)
+            except FileNotFoundError:
+                pass
+            shutil.copy2(s_f, d_f)
+    for dirpath, dirs, files in os.walk(dst, topdown=False):
+        base = os.path.relpath(dirpath, dst)
+        base = "" if base == "." else base + "/"
+        for name in files + dirs:
+            rel = base + name
+            top = rel.split("/", 1)[0]
+            if rel in keep or excluded(rel) or any(fnmatch.fnmatch(top, e[1:]) for e in excludes if e.startswith("/")):
+                continue
+            if any(fnmatch.fnmatch(part, e) for part in rel.split("/") for e in excludes if not e.startswith("/")):
+                continue
+            path = dst / rel
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+
+
 def configure_and_build(tinycc: Path, tree: Path, opt: str, work: Path) -> Path:
     """The stage-2 native build of build_rootfs.sh, with the cross, in *tree*.
 
     Keep the configure line in step with build_rootfs.sh (build_c_compiler,
     "Second stage")."""
     tree.mkdir(parents=True, exist_ok=True)
-    sh(["rsync", "-a", "--delete"] + [f"--exclude={e}" for e in TREE_EXCLUDES] + [f"{tinycc}/", f"{tree}/"])
+    mirror(tinycc, tree, TREE_EXCLUDES)
     env = dict(os.environ, PATH=f"{tinycc / 'bin'}:{os.environ['PATH']}")
     defines = f"-DTCC_DEBUG=0 -DCONFIG_TCC_DEBUG_ENV=0 -DCONFIG_TCC_CHECKS=0 {fp_define(tinycc)}"
     cflags = (f"-Wall -Werror {defines} {opt} -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 "
