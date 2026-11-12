@@ -70,6 +70,14 @@ pub const PidStatFile = interface.DeriveFromBase(PidStatBufferedFile, struct {
         const ppid: i32 = if (process.get_parent()) |p| p.pid else 0;
         var written = vfmt.print(buffer, human_readable_file_content_format, .{ name, pid, pid, pid, ppid }).len;
         written += vfmt.print(buffer[written..], "Sched:  {s}\nWaitOn: 0x{x}\n", .{ @tagName(process.state), if (process.waiting_for) |w| @intFromPtr(w) else 0 }).len;
+        // Where it will resume, for finding what a process that never finishes
+        // is doing: sampled while it is switched out. A running process's saved
+        // frame is stale, so it gets none.
+        if (process.state != .Running) {
+            if (process.saved_pc_lr()) |r| {
+                written += vfmt.print(buffer[written..], "Resume: pc=0x{x} lr=0x{x}\n", .{ r[0], r[1] }).len;
+            }
+        }
         // Open descriptors; for a pipe end, the pipe and its end counts, which
         // is what finding a reader that never gets EOF comes down to.
         if (!process._fds_cleared) {

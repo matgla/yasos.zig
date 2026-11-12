@@ -803,6 +803,33 @@ pub const MmcIo = struct {
 
     const sdio_io_retry_limit: usize = 6;
 
+    /// Walk the kernel free list after every step of a multi-block read (tags
+    /// 0x5D20..): for bisecting a corruption that arrives with a read error down
+    /// to the step that did it. A list walk per step, so not something to leave on.
+    const trace_heap_around_reads = false;
+
+    inline fn heap_step(tag: u32) void {
+        if (trace_heap_around_reads and comptime !@import("builtin").is_test) kernel.memory.heap.malloc.probe(tag);
+    }
+
+    /// One line per failed data phase, and a walk of the kernel heap's free list.
+    /// The errors themselves are survivable -- the transfer is retried -- but what
+    /// followed them on an overclocked bus was not: a heap fault in an unrelated
+    /// close() one time, a card that timed out every write the next. So each error
+    /// says where it was (card block, buffer), what state the card reports once
+    /// the transfer has been stopped (CMD13: 4 = tran is the only state a retry can
+    /// start from; 5 = data and 6 = rcv mean the stop did not reach it), and the
+    /// free list is checked here, at the error, rather than at whichever free()
+    /// trips over it later.
+    fn note_io_error(self: *const Self, what: []const u8, lba: usize, blocks: usize, buffer: usize, err: anyerror, attempt: usize) void {
+        const status = self._mmc.send_sdio_command(13, @as(u32, self._rca) << 16);
+        const state: u32 = if (status.command_index == 13) (status.card_status >> 9) & 0xF else 0xFF;
+        log.err("SDIO {s} error {s}: lba {d}, {d} block(s), buffer 0x{x}, attempt {d}, card state {d} (status 0x{x})", .{
+            what, @errorName(err), lba, blocks, buffer, attempt, state, status.card_status,
+        });
+        if (comptime !@import("builtin").is_test) kernel.memory.heap.malloc.probe(0x5D10);
+    }
+
     fn wait_for_card_dat0(self: *const Self) void {
         const t_wait = if (kernel.perf.enabled) kernel.perf.read_cycles() else 0;
         defer if (kernel.perf.enabled) kernel.perf.disk_wait(kernel.perf.read_cycles() -% t_wait);
@@ -840,6 +867,7 @@ pub const MmcIo = struct {
                 }
 
                 self._mmc.read_sdio_data(buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                    self.note_io_error("read", block_address + i, 1, @intFromPtr(buf.ptr) + 512 * i, err, retransmissions);
                     if (retransmissions < sdio_io_retry_limit) {
                         retransmissions += 1;
                         continue;
@@ -849,7 +877,9 @@ pub const MmcIo = struct {
                 };
                 i += 1;
             } else {
+                heap_step(0x5D20);
                 const resp = self._mmc.send_sdio_command(18, @intCast(block_address + i));
+                heap_step(0x5D21);
                 if (resp.command_index != 18) {
                     if (retransmissions < sdio_io_retry_limit) {
                         retransmissions += 1;
@@ -860,7 +890,10 @@ pub const MmcIo = struct {
                 }
 
                 self._mmc.read_sdio_data(buf[512 * i .. 512 * (i + chunk)]) catch |err| {
+                    heap_step(0x5D22);
                     _ = self._mmc.send_sdio_command(12, 0);
+                    heap_step(0x5D23);
+                    self.note_io_error("multi-read", block_address + i, chunk, @intFromPtr(buf.ptr) + 512 * i, err, retransmissions);
                     if (retransmissions < sdio_io_retry_limit) {
                         retransmissions += 1;
                         continue;
@@ -869,7 +902,9 @@ pub const MmcIo = struct {
                     return -1;
                 };
 
+                heap_step(0x5D24);
                 _ = self._mmc.send_sdio_command(12, 0);
+                heap_step(0x5D25);
                 i += chunk;
             }
             retransmissions = 0;
@@ -931,6 +966,7 @@ pub const MmcIo = struct {
                 }
 
                 self._mmc.write_sdio_data(buf[512 * i .. 512 * (i + 1)]) catch |err| {
+                    self.note_io_error("write", block_address + i, 1, @intFromPtr(buf.ptr) + 512 * i, err, retransmissions);
                     _ = self._mmc.send_sdio_command(12, 0);
                     if (retransmissions < sdio_io_retry_limit) {
                         retransmissions += 1;
@@ -974,6 +1010,7 @@ pub const MmcIo = struct {
                 self._mmc.write_sdio_data(buf[512 * i .. 512 * (i + chunk)]) catch |err| {
                     _ = self._mmc.send_sdio_command(12, 0);
                     self.wait_for_card_dat0();
+                    self.note_io_error("multi-write", block_address + i, chunk, @intFromPtr(buf.ptr) + 512 * i, err, retransmissions);
                     if (retransmissions < sdio_io_retry_limit) {
                         retransmissions += 1;
                         continue;

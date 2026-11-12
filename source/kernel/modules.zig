@@ -704,6 +704,21 @@ pub fn release_executable(pid: c.pid_t) void {
     release_executable_locked(pid);
 }
 
+/// Forget a process's image without walking it: for a process killed while its
+/// memory is on swap (the swap-in watchdog). `release_executable` takes the
+/// modules apart through structures that live in the process's own pages, and
+/// those pages are somebody else's by then -- walking them double-faulted the
+/// kernel the first time the watchdog fired. The pages themselves go back with
+/// the rest of the process (`release_pages_for` drops the swap copies); what is
+/// lost is the shared libraries' reference counts, which only ever kept a
+/// cache entry alive.
+pub fn abandon_executable(pid: c.pid_t) void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    _ = modules_list.remove(pid);
+    _ = libraries_list.remove(pid);
+}
+
 /// `release_executable` with `loader_lock` already held. Split out because
 /// `load_executable` drops the previous image before installing the new one,
 /// and `RankedMutex` is not recursive.

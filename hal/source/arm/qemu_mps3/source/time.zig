@@ -70,14 +70,34 @@ pub const Time = struct {
         return 0xFFFF_FFFF -% TIMER_VALUE.*;
     }
 
-    // Monotonic tick count, tracking 32-bit wraps across calls.
+    /// Guards `last_raw`/`accumulated_ticks`. Both cores read the clock: unguarded, a
+    /// core that sampled the counter before the other core stored a newer `last_raw`
+    /// computed `raw - last_raw` across the wrap, ~2^32 ticks, and the clock leapt
+    /// 172 s forward. A zig build on an SD-card guest saw it as `sleep 30` returning at
+    /// once, timeouts firing and finally an integer-overflow panic (2026-11-11).
+    var tick_lock: u32 = 0;
+
+    // Monotonic tick count, tracking 32-bit wraps across calls. Interrupts are masked
+    // while the lock is held: SysTick reads the clock too, and taking the lock from an
+    // interrupt over the same core's holder would never return.
     fn now_ticks() u64 {
         ensure_started();
+        const primask = asm volatile ("mrs %[ret], PRIMASK\n cpsid i"
+            : [ret] "=r" (-> u32),
+            :
+            : .{ .memory = true });
+        while (@cmpxchgWeak(u32, &tick_lock, 0, 1, .acquire, .monotonic) != null) {}
         const raw = up_counter();
         const delta = raw -% last_raw;
         accumulated_ticks +%= delta;
         last_raw = raw;
-        return accumulated_ticks;
+        const ticks = accumulated_ticks;
+        @atomicStore(u32, &tick_lock, 0, .release);
+        asm volatile ("msr PRIMASK, %[mask]"
+            :
+            : [mask] "r" (primask),
+            : .{ .memory = true });
+        return ticks;
     }
 
     pub fn get_time_us() u64 {

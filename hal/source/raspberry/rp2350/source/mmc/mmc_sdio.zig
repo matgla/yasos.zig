@@ -469,7 +469,7 @@ pub const MmcSdio = struct {
     /// away, because the macro defaults to nothing and nothing ever defined it.
     /// Hours of this investigation would have been minutes with it wired up.
     export fn yasos_sdio_errmsg(txt: [*:0]const u8, arg1: u32, arg2: u32) void {
-        log.err("{s} ({d}, 0x{x})", .{ txt, arg1, arg2 });
+        log.err("{s} ({d}, 0x{x})", .{ std.mem.span(txt), arg1, arg2 });
     }
 
     pub fn read_sdio_data(self: *MmcSdio, buf: []u8) anyerror!void {

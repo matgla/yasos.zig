@@ -271,6 +271,9 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// before it returns.  Set and cleared under `proctable_lock` and the
         /// swap mutex.
         swapped: bool = false,
+        /// Until when this process sleeps (`sleep_for_us`), 0 when it does not.
+        /// A plain word read by other processes as a hint, never a guarantee.
+        sleeping_until_us: u64 = 0,
         _initialized: bool = false,
         /// Sleeping-mutex ranks this process holds, parked here while it is not
         /// running. lockdep's held-set is per-core, which is right for the
@@ -642,6 +645,12 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
 
         pub fn get_stack_bottom(self: Self) *const u8 {
             return self.impl.get_stack_bottom();
+        }
+
+        /// PC and LR a switched-out process resumes at (`/proc/<pid>/status`).
+        pub fn saved_pc_lr(self: *const Self) ?[2]u32 {
+            if (comptime !@hasDecl(ImplType, "saved_pc_lr")) return null;
+            return self.impl.saved_pc_lr();
         }
 
         pub fn get_stack_top(self: Self) *const u8 {
@@ -1021,12 +1030,15 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// the deadline passes. Blocking would need a `wake_at` in the
         /// scheduler.
         pub fn sleep_for_us(self: *Self, us: u64) void {
-            _ = self;
             // Saturating, so an absurd request cannot overflow the deadline into
             // the past. Plain comparisons below: the qemu boards' `get_time_us`
             // accumulates its 32-bit timer non-atomically, so it can step
             // backwards, which wrapping arithmetic would read as "long passed".
             const deadline = hal.time.get_time_us() +| us;
+            // For whoever is waiting on this process: it is asleep, and until when
+            // (the swap-in watchdog does not give up on a holder about to wake).
+            self.sleeping_until_us = deadline;
+            defer self.sleeping_until_us = 0;
             while (true) {
                 const now = hal.time.get_time_us();
                 if (now >= deadline) return;

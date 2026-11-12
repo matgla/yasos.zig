@@ -768,9 +768,23 @@ pub fn sys_unlink(arg: *const anyopaque) !i32 {
     const context: *const c.unlink_context = @ptrCast(@alignCast(arg));
     const path = try determine_path_for_file(kernel_allocator, context.pathname, context.dirfd);
     defer kernel_allocator.free(path);
+    // unlinkat(2): a directory goes only with AT_REMOVEDIR (rmdir), anything else
+    // only without it.  A filesystem's own unlink removes either, so this is where
+    // unlink of a directory is EISDIR -- what callers such as Zig's deleteTree take
+    // as "a directory, recurse" -- and not whatever the filesystem says about it.
+    // Not following a symlink: a link to a directory is unlinked like a file.
+    var st: c.struct_stat = undefined;
+    try fs.get_ivfs().interface.stat(path, &st, false);
+    const is_dir = (st.st_mode & c.S_IFMT) == c.S_IFDIR;
+    const remove_dir = (context.flags & at_removedir) != 0;
+    if (is_dir and !remove_dir) return kernel.errno.ErrnoSet.IsADirectory;
+    if (!is_dir and remove_dir) return kernel.errno.ErrnoSet.NotADirectory;
     try fs.get_ivfs().interface.unlink(path);
     return 0;
 }
+
+/// unlinkat(2)'s AT_REMOVEDIR, Linux's value (libc fcntl.h, and what Zig passes).
+const at_removedir = 0x200;
 pub fn sys_link(arg: *const anyopaque) !i32 {
     const context: *const c.link_context = @ptrCast(@alignCast(arg));
     const old_path = try determine_path_for_file(kernel_allocator, context.oldpath, context.olddirfd);

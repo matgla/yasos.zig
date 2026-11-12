@@ -116,7 +116,9 @@ once — prefer that when a bug class repeats.
   PSRAM costs on a board-shaped an524 image and drives the guest clock, so tcc's
   own `-bench`/`PASS_TIME` read Pico Plus 2 time (within ~3-7% of the board).
   `setup`, `image NAME --tinycc REV|DIR`, `run IMAGE [-k ...]`, `report`,
-  `compare A B`, `calibrate`. Host and plain-QEMU profiles mis-rank passes for
+  `compare A B`, `calibrate`; `kernel` builds this tree's kernel with the board's
+  memory map (`.cache/board_model/kernel`) for `qemu_mount.py --kernel`: real workloads
+  in 8 MB, swap and fragmentation included (run with zig 0.17.1 first in PATH). Host and plain-QEMU profiles mis-rank passes for
   the board — use this before optimising compile time.
 - **`scripts/selfhost_profile.py`** — where a self-compile's board time goes, on a
   board-model image: `run` (units of the tcc_selfhost payload), `funcs` (cycles per
@@ -174,6 +176,21 @@ rm -rf .zig-cache && zig build -Doptimize=ReleaseSafe   # kernel (re-embeds root
   Never write `until ! pgrep -f qemu_fatdisk_run; …` — the loop never exits.
 - **Stale ARM objects break the x86 cross link** ("file in wrong format"):
   `rm -rf libs/tinycc/{armv8m-arch,armv8m-ir,armv8m-*.o,*.o}` before a cross build.
+- **`zig build` on the board** (fork `-ftcc`): a prebuilt maker plus a configurer compiled
+  on the device, its C at tcc `-O0`. Pico Plus 2, hello: cold 14 min, rebuild after an edit
+  7 min, cached 4 s; the fixed cost is the configurer (6.3 MB of C). The shipped std ZIR
+  (`<lib>/zir/`) is keyed by file path and compiler version, not content: a lib file edited
+  on the card without regenerating `zir/` compiles the OLD source, and a fork commit with a
+  new `git describe` starts every cache cold.
+- **LDREX/STREX never succeed in RP2350 PSRAM** (the global monitor does not cover it). User
+  code gets plain atomics from libtcc1 (`-DTCC_ATOMICS_PLAIN`); the kernel keeps exclusives
+  for its locks in SRAM. A process spinning with no children and no I/O: read the `Resume:`
+  line of `/proc/<pid>/status` for its pc.
+- **Watching a build on the board: no shell loops.** A loop with `$(...)` or pipes allocates
+  and can starve the pool or block a swap-in until the watchdog kills the build (5 s, exit
+  137; pid 1 panics). Use a non-allocating tracer.
+- **Killing the local `zig_board.py` does not stop the job on the rig**, and it keeps the
+  board lock. Filter processes by `comm`, never by text that matches your own command line.
 - **Never hand-build the cross with plain `make`** (e.g. for a private-copy
   self-host cross): a bare make over an old `config.mak` drops
   `-DTARGETOS_YasOS=1` and the rootfs sysroot paths from `build_rootfs.sh`'s

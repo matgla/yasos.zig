@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* Report a failing shim when YASOS_ZIG_ALL_STUBS is set: a call implemented
@@ -165,81 +166,87 @@ static yz_i128 yz_i128_from(yz_u128 u, int negative) {
  * the process against itself. Plain accesses are therefore correct AND
  * complete: no LDREX/STREX pair, no interrupt masking. If the compiler is ever
  * built multi-threaded, every one of these has to grow a real implementation
- * -- that is the whole reason they are gathered in one block. */
+ * -- that is the whole reason they are gathered in one block.
+ *
+ * Weak: tcc's libtcc1.a now carries a full set of these (LDREX/STREX) except
+ * the loads and stores.  A program that needs one of its others pulls that
+ * member in, whose strong definitions then replace these instead of clashing
+ * with them. */
+#define YZ_ATOMIC __attribute__((weak))
 
-uint8_t __atomic_load_1(const volatile void *p, int m) {
+YZ_ATOMIC uint8_t __atomic_load_1(const volatile void *p, int m) {
   (void)m;
   return *(const volatile uint8_t *)p;
 }
-uint16_t __atomic_load_2(const volatile void *p, int m) {
+YZ_ATOMIC uint16_t __atomic_load_2(const volatile void *p, int m) {
   (void)m;
   return *(const volatile uint16_t *)p;
 }
-uint32_t __atomic_load_4(const volatile void *p, int m) {
+YZ_ATOMIC uint32_t __atomic_load_4(const volatile void *p, int m) {
   (void)m;
   return *(const volatile uint32_t *)p;
 }
-void __atomic_store_1(volatile void *p, uint8_t v, int m) {
+YZ_ATOMIC void __atomic_store_1(volatile void *p, uint8_t v, int m) {
   (void)m;
   *(volatile uint8_t *)p = v;
 }
-void __atomic_store_2(volatile void *p, uint16_t v, int m) {
+YZ_ATOMIC void __atomic_store_2(volatile void *p, uint16_t v, int m) {
   (void)m;
   *(volatile uint16_t *)p = v;
 }
-void __atomic_store_4(volatile void *p, uint32_t v, int m) {
+YZ_ATOMIC void __atomic_store_4(volatile void *p, uint32_t v, int m) {
   (void)m;
   *(volatile uint32_t *)p = v;
 }
-uint8_t __atomic_fetch_add_1(volatile void *p, uint8_t v, int m) {
+YZ_ATOMIC uint8_t __atomic_fetch_add_1(volatile void *p, uint8_t v, int m) {
   uint8_t old = *(volatile uint8_t *)p;
   (void)m;
   *(volatile uint8_t *)p = (uint8_t)(old + v);
   return old;
 }
-uint8_t __atomic_fetch_sub_1(volatile void *p, uint8_t v, int m) {
+YZ_ATOMIC uint8_t __atomic_fetch_sub_1(volatile void *p, uint8_t v, int m) {
   uint8_t old = *(volatile uint8_t *)p;
   (void)m;
   *(volatile uint8_t *)p = (uint8_t)(old - v);
   return old;
 }
-uint16_t __atomic_fetch_or_2(volatile void *p, uint16_t v, int m) {
+YZ_ATOMIC uint16_t __atomic_fetch_or_2(volatile void *p, uint16_t v, int m) {
   uint16_t old = *(volatile uint16_t *)p;
   (void)m;
   *(volatile uint16_t *)p = (uint16_t)(old | v);
   return old;
 }
-uint32_t __atomic_fetch_add_4(volatile void *p, uint32_t v, int m) {
+YZ_ATOMIC uint32_t __atomic_fetch_add_4(volatile void *p, uint32_t v, int m) {
   uint32_t old = *(volatile uint32_t *)p;
   (void)m;
   *(volatile uint32_t *)p = old + v;
   return old;
 }
-uint32_t __atomic_fetch_sub_4(volatile void *p, uint32_t v, int m) {
+YZ_ATOMIC uint32_t __atomic_fetch_sub_4(volatile void *p, uint32_t v, int m) {
   uint32_t old = *(volatile uint32_t *)p;
   (void)m;
   *(volatile uint32_t *)p = old - v;
   return old;
 }
-uint32_t __atomic_fetch_or_4(volatile void *p, uint32_t v, int m) {
+YZ_ATOMIC uint32_t __atomic_fetch_or_4(volatile void *p, uint32_t v, int m) {
   uint32_t old = *(volatile uint32_t *)p;
   (void)m;
   *(volatile uint32_t *)p = old | v;
   return old;
 }
-uint32_t __atomic_fetch_xor_4(volatile void *p, uint32_t v, int m) {
+YZ_ATOMIC uint32_t __atomic_fetch_xor_4(volatile void *p, uint32_t v, int m) {
   uint32_t old = *(volatile uint32_t *)p;
   (void)m;
   *(volatile uint32_t *)p = old ^ v;
   return old;
 }
-uint32_t __atomic_exchange_4(volatile void *p, uint32_t v, int m) {
+YZ_ATOMIC uint32_t __atomic_exchange_4(volatile void *p, uint32_t v, int m) {
   uint32_t old = *(volatile uint32_t *)p;
   (void)m;
   *(volatile uint32_t *)p = v;
   return old;
 }
-int __atomic_compare_exchange_4(volatile void *p, void *expected,
+YZ_ATOMIC int __atomic_compare_exchange_4(volatile void *p, void *expected,
                                 uint32_t desired, int weak, int success,
                                 int failure) {
   uint32_t current = *(volatile uint32_t *)p;
@@ -555,11 +562,32 @@ YZ_ENOSYS_STUB(sendmmsg, (int s, void *m, unsigned int n, int f))
 YZ_ENOSYS_STUB(clock_getres, (int id, struct timespec *res))
 YZ_ENOSYS_STUB(clock_nanosleep, (int id, int flags, const struct timespec *req,
                                  struct timespec *rem))
-YZ_ENOSYS_STUB(wait4, (int pid, int *status, int options, void *rusage))
-YZ_ENOSYS_STUB(copy_file_range, (int fdin, int64_t *offin, int fdout,
-                                 int64_t *offout, size_t len,
-                                 unsigned int flags))
-YZ_ENOSYS_STUB(sendfile, (int out, int in, int64_t *off, size_t count))
+/* dl_iterate_phdr: std's debug info (stack traces) walks the loaded objects
+ * with it when libc is linked.  YAFF images have no program headers to
+ * offer: no objects, so no debug info, which is what a stripped build has. */
+int dl_iterate_phdr(int (*callback)(void *info, unsigned long size, void *data), void *data) {
+  (void)callback;
+  (void)data;
+  return 0;
+}
+
+/* wait4 without resource usage: rusage is left as the caller had it (the
+ * layout is Zig's, not ours); std on YasOS waits with waitpid (section 6). */
+int wait4(int pid, int *status, int options, void *rusage) {
+  (void)rusage;
+  return (int)yz_trace("wait4", waitpid(pid, status, options));
+}
+/* Not reported: callers (Zig's file copies) try these first and fall back to
+   read/write on ENOSYS, so it is the normal path, not a missing feature. */
+#define YZ_ENOSYS_QUIET(name, proto)                                           \
+  int name proto {                                                             \
+    errno = ENOSYS;                                                            \
+    return -1;                                                                 \
+  }
+YZ_ENOSYS_QUIET(copy_file_range, (int fdin, int64_t *offin, int fdout,
+                                  int64_t *offout, size_t len,
+                                  unsigned int flags))
+YZ_ENOSYS_QUIET(sendfile, (int out, int in, int64_t *off, size_t count))
 
 /* An alternate signal stack for a kernel that delivers no signals: there is
  * nothing to install it for, and nothing to go wrong if a caller thinks it has
@@ -632,3 +660,99 @@ extern float logf(float);
  * take (named inline-asm operands in eight ARM EABI wrappers, and second
  * exported names expressed as attribute aliases of an assembler name).
  * Link the resulting object next to this one. */
+
+/* ── 6. Spawning a child ────────────────────────────────────────────────
+ *
+ * YasOS has no fork (no MMU), and Zig's own fork-child code cannot simply run
+ * after a vfork: the child shares the parent's stack and memory, and code a
+ * compiler laid out for a returns-once call may reuse spill slots the parent
+ * reads afterwards.  std on YasOS (Io/Threaded.zig, `is_yasos`) prepares
+ * everything -- pipes, argv, the environment -- and hands this helper a plain
+ * request; the vfork child does only dup2/close/chdir/fcntl and the exec.
+ *
+ * The child reports a failure through `err`, which it shares with the parent
+ * (vfork), and exits 127; the parent reaps it and returns -errno.  The layout
+ * is YasosSpawnRequest in std. */
+
+#ifndef PATH_MAX
+#define PATH_MAX 512
+#endif
+
+struct yz_spawn_request {
+  const char *file;
+  char **argv;
+  char *const *envp;
+  const char *path_env; /* search this PATH for `file` unless it has a '/' */
+  int expand_arg0;      /* argv[0] becomes the path found */
+  const char *cwd;      /* chdir first; NULL keeps the parent's */
+  int fds[3];           /* dup2 onto 0/1/2 when >= 0; -1 inherit; -2 close */
+  const int *inherit;   /* FD_CLOEXEC cleared in the child */
+  int inherit_len;
+};
+
+/* In the vfork child: exec `r->file`, through PATH when asked.  Returns only on
+ * failure, with errno set (EACCES wins over ENOENT, as execvp does). */
+static void yz_spawn_exec(const struct yz_spawn_request *r) {
+  if (!r->path_env || strchr(r->file, '/')) {
+    execve(r->file, r->argv, r->envp);
+    return;
+  }
+  char buf[PATH_MAX];
+  size_t flen = strlen(r->file);
+  int seen_eacces = 0;
+  const char *p = r->path_env;
+  for (;;) {
+    const char *end = strchr(p, ':');
+    size_t dlen = end ? (size_t)(end - p) : strlen(p);
+    if (dlen != 0 && dlen + 1 + flen + 1 <= sizeof(buf)) {
+      memcpy(buf, p, dlen);
+      buf[dlen] = '/';
+      memcpy(buf + dlen + 1, r->file, flen + 1);
+      if (r->expand_arg0)
+        r->argv[0] = buf;
+      execve(buf, r->argv, r->envp);
+      if (errno == EACCES)
+        seen_eacces = 1;
+      else if (errno != ENOENT && errno != ENOTDIR)
+        return;
+    }
+    if (!end)
+      break;
+    p = end + 1;
+  }
+  errno = seen_eacces ? EACCES : ENOENT;
+}
+
+int yz_spawn(const struct yz_spawn_request *r) {
+  volatile int child_err = 0;
+  int pid = vfork();
+  if (pid < 0)
+    return -errno;
+  if (pid == 0) {
+    if (r->cwd && chdir(r->cwd) != 0)
+      goto fail;
+    for (int i = 0; i < r->inherit_len; i++)
+      fcntl(r->inherit[i], F_SETFD, 0);
+    for (int i = 0; i < 3; i++) {
+      int fd = r->fds[i];
+      if (fd == i)
+        fcntl(fd, F_SETFD, 0); /* dup2 onto itself would keep FD_CLOEXEC */
+      else if (fd >= 0) {
+        if (dup2(fd, i) < 0)
+          goto fail;
+      } else if (fd == -2)
+        close(i);
+    }
+    yz_spawn_exec(r);
+  fail:
+    child_err = errno ? errno : ENOEXEC;
+    _exit(127);
+  }
+  if (child_err) {
+    int status;
+    int err = child_err;
+    waitpid(pid, &status, 0);
+    return -err;
+  }
+  return pid;
+}

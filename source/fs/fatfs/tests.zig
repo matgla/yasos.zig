@@ -21,6 +21,7 @@ comptime {
     _ = @import("fatfs.zig");
     _ = @import("fat_time.zig");
     _ = @import("fatfs_file.zig");
+    _ = @import("open_files.zig");
 }
 
 test {

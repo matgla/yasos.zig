@@ -166,6 +166,22 @@ pub fn probe(tag: u32) void {
         "free list corrupted at tag {d}: {s} node=0x{X:0>8} prev=0x{X:0>8} index={d}",
         .{ tag, fault.reason, fault.node, fault.prev, fault.index },
     );
+    // What surrounds the list head, and the bad node when it is readable: a head
+    // that is garbage itself (index 0) was written where it lives, in .bss, and
+    // its neighbours there say by what; a bad link further in was written in the
+    // heap, and the words before it are the tail of whatever overran.
+    dump_words("around the list head", @intFromPtr(&__malloc_free_list) -% 0x60, 40);
+    if (fault.prev != 0) dump_words("the last good chunk", fault.prev -% 0x20, 24);
+}
+
+fn dump_words(what: []const u8, start: usize, words: usize) void {
+    const base = start & ~@as(usize, 3);
+    log.err("  {s}, from 0x{X:0>8}:", .{ what, base });
+    var i: usize = 0;
+    while (i < words) : (i += 4) {
+        const w: [*]const u32 = @ptrFromInt(base + i * 4);
+        log.err("    0x{X:0>8}: {X:0>8} {X:0>8} {X:0>8} {X:0>8}", .{ base + i * 4, w[0], w[1], w[2], w[3] });
+    }
 }
 
 /// Walk the kernel free list and return the first structural violation, or null
