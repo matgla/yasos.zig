@@ -8,13 +8,13 @@ on the SD card, in four MBR partitions that `cardreformat` lays out (see
 
 | # | Label     | Type | Default size | Mounted at | Holds                                              |
 |---|-----------|------|--------------|------------|----------------------------------------------------|
-| 1 | `YASBOOT` | FAT  | 64 MiB       | `/boot`    | `yasboot/*.ybi` update images (docs/bootloader_plan.md §4.5) |
+| 1 | `YASBOOT` | FAT  | 64 MiB       | `/boot`    | `yasboot/stage2.bin` (the bootloader's stage 2, a FAT file by decision), `yasboot/yasboot.cfg`, kernels and images to install (`yasboot/docs/design.md`) |
 | 2 | `YASVAR`  | ext4 | 256 MiB      | `/var`     | `log/kernel.log`, `tmp/` (the /tmp spill), `lib/zig/` (the device Zig's lib, ~33 MB: `apps/zig/build_zig.sh` stages it in `sdcard/`) |
 | 3 | (none)    | swap (type 82) | 128 MiB | --      | processes waiting in `waitpid`, written out ([Swap](#swap)) |
 | 4 | `YASHOME` | ext4 | the rest     | `/home`    | `root/`, which is bind-mounted at `/root`          |
 
-Partitions start on 1 MiB boundaries, the first at 1 MiB, which leaves the gap
-after the MBR for yasboot (`scripts/write_yasboot.py`).
+Partitions start on 1 MiB boundaries, the first at 1 MiB. The gap after the MBR
+is unused: yasboot's stage 2 is a file on `/boot`, so updating it is a `cp`.
 
 `/boot` stays FAT because yasboot reads it with a read-only FatFs: FAT32 from
 512 MiB up, FAT12/16 below. Its label is written both into the boot sector,

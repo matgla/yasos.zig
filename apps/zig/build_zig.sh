@@ -37,6 +37,19 @@
 # 0 keeps all ZIR loaded.
 # zig.c is compiled with lseek/ftruncate renamed to yasos_compat.c's 64-bit
 # wrappers: Zig's off_t is 64-bit, YasOS's libc takes a 32-bit one.
+#
+# `zig build` on the device: the device compiler is built with -Dtcc-default
+# (every native or ARM compile goes C backend -> a `tcc` child process,
+# `-ftcc`) and -Dyasos-host (native programs link the YasOS libc,
+# single-threaded).  Its lib directory on the card carries what that needs, in
+# tcc/:
+#   tcc/zig_c_prelude.h, tcc/include/   force-included prelude, freestanding headers
+#   tcc/yasos/yasos_compat.o, compiler_rt.o   linked into every native program
+#   tcc/yasos/ip-hints-configurer       InternPool sizes for the configurer's first compile
+# and compiler/configurer.zig, which the device compiles per project.  `zig build`'s
+# maker, built here on the PC (its C is 36 MB), goes into the rootfs as
+# /usr/bin/zig-maker (-Dprebuilt-maker): from the romfs its code runs in place
+# instead of taking RAM.
 set -euo pipefail
 
 ZIG_SRC="$(realpath "${1:?zig source dir}")"
@@ -71,7 +84,8 @@ echo "zig: rendering the compiler as C"
 (cd "$ZIG_SRC" && ZIG_LIB_DIR="$ZIG_SRC/lib" "$FORK_ZIG" build -Donly-c -Dofmt=c -Ddev=cbe \
     -Denable-llvm=false -Dsingle-threaded -Dforce-link-libc -Dtarget=thumb-linux-musleabi \
     -Dcpu=cortex_m33 -Doptimize=ReleaseFast -Dstrip ${CPU_FAMILY_FLAGS[@]+"${CPU_FAMILY_FLAGS[@]}"} \
-    -Dzir-budget="$ZIR_BUDGET" -Dzig-lib-search="$LIB_ON_CARD" --prefix "$WORK/zigc")
+    -Dzir-budget="$ZIR_BUDGET" -Dzig-lib-search="$LIB_ON_CARD" \
+    -Dtcc-default -Dyasos-host -Dprebuilt-maker=/usr/bin/zig-maker --prefix "$WORK/zigc")
 
 echo "zig: compiler-rt"
 ZIG="$FORK_ZIG" "$HERE/build_compiler_rt.sh" "$ZIG_SRC" "$CC" "$WORK/compiler_rt.o" "$WORK/compiler_rt"
@@ -101,9 +115,105 @@ install -D -m 755 "$WORK/zig" "$ROOTFS/usr/bin/zig"
 rm -rf "$ROOTFS/usr/lib/zig" "$CARD_DIR$LIB_ON_CARD"
 mkdir -p "$CARD_DIR$LIB_ON_CARD"
 cp -r "$ZIG_SRC/lib/std" "$CARD_DIR$LIB_ON_CARD/std"
+# The card's std only ever builds YasOS and freestanding Arm programs: switches on the
+# native OS or CPU lose their prongs for other systems (trim_std.zig).  In zig build's
+# configurer that takes the ZIR pinned at once from 2.8 to 2.1 MB (c.zig 803 -> 249 KB).
+"$FORK_ZIG" build-exe -OReleaseFast --zig-lib-dir "$ZIG_SRC/lib" "$HERE/trim_std.zig" \
+    --cache-dir "$WORK/trim-cache" --global-cache-dir "$WORK/trim-cache" -femit-bin="$WORK/trim_std"
+"$WORK/trim_std" "$CARD_DIR$LIB_ON_CARD/std"
 # compiler-rt as source too: the kernel's tcc build renders it with the C
 # backend like the kernel itself (build/kernel_tcc.zig), on the device as well.
 cp -r "$ZIG_SRC/lib/compiler_rt" "$CARD_DIR$LIB_ON_CARD/compiler_rt"
 cp "$ZIG_SRC/lib/compiler_rt.zig" "$CARD_DIR$LIB_ON_CARD/"
 cp "$ZIG_SRC/lib/zig.h" "$HERE/zig_c_prelude.h" "$CARD_DIR$LIB_ON_CARD/"
+# zig build: the configurer's root (the device compiles it per build.zig), and
+# what -ftcc reads and links (see the top).
+mkdir -p "$CARD_DIR$LIB_ON_CARD/compiler"
+cp "$ZIG_SRC/lib/compiler/configurer.zig" "$CARD_DIR$LIB_ON_CARD/compiler/"
+cp -r "$ZIG_SRC/lib/tcc" "$CARD_DIR$LIB_ON_CARD/tcc"
+mkdir -p "$CARD_DIR$LIB_ON_CARD/tcc/yasos"
+# Built again for programs the device links: there the soft-float helpers
+# (__aeabi_*) bind to a shared library, so calls must keep their R9 reload
+# (-fno-module-local-calls).  The device zig itself keeps the faster copies.
+"$CC" -O2 -fno-module-local-calls -c "$HERE/yasos_compat.c" -o "$CARD_DIR$LIB_ON_CARD/tcc/yasos/yasos_compat.o" \
+    -fvisibility=hidden
+"$CC" -O2 -fno-module-local-calls -c "$WORK/compiler_rt/compiler_rt_tcc.c" \
+    -o "$CARD_DIR$LIB_ON_CARD/tcc/yasos/compiler_rt.o" -ffunction-sections \
+    -I "$ZIG_SRC/lib" -include "$HERE/zig_c_prelude.h" -fvisibility=hidden -w
+
+# The maker, built by the PC's fork the way the device would build it (-ftcc
+# against the card's lib, so with the YasOS runtime) -- ReleaseSmall where the
+# device's jitCmd would pick ReleaseSafe: 44 MB of C either way.  Its stack:
+# Fetch.run, which runs for every project's root package, has a 164 KB frame
+# under tcc (131 KB of git/zip buffers), past the 128 KB -ftcc default.
+echo "zig: zig build's maker for YasOS"
+ZIG_LIB_DIR="$CARD_DIR$LIB_ON_CARD" ZIG_TCC="$(command -v "$CC")" "$WORK/host-st/bin/zig" build-exe -ftcc \
+    -target thumb-linux-musleabi -mcpu cortex_m33 -OReleaseSmall -fsingle-threaded -lc -fstrip \
+    --tcc-arg -stack-size=262144 \
+    -Mroot="$ZIG_SRC/lib/compiler/Maker.zig" --name maker \
+    --cache-dir "$WORK/maker-cache" --global-cache-dir "$WORK/maker-cache" -femit-bin="$WORK/maker"
+install -D -m 755 "$WORK/maker" "$ROOTFS/usr/bin/zig-maker"
+
+# The configurer's InternPool sizes, for its first compile on the device (the
+# device compiler keeps its own afterwards, in its global cache).  A hello-world
+# build script; the second run reads the first one's sizes and writes them back
+# trimmed, which is what a device run would see.
+echo "zig: InternPool hints for the configurer"
+HP="$WORK/hints-project"
+rm -rf "$HP" && mkdir -p "$HP/src"
+cat > "$HP/build.zig" <<'ZIG'
+const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const exe = b.addExecutable(.{ .name = "hello", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = b.standardTargetOptions(.{}),
+        .optimize = b.standardOptimizeOption(.{}),
+    }) });
+    b.installArtifact(exe);
+    b.step("run", "Run it").dependOn(&b.addRunArtifact(exe).step);
+}
+ZIG
+printf 'pub const packages = struct {};\npub const root_deps: []const struct { []const u8, []const u8 } = &.{};\n' > "$HP/dependencies.zig"
+# Both runs also export std's ZIR (ZIG_ZIR_EXPORT_DIR, see below).
+rm -rf "$CARD_DIR$LIB_ON_CARD/zir"
+for run in 1 2; do
+  (cd "$HP" && rm -rf cache && ZIG_LIB_DIR="$CARD_DIR$LIB_ON_CARD" ZIG_IP_HINTS="$HP/ip-hints-configurer" \
+    ZIG_ZIR_EXPORT_DIR="$CARD_DIR$LIB_ON_CARD/zir" \
+    "$WORK/host-st/bin/zig" build-exe -ofmt=c -target thumb-linux-musleabi -mcpu cortex_m33 -OReleaseSmall \
+    -fsingle-threaded -lc --dep @build --dep @dependencies \
+    -Mroot="$CARD_DIR$LIB_ON_CARD/compiler/configurer.zig" -M@dependencies=dependencies.zig -M@build=build.zig \
+    --name configurer --cache-dir cache --global-cache-dir cache -femit-bin=cache/configurer.c)
+done
+install -m 644 "$HP/ip-hints-configurer" "$CARD_DIR$LIB_ON_CARD/tcc/yasos/ip-hints-configurer"
+
+# std's ZIR, lowered here and shipped in the lib (lib/zir/): the device then never parses
+# std, whose biggest files do not fit the free runs an 8 MB machine without an MMU has
+# mid-compile (Io/Threaded.zig: 834 KB of source, a 1.3 MB AST).  Named by file, compiler
+# version and lowering options (Zcu.shippedZirDigest), so every kind of compile the device
+# runs is lowered once: the configurer above, programs for YasOS in Debug and
+# ReleaseSmall, and freestanding ones (a bootloader).
+echo "zig: std's ZIR for the card"
+cat > "$HP/src/main.zig" <<'ZIG'
+const std = @import("std");
+pub fn main() void {
+    std.debug.print("hello\n", .{});
+}
+ZIG
+cat > "$HP/src/free.zig" <<'ZIG'
+const std = @import("std");
+export fn _start() callconv(.c) noreturn {
+    var x: u32 = 0;
+    while (true) x = std.math.rotl(u32, x +% 1, 3);
+}
+pub const panic = std.debug.no_panic;
+ZIG
+for args in "-target thumb-linux-musleabi -lc -ODebug src/main.zig" \
+            "-target thumb-linux-musleabi -lc -OReleaseSmall src/main.zig" \
+            "-target thumb-freestanding-eabi -OReleaseSmall src/free.zig" \
+            "-target thumb-freestanding-eabi -ODebug src/free.zig"; do
+  (cd "$HP" && rm -rf cache && ZIG_LIB_DIR="$CARD_DIR$LIB_ON_CARD" ZIG_ZIR_EXPORT_DIR="$CARD_DIR$LIB_ON_CARD/zir" \
+    "$WORK/host-st/bin/zig" build-exe -ofmt=c -mcpu cortex_m33 -fsingle-threaded $args \
+    --cache-dir cache --global-cache-dir cache -femit-bin=cache/out.c)
+done
+echo "zig: $(ls "$CARD_DIR$LIB_ON_CARD/zir" | wc -l) ZIR files, $(du -sh "$CARD_DIR$LIB_ON_CARD/zir" | cut -f1)"
 echo "zig: done ($(stat -c %s "$WORK/zig") bytes; lib $(du -sb "$CARD_DIR$LIB_ON_CARD" | cut -f1) bytes for the card)"

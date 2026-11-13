@@ -25,13 +25,17 @@ pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator,
     const Self = @This();
     _dir: fatfs.Dir,
     _allocator: std.mem.Allocator,
-    _name: ?[]const u8,
+    /// The last entry's name, valid until the next call. In the iterator, not
+    /// allocated per entry: a failed allocation ended the listing as if the
+    /// directory had no more entries, and `rm -r` then tried to remove a
+    /// directory it had not emptied.
+    _name: [fatfs.FileInfo.max_name_len + 1]u8,
 
     pub fn create(dir: fatfs.Dir, allocator: std.mem.Allocator) FatFsIterator {
         return FatFsIterator.init(.{
             ._dir = dir,
             ._allocator = allocator,
-            ._name = null,
+            ._name = undefined,
         });
     }
 
@@ -40,12 +44,10 @@ pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator,
         defer fs_lock.release();
         const maybe_entry = self._dir.next() catch return null;
         if (maybe_entry) |entry| {
-            if (self._name) |old_name| {
-                self._allocator.free(old_name);
-            }
-            self._name = self._allocator.dupe(u8, entry.name()) catch return null;
+            const name = entry.name();
+            @memcpy(self._name[0..name.len], name);
             return .{
-                .name = self._name.?,
+                .name = self._name[0..name.len],
                 .kind = if (entry.kind == .Directory) .Directory else .File,
             };
         }
@@ -53,9 +55,6 @@ pub const FatFsIterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator,
     }
 
     pub fn delete(self: *Self) void {
-        if (self._name) |name| {
-            self._allocator.free(name);
-        }
         self._dir.close();
     }
 });

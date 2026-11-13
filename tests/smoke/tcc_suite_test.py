@@ -122,6 +122,18 @@ def _compile_timeout_default():
 
 COMPILE_TIMEOUT = _compile_timeout_default()
 
+
+def _run_silence_timeout(session, testcase):
+    """Silence limit for a test program's run: never tighter than a compile's.
+
+    The session default is 1 s. A program that computes for longer without
+    printing (mibench_dijkstra at -O0, gcc_execute/pr43220) finishes correctly,
+    but the harness has stopped listening: "Prompt not found", twice, since the
+    rerun is as slow. A QEMU gate on a runner with fewer cores than QEMU
+    threads hit it on ten tests (PR #33, 2026-11-12).
+    """
+    return testcase.timeout or max(COMPILE_TIMEOUT, session.serial.timeout or 0)
+
 # When a compile overruns its serial-read deadline the device is usually STILL
 # compiling (tcc is silent while it works, so the idle-timeout tripped before
 # it finished). Before a rerun we passively wait up to this long for that
@@ -2487,7 +2499,7 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
             )
             _t_execute = start_timer()
             data_lines, run_aborted = session.wait_for_prompt_streaming(
-                _validate_run_line, timeout=testcase.timeout
+                _validate_run_line, timeout=_run_silence_timeout(session, testcase)
             )
             if timing is not None:
                 timing.execute_ms = elapsed_ms(_t_execute)
@@ -2527,7 +2539,7 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
             session.write_command(f"{run_command}; echo {EXIT_MARKER_PREFIX}$?")
             _t_execute = start_timer()
             data_lines, run_aborted = session.wait_for_prompt_streaming(
-                _validate_run_line, timeout=testcase.timeout
+                _validate_run_line, timeout=_run_silence_timeout(session, testcase)
             )
             if timing is not None:
                 timing.execute_ms = elapsed_ms(_t_execute)

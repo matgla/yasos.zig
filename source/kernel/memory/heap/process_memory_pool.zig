@@ -184,6 +184,17 @@ pub const ProcessMemoryPool = struct {
         // need not clear what only it ever wrote. Slow tier only: that is where
         // the clear is expensive and the page count small.
         last_owner: ?[]u8 = null,
+        // Pages a process on its way back from swap already holds (`owner_tag`
+        // of its pid, 0 for none); see `claim_swapped_pages`. Allocated at the
+        // first swap-in that has to wait.
+        claimed_by: ?[]u8 = null,
+        // Pages such a process is still waiting for: `mark_free` hands them to
+        // it the moment their holder lets go, instead of to the next first fit.
+        wanted_by: ?[]u8 = null,
+        // Pages a swapped-out process left behind and will need again, at these
+        // addresses (`owner_tag` of its pid): handed out last. See `reserve_pages`.
+        lent_by: ?[]u8 = null,
+        lent_pages: usize = 0,
         // High-water mark of used pages in this region since the last reset.
         // Diagnostic only (perf profiling): lets us see whether a process spilled
         // out of fast SRAM into slow PSRAM during a run.
@@ -289,6 +300,16 @@ pub const ProcessMemoryPool = struct {
         if (from < region.first_free_hint) {
             region.first_free_hint = from;
         }
+        // A page a process coming back from swap is waiting for goes straight to
+        // it (see `claim_swapped_pages`).
+        const wants = region.wanted_by orelse return;
+        const held = region.claimed_by orelse return;
+        var page = from;
+        while (page < to) : (page += 1) {
+            if (wants[page] == 0 or held[page] != 0) continue;
+            held[page] = wants[page];
+            region.used_pages += markRange(region, page, page + 1, true);
+        }
     }
 
     inline fn advance_free_hint(region: *Region) usize {
@@ -350,6 +371,9 @@ pub const ProcessMemoryPool = struct {
 
     regions: []Region,
     memory_map: ProcessMemoryMap,
+    /// Hand a swapped-out process's pages out last (see `reserve_pages`). Off in
+    /// the tests that need something to land on them.
+    avoid_lent: bool = true,
     /// Pids whose image asked for slow memory: what they allocate without a
     /// stated tier starts at the slow end. See `set_prefers_slow`.
     /// Plain words: StaticBitSet's accessors take the set by value, 256 bytes copied
@@ -421,6 +445,9 @@ pub const ProcessMemoryPool = struct {
         for (self.regions) |*region| {
             region.page_bitmap.deinit();
             if (region.last_owner) |owners| slow_heap.allocator_or(self.allocator).free(owners);
+            if (region.claimed_by) |claims| slow_heap.allocator_or(self.allocator).free(claims);
+            if (region.wanted_by) |wants| slow_heap.allocator_or(self.allocator).free(wants);
+            if (region.lent_by) |lent| slow_heap.allocator_or(self.allocator).free(lent);
         }
         self.allocator.free(self.regions);
         var it = self.memory_map.iterator();
@@ -532,7 +559,13 @@ pub const ProcessMemoryPool = struct {
         // Not for .heap_fast: fast SRAM is asked for opportunistically (tcc's IR
         // arena) and the caller falls back to the slow tier. Swapping for it
         // wrote make out and back for every compile, for nothing.
-        if (source != .heap and source != .heap_slow and source != .heap_top) return null;
+        if (source != .heap and source != .heap_slow and source != .heap_top) {
+            // An image or a stack that found no room is an exec that fails; say
+            // what the pool looked like (not for .heap_fast, which is asked for
+            // opportunistically and falls back).
+            if (source != .heap_fast and swap_hook != null and bytes >= 64 * 1024) self.report_exhaustion(bytes, pid);
+            return null;
+        }
         const swap = swap_hook orelse return null;
         while (swap(bytes) != 0) {
             if (self.reserve_pages(number_of_pages, pid, source)) |reserved| return reserved;
@@ -656,10 +689,21 @@ pub const ProcessMemoryPool = struct {
         // Phase stamps (compiled out unless profiling): mmap costs 407 us a
         // call and this is where it goes. See perf.PoolPhase.
         const t_scan = if (perf.enabled) perf.read_cycles() else 0;
+        // Twice when a swapped-out process has left pages behind: first for a run
+        // that takes none of them, in any tier, and only then for any run at all.
+        // A process comes back at the addresses it left, so a page of its given
+        // to something that outlives the wait keeps it out for good -- first fit
+        // used to hand a waiting shell's low pages to every small allocation of
+        // a background job. What still ends up on them is what found no room
+        // anywhere else: the big child the swap was made for, which is gone
+        // before its parent wakes.
+        var pass: usize = if (self.avoid_lent and self.any_lent_pages()) 0 else 1;
+        while (pass < 2) : (pass += 1) {
+        const avoid_lent = pass == 0;
         // Probe regions fast-first; the first region with a contiguous run wins.
         // The loader cache goes the other way: it should never be what pushes a
         // process out of fast SRAM.
-        for (0..self.regions.len) |probe| {
+        tiers: for (0..self.regions.len) |probe| {
             const tier = if (source == .cache or source == .heap_slow or source == .heap_top or source == .loader_slow or (source != .heap_fast and self.goes_slow(pid, requested_bytes))) self.regions.len - 1 - probe else probe;
             if (source == .heap_fast and tier != 0) break;
             const region = &self.regions[tier];
@@ -671,10 +715,16 @@ pub const ProcessMemoryPool = struct {
             // allocation is spilling to PSRAM.
             if (region.used_pages + region_pages_usize > region.page_count) continue;
             // Hold the scan state locally: TCC otherwise reloads these fields on every probe.
-            const slot_start = if (source == .heap_top)
+            var slot_start = if (source == .heap_top)
                 @call(.never_inline, find_free_run_top, .{ region, region_pages_usize }) orelse continue
             else
                 @call(.never_inline, find_free_run, .{ region, region_pages_usize, advance_free_hint(region), region.page_count }) orelse continue;
+            if (avoid_lent) {
+                while (first_lent(region, slot_start, slot_start + region_pages_usize)) |lent_page| {
+                    if (source == .heap_top) continue :tiers;
+                    slot_start = @call(.never_inline, find_free_run, .{ region, region_pages_usize, lent_page + 1, region.page_count }) orelse continue :tiers;
+                }
+            }
             const t_mark = if (perf.enabled) perf.read_cycles() else 0;
             perf.pool_record(.scan, t_mark -% t_scan);
             const end_index: usize = slot_start + region_pages_usize;
@@ -711,7 +761,15 @@ pub const ProcessMemoryPool = struct {
                 .region_pages = region_pages_usize,
             };
         }
+        }
         return null;
+    }
+
+    fn any_lent_pages(self: *const ProcessMemoryPool) bool {
+        for (self.regions) |*region| {
+            if (region.lent_pages != 0) return true;
+        }
+        return false;
     }
 
     /// Mark a found run used and add it to the pid's list. Out of line for the
@@ -773,8 +831,11 @@ pub const ProcessMemoryPool = struct {
                     if (swap_io) |io| io.drop(io.ctx, entity.kept_slot, entity.address.len);
                 }
                 if (entity.swapped()) {
-                    // Its pages are somebody else's by now: only the copy goes.
+                    // Its pages are somebody else's by now: only the copy goes --
+                    // and whichever of them it had already taken back, waiting
+                    // for the rest (a process killed by the swap-in watchdog).
                     if (swap_io) |io| io.drop(io.ctx, entity.swap_slot, entity.address.len);
+                    self.release_claims(entity, pid);
                 } else if (self.region_for_addr(@intFromPtr(entity.address.ptr))) |region| {
                     const start_index = (@intFromPtr(entity.address.ptr) - region.start_address) / region.page_size;
                     const end_index = start_index + @as(usize, @intCast(entity.address.len)) / region.page_size;
@@ -873,6 +934,20 @@ pub const ProcessMemoryPool = struct {
                 if (@as(*anyopaque, entity.address.ptr) == address and
                     whole_region_pages(region, number_of_pages) * region.page_size >= entity.address.len)
                 {
+                    if (entity.swapped()) {
+                        // A run still on swap: its pages are somebody else's, or
+                        // this process's again only as far as it had claimed them
+                        // back. Marking the range free, as below, freed other
+                        // processes' pages and left the claimed ones used with no
+                        // owner -- which is what kept a killed process's parent
+                        // out of its own memory, and its parent, up to the root
+                        // shell. Only the copy and the claims go.
+                        if (swap_io) |io| io.drop(io.ctx, entity.swap_slot, entity.address.len);
+                        self.release_claims(entity, pid);
+                        _ = mapping.value_ptr.remove(entity_node);
+                        slow_heap.allocator_or(self.allocator).destroy(entity);
+                        return;
+                    }
                     matched_bytes = entity.address.len;
                     found = true;
                     drop_kept(entity);
@@ -1033,6 +1108,7 @@ pub const ProcessMemoryPool = struct {
     /// A run at a time, nothing collected on the stack: this runs inside the
     /// allocating process's mmap, on its stack.
     pub fn swap_out(self: *ProcessMemoryPool, pid: c.pid_t, keep: *const anyopaque, io: SwapIo) usize {
+        self.ensure_claim_tags();
         var freed: usize = 0;
         while (self.next_to_swap_out(pid, keep)) |entity| {
             // Outside the lock, which masks interrupts: this is SD card I/O.
@@ -1076,6 +1152,8 @@ pub const ProcessMemoryPool = struct {
             mark_free(region, first, last);
             // Whoever gets these pages next sees zeros, not this process.
             set_last_owner(region, first, last, 0);
+            // And they are the last pages anybody is given: it needs them back.
+            set_lent(region, first, last, owner_tag(pid), true);
             entity.swap_slot = slot;
             freed += entity.address.len;
         }
@@ -1129,6 +1207,7 @@ pub const ProcessMemoryPool = struct {
     /// Bring back what `swap_out` wrote, at the same addresses.  False, with
     /// nothing changed, while any of those pages belongs to somebody else.
     pub fn swap_in(self: *ProcessMemoryPool, pid: c.pid_t, io: SwapIo) !bool {
+        self.ensure_claim_tags();
         if (!self.claim_swapped_pages(pid)) return false;
         // Every page is ours again, so nothing else is handed them while they
         // fill.  A run comes back whole before the next is looked for.
@@ -1151,11 +1230,30 @@ pub const ProcessMemoryPool = struct {
         return true;
     }
 
-    /// Mark every swapped run of `pid` used, if all of them are free.
-    fn claim_swapped_pages(self: *ProcessMemoryPool, pid: c.pid_t) bool {
+    pub const SwapBlocker = struct {
+        /// The owner of the page: a pid, a loader pseudo-pid (negative), or 0 when the
+        /// page is marked used and no run in the map covers it.
+        pid: c.pid_t = 0,
+        source: []const u8 = "unmapped",
+        /// The owner's run.
+        address: usize = 0,
+        len: usize = 0,
+        /// The page of `pid`'s that it sits on, and how many of its pages are taken.
+        wanted: usize = 0,
+        pages_taken: usize = 0,
+    };
+
+    /// Why `swap_in` keeps returning false: the first page of a swapped run of
+    /// `pid` that somebody else holds, and who.  A process comes back at the
+    /// addresses it left (there is no MMU to put it anywhere else), so one page
+    /// handed to a process that outlives the wait keeps it out for good -- and
+    /// until this named the holder, all there was to see was a process that had
+    /// stopped.
+    pub fn swap_in_blocker(self: *ProcessMemoryPool, pid: c.pid_t) ?SwapBlocker {
         const flags = pagepool_lock.lock_irqsave();
         defer pagepool_lock.unlock_irqrestore(flags);
-        const mapping = self.memory_map.getPtr(pid) orelse return true;
+        const mapping = self.memory_map.getPtr(pid) orelse return null;
+        var found: ?SwapBlocker = null;
         var next = mapping.first;
         while (next) |node| : (next = node.next) {
             const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
@@ -1164,22 +1262,185 @@ pub const ProcessMemoryPool = struct {
             const first = (@intFromPtr(entity.address.ptr) - region.start_address) / region.page_size;
             var page = first;
             while (page < first + entity.address.len / region.page_size) : (page += 1) {
-                if (region.page_bitmap.isSet(page)) return false;
+                if (!region.page_bitmap.isSet(page)) continue;
+                // Its own, taken back already and held for the rest.
+                if (region.claimed_by) |held| {
+                    if (held[page] != 0 and held[page] == owner_tag(pid)) continue;
+                }
+                if (found) |*f| {
+                    f.pages_taken += 1;
+                    continue;
+                }
+                const address = region.start_address + page * region.page_size;
+                var blocker = SwapBlocker{ .wanted = address, .pages_taken = 1 };
+                var it = self.memory_map.iterator();
+                owners: while (it.next()) |kv| {
+                    var other = kv.value_ptr.first;
+                    while (other) |n| : (other = n.next) {
+                        const e: *const ProcessMemoryEntity = @fieldParentPtr("node", n);
+                        if (e.swapped()) continue;
+                        const start = @intFromPtr(e.address.ptr);
+                        if (address < start or address >= start + e.address.len) continue;
+                        blocker.pid = kv.key_ptr.*;
+                        blocker.source = @tagName(e.source);
+                        blocker.address = start;
+                        blocker.len = e.address.len;
+                        break :owners;
+                    }
+                }
+                found = blocker;
             }
         }
+        return found;
+    }
+
+    /// The per-page claim tags, from the slow heap, before the pool's lock is taken.
+    fn ensure_claim_tags(self: *ProcessMemoryPool) void {
+        for (self.regions) |*region| {
+            if (region.claimed_by != null) continue;
+            const a = slow_heap.allocator_or(self.allocator);
+            const tags = a.alloc(u8, region.page_count) catch continue;
+            const wants = a.alloc(u8, region.page_count) catch {
+                a.free(tags);
+                continue;
+            };
+            const lent = a.alloc(u8, region.page_count) catch {
+                a.free(tags);
+                a.free(wants);
+                continue;
+            };
+            @memset(tags, 0);
+            @memset(wants, 0);
+            @memset(lent, 0);
+            const flags = pagepool_lock.lock_irqsave();
+            defer pagepool_lock.unlock_irqrestore(flags);
+            if (region.claimed_by == null) {
+                region.claimed_by = tags;
+                region.wanted_by = wants;
+                region.lent_by = lent;
+            } else {
+                a.free(tags);
+                a.free(wants);
+                a.free(lent);
+            }
+        }
+    }
+
+    /// Take back the pages of `pid`'s swapped runs; true once it holds them all.
+    ///
+    /// Page by page: what is free is taken and stays taken across calls, and what
+    /// is not is marked wanted, so `mark_free` gives it to this process the
+    /// moment its holder lets go. It used to be
+    /// all or nothing -- every page free at the same instant, or none marked --
+    /// and that starved: a background loop starting one short-lived process
+    /// after another (a `sleep`, then a `date`, then the next `sleep`) had each of
+    /// them loaded onto the same few just-freed pages, so the pages were never
+    /// all free together and a `zig build` on the board stopped for good with
+    /// both cores idle. Held pages are tagged with the pid, so a second process
+    /// swapped out of the same addresses does not mistake them for its own.
+    /// Without tags (no memory for them, or a pid past the tag's range) it is
+    /// all or nothing as before.
+    fn claim_swapped_pages(self: *ProcessMemoryPool, pid: c.pid_t) bool {
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        const mapping = self.memory_map.getPtr(pid) orelse return true;
+        const tag = owner_tag(pid);
+        var missing: usize = 0;
+        var next = mapping.first;
+        while (next) |node| : (next = node.next) {
+            const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
+            if (!entity.swapped()) continue;
+            const region = self.region_for_addr(@intFromPtr(entity.address.ptr)) orelse continue;
+            const first = (@intFromPtr(entity.address.ptr) - region.start_address) / region.page_size;
+            const claims: ?[]u8 = if (tag != 0) region.claimed_by else null;
+            var page = first;
+            while (page < first + entity.address.len / region.page_size) : (page += 1) {
+                if (claims) |held| {
+                    if (held[page] == tag) continue;
+                    const wants = region.wanted_by.?;
+                    if (wants[page] == 0) wants[page] = tag;
+                    if (region.page_bitmap.isSet(page)) {
+                        missing += 1;
+                        continue;
+                    }
+                    mark_used(region, page, page + 1);
+                    held[page] = tag;
+                } else if (region.page_bitmap.isSet(page)) {
+                    return false;
+                }
+            }
+        }
+        if (missing != 0) return false;
         next = mapping.first;
         while (next) |node| : (next = node.next) {
             const entity: *ProcessMemoryEntity = @fieldParentPtr("node", node);
             if (!entity.swapped()) continue;
             const region = self.region_for_addr(@intFromPtr(entity.address.ptr)) orelse continue;
             const first = (@intFromPtr(entity.address.ptr) - region.start_address) / region.page_size;
-            mark_used(region, first, first + entity.address.len / region.page_size);
+            const last = first + entity.address.len / region.page_size;
+            if (tag != 0 and region.claimed_by != null) {
+                // Held already; from here on they are ordinary pages of the run.
+                @memset(region.claimed_by.?[first..last], 0);
+                for (region.wanted_by.?[first..last]) |*want| {
+                    if (want.* == tag) want.* = 0;
+                }
+                set_lent(region, first, last, tag, false);
+            } else {
+                mark_used(region, first, last);
+            }
             if (region.used_pages > region.peak_used) region.peak_used = region.used_pages;
             if (region.used_pages > region.watermark_used) region.watermark_used = region.used_pages;
         }
         return true;
     }
 
+    /// Mark or unmark `[from, to)` as lent by `tag`'s process. Unmarking leaves
+    /// pages another swapped-out process has since lent from the same addresses.
+    fn set_lent(region: *Region, from: usize, to: usize, tag: u8, lent: bool) void {
+        const tags = region.lent_by orelse return;
+        if (tag == 0) return;
+        for (tags[from..to]) |*t| {
+            if (lent) {
+                if (t.* == 0) region.lent_pages += 1;
+                t.* = tag;
+            } else if (t.* == tag) {
+                t.* = 0;
+                region.lent_pages -= 1;
+            }
+        }
+    }
+
+    /// The first page of `[from, to)` a swapped-out process is still owed, if any.
+    fn first_lent(region: *const Region, from: usize, to: usize) ?usize {
+        const tags = region.lent_by orelse return null;
+        if (region.lent_pages == 0) return null;
+        for (tags[from..to], from..) |t, page| {
+            if (t != 0) return page;
+        }
+        return null;
+    }
+
+    /// Give back what `claim_swapped_pages` took of one swapped run. Caller holds
+    /// the pool's lock.
+    fn release_claims(self: *ProcessMemoryPool, entity: *const ProcessMemoryEntity, pid: c.pid_t) void {
+        const tag = owner_tag(pid);
+        if (tag == 0) return;
+        const region = self.region_for_addr(@intFromPtr(entity.address.ptr)) orelse return;
+        const held = region.claimed_by orelse return;
+        const first = (@intFromPtr(entity.address.ptr) - region.start_address) / region.page_size;
+        var page = first;
+        const wants = region.wanted_by.?;
+        set_lent(region, first, first + entity.address.len / region.page_size, tag, false);
+        while (page < first + entity.address.len / region.page_size) : (page += 1) {
+            if (wants[page] == tag) wants[page] = 0;
+            if (held[page] != tag) continue;
+            held[page] = 0;
+            mark_free(region, page, page + 1);
+        }
+    }
+
+    /// The load failed after every page was claimed: they are ordinary used pages
+    /// by then (the tags are cleared), so all of them go back.
     fn unclaim_swapped_pages(self: *ProcessMemoryPool, pid: c.pid_t) void {
         const flags = pagepool_lock.lock_irqsave();
         defer pagepool_lock.unlock_irqrestore(flags);
@@ -2324,6 +2585,7 @@ test "ProcessMemoryPool.SwapInWaitsUntilEveryPageIsFreeAgain" {
     defer ProcessMemoryPool.swap_io = null;
     var pool = try ProcessMemoryPool.init(std.testing.allocator);
     defer pool.deinit();
+    pool.avoid_lent = false;
     const parent: c.pid_t = 7;
     const child: c.pid_t = 8;
 
@@ -2341,6 +2603,101 @@ test "ProcessMemoryPool.SwapInWaitsUntilEveryPageIsFreeAgain" {
     pool.release_pages_for(child);
     try std.testing.expect(try pool.swap_in(parent, swap.io()));
     try std.testing.expectEqual(@as(u8, 42), heap[0]);
+}
+
+test "ProcessMemoryPool.SwapInHoldsThePagesItFindsFreeAgainstAStreamOfShortLivedProcesses" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    pool.avoid_lent = false;
+    const parent: c.pid_t = 7;
+    const ps = ProcessMemoryPool.page_size;
+
+    const stack = pool.allocate_pages(4, parent).?;
+    const heap = pool.allocate_pages_from(16, parent, .heap).?;
+    heap[0] = 42;
+    _ = pool.swap_out(parent, stack.ptr, swap.io());
+
+    // A helper is loaded onto the first of the parent's pages: the parent cannot
+    // come back yet, but it holds the other fifteen from now on.
+    const first = pool.allocate_pages_from(2, 20, .loader).?;
+    try std.testing.expectEqual(heap.ptr, first.ptr);
+    try std.testing.expect(!try pool.swap_in(parent, swap.io()));
+    try std.testing.expectEqual(@as(usize, 2), pool.swap_in_blocker(parent).?.pages_taken);
+    try expect_counts_match_bitmap(&pool);
+
+    // The helper exits and the next one starts: it used to land on the same two
+    // pages, forever. Now it is somewhere else, and the pages stay free.
+    pool.release_pages_for(20);
+    const second = pool.allocate_pages_from(2, 21, .loader).?;
+    try std.testing.expect(@intFromPtr(second.ptr) >= @intFromPtr(heap.ptr) + 16 * ps or @intFromPtr(second.ptr) + 2 * ps <= @intFromPtr(heap.ptr));
+    try std.testing.expect(try pool.swap_in(parent, swap.io()));
+    try std.testing.expectEqual(@as(u8, 42), heap[0]);
+    try std.testing.expect(pool.swap_in_blocker(parent) == null);
+    pool.release_pages_for(21);
+    pool.release_pages_for(parent);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+    try expect_counts_match_bitmap(&pool);
+}
+
+test "ProcessMemoryPool.ASwappedOutProcessesPagesAreTheLastOnesHandedOut" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const parent: c.pid_t = 7;
+    const ps = ProcessMemoryPool.page_size;
+
+    const stack = pool.allocate_pages(4, parent).?;
+    const heap = pool.allocate_pages_from(16, parent, .heap).?;
+    heap[0] = 42;
+    _ = pool.swap_out(parent, stack.ptr, swap.io());
+
+    // A background job's small allocation: first fit would put it on the
+    // parent's pages. It goes past them.
+    const small = pool.allocate_pages_from(2, 20, .heap).?;
+    try std.testing.expect(@intFromPtr(small.ptr) >= @intFromPtr(heap.ptr) + 16 * ps or @intFromPtr(small.ptr) + 2 * ps <= @intFromPtr(heap.ptr));
+    // So the parent comes straight back, with the job still running.
+    try std.testing.expect(try pool.swap_in(parent, swap.io()));
+    try std.testing.expectEqual(@as(u8, 42), heap[0]);
+    try std.testing.expect(!pool.any_lent_pages());
+    pool.release_pages_for(20);
+    pool.release_pages_for(parent);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+    try expect_counts_match_bitmap(&pool);
+}
+
+test "ProcessMemoryPool.AProcessKilledWhileWaitingForItsPagesGivesBackTheOnesItHeld" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    pool.avoid_lent = false;
+    const parent: c.pid_t = 7;
+
+    const stack = pool.allocate_pages(4, parent).?;
+    const heap = pool.allocate_pages_from(16, parent, .heap).?;
+    _ = pool.swap_out(parent, stack.ptr, swap.io());
+    const holder = pool.allocate_pages_from(2, 20, .heap).?;
+    try std.testing.expectEqual(heap.ptr, holder.ptr);
+    try std.testing.expect(!try pool.swap_in(parent, swap.io()));
+
+    // The watchdog's kill. Its teardown frees runs one by one before the rest
+    // goes at once; neither may free the holder's pages or strand the fourteen
+    // the parent had taken back.
+    pool.free_pages(heap.ptr, 16, parent);
+    try std.testing.expectEqual(holder.len + stack.len, pool.get_used_size());
+    try std.testing.expect(pool.owns_mapping(20, holder.ptr, holder.len));
+    try expect_counts_match_bitmap(&pool);
+    pool.release_pages_for(parent);
+    try std.testing.expectEqual(holder.len, pool.get_used_size());
+    try expect_counts_match_bitmap(&pool);
+    pool.release_pages_for(20);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
 }
 
 test "ProcessMemoryPool.ReleasingASwappedOutProcessDropsItsCopiesOnly" {

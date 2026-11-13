@@ -1158,7 +1158,7 @@ if $BUILD_IMAGE; then
     if [ -e rootfs/usr/bin/zig ] || [ -e rootfs/usr/lib/zig ]; then
       echo "Leaving the Zig compiler out of the rp2350 rootfs (not ready yet)."
     fi
-    rm -rf rootfs/usr/bin/zig rootfs/usr/lib/zig
+    rm -rf rootfs/usr/bin/zig rootfs/usr/bin/zig-maker rootfs/usr/lib/zig
   fi
   # Loader precache: every image relocated once here, by the device's own
   # loader built for the host, so the board replays the result from flash

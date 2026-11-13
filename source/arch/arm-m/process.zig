@@ -384,6 +384,25 @@ pub const ArmProcess = struct {
         return @ptrCast(self.stack.ptr);
     }
 
+    /// Where a switched-out process resumes: the PC and LR of the hardware frame
+    /// above its saved software frame (`arch_store_registers_on_stack`: is_fpu,
+    /// lr + r4-r11, s16-s31 when is_fpu, then the DCP slot). Null when the saved
+    /// stack pointer is not inside the stack. Meaningless for a process that is
+    /// running -- its saved frame is the one from its last switch.
+    pub fn saved_pc_lr(self: *const Self) ?[2]u32 {
+        const sp = @intFromPtr(self.stack_position);
+        const dcp_bytes: usize = if (saves_dcp_state) 7 * @sizeOf(u32) else 0;
+        const lo = @intFromPtr(self.stack.ptr);
+        const hi = lo + self.stack.len;
+        if (sp < lo or sp % 4 != 0 or sp + 10 * @sizeOf(u32) > hi) return null;
+        const is_fpu = @as(*const u32, @ptrFromInt(sp)).* != 0;
+        const fpu_bytes: usize = if (is_fpu) 16 * @sizeOf(u32) else 0;
+        const hw = sp + 10 * @sizeOf(u32) + fpu_bytes + dcp_bytes;
+        if (hw + basic_frame_size > hi) return null;
+        const frame: *const [8]u32 = @ptrFromInt(hw);
+        return .{ frame[6], frame[5] };
+    }
+
     pub fn get_stack_top(self: *const Self) *const u8 {
         return @ptrFromInt(@intFromPtr(self.stack.ptr) + self.stack.len);
     }

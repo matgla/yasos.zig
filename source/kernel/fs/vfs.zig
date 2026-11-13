@@ -115,7 +115,7 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
 
     fn get_on(maybe_node: ?MountMatch, t_fsget: u64) anyerror!kernel.fs.Node {
         if (maybe_node) |*node| {
-            defer if (perf.enabled) perf.vfs_fsget(perf.read_cycles() -% t_fsget);
+            defer if (perf.enabled) perf.vfs_fsget(perf.read_cycles() -% @as(u32, @truncate(t_fsget)));
             var result = try node.point.filesystem.interface.get(node.left);
             result.immutable_backing = node.point.info.read_only() and
                 std.mem.eql(u8, node.point.info.fstype(), "romfs");

@@ -33,6 +33,7 @@ const arch = @import("arch");
 const log = std.log.scoped(.@"fs/fatfs");
 
 const FatFsFile = @import("fatfs_file.zig").FatFsFile;
+const open_files = @import("open_files.zig");
 const FatFsDirectory = @import("fatfs_directory.zig").FatFsDirectory;
 const FatFsIterator = @import("fatfs_directory.zig").FatFsIterator;
 
@@ -218,8 +219,22 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         defer self._allocator.free(old_volume);
         const new_volume = try self.volume_path(new_path);
         defer self._allocator.free(new_volume);
+        // rename(2) of a file onto itself does nothing; here the unlink below
+        // would have deleted it.
+        if (std.mem.eql(u8, old_volume, new_volume)) return;
+        // A replaced destination still open somewhere lives on unnamed, as an
+        // unlinked one does.
+        try open_files.detach(self._allocator, new_volume);
         fatfs.unlink(new_volume) catch {};
-        try fatfs.rename(old_volume, new_volume);
+        // Handles open on the source follow it to the new entry.
+        try open_files.begin_move(self._allocator, old_volume);
+        // FatFs's codes as errnos, as mkdir does: a missing destination
+        // directory is ENOENT (callers create it and retry), not EINVAL.
+        fatfs.rename(old_volume, new_volume) catch |err| {
+            open_files.end_move(self._allocator, null);
+            return fatfs_error_to_errno(err);
+        };
+        open_files.end_move(self._allocator, new_volume);
     }
 
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
@@ -227,7 +242,20 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         defer fs_lock.release();
         const filepath = try self.volume_path(path);
         defer self._allocator.free(filepath);
-        try fatfs.unlink(filepath);
+        // An open file loses its name now and its clusters at the last close;
+        // FatFs alone would let its close write into the freed entry.
+        try open_files.detach(self._allocator, filepath);
+        fatfs.unlink(filepath) catch |err| {
+            // FR_DENIED is a read-only entry or a directory that is not empty.
+            // The second is ENOTEMPTY, which rm -r and Zig's deleteTree know
+            // to handle; EACCES made them give up.
+            if (err == error.Denied) {
+                if (fatfs.stat(filepath)) |info| {
+                    if (info.kind == .Directory and !info.attributes.read_only) return kernel.errno.ErrnoSet.DirectoryNotEmpty;
+                } else |_| {}
+            }
+            return fatfs_error_to_errno(err);
+        };
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -1668,4 +1696,151 @@ test "FatFs.ShouldReturnCorrectFileSize" {
         _ = file.interface.write(large_data);
         try std.testing.expectEqual(4096, file.interface.size());
     }
+}
+
+const chunk_bytes = 4096;
+
+/// Writes `pattern` to `file`, one 4 KiB chunk of each byte.
+fn write_chunks(file: *kernel.fs.IFile, pattern: []const u8) !void {
+    var chunk: [chunk_bytes]u8 = undefined;
+    for (pattern) |byte| {
+        @memset(&chunk, byte);
+        try std.testing.expectEqual(@as(isize, chunk_bytes), file.interface.write(&chunk));
+    }
+}
+
+/// Reads what `file` holds from its start and checks it is `pattern`, one 4 KiB
+/// chunk of each byte.
+fn expect_chunks(file: *kernel.fs.IFile, pattern: []const u8) !void {
+    _ = try file.interface.seek(0, c.SEEK_SET);
+    var chunk: [chunk_bytes]u8 = undefined;
+    for (pattern) |byte| {
+        try std.testing.expectEqual(@as(isize, chunk_bytes), file.interface.read(&chunk));
+        for (chunk) |got| try std.testing.expectEqual(byte, got);
+    }
+    try std.testing.expectEqual(@as(isize, 0), file.interface.read(&chunk));
+}
+
+fn expect_file_chunks(fs: *kernel.fs.IFileSystem, path: []const u8, pattern: []const u8) !void {
+    var node = try fs.interface.get(path);
+    defer node.delete();
+    var file = node.as_file().?;
+    try std.testing.expectEqual(@as(u64, pattern.len * chunk_bytes), file.interface.size());
+    try expect_chunks(&file, pattern);
+}
+
+fn new_file(fs: *kernel.fs.IFileSystem, path: []const u8, pattern: []const u8) !void {
+    try fs.interface.create(path, 0o644);
+    var node = try fs.interface.get(path);
+    defer node.delete();
+    var file = node.as_file().?;
+    try write_chunks(&file, pattern);
+}
+
+test "FatFs.AnUnlinkedOpenFileLeavesTheEntryThatTakesItsSlotAlone" {
+    // A file open while its name was removed used to write its start cluster
+    // and size into that directory slot at close -- into the next file created
+    // there -- pointing it at clusters FatFs had already freed.
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    try fs.interface.mkdir("/tmp", 0o755);
+    const free_before = (try fs.interface.statvfs()).free_blocks;
+
+    try new_file(&fs, "/tmp/victim_1.txt", "oooo");
+    // Opened again, so the entry names the clusters the handle writes.
+    var orphan = try fs.interface.get("/tmp/victim_1.txt");
+    errdefer orphan.delete();
+    var file = orphan.as_file().?;
+    _ = try file.interface.seek(0, c.SEEK_END);
+    try write_chunks(&file, "p");
+
+    try fs.interface.unlink("/tmp/victim_1.txt");
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, fs.interface.get("/tmp/victim_1.txt"));
+    try new_file(&fs, "/tmp/victim_2.txt", "AA");
+
+    // Still a file to its handle: written, read back, synced.
+    try write_chunks(&file, "X");
+    try expect_chunks(&file, "oooopX");
+    try std.testing.expectEqual(@as(i32, 0), file.interface.sync());
+    orphan.delete();
+
+    try expect_file_chunks(&fs, "/tmp/victim_2.txt", "AA");
+    // The directory empties and the orphan's clusters are free again.
+    try fs.interface.unlink("/tmp/victim_2.txt");
+    try fs.interface.unlink("/tmp");
+    try std.testing.expectEqual(free_before + 1, (try fs.interface.statvfs()).free_blocks);
+}
+
+test "FatFs.AFileOpenAcrossARenameKeepsWritingItsNewEntry" {
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    try new_file(&fs, "/victim_1.txt", "oooo");
+    var open = try fs.interface.get("/victim_1.txt");
+    errdefer open.delete();
+    var file = open.as_file().?;
+    _ = try file.interface.seek(0, c.SEEK_END);
+    try write_chunks(&file, "p");
+
+    try fs.interface.rename("/victim_1.txt", "/renamed_1.txt");
+    // The abandoned slot goes to the next file.
+    try new_file(&fs, "/victim_2.txt", "AA");
+    try write_chunks(&file, "X");
+    open.delete();
+
+    try expect_file_chunks(&fs, "/renamed_1.txt", "oooopX");
+    try expect_file_chunks(&fs, "/victim_2.txt", "AA");
+}
+
+test "FatFs.ARenameOverAnOpenFileOrphansIt" {
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    const free_before = (try fs.interface.statvfs()).free_blocks;
+    try new_file(&fs, "/target.txt", "tt");
+    var open = try fs.interface.get("/target.txt");
+    errdefer open.delete();
+    var file = open.as_file().?;
+
+    try new_file(&fs, "/source.txt", "s");
+    try fs.interface.rename("/source.txt", "/target.txt");
+    try new_file(&fs, "/other.txt", "BB");
+
+    try write_chunks(&file, "Z");
+    try expect_chunks(&file, "Zt");
+    open.delete();
+
+    try expect_file_chunks(&fs, "/target.txt", "s");
+    try expect_file_chunks(&fs, "/other.txt", "BB");
+    try fs.interface.unlink("/target.txt");
+    try fs.interface.unlink("/other.txt");
+    try std.testing.expectEqual(free_before, (try fs.interface.statvfs()).free_blocks);
+    // A rename onto itself keeps the file.
+    try new_file(&fs, "/same.txt", "q");
+    try fs.interface.rename("/same.txt", "/same.txt");
+    try expect_file_chunks(&fs, "/same.txt", "q");
+}
+
+test "FatFs.RemovingADirectoryThatIsNotEmptyIsENOTEMPTY" {
+    var fs = try create_fs_for_test();
+    defer fs.interface.delete();
+    try fs.interface.format();
+    _ = fs.interface.mount();
+    defer _ = fs.interface.umount();
+
+    try fs.interface.mkdir("/full", 0o755);
+    try fs.interface.create("/full/file", 0o644);
+    try std.testing.expectError(kernel.errno.ErrnoSet.DirectoryNotEmpty, fs.interface.unlink("/full"));
+    try fs.interface.unlink("/full/file");
+    try fs.interface.unlink("/full");
 }

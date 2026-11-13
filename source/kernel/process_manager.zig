@@ -594,7 +594,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 // sleeping mutex is unavailable. Idempotent, so `deinit` may
                 // still call it for the paths that never reach here.
                 exiting.clear_fds();
-                dynamic_loader.release_executable(pid);
+                if (exiting.swapped) dynamic_loader.abandon_executable(pid) else dynamic_loader.release_executable(pid);
             }
 
             preempt.preempt_disable();
@@ -1108,18 +1108,35 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         self._scheduler.set_next(&h.parent.node);
                         self.core[hal.cpu.coreid()] = h.parent;
                     },
-                    // A plain `execve` with no parked parent behind it, left as
-                    // it was: `set_next` releases this process through
-                    // `update_current`, and its frame is freshly built and
-                    // marked uninitialised, so the switch away enters the new
-                    // image rather than storing over it.
-                    // An orphan has no parent to name; the core's idle process
-                    // serves the same purpose -- some process other than this
-                    // one to switch to, so the switch enters the new image.
+                    // A plain `execve` with no parked parent behind it. This
+                    // core needs some process other than this one to switch to,
+                    // so the switch enters the new image (its frame is freshly
+                    // built and marked uninitialised) rather than storing over
+                    // it: the core's idle process. Never a parent that is not
+                    // runnable: claimed, it runs from its stored context whatever
+                    // its state, and a shell blocked in waitpid for this process
+                    // (zig handing over to its build runner) took over the core
+                    // and faulted when it exited.
+                    //
+                    // Claimed, not switched to: `claim` only sets this core's
+                    // `next`, and the PendSV below makes the switch. `set_next`
+                    // here also ran `update_current`, which released this process
+                    // -- `Ready`, on no core's cursor -- while this core was still
+                    // inside its SVC. On two cores the other one took it and
+                    // started the new image, this core's PendSV found nothing to
+                    // switch to, and the SVC returned into the old image on its
+                    // released stack: zig exec'ing its build runner on the Pico
+                    // Plus 2 jumped through 0xAAAA.... (2026-11-11). The switch
+                    // releases it instead, once this core has left it, and
+                    // switches without storing because it is uninitialised.
+                    //
+                    // The idle process rather than the parent: a parent that is
+                    // `Running` may be running on the other core, and claiming it
+                    // here would run it on both.
                     .none => {
-                        const next_process = current_process._parent orelse self.idle[hal.cpu.coreid()].?;
-                        self._scheduler.set_next(&next_process.node);
-                        self.core[hal.cpu.coreid()] = next_process;
+                        // No idle process: only the host tests.
+                        const next_process = self.idle[hal.cpu.coreid()] orelse current_process._parent.?;
+                        _ = self._scheduler.claim(&next_process.node);
                     },
                     // A parked, unresumable parent. Naming it here is the bug
                     // this split exists to prevent -- the claim would hand it to
@@ -1166,7 +1183,19 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     hal.irq.trigger(.pendsv);
                     return kernel.errno.ErrnoSet.TryAgain;
                 },
-                .none => return 0,
+                .none => {
+                    // The switch to the new image has to be pended, as in
+                    // `.refused`: without it the SVC returned straight into the
+                    // old image -- its stack and code already released -- and a
+                    // plain execve (one by a process that is not a vfork child,
+                    // such as zig handing over to its build runner) faulted.
+                    // This process is uninitialised, so the switch away releases
+                    // it without storing and it is entered at `call_main`.
+                    preempt_held = false;
+                    preempt.preempt_enable();
+                    hal.irq.trigger(.pendsv);
+                    return 0;
+                },
             }
         }
 
@@ -1326,7 +1355,12 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 current_process.reevaluate_state();
             }
             current_process.swap_eligible = false;
-            if (current_process.swapped) self.swap_in_current(current_process);
+            if (current_process.swapped and !self.swap_in_current(current_process)) {
+                // Killed by the swap-in watchdog. Nothing of this process may be
+                // touched from here on -- `status` least of all: it points into
+                // memory that belongs to somebody else now.
+                return kernel.errno.ErrnoSet.OutOfMemory;
+            }
 
             // Woken because a child finished: which one is known only from the
             // record it left, so `waitpid(-1)` reports the pid it collected.
@@ -1442,11 +1476,36 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         /// the pages it had are free again -- normally until the child it was
         /// waiting for is reaped, which this does itself rather than wait for
         /// the idle process.
-        fn swap_in_current(self: *Self, current: *Process) void {
-            const io = kernel.memory.heap.ProcessMemoryPool.swap_io orelse return;
+        /// How long a process may wait for its own pages before the loader's caches
+        /// are dropped for it, and before it is given up on.
+        const swap_in_reclaim_after_ms = 2_000;
+        const swap_in_give_up_after_ms = 5_000;
+        /// However long its holders say they sleep, a process is not kept out longer.
+        const swap_in_hard_limit_ms = 60_000;
+
+        /// Read a process waiting in waitpid back in. False when it could not be:
+        /// the process has been killed and the caller must return at once.
+        ///
+        /// A process comes back at the addresses it left, so a single page handed
+        /// to something that outlives the wait keeps it out for good -- a build
+        /// that simply stops, with both cores idle. That is the one outcome this
+        /// refuses: after `swap_in_reclaim_after_ms` everything the kernel can
+        /// drop is dropped, and after `swap_in_give_up_after_ms` the process is
+        /// killed with the reason on the console, so its parent sees a failure
+        /// instead of nothing. A holder that is merely asleep says so (its
+        /// `sleeping_until_us`): the count starts again when it is due to wake,
+        /// up to `swap_in_hard_limit_ms` in all, so a `sleep 15` in the way is
+        /// waited for and a `sleep 100000` is not. The root shell cannot be killed and restarted
+        /// (it is loaded once, never exec'd), so for pid 1 this is a panic.
+        fn swap_in_current(self: *Self, current: *Process) bool {
+            const io = kernel.memory.heap.ProcessMemoryPool.swap_io orelse return true;
             const pool = self.get_process_memory_pool();
             var waits: usize = 0;
-            while (true) : (waits += 1) {
+            var total_ms: usize = 0;
+            while (true) : ({
+                waits += 1;
+                total_ms += 1;
+            }) {
                 {
                     kernel.memory.swap.io_lock.lock();
                     defer kernel.memory.swap.io_lock.unlock();
@@ -1457,12 +1516,63 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     if (back) break;
                 }
                 self.reap_terminated();
-                if (waits == 1000) log.warn("swap: pid {d} still waiting for its pages", .{current.pid});
+                // After a second, then every five: who holds them. An error, not a
+                // warning -- the boards log errors only.
+                if (waits == 1000 or (waits > 1000 and waits % 5_000 == 0)) {
+                    if (pool.swap_in_blocker(current.pid)) |b| {
+                        log.err("swap: pid {d} waits for its pages: 0x{x} is in a {s} run of pid {d} (0x{x}, {d} KiB); {d} of its pages are taken", .{
+                            current.pid, b.wanted, b.source, b.pid, b.address, b.len / 1024, b.pages_taken,
+                        });
+                    }
+                }
+                if (waits == swap_in_reclaim_after_ms) {
+                    if (kernel.memory.heap.ProcessMemoryPool.reclaim_hook) |reclaim| {
+                        var dropped: usize = 0;
+                        while (true) {
+                            const got = reclaim(std.math.maxInt(u32));
+                            if (got == 0) break;
+                            dropped += got;
+                        }
+                        if (dropped != 0) log.err("swap: dropped {d} KiB of caches for pid {d}", .{ dropped / 1024, current.pid });
+                    }
+                }
+                if (waits >= swap_in_give_up_after_ms) {
+                    if (total_ms < swap_in_hard_limit_ms) {
+                        if (self.holder_asleep_for_ms(pool, current.pid)) |ms| {
+                            log.err("swap: pid {d}: the holder of its pages sleeps for another {d} ms, waiting for it", .{ current.pid, ms });
+                            // Count again from when it wakes.
+                            waits = if (ms + 1000 >= swap_in_give_up_after_ms) 1001 else swap_in_give_up_after_ms - ms - 1000;
+                            current.sleep_for_us(1000);
+                            continue;
+                        }
+                    }
+                    log.err("swap: pid {d} cannot have its memory back after {d} s -- killing it", .{ current.pid, total_ms / 1000 });
+                    if (current.pid == 1) @panic("the root shell cannot be restored from swap");
+                    // As `sys_kill`: the window `delete_process` closes.
+                    preempt.preempt_disable();
+                    self.delete_process(current.pid, 137);
+                    return false;
+                }
                 current.sleep_for_us(1000);
             }
             const flags = proctable_lock.lock_irqsave();
             defer proctable_lock.unlock_irqrestore(flags);
             current.swapped = false;
+            return true;
+        }
+
+        /// How much longer the process holding `pid`'s pages means to sleep, or null
+        /// when it is not asleep (or is no process at all).
+        fn holder_asleep_for_ms(self: *Self, pool: anytype, pid: c.pid_t) ?usize {
+            const blocker = pool.swap_in_blocker(pid) orelse return null;
+            if (blocker.pid <= 0) return null;
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const holder = self.get_process_for_pid_locked(blocker.pid) orelse return null;
+            const until = holder.sleeping_until_us;
+            const now = hal.time.get_time_us();
+            if (until <= now) return null;
+            return @intCast(@min((until - now) / 1000, swap_in_hard_limit_ms));
         }
 
         /// The process running on this core. The slot needs no lock: `core[]`

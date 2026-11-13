@@ -96,10 +96,28 @@ static struct {
 
     // DMA configuration blocks
     // This is used to perform DMA into data buffers and checksum buffers separately.
+    //
+    // Channel B copies one of these into channel A's "alias 2" registers, in this
+    // order: CTRL, TRANS_COUNT, READ_ADDR, WRITE_ADDR_TRIG.  The write address is
+    // the trigger, and it comes last.  It used to be {WRITE_ADDR, TRANS_COUNT_TRIG}
+    // (alias 1), and on the Pico Plus 2 the first of those two writes was
+    // sometimes lost while the second landed: channel A then ran its count from
+    // a stale pointer, which put a 512-byte data block in the checksum array
+    // and on through .bss.  In this order a lost address is a transfer that
+    // never starts -- the read times out and is retried, and nothing is written
+    // anywhere -- and the two writes that follow channel A's completion most
+    // closely, where the loss was seen, carry values A already holds.
+    // A lost count can still run a checksum descriptor for 128 words; that is
+    // what `stray_block` below is for.
     struct {
-        void * write_addr;
+        uint32_t ctrl;
         uint32_t transfer_count;
+        uint32_t read_addr;
+        void * write_addr;
     } dma_blocks[SDIO_MAX_BLOCKS_PER_REQ * 2];
+
+    // Channel A's CTRL for reception, as configured: what every descriptor carries.
+    uint32_t rx_ctrl;
 
     // Received checksums for read operations. DMA-written, hence volatile:
     // sdio_verify_rx_checksums compares against these right after the transfer
@@ -109,12 +127,87 @@ static struct {
         volatile uint32_t top;
         volatile uint32_t bottom;
     } received_checksums[SDIO_MAX_BLOCKS_PER_REQ + 4];
+
+    // Where a data block goes when channel B's write of channel A's address is
+    // lost and only the count/trigger lands -- seen on the Pico Plus 2 with the
+    // bus overclocked, about once in ten minutes of heavy reading.  A then
+    // writes its 128 words from where the previous descriptor left its pointer:
+    // 12 bytes into the checksum slot it has just filled.  Without this room the
+    // block ran over the end of the array and through .bss -- the pin numbers
+    // this driver reads on every stop, the kernel heap's free-list head -- which
+    // is how one "CRC error" became a dead card and a fault in free().  With it
+    // the block stays here, the slot of the block it was meant for fails its
+    // CRC, and the read is retried.  (The mirror case, a checksum landing in
+    // the data buffer, was always harmless: the next block overwrites it.)
+    // The last checksum the DMA stores is [MAX - 2], so a stray block ends at
+    // most 8 * (MAX - 2) + 12 + 512 bytes into the array.
+    uint32_t stray_block[(8 * (SDIO_MAX_BLOCKS_PER_REQ - 2) + 12 + 512 - 8 * (SDIO_MAX_BLOCKS_PER_REQ + 4)) / 4 + 4];
+
+    // Guard words after that: anything that gets past the room above is not
+    // the case it was sized for.  rx/tx_poll look at them on every call.
+    volatile uint32_t guard[4];
 } g_sdio;
+
+#define SDIO_GUARD_WORD 0x5D10CA7Au
+static bool g_sdio_guard_reported;
+
+static void sdio_guard_arm(void)
+{
+    for (int i = 0; i < 4; i++) g_sdio.guard[i] = SDIO_GUARD_WORD;
+}
+
+// True when the guard is intact.  On the first breach: what the DMA is doing
+// right now, before anything is stopped.
+static bool sdio_guard_check(const char *where)
+{
+    if (g_sdio.guard[0] == SDIO_GUARD_WORD && g_sdio.guard[3] == SDIO_GUARD_WORD) return true;
+    if (g_sdio_guard_reported) return false;
+    g_sdio_guard_reported = true;
+    uint32_t a_write = dma_hw->ch[SDIO_DMACH_A].write_addr;
+    uint32_t a_count = dma_hw->ch[SDIO_DMACH_A].transfer_count;
+    uint32_t a_ctrl = dma_hw->ch[SDIO_DMACH_A].al1_ctrl;
+    uint32_t b_read = dma_hw->ch[SDIO_DMACH_B].read_addr;
+    uint32_t b_write = dma_hw->ch[SDIO_DMACH_B].write_addr;
+    uint32_t b_count = dma_hw->ch[SDIO_DMACH_B].transfer_count;
+    uint32_t b_ctrl = dma_hw->ch[SDIO_DMACH_B].al1_ctrl;
+    SDIO_ERRMSG(where, g_sdio.guard[0], g_sdio.guard[3]);
+    SDIO_ERRMSG("  SDIO DMA OVERRAN ITS BUFFERS: state / total blocks", g_sdio.transfer_state, g_sdio.total_blocks);
+    SDIO_ERRMSG("  blocks done / checksumed", g_sdio.blocks_done, g_sdio.blocks_checksumed);
+    SDIO_ERRMSG("  data_buf / blocksize", (uint32_t)g_sdio.data_buf, g_sdio.blocksize);
+    SDIO_ERRMSG("  ch A write_addr / count", a_write, a_count);
+    SDIO_ERRMSG("  ch A ctrl / &received_checksums", a_ctrl, (uint32_t)g_sdio.received_checksums);
+    SDIO_ERRMSG("  ch B read_addr / write_addr", b_read, b_write);
+    SDIO_ERRMSG("  ch B count / ctrl", b_count, b_ctrl);
+    SDIO_ERRMSG("  dma_blocks / &A.al2_ctrl", (uint32_t)g_sdio.dma_blocks, (uint32_t)&dma_hw->ch[SDIO_DMACH_A].al2_ctrl);
+    for (int i = 0; i < 20; i += 2)
+        SDIO_ERRMSG("  dma_blocks[i] addr / count", (uint32_t)g_sdio.dma_blocks[i / 2].write_addr, g_sdio.dma_blocks[i / 2].transfer_count);
+    return false;
+}
 
 // Bound on the per-timeout state dump below. Bring-up polls ACMD41 hundreds of
 // times, and a dump per poll would be the log rather than a note in it.
 #define SDIO_TIMEOUT_DUMP_LIMIT 6
 static uint32_t g_sdio_timeout_dumps;
+
+/* Debugging aids for the error paths, which a healthy card never takes.
+ *
+ * yasos_sdio_inject_crc_every: report a CRC mismatch on every Nth received block
+ * (0 = never), so the read-error recovery -- abort mid-stream, CMD12, retry --
+ * runs on demand instead of once an hour at an overclocked bus.  Build with
+ * -DYASOS_SDIO_INJECT_CRC_EVERY=N or poke the variable from a debugger.
+ *
+ * g_sdio_stop_report: the next rp2350_sdio_stop() logs what the abort found --
+ * the FIFO level, whether a DMA channel was still busy after each abort, and
+ * where channel A was left pointing.  Set by every stop that ends a transfer on
+ * an error; a channel left armed with a stale write address is how a failed
+ * transfer would write into memory that is no longer its buffer. */
+#ifndef YASOS_SDIO_INJECT_CRC_EVERY
+#define YASOS_SDIO_INJECT_CRC_EVERY 0
+#endif
+uint32_t yasos_sdio_inject_crc_every = YASOS_SDIO_INJECT_CRC_EVERY;
+uint32_t yasos_sdio_injected_crc_errors;
+static uint32_t g_sdio_rx_blocks_verified;
+static bool g_sdio_stop_report;
 
 static void rp2350_sdio_dma_irq();
 extern void rp2350_install_irq_handler(uint32_t irq_num, void (*handler)(void));
@@ -568,6 +661,16 @@ static void load_pio_data_rx_program()
     g_sdio.pio_loaded_data_prog_offset = g_sdio.pio_offset.data_rx;
 }
 
+// One descriptor for channel B to load into channel A.  A zero write address is
+// a null trigger: channel A stays stopped, which is how the chain ends.
+static inline void sdio_rx_descriptor(int index, void *write_addr, uint32_t words)
+{
+    g_sdio.dma_blocks[index].ctrl = g_sdio.rx_ctrl;
+    g_sdio.dma_blocks[index].transfer_count = words;
+    g_sdio.dma_blocks[index].read_addr = (uint32_t)&SDIO_PIO->rxf[SDIO_SM];
+    g_sdio.dma_blocks[index].write_addr = write_addr;
+}
+
 sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize)
 {
     // Buffer must be aligned
@@ -575,6 +678,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
     {
         return SDIO_ERR_INVALID_PARAM;
     }
+    sdio_guard_check("rx_start: guard after the stray-block room");
 
     // If we are continuing a previous transfer, we don't
     // need to reinitialize PIO and DMA.
@@ -594,15 +698,17 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
         channel_config_set_bswap(&dmacfg, true);
         channel_config_set_chain_to(&dmacfg, SDIO_DMACH_B);
         dma_channel_configure(SDIO_DMACH_A, &dmacfg, 0, &SDIO_PIO->rxf[SDIO_SM], 0, false);
+        g_sdio.rx_ctrl = dmacfg.ctrl;
 
-        // Preconfigure second DMA channel for reconfiguring the first one
+        // Preconfigure second DMA channel for reconfiguring the first one:
+        // four words a descriptor, wrapping on channel A's alias 2 block.
         dmacfg = dma_channel_get_default_config(SDIO_DMACH_B);
         channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
         channel_config_set_read_increment(&dmacfg, true);
         channel_config_set_write_increment(&dmacfg, true);
-        channel_config_set_ring(&dmacfg, true, 3);
-        dma_channel_configure(SDIO_DMACH_B, &dmacfg, &dma_hw->ch[SDIO_DMACH_A].al1_write_addr,
-            g_sdio.dma_blocks, 2, false);
+        channel_config_set_ring(&dmacfg, true, 4);
+        dma_channel_configure(SDIO_DMACH_B, &dmacfg, &dma_hw->ch[SDIO_DMACH_A].al2_ctrl,
+            g_sdio.dma_blocks, 4, false);
 
         // Initialize PIO state machine
         pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.data_rx, &g_sdio.pio_cfg.data_rx);
@@ -641,8 +747,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
     // caused by initializing the dma blocks. By setting first DMA block to
     // NULL values, we ensure the DMA stops if the transfer completes before
     // next block is ready.
-    g_sdio.dma_blocks[0].transfer_count = 0;
-    g_sdio.dma_blocks[0].write_addr = 0;
+    sdio_rx_descriptor(0, 0, 0);
     dma_channel_set_read_addr(SDIO_DMACH_B, g_sdio.dma_blocks, false);
 
     // IRQ handler will verify checksums
@@ -665,8 +770,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
             if (i > 0)
             {
                 // Copy block data
-                g_sdio.dma_blocks[i * 2].write_addr = buffer + i * blocksize;
-                g_sdio.dma_blocks[i * 2].transfer_count = blocksize / sizeof(uint32_t);
+                sdio_rx_descriptor(i * 2, buffer + i * blocksize, blocksize / sizeof(uint32_t));
             }
 
             if (i < num_blocks - 1)
@@ -674,15 +778,13 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
                 // Copy the checksum from the FIFO
                 // There is one extra word for the trailing clocks, this dummy value can go over the next checksum.
                 // This starts up the next reception
-                g_sdio.dma_blocks[i * 2 + 1].write_addr = &g_sdio.received_checksums[i];
-                g_sdio.dma_blocks[i * 2 + 1].transfer_count = 3;
+                sdio_rx_descriptor(i * 2 + 1, (void *)&g_sdio.received_checksums[i], 3);
             }
             else
             {
                 // The checksum for last block will be left in the FIFO.
                 // This keeps the state machine stopped after last block.
-                g_sdio.dma_blocks[i * 2 + 1].write_addr = 0;
-                g_sdio.dma_blocks[i * 2 + 1].transfer_count = 0;
+                sdio_rx_descriptor(i * 2 + 1, 0, 0);
             }
         }
 
@@ -783,6 +885,13 @@ static void sdio_verify_rx_checksums()
         uint32_t bottom = __builtin_bswap32(g_sdio.received_checksums[blockidx].bottom);
         uint64_t expected = ((uint64_t)top << 32) | bottom;
 
+        if (yasos_sdio_inject_crc_every != 0 &&
+            ++g_sdio_rx_blocks_verified % yasos_sdio_inject_crc_every == 0)
+        {
+            yasos_sdio_injected_crc_errors++;
+            expected ^= 1;
+        }
+
         if (checksum != expected)
         {
             g_sdio.checksum_errors++;
@@ -802,6 +911,13 @@ static void sdio_verify_rx_checksums()
 // Returns SDIO_BUSY while transferring, SDIO_OK when done and error on failure.
 sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
 {
+    if (!sdio_guard_check("rx_poll: guard after the stray-block room"))
+    {
+        g_sdio_stop_report = true;
+        rp2350_sdio_stop();
+        return SDIO_ERR_DATA_CRC;
+    }
+
     // Always call DMA IRQ handler in polled mode.
     // The DMA interrupt may not fire in environments that manage
     // their own interrupt vector table (e.g. an RTOS).
@@ -815,6 +931,7 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
     if (g_sdio.checksum_errors > 0)
     {
         SDIO_ERRMSG("SDIO checksum error in read", g_sdio.blocks_checksumed, g_sdio.total_blocks);
+        g_sdio_stop_report = true;
         rp2350_sdio_stop();
         return SDIO_ERR_DATA_CRC;
     }
@@ -831,6 +948,7 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
     else if (SDIO_ELAPSED_US(g_sdio.transfer_start_time) > SDIO_TRANSFER_TIMEOUT_US)
     {
         SDIO_ERRMSG("SDIO data rx timeout", g_sdio.blocks_done, dma_hw->ch[SDIO_DMACH_A].al2_transfer_count);
+        g_sdio_stop_report = true;
         rp2350_sdio_stop();
         return SDIO_ERR_DATA_TIMEOUT;
     }
@@ -1134,6 +1252,8 @@ static void rp2350_sdio_dma_irq()
 // Check if transmission is complete
 sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
 {
+    sdio_guard_check("tx_poll: guard after the stray-block room");
+
     // Always call DMA IRQ handler in polled mode.
     rp2350_sdio_dma_irq();
 
@@ -1149,6 +1269,7 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
     else if (SDIO_ELAPSED_US(g_sdio.transfer_start_time) > SDIO_TRANSFER_TIMEOUT_US)
     {
         SDIO_ERRMSG("SDIO data tx timeout", g_sdio.blocks_done, dma_hw->ch[SDIO_DMACH_A].al2_transfer_count);
+        g_sdio_stop_report = true;
         rp2350_sdio_stop();
         return SDIO_ERR_DATA_TIMEOUT;
     }
@@ -1167,6 +1288,11 @@ bool rp2350_sdio_is_card_busy(void)
 // This requires careful sequencing to cleanly abort any running data transfers.
 sdio_status_t rp2350_sdio_stop()
 {
+    bool report = g_sdio_stop_report;
+    g_sdio_stop_report = false;
+    uint32_t state_before = g_sdio.transfer_state;
+    uint32_t flevel_before = SDIO_PIO->flevel;
+
     // First disable DMA interrupt handlers
     uint32_t channel_mask = (1 << SDIO_DMACH_A) | (1 << SDIO_DMACH_B);
     dma_irqn_set_channel_mask_enabled(SDIO_DMAIRQ_IDX, channel_mask, false);
@@ -1180,8 +1306,13 @@ sdio_status_t rp2350_sdio_stop()
     // To ensure both are stopped, they are aborted twice.
     dma_hw->abort = channel_mask;
     while (dma_hw->abort);
+    uint32_t busy_after_first = (dma_channel_is_busy(SDIO_DMACH_A) ? 1 : 0) | (dma_channel_is_busy(SDIO_DMACH_B) ? 2 : 0);
     dma_hw->abort = channel_mask;
     while (dma_hw->abort);
+    uint32_t busy_after_second = (dma_channel_is_busy(SDIO_DMACH_A) ? 1 : 0) | (dma_channel_is_busy(SDIO_DMACH_B) ? 2 : 0);
+    uint32_t a_write_addr = dma_hw->ch[SDIO_DMACH_A].write_addr;
+    uint32_t a_count = dma_hw->ch[SDIO_DMACH_A].transfer_count;
+    uint32_t b_read_addr = dma_hw->ch[SDIO_DMACH_B].read_addr;
 
     // Re-enable the command state machine
     // This will give continuous clock for the card to use for its own tasks
@@ -1194,6 +1325,16 @@ sdio_status_t rp2350_sdio_stop()
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, true);
 
     g_sdio.transfer_state = SDIO_IDLE;
+
+    // A channel still busy after the second abort is reported whoever asked.
+    if (report || busy_after_second != 0)
+    {
+        SDIO_ERRMSG("SDIO stop: state / PIO flevel before", state_before, flevel_before);
+        SDIO_ERRMSG("  DMA busy (A=1,B=2) after abort 1 / 2", busy_after_first, busy_after_second);
+        SDIO_ERRMSG("  ch A write_addr / count", a_write_addr, a_count);
+        SDIO_ERRMSG("  ch B read_addr / data_buf", b_read_addr, (uint32_t)g_sdio.data_buf);
+        SDIO_ERRMSG("  dma_blocks / blocks total", (uint32_t)g_sdio.dma_blocks, g_sdio.total_blocks);
+    }
     return SDIO_OK;
 }
 
@@ -1361,6 +1502,7 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
     }
 
     memset(&g_sdio, 0, sizeof(g_sdio));
+    sdio_guard_arm();
     g_sdio.timing = timing;
 
     // Hold CLK high before stopping SM to prevent glitches that could

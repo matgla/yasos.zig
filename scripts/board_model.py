@@ -237,6 +237,24 @@ def cmd_image(args):
     log(f"image {args.name}: {dst} ({meta['tinycc']})")
 
 
+def cmd_kernel(args):
+    """This tree's an524 kernel with the board's memory map, nothing else changed: for
+    running real workloads (`scripts/qemu_mount.py --kernel`) inside the board's 8 MB
+    of PSRAM and 432 KB of process SRAM -- swap, fragmentation and all -- without an
+    image's separate tree.  The linker script is reshaped in place for the build and
+    put back afterwards; zig-out is not touched."""
+    script = REPO / "hal/source/arm/qemu_mps3/linker_script.ld"
+    prefix = ROOT / "kernel"
+    ROOT.mkdir(parents=True, exist_ok=True)
+    original = script.read_text()
+    try:
+        board_shape(script)
+        sh(f"zig build -Doptimize={args.optimize} -p {prefix}", cwd=REPO, logfile=ROOT / "kernel.log")
+    finally:
+        script.write_text(original)
+    log(f"board-shaped kernel: {prefix / 'bin/yasos_kernel'}")
+
+
 def image_dir(name):
     d = ROOT / "images" / name
     if not (d / "zig-out/bin/yasos_kernel").exists():
@@ -545,6 +563,8 @@ def main():
     s.add_argument("--tinycc-patch", help="patch applied to the image's tinycc (-p1)")
     s.add_argument("--source", help="yasos tree to copy (default: this one)")
     s.add_argument("--force", action="store_true")
+    s = sub.add_parser("kernel", help="this tree's an524 kernel with the board's memory map, into .cache/board_model/kernel")
+    s.add_argument("--optimize", default="ReleaseSafe")
     s = sub.add_parser("run", help="run the smoke tcc suites on an image under the model")
     s.add_argument("image")
     s.add_argument("-O", "--opt-levels", default="-O2")
@@ -567,7 +587,7 @@ def main():
     s.add_argument("-j", "--jobs", type=int, default=8)
     s.add_argument("--write", action="store_true", help=f"save the fit to {PARAMS}")
     args = ap.parse_args()
-    {"setup": cmd_setup, "image": cmd_image, "run": cmd_run, "report": cmd_report, "compare": cmd_compare,
+    {"setup": cmd_setup, "image": cmd_image, "kernel": cmd_kernel, "run": cmd_run, "report": cmd_report, "compare": cmd_compare,
      "calibrate": cmd_calibrate}[args.cmd](args)
 
 

@@ -1,5 +1,9 @@
 # yasboot — bootloader plan for yasos.zig boards and MSPC cards
 
+**Superseded where they differ by `yasboot/docs/design.md` (2026-11-10):** two stages, stage 1
+in flash and stage 2 as a FAT file on `/boot`; the kernel at a fixed flash address; kernels as
+files on the card instead of flash slots.
+
 Drafted 2026-09-21; decisions applied the same day (§10). The existing `matgla/Yasboot`
 repository (CMake, last touched 2025-05) is wiped and reimplemented from this plan. This file
 becomes a pointer to that repository once it exists.
