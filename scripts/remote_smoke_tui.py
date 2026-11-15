@@ -296,7 +296,7 @@ BOARD_PROFILES = {
         defconfig="configs/pimoroni_pico_plus2_and_vga_defconfig",
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
-        rootfs_address="0x10100000",
+        rootfs_address="0x10120000",
     ),
     "mspc_v2": BoardProfile(
         key="mspc_v2",
@@ -304,7 +304,7 @@ BOARD_PROFILES = {
         defconfig="configs/mspc_defconfig",
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
-        rootfs_address="0x10100000",
+        rootfs_address="0x10120000",
         console_baudrate=115200,
     ),
 }

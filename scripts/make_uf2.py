@@ -3,11 +3,16 @@
 
   make_uf2.py OUT.uf2 ADDR:FILE [ADDR:FILE ...]
 
-e.g. the kernel at the flash base and the romfs 1 MiB in (the linker script's
-`flash` and `romfs` regions):
+e.g. the partition table at the flash base, the kernel at the start of
+partition 1 (its ELF load addresses) and the romfs 1 MiB into the partition
+(hal/source/raspberry/rp2350/partitions).  The kernel ELF carries the table
+too; strip it there, or objcopy -O binary would start at offset 0 and fill
+the bootloader's partition with zeros:
 
-  arm-none-eabi-objcopy -O binary zig-out/bin/yasos_kernel kernel.bin
-  make_uf2.py yasos.uf2 0x10000000:kernel.bin 0x10100000:rootfs.img
+  arm-none-eabi-objcopy -O binary -R .partition_table zig-out/bin/yasos_kernel kernel.bin
+  make_uf2.py yasos.uf2 \
+      0x10000000:hal/source/raspberry/rp2350/partitions/partition_table.bin \
+      0x10020000:kernel.bin 0x10120000:rootfs.img
 """
 import struct
 import sys

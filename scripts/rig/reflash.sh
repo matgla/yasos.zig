@@ -6,7 +6,9 @@
 # The hashes are checked at the start only and write_image reads the files later, so
 # whoever calls this must keep them from changing: run_selfhost.sh checks again after.
 set -u
-HERE=$(cd "$(dirname "$0")" && pwd); REMOTE=${YASOS_RIG_REMOTE:-$HOME/yasos_remote_smoke}; W=$REMOTE/workdir; R=$W/rootfs.img; K=$W/yasos_kernel; ADDR=$((0x10100000))
+HERE=$(cd "$(dirname "$0")" && pwd); REMOTE=${YASOS_RIG_REMOTE:-$HOME/yasos_remote_smoke}; W=$REMOTE/workdir; R=$W/rootfs.img; K=$W/yasos_kernel; ADDR=$((0x10120000))
+# The romfs is 1 MiB into partition 1 (flash offset 0x20000); the kernel ELF loads at
+# 0x20000 and carries the partition table for offset 0 (hal/source/raspberry/rp2350/partitions).
 [ "$(sha256sum < $R | cut -d' ' -f1)" = "$1" ] || { echo "rootfs sha mismatch"; exit 8; }
 [ "$(sha256sum < $K | cut -d' ' -f1)" = "$2" ] || { echo "kernel sha mismatch"; exit 8; }
 TCL=/tmp/yasos_reflash.tcl; SZ=$(stat -c %s $R); CH=$((64*1024))

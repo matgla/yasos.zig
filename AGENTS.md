@@ -151,6 +151,21 @@ once — prefer that when a bug class repeats.
   cache-off FAT path, configure `configs/qemu_mps3_an524_nofatcache_defconfig`,
   build, then use the smoke runner's `--no-build` so it retains that config.
 
+## Flash layout (RP2350): partitions
+
+`hal/source/raspberry/rp2350/partitions/partition_table.json` (2026-11-16): the
+RP2350 partition table at flash offset 0, partition 0 "yasboot" at 0x2000
+(120 KB, the bootloader, tried first), partition 1 "yasos" at 0x20000 (kernel,
+then romfs) to 0xFFF000. The bootrom boots the first partition with a valid
+IMAGE_DEF and maps it at 0x10000000 (QMI ATRANS), so the kernel stays linked at
+0x10000000; the linker scripts load it at `flash_load` (0x10020000) and the
+romfs (virtual 0x10100000) is flashed at 0x10120000. The table itself is in
+the kernel ELF (`partitions/partition_table.zig`, regenerated with
+`partitions/generate.sh` from the JSON, picotool): section `.partition_table`,
+run 0x1c000000 (the untranslated XIP alias), load 0x10000000 -- so every flash
+path writes it with the kernel. This needs the tinycc linker fixes of
+2026-11-16 (`AT(lma)`, explicit section addresses, `LOADADDR() - const`).
+
 ## Build / run
 
 ```bash

@@ -31,7 +31,7 @@
 # Env (with defaults):
 #   YASOS_SMOKE_TCC_OPT_LEVELS       tcc -O levels to exercise (default "-O0 -O1 -O2")
 #   YASOS_SMOKE_ENABLE_GCC_TORTURE   run gcc-torture on device (default 1)
-#   YASOS_SMOKE_ROOTFS_ADDRESS       rootfs flash address     (default 0x10100000)
+#   YASOS_SMOKE_ROOTFS_ADDRESS       rootfs flash address     (default 0x10120000)
 #   SERIAL_DEVICE                    debug-probe tty          (default: auto-detect)
 #   GCC_TORTURE_PATH                 external gcc-torture checkout (skips submodule fetch)
 #
@@ -68,7 +68,7 @@ OPT_LEVELS="${OPT_LEVELS//,/ }"
 
 KERNEL="$REPO_ROOT/zig-out/bin/yasos_kernel"
 ROOTFS="$REPO_ROOT/rootfs.img"
-ROOTFS_ADDR="${YASOS_SMOKE_ROOTFS_ADDRESS:-0x10100000}"
+ROOTFS_ADDR="${YASOS_SMOKE_ROOTFS_ADDRESS:-0x10120000}"
 # yaff_arch_test.py corrupts one field of this executable per case and checks the
 # loader refuses it, so it needs the unpacked YAFF image, not just rootfs.img.
 # It is a build product (rootfs/ is gitignored), so a checkout that only staged
@@ -94,7 +94,8 @@ rescue_dp() {
     sleep 1
 }
 
-# flash_rp2350.cfg programs rootfs.img @ 0x10100000 + zig-out/bin/yasos_kernel
+# flash_rp2350.cfg programs rootfs.img @ 0x10120000 + zig-out/bin/yasos_kernel
+# (which also writes the partition table at 0x10000000)
 # relative to cwd (= REPO_ROOT). A board left wedged by a prior run can refuse the
 # first program; rescue the DP and retry once before giving up.
 echo ">> Flashing prebuilt image (no rebuild): $(basename "$ROOTFS") @ $ROOTFS_ADDR + $(basename "$KERNEL")"
