@@ -151,35 +151,9 @@ pub fn build(b: *std.Build) !void {
     const kernel_cc = b.option(KernelCc, "kernel_cc", "Kernel compiler: tcc (default, Zig C backend + tinycc) or llvm") orelse .tcc;
     const kernel_tcc_path = b.option([]const u8, "kernel_tcc", "Cross tcc for -Dkernel_cc=tcc (default libs/tinycc/bin/armv8m-tcc)") orelse "libs/tinycc/bin/armv8m-tcc";
 
-    // The bootloader (yasboot/, its own repository), always built the way the
-    // device builds code: Zig's C backend, then this same cross tcc.  Two
-    // modes of one loader: the bare-metal bootloader, and the same logic as a
-    // YasOS program to try in a running kernel before flashing it.
-    const yasboot_tcc: std.Build.LazyPath = if (std.fs.path.isAbsolute(kernel_tcc_path)) .{ .cwd_relative = kernel_tcc_path } else b.path(kernel_tcc_path);
-    const yasboot_bm = b.dependency("yasboot", .{ .tcc = yasboot_tcc, .mode = .baremetal });
-    const yasboot_app = b.dependency("yasboot", .{ .tcc = yasboot_tcc, .mode = .yasos });
-    const yasboot_step = b.step("yasboot", "Build yasboot with tcc: zig-out/boot/yasboot (bootloader ELF) and zig-out/usr/bin/yasboot (YasOS program)");
-    yasboot_step.dependOn(&b.addInstallFile(yasboot_bm.namedLazyPath("yasboot"), "boot/yasboot").step);
-    yasboot_step.dependOn(&b.addInstallFile(yasboot_bm.namedLazyPath("yasboot.c"), "boot/yasboot.c").step);
-    yasboot_step.dependOn(&b.addInstallFile(yasboot_app.namedLazyPath("yasboot"), "usr/bin/yasboot").step);
-    yasboot_step.dependOn(&b.addInstallFile(yasboot_app.namedLazyPath("yasboot.c"), "usr/bin/yasboot.c").step);
-
-    const yasboot_qemu = b.addSystemCommand(&.{ "qemu-system-arm", "-machine", "mps3-an524", "-nographic", "-semihosting-config", "enable=on,target=native", "-kernel" });
-    yasboot_qemu.addFileArg(yasboot_bm.namedLazyPath("yasboot"));
-    b.step("yasboot-qemu", "Boot the bare-metal yasboot on QEMU mps3-an524").dependOn(&yasboot_qemu.step);
-
-    // The program in a kernel: its directory at /mnt (scripts/qemu_mount.py),
-    // copied off FAT and run.  -Dyasboot_kernel picks the an524 kernel.
-    const yasboot_kernel = b.option([]const u8, "yasboot_kernel", "an524 kernel for yasboot-test (default zig-out/bin/yasos_kernel)");
-    const yasboot_dir = b.addWriteFiles();
-    _ = yasboot_dir.addCopyFile(yasboot_app.namedLazyPath("yasboot"), "yasboot");
-    const yasboot_test = b.addSystemCommand(&.{ "yasos_venv/bin/python3", "scripts/qemu_mount.py" });
-    yasboot_test.setCwd(b.path("."));
-    yasboot_test.addDirectoryArg(yasboot_dir.getDirectory());
-    if (yasboot_kernel) |k| yasboot_test.addArgs(&.{ "--kernel", k });
-    yasboot_test.addArgs(&.{ "-c", "cp /mnt/yasboot /tmp/yasboot && chmod +x /tmp/yasboot && /tmp/yasboot" });
-    yasboot_test.has_side_effects = true;
-    b.step("yasboot-test", "Run the yasboot program inside an an524 kernel on QEMU").dependOn(&yasboot_test.step);
+    // yasboot (yasboot/, its own repository) is no longer built here: it is
+    // written and built on the board (yasboot/docs/build.txt), and the
+    // submodule holds its docs.
 
     // What the wall clock reads before anything sets it is the image's build
     // time (rootfs.img's mtime). It is data in the generated rootfs.S, not an
