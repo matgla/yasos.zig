@@ -313,6 +313,11 @@ def test_sd_write_throughput(request):
         session.write_command(f"rm -f {SCRATCH_DIR}/sdbench.tmp")
         session.wait_for_prompt_except_logs()
 
+    output = "\n".join(lines).lower()
+    if not results and ("not found" in output or "no such file" in output):
+        # sdbench left the image (build_rootfs.sh, 2026-11-16): build it with
+        # `make -C apps/sdbench` and copy it to the card to run this again.
+        pytest.skip("sdbench is not on the target (no longer in the rootfs)")
     if not results:
         pytest.fail(
             "sdbench produced no parseable results (missing binary, or it"

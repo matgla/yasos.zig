@@ -1,0 +1,120 @@
+#!/bin/bash
+# man - show a manual page
+#
+#   man NAME        the page for NAME (printf, stdio.h, tcc, f_open, pio)
+#   man -k WORD     search the one-line descriptions
+#   man -w NAME     print the page's path
+#   man             list every page
+#
+# The built pages (scripts/man/build_man.py in yasos.zig) are packed into
+# xz blocks of about 64 KB, /usr/share/man/bNN.xz, listed in
+# /usr/share/man/index as "name block offset length": showing one unpacks
+# its block (0.1 s on the Pico Plus 2) and cuts the page out into /tmp.
+# NAME.txt and NAME.txt.gz files are found too (pages written on the
+# board, or a --compress gzip build).  /usr/share/man/aliases lists
+# names that share a page (fprintf -> printf).  More directories can be
+# put in front with MANPATH (colon-separated), e.g. pages on the card:
+# MANPATH=/var/lib/man:/usr/share/man.  The pager is $PAGER, else more.
+#
+# Kept to builtins plus one grep: loops over $(...) allocate on YasOS.
+
+MANPATH=${MANPATH:-/usr/share/man}
+PAGER=${PAGER:-more}
+
+# in_dir DIR NAME: the page NAME in DIR -- PAGE=DIR/NAME.txt, or
+# DIR/NAME.txt.gz, or from DIR/index: PAGE=DIR/BLOCK, with OFFSET, LENGTH
+# and PAGENAME set.
+in_dir() {
+    local entry dir="$1"
+    OFFSET=""
+    PAGENAME="$2"
+    if [ -f "$1/$2.txt" ]; then
+        PAGE="$1/$2.txt"
+    elif [ -f "$1/$2.txt.gz" ]; then
+        PAGE="$1/$2.txt.gz"
+    elif [ -f "$1/index" ] && entry=$(grep -m1 "^$2 " "$1/index") &&
+        [ -n "$entry" ]; then  # toybox sh: the assignment is true even when grep fails
+        IFS=' '  # find_page loops with IFS=: ; the index is space-separated
+        set -- $entry
+        IFS=:
+        PAGE="$dir/$2"
+        OFFSET=$3
+        LENGTH=$4
+    else
+        return 1
+    fi
+}
+
+find_page() {
+    local d alias
+    IFS=:
+    for d in $MANPATH; do
+        if in_dir "$d" "$1"; then
+            unset IFS
+            return 0
+        fi
+    done
+    for d in $MANPATH; do
+        if [ -f "$d/aliases" ]; then
+            alias=$(grep -m1 "^$1 " "$d/aliases")
+            if [ -n "$alias" ] && in_dir "$d" "${alias#* }"; then
+                unset IFS
+                return 0
+            fi
+        fi
+    done
+    unset IFS
+    return 1
+}
+
+# show PAGE: a packed page goes through /tmp, since more pages a named
+# file (its keyboard is stdin).
+show() {
+    local tmp="/tmp/man-$$-$PAGENAME.txt"
+    if [ -n "$OFFSET" ]; then
+        xzcat "$1" | tail -c +$((OFFSET + 1)) | head -c "$LENGTH" > "$tmp" ||
+            { rm -f "$tmp"; exit 1; }
+    else
+        case "$1" in
+            *.gz) zcat "$1" > "$tmp" || { rm -f "$tmp"; exit 1; } ;;
+            *) $PAGER "$1"; return ;;
+        esac
+    fi
+    $PAGER "$tmp"
+    rm -f "$tmp"
+}
+
+case "$1" in
+    "")
+        IFS=:
+        for d in $MANPATH; do
+            [ -f "$d/whatis" ] && $PAGER "$d/whatis"
+        done
+        unset IFS
+        ;;
+    -k)
+        [ -n "$2" ] || { echo "usage: man -k WORD" >&2; exit 2; }
+        IFS=:
+        found=1
+        for d in $MANPATH; do
+            [ -f "$d/whatis" ] && grep -i -- "$2" "$d/whatis" && found=0
+        done
+        unset IFS
+        exit $found
+        ;;
+    -w)
+        find_page "$2" || { echo "man: no page for $2" >&2; exit 1; }
+        if [ -n "$OFFSET" ]; then
+            echo "$PAGE ($PAGENAME at $OFFSET, $LENGTH bytes)"
+        else
+            echo "$PAGE"
+        fi
+        ;;
+    -h|--help)
+        sed -n '2,15p' "$0"
+        ;;
+    *)
+        find_page "$1" || { echo "man: no page for $1 (try man -k $1)" >&2; exit 1; }
+        show "$PAGE"
+        ;;
+esac

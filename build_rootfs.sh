@@ -250,6 +250,7 @@ if $CLEAR; then
   rm -rf apps/textvaders/build
   rm -rf apps/hexdump/build
   rm -rf apps/pioasm/build
+  rm -rf apps/more/build
   rm -rf apps/ccat/build
   rm -rf apps/yaffdump/build
   rm -rf apps/yaffdump/tests/build
@@ -284,6 +285,9 @@ mkdir -p rootfs/opt
 mkdir -p rootfs/etc
 cp $SCRIPT_DIR/etc/* rootfs/etc/
 mkdir -p rootfs/usr/bin
+# The previous image build linked duplicate files (scripts/rootfs_dedupe.py);
+# turn them back into files before anything installs over them.
+python3 "$SCRIPT_DIR/scripts/rootfs_dedupe.py" rootfs --undo || exit 1
 cp -r $SCRIPT_DIR/usr/. rootfs/usr/
 cd rootfs
 if [ ! -e lib ] && [ ! -L lib ]; then
@@ -1029,19 +1033,19 @@ build_makefile prun
 build_makefile fbdemo
 build_makefile hexdump
 build_makefile pioasm
+build_makefile more
 build_makefile ccat
 build_makefile yaffdump
 build_makefile time
 build_makefile yasvi
 build_makefile mkfs
 build_makefile fdisk
-build_makefile longjump_tester
 build_zork_makefile zork
 build_makefile rzsz
 build_makefile sha
-build_makefile sdbench
-build_makefile syscallbench
-build_makefile fpbench
+# Benchmarks and test programs are not in the image any more (sdbench,
+# syscallbench, fpbench, longjump_tester's jump_test); build one by hand with
+# `make -C apps/<name>` and copy it to the card when it is wanted.
 build_gnumake make
 build_ctags ctags
 
@@ -1159,6 +1163,34 @@ if $BUILD_IMAGE; then
       echo "Leaving the Zig compiler out of the rp2350 rootfs (not ready yet)."
     fi
     rm -rf rootfs/usr/bin/zig rootfs/usr/bin/zig-maker rootfs/usr/lib/zig
+  fi
+  # Man pages (usr/bin/man reads them with apps/more): the hand-written ones in
+  # man/, the yasos libc headers and Linux man-pages for what libc implements,
+  # tinycc, FatFs and -- with --zig, or ZIG_DOC_SOURCE=<zig tree> -- the Zig
+  # language reference and CLI.  After the rm of usr/share above, which drops
+  # what autotools installs there.  Packed into 64 KB xz blocks (needs toybox
+  # xzcat, CONFIG_XZCAT in apps/toybox_builder/yasos.config): about 0.55 MB
+  # of the romfs (2.1 MB as plain text, 0.77 MB as gzip per page).
+  ZIG_DOC_SOURCE=${ZIG_DOC_SOURCE:-$ZIG_SOURCE}
+  MAN_ZIG_ARGS=()
+  [ -n "$ZIG_DOC_SOURCE" ] && MAN_ZIG_ARGS+=(--zig-source "$ZIG_DOC_SOURCE")
+  [ -n "$ZIG_DOC_SOURCE" ] && [ -x .cache/zig-build/host-st/bin/zig ] && \
+    MAN_ZIG_ARGS+=(--zig .cache/zig-build/host-st/bin/zig)
+  if ! python3 scripts/man/build_man.py rootfs/usr/share/man --rootfs rootfs "${MAN_ZIG_ARGS[@]}"; then
+    echo "WARNING: scripts/man/build_man.py failed; the image has no man pages."
+    rm -rf rootfs/usr/share/man
+  fi
+  # Stale programs: rootfs/ is only cleared by -c, so what earlier builds
+  # installed stays unless removed here -- the benchmarks and test programs
+  # no longer built (above), and zig build's maker (YASOS_ZIG_MAKER).
+  rm -f rootfs/usr/bin/sdbench rootfs/usr/bin/syscallbench rootfs/usr/bin/jump_test \
+        rootfs/usr/bin/fpbench-* rootfs/usr/bin/fpbench.sh
+  [ "${YASOS_ZIG_MAKER:-0}" = 1 ] || rm -f rootfs/usr/bin/zig-maker
+  # Identical files (tcc's include/ and runtime copies in usr/lib/tcc/ next to
+  # usr/include and usr/lib) become relative symlinks to one copy: romfs has
+  # no hard links.  Before the precache, which then sees the final files.
+  if ! python3 scripts/rootfs_dedupe.py rootfs; then
+    echo "WARNING: scripts/rootfs_dedupe.py failed; duplicates stay in the image."
   fi
   # Loader precache: every image relocated once here, by the device's own
   # loader built for the host, so the board replays the result from flash

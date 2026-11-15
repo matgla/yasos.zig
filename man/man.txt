@@ -1,0 +1,68 @@
+MAN(1)                           YasOS Manual                           MAN(1)
+
+NAME
+       man - show a manual page
+
+SYNOPSIS
+       man NAME
+       man -k WORD
+       man -w NAME
+       man
+
+DESCRIPTION
+       man shows the page for NAME with the pager (more, or $PAGER). The
+       pages are packed into xz blocks of about 64 KB in /usr/share/man
+       (bNN.xz, listed in /usr/share/man/index); man unpacks the one block
+       holding the page, about 0.1 s, and cuts the page out into /tmp. A
+       plain NAME.txt or a gzipped NAME.txt.gz in a MANPATH directory is
+       found too, for pages written on the board. Names that share a page
+       are listed in /usr/share/man/aliases, so man fprintf opens the
+       printf page.
+
+       What there is:
+
+           man yasos-libc      the C library: headers, libraries, gaps
+           man stdio.h         what one header declares (sys/stat.h too)
+           man printf          a function (Linux man-pages, with a YasOS
+                               note on top saying what yasos libc has)
+           man tcc             the compiler; man tcc-options for -h/-hh
+           man zig, zig-lang   the Zig CLI and language reference (images
+                               built with --zig)
+           man fatfs, f_open   ChaN's FatFs
+           man pio, pioasm     PIO assembly and its assembler
+           man rp2350-pio      the RP2350 PIO registers
+
+OPTIONS
+       -k WORD
+              Search the one-line descriptions (/usr/share/man/whatis),
+              case-insensitively.
+
+       -w NAME
+              Print the path of the page instead of showing it.
+
+       (no argument)
+              Page through the list of every page.
+
+ENVIRONMENT
+       MANPATH
+              Colon-separated directories to look in, first match wins.
+              Default /usr/share/man. Pages on the card can go first:
+              MANPATH=/var/lib/man:/usr/share/man.
+
+       PAGER  The program that shows the page. Default more.
+
+FILES
+       /usr/share/man/bNN.xz       the pages, packed in xz blocks
+       /usr/share/man/index        "name block offset length", one per page
+       /usr/share/man/whatis       "name - description", one per page
+       /usr/share/man/aliases      "othername pagename", one per line
+       DIR/NAME.txt, NAME.txt.gz   single pages, looked for first
+
+NOTES
+       The pages are generated on the PC by scripts/man/build_man.py in
+       yasos.zig when the rootfs image is built; nothing is converted on the
+       board. In vi, :man NAME opens a page in a buffer and K opens the page
+       for the word under the cursor.
+
+SEE ALSO
+       more(1), yasos-libc(7)

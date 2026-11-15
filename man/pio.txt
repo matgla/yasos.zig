@@ -1,0 +1,533 @@
+PIO(7)                           YasOS Manual                           PIO(7)
+
+NAME
+       pio - PIO assembly language of the RP2040 and RP2350
+
+DESCRIPTION
+       PIO (programmable I/O) blocks run tiny programs that drive GPIOs
+       with cycle-exact timing. The RP2350 has three PIO blocks (PIO0,
+       PIO1, PIO2; the RP2040 has two). Each block has four state
+       machines (SMs) that share a 32-instruction memory. Each SM has
+
+           OSR, ISR    32-bit output and input shift registers
+           X, Y        32-bit scratch registers
+           PC          5-bit program counter
+           TX FIFO     4 words, CPU -> SM (8 if joined with RX)
+           RX FIFO     4 words, SM -> CPU (8 if joined with TX)
+           a clock divider, and pin mappings for OUT, SET, IN, side-set
+           and the JMP pin (see rp2350-pio(7) for the registers)
+
+       An SM executes one instruction per (divided) clock cycle; an
+       instruction can also stall (waiting on a FIFO, a pin or an IRQ
+       flag) and can add up to 31 idle cycles of delay. Programs are
+       written in the language below and assembled with pioasm(1). This
+       page follows the Pico SDK's pioasm, which YasOS's pioasm
+       reproduces exactly; "v1" marks RP2350-only (PIO version 1)
+       features.
+
+SOURCE SYNTAX
+       One statement per line: a directive, an instruction, a label, a
+       label followed by an instruction, or nothing.
+
+           ; comment          // comment          /* comment,
+                                                   may span lines */
+
+       Keywords, instruction names and directives are case-insensitive
+       (JMP, jmp and Jmp are the same); symbol names are case-sensitive.
+       Numbers are decimal (42), hex (0x2a) or binary (0b101010); the
+       words one and zero also stand for 1 and 0. Commas between operands
+       are optional.
+
+       Labels: "name:" defines name as the address of the next
+       instruction. "public name:" (or "*name:") also exports it, as
+       NAME_offset_name in the output. Labels belong to their program.
+
+       Expressions: integers, symbol names and the operators
+
+           ( )                 grouping
+           & | ^               and, or, xor          (bind tightest)
+           * /                 multiply, divide
+           + -                 add, subtract
+           << >>               shift left, shift right
+           ::                  bit-reverse a 32-bit value (loosest)
+           -                   negate
+
+       All binary operators are left-associative. Note the unusual
+       order: 1 + 2 * 3 | 4 is 1 + (2 * (3 | 4)) = 15, and -1 & 31 is
+       -(1 & 31). Use parentheses. Most operand positions take a "value":
+       a number, a symbol, or a parenthesised expression; delays, jmp
+       targets and .define take a full expression.
+
+DIRECTIVES
+       .program name
+              Start a new program. Everything up to the next .program
+              belongs to it. Directives marked (*) below must come before
+              the program's first instruction.
+
+       .define [public] name expression
+              Define a symbol. Inside a program it is local to that
+              program; before the first .program it is global. public
+              (or a leading *) exports it: #define NAME_name value in
+              c-sdk output, or #define name value for a global one.
+
+       .origin value  (*)
+              The program must be loaded at this instruction address
+              (0-31). Output: .origin in struct pio_program; without it
+              the loader picks the address (-1).
+
+       .pio_version 0|1|rp2040|rp2350  (*)
+              The PIO version the program needs. Before the first
+              .program it sets the default for all programs (pioasm -v
+              sets it from the command line). Version 1 enables the v1
+              syntax below; output: NAME_pio_version.
+
+       .side_set count [opt] [pindirs]  (*)
+              Use count bits (0-5) of every instruction's delay field for
+              side-set. With opt (or optional) one more bit enables the
+              side-set, so it may be left out of an instruction, and
+              count may be at most 4. With pindirs side-set drives pin
+              directions instead of values. Without opt, every
+              instruction must have a side value. See SIDE-SET AND DELAY.
+
+       .wrap_target
+              The next instruction is where execution continues after
+              .wrap. Default: the first instruction.
+
+       .wrap
+              The previous instruction is the last one: after it the SM
+              continues at .wrap_target, in zero cycles, with no jmp.
+              Default: the last instruction of the program.
+
+       .word value
+              Emit value (0-0xffff) as a raw instruction.
+
+       .in count [left|right] [auto|manual] [threshold]  (*)
+              IN configuration for the default config: count IN pins
+              (must be 32 on v0, 1-32 on v1), shift direction (default
+              right), autopush (default manual) and the push threshold
+              in bits (1-32, default 32).
+
+       .out count [left|right] [auto|manual] [threshold]  (*)
+              OUT configuration: count OUT pins (0-32), shift direction
+              (default right), autopull (default manual), pull threshold
+              (1-32, default 32).
+
+       .set count  (*)
+              Number of SET pins (0-5).
+
+       .fifo txrx|tx|rx|txput|txget|putget  (*)
+              FIFO arrangement. txrx: separate 4-word FIFOs (default).
+              tx: one 8-word TX FIFO. rx: one 8-word RX FIFO. v1 only:
+              txput: the SM writes the 4 RX FIFO entries with
+              "mov rxfifo[i], isr" and the CPU reads them through the
+              RXFx_PUTGETy registers; txget: the CPU writes them and the
+              SM reads them with "mov osr, rxfifo[i]"; putget: the SM
+              does both, the CPU has no access. push needs txrx or rx;
+              autopush (.in ... auto) needs txrx, tx or rx.
+
+       .mov_status txfifo < n
+       .mov_status rxfifo < n
+       .mov_status irq [next|prev] set n  (*)
+              What "mov dest, status" reads: all ones while the TX
+              (or RX) FIFO holds fewer than n words (n 0-31), else
+              zero; or (RP2350 only) all ones while IRQ flag n (0-7) of
+              this, the next or the previous PIO block is set.
+
+       .clock_div divisor
+              Clock divider for the default config, 1 <= divisor <
+              65536, integer or decimal (e.g. 2.5).
+
+       .lang_opt lang name = value
+              An option for an output language. YasOS's pioasm accepts
+              and ignores it.
+
+       % lang {
+       ...
+       %}     A code block, copied into the output for language lang
+              (c-sdk or zig with YasOS's pioasm); see pioasm(1).
+
+INSTRUCTION FORMAT
+       instruction [side value] [[delay]]
+
+       side and the bracketed delay may come in either order. Every
+       instruction is 16 bits:
+
+           15 14 13  12 11 10  9  8   7  6  5   4  3  2  1  0
+           +-------+----------------+---------+--------------+
+           |opcode | delay/side-set |  arg1   |     arg2     |
+           +-------+----------------+---------+--------------+
+
+           opcode  000 JMP   001 WAIT  010 IN    011 OUT
+                   100 PUSH/PULL (v1 also MOV to/from RX FIFO)
+                   101 MOV   110 IRQ   111 SET
+
+       Bits 12:8 hold the side-set value in their top bits and the delay
+       in the rest; see SIDE-SET AND DELAY. The examples below have no
+       side-set, so bits 12:8 are the delay.
+
+INSTRUCTIONS
+   JMP
+       jmp [condition,] target
+
+           000 ddddd ccc aaaaa     c = condition, a = address
+
+           ccc  condition  jump if
+           000  (none)     always
+           001  !x         X is zero
+           010  x--        X is non-zero; X is decremented either way
+           011  !y         Y is zero
+           100  y--        Y is non-zero; Y is decremented either way
+           101  x!=y       X differs from Y
+           110  pin        the JMP pin (EXECCTRL_JMP_PIN) is high
+           111  !osre      the OSR is not empty (fewer bits shifted out
+                           than the pull threshold)
+
+       The target is an address within the program (usually a label).
+       It is assembled relative to the program start; the loader adds
+       the load offset. ~ may be written for !.
+
+           jmp 3              0x0003
+           jmp x--, 3         0x0043
+           jmp !osre, 1 [2]   0x02e1
+
+   WAIT
+       wait [polarity] source
+
+           001 ddddd p ss iiiii     p = polarity, s = source, i = index
+
+           ss  source            waits until
+           00  gpio n            GPIO n (absolute number) is p
+           01  pin n             IN pin n (IN_BASE + n) is p
+           10  irq n [rel]       IRQ flag n is p (p=1: also clears it)
+           11  jmppin [+ n]  v1  the JMP pin + n (n 0-3) is p
+
+       polarity is 0 or 1, default 1. gpio n is 0-31 (v1: 0-47; the
+       loader adjusts it for GPIOBASE, and one program cannot use both
+       0-15 and 32-47). For irq, bits 4:3 of the index select the flag:
+       00 n (this block), 10 "n rel" (flag (n + SM number) mod 4, in
+       the same group of four), and on v1 01 "prev n" / 11 "next n" (flag
+       n of the previous / next PIO block): wait 1 irq prev 2.
+
+           wait 1 gpio 5      0x2085
+           wait 0 pin 2       0x2022
+           wait irq 3 rel     0x20d3
+
+   IN
+       in source, bitcount
+
+           010 ddddd sss nnnnn     n = bit count, 32 written as 00000
+
+           sss  source       sss  source
+           000  pins         100  (reserved)
+           001  x            101  (reserved; pioasm accepts "status")
+           010  y            110  isr
+           011  null (zeros) 111  osr
+
+       Shifts bitcount (1-32) bits from the source into the ISR, in the
+       direction set by SHIFTCTRL_IN_SHIFTDIR. With autopush, pushes the
+       ISR to the RX FIFO when the threshold is reached.
+
+           in pins, 1         0x4001
+           in x, 32           0x4020
+
+   OUT
+       out destination, bitcount
+
+           011 ddddd sss nnnnn     n = bit count, 32 written as 00000
+
+           sss  destination     sss  destination
+           000  pins            100  pindirs
+           001  x               101  pc (jump to the shifted value)
+           010  y               110  isr (also sets ISR count)
+           011  null (discard)  111  exec (run the value as an
+                                     instruction)
+
+       Shifts bitcount (1-32) bits out of the OSR. With autopull,
+       refills the OSR from the TX FIFO when the threshold is reached.
+
+           out pins, 1        0x6001
+           out pindirs, 4     0x6084
+           out exec, 16       0x60f0
+
+   PUSH
+       push [iffull] [block|noblock]
+
+           100 ddddd 0 f b 00000   f = iffull, b = block
+
+       Pushes the ISR into the RX FIFO and clears it. iffull: only if
+       the ISR count reached the push threshold. block (the default):
+       stall while the RX FIFO is full; noblock: drop the data instead
+       (and set FDEBUG_RXSTALL).
+
+           push                  0x8020
+           push iffull noblock   0x8040
+
+   PULL
+       pull [ifempty] [block|noblock]
+
+           100 ddddd 1 e b 00000   e = ifempty, b = block
+
+       Loads a word from the TX FIFO into the OSR. ifempty: only if the
+       OSR count reached the pull threshold. block (default): stall
+       while the TX FIFO is empty; noblock: on empty copy X into the
+       OSR.
+
+           pull                  0x80a0
+           pull ifempty noblock  0x80c0
+
+   MOV
+       mov destination, [op] source
+
+           101 ddddd ttt oo sss    t = destination, o = op, s = source
+
+           ttt  destination      sss  source
+           000  pins (OUT pins)  000  pins (IN pins)
+           001  x                001  x
+           010  y                010  y
+           011  pindirs (v1)     011  null (zeros)
+           100  exec             100  (reserved)
+           101  pc               101  status (see .mov_status)
+           110  isr (count := 0) 110  isr
+           111  osr (count := 0) 111  osr
+
+           oo  op
+           00  (none)  copy
+           01  ! or ~  invert every bit
+           10  ::      reverse the bit order
+           11  (reserved)
+
+           mov x, y           0xa022
+           mov y, ~x          0xa049
+           mov isr, ::osr     0xa0d7
+           mov pindirs, x     0xa061   (v1)
+
+   MOV to and from the RX FIFO (v1)
+       mov rxfifo[y], isr
+       mov rxfifo[index], isr
+       mov osr, rxfifo[y]
+       mov osr, rxfifo[index]
+
+           100 ddddd g 0 0 1 k 0 nn
+
+           g = 0: write ISR to entry; 1: read entry into OSR
+           k = 0: entry number is Y (low 2 bits); 1: entry number nn
+
+       Random access to the four RX FIFO entries; needs .fifo txput
+       (write), txget (read) or putget (both). Use index 0-3: pioasm
+       accepts up to 7, but there are four entries and bit 2 is not
+       part of the index.
+
+           mov rxfifo[y], isr    0x8010
+           mov rxfifo[2], isr    0x801a
+           mov osr, rxfifo[1]    0x8099
+
+   IRQ
+       irq [set|nowait|wait|clear] index [rel]
+       irq [prev|next] [set|nowait|wait|clear] index      (v1)
+
+           110 ddddd 0 c w iiiii   c = clear, w = wait
+
+       set (the default, also nowait) raises the flag; wait raises it
+       and stalls until something clears it; clear lowers it. index
+       (0-7) and bits 4:3 work as for wait irq: rel adds the SM number
+       (mod 4); prev and next address the neighbouring PIO block. Flags
+       are visible to the CPU in the IRQ register and can interrupt it.
+
+           irq 3              0xc003
+           irq wait 0 rel     0xc030
+           irq clear 7        0xc047
+           irq next set 1     0xc019   (v1)
+
+   SET
+       set destination, value
+
+           111 ddddd ttt vvvvv     v = 5-bit immediate
+
+           ttt  destination
+           000  pins (SET pins, SET_COUNT of them)
+           001  x (bits 31:5 cleared)
+           010  y (bits 31:5 cleared)
+           100  pindirs
+
+           set pins, 1        0xe001
+           set x, 31          0xe03f
+           set pindirs, 3     0xe083
+
+   NOP
+       nop is "mov y, y": 0xa042. Useful to carry side-set or a delay:
+
+           nop [7]            0xa742
+
+SIDE-SET AND DELAY
+       The five bits 12:8 are shared. With .side_set count, the top
+       count bits (plus the enable bit 12 when opt is given) are the
+       side-set value and the remaining 5 - count (- 1 with opt) bits are
+       the delay. Examples of the field layout:
+
+           no side-set        12:8 delay (0-31)
+           .side_set 1        12 side, 11:8 delay (0-15)
+           .side_set 2        12:11 side, 10:8 delay (0-7)
+           .side_set 1 opt    12 enable, 11 side, 10:8 delay (0-7)
+           .side_set 2 opt    12 enable, 11:10 side, 9:8 delay (0-3)
+           .side_set 5        12:8 side, no delay
+
+       side value: sets the side-set pins (SIDESET_BASE upwards, value
+       bit 0 on the lowest pin) at the start of the instruction, even
+       if the instruction then stalls. With opt, an instruction without
+       side leaves the pins alone.
+
+       [delay]: after the instruction completes, the SM idles for delay
+       extra cycles. A stalled instruction starts its delay only once
+       it proceeds. Delay counts must be constant expressions.
+
+           .side_set 1:      out pins, 1 side 0 [1]   0x6101
+           .side_set 1:      in pins, 1 side 1 [1]    0x5101
+           .side_set 2 opt:  nop side 3               0xbc42
+           .side_set 2 opt:  nop [3]                  0xa342
+
+       The SM's PINCTRL_SIDESET_COUNT (including the enable bit) and
+       EXECCTRL_SIDE_EN and SIDE_PINDIR must match the directive; the
+       generated default config does that.
+
+AUTOPUSH AND AUTOPULL
+       The ISR and OSR each count the bits shifted since they were last
+       emptied or filled. The thresholds (1-32) are in SHIFTCTRL
+       (PUSH_THRESH, PULL_THRESH, 0 meaning 32).
+
+       Autopush (SHIFTCTRL_AUTOPUSH, ".in ... auto n"): an IN that
+       brings the ISR count to n or more also pushes the ISR to the RX
+       FIFO and clears it. If the RX FIFO is full the IN stalls.
+
+       Autopull (SHIFTCTRL_AUTOPULL, ".out ... auto n"): once the OSR
+       count reaches n, the SM refills the OSR from the TX FIFO (in the
+       background where possible). An OUT on an empty OSR with an empty
+       TX FIFO stalls until data arrives. "jmp !osre" sees the count.
+
+       Without them, push/pull do the transfer; "push iffull" and
+       "pull ifempty" use the same thresholds. Shift direction: left
+       sends/receives MSB first (data leaves at bit 31, enters at bit 0),
+       right LSB first. For an 8-bit frame shifted left, the CPU puts
+       the byte in bits 31:24 of the TX word and reads it from bits 7:0
+       of the RX word.
+
+RP2350 (PIO VERSION 1) ADDITIONS
+       Selected with .pio_version 1 (or rp2350) or pioasm -v 1; using
+       them otherwise is an error ("PIO version 1 is required for ...").
+
+           mov pindirs, src         MOV destination 011
+           mov rxfifo[..], isr      random access to the RX FIFO, with
+           mov osr, rxfifo[..]        .fifo txput, txget or putget
+           wait p jmppin [+ n]      WAIT source 11
+           wait p irq prev|next n   IRQ flags of neighbouring blocks
+           irq prev|next ... n
+           .mov_status irq ...      mov x, status reads an IRQ flag
+           .in count                IN pin count below 32 (IN_COUNT)
+           wait gpio 32-47          with GPIOBASE = 16
+
+       The hardware also adds a third PIO block, GPIOBASE (PIO sees 32
+       GPIOs starting at 0 or 16), CTRL bits that start/stop SMs of the
+       neighbouring blocks in the same write, and the RXFx_PUTGETy
+       registers; see rp2350-pio(7).
+
+EXAMPLE: SPI MODE 0
+       A full-duplex SPI master, mode 0 (CPOL=0, CPHA=0: SCK idles low,
+       data is sampled on the rising edge and changes on the falling
+       edge), MSB first, 8-bit frames. One SCK period is 4 PIO cycles.
+       This text assembles unchanged with pioasm (and with the SDK's).
+
+           ; spi_mode0.pio - SPI master, mode 0, MSB first, 8-bit
+           ; frames, one SCK period = 4 PIO cycles.
+           ;
+           ; Pins (set in PINCTRL by the loader, not in this file):
+           ;   side-set pin 0 = SCK     (Pico Plus 2 SD card: GP5)
+           ;   OUT pin 0      = MOSI    (GP18, card CMD/DI)
+           ;   IN pin 0       = MISO    (GP19, card DAT0/DO)
+           ;   CS is an ordinary GPIO   (GP22, card DAT3/CS), driven
+           ;   by the CPU.
+
+           .program spi_mode0
+           .side_set 1         ; 1 side-set bit: SCK; 4 delay bits left
+           .out 1 left auto 8  ; 1 OUT pin, MSB first, autopull at 8
+           .in 32 left auto 8  ; IN (32 on v0), MSB first, autopush at 8
+
+           .wrap_target
+               out pins, 1 side 0 [1] ; MOSI <- next bit, SCK low,
+                                      ; 2 cycles. Stalls here, SCK
+                                      ; low, while TX FIFO is empty.
+               in  pins, 1 side 1 [1] ; SCK high: sample MISO on the
+                                      ; rising edge, 2 cycles.
+           .wrap                      ; back to out, no jmp needed
+
+       pioasm -o hex gives 6101 and 5101. The generated default config
+       sets the wrap (0..1), 1 side-set bit, OUT count 1, shift left,
+       autopull and autopush at 8 bits. The loader adds the pins: OUT
+       base = MOSI, IN base = MISO, side-set base = SCK, makes SCK and
+       MOSI outputs (pindirs, initially low), and should bypass the
+       input synchroniser for MISO (INPUT_SYNC_BYPASS) at high speed.
+
+       To exchange a byte b: write b << 24 to the SM's TX FIFO (or store
+       b with an 8-bit write, which the bus replicates into all four
+       byte lanes), then read the received byte from bits 7:0 of the RX
+       FIFO. Every byte sent clocks one byte in; to only receive, send
+       0xff. Keep the RX FIFO drained or the SM stalls (with SCK low,
+       which is harmless). CS is pulled low by the CPU around a
+       transaction. rp2350-pio(7) gives every register write needed to
+       load and start this program on SM0 of PIO0.
+
+       Mode 1 (CPHA=1) changes data on the rising edge and samples on
+       the falling one:
+
+           .program spi_mode1
+           .side_set 1
+               out x, 1    side 0     ; stall here on empty, SCK low
+               mov pins, x side 1 [1] ; drive MOSI, SCK high
+               in pins, 1  side 0     ; sample MISO, SCK low
+
+       CPOL=1 (modes 2 and 3) is the same program with SCK inverted by
+       the GPIO output override (IO_BANK0 GPIOn_CTRL OUTOVER = 1).
+
+CLOCK DIVIDERS AND SPI SPEED
+       An SM runs at clk_sys / (INT + FRAC/256), INT and FRAC from
+       SMx_CLKDIV. The example takes 4 SM cycles per SCK period, so
+
+           f_SCK = clk_sys / (4 * divider)
+           divider = clk_sys / (4 * f_SCK)
+
+       At clk_sys = 150 MHz (the SDK's RP2350 default):
+
+           f_SCK      divider   INT  FRAC  SMx_CLKDIV
+           400 kHz    93.75      93   192  0x005dc000  SD card init
+           12.5 MHz   3           3     0  0x00030000
+           18.75 MHz  2           2     0  0x00020000
+           25 MHz     1.5         1   128  0x00018000  SD maximum
+           37.5 MHz   1           1     0  0x00010000  fastest
+
+       A fractional divider makes successive SCK periods alternate in
+       length (jitter of one clk_sys cycle); SPI tolerates that, but an
+       integer divider gives a clean clock. SD cards must be initialised
+       at 100-400 kHz and then allow up to 25 MHz in SPI mode. A
+       2-instruction program without delays (as the kernel's
+       hal/source/raspberry/rp2350/source/mmc/mmc_spi.pio) takes 2 cycles
+       per bit and doubles every rate above. At high SCK rates the MISO
+       sample point matters: the input synchroniser adds 2 cycles of
+       delay unless bypassed, and the card's output delay must fit in
+       the half period.
+
+SD CARD ON THE PIMORONI PICO PLUS 2
+       The board wires its microSD slot as SD_CLK GP5, SD_CMD GP18,
+       SD_DAT0 GP19 and SD_DAT3 GP22 (DAT1/DAT2 on GP20/GP21). In SPI
+       mode that is SCK GP5, MOSI GP18, MISO GP19, CS GP22.
+
+       The RP2350's PL022 SPI controllers cannot drive this: a GPIO only
+       carries one fixed SPI signal, and here GP5 offers SPI0 CSn, GP18
+       SPI0 SCK, GP19 SPI0 TX and GP22 SPI0 SCK (IO_BANK0 FUNCSEL 1) -
+       SCK, MOSI and MISO all land on pins that do not carry the
+       matching function. PIO can use any GPIO for any role (FUNCSEL 6,
+       7 or 8 for PIO0, PIO1, PIO2), so the SPI mode 0 program above
+       drives the slot directly. YasOS's SD driver in SPI mode does
+       exactly this (mmc_spi.pio, loaded by mmc/mmc_spi.zig); in SDIO
+       mode it uses mmc_sdio.pio.
+
+SEE ALSO
+       pioasm(1), rp2350-pio(7); RP2350 datasheet, chapter "PIO";
+       hal/libs/pico-sdk/src/rp2_common/hardware_pio

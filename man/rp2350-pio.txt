@@ -1,0 +1,467 @@
+RP2350-PIO(7)                    YasOS Manual                    RP2350-PIO(7)
+
+NAME
+       rp2350-pio - RP2350 PIO register reference for bare-metal code
+
+DESCRIPTION
+       The registers of the RP2350's three PIO blocks, and the reset,
+       GPIO and pad registers needed to use them, with a complete
+       sequence that loads and starts a program. All numbers come from
+       the Pico SDK's register headers in
+       hal/libs/pico-sdk/src/rp2350/hardware_regs/include/hardware/regs
+       (pio.h, resets.h, io_bank0.h, pads_bank0.h, addressmap.h, sio.h,
+       intctrl.h, dreq.h, accessctrl.h). The PIO assembly language is in
+       pio(7).
+
+       Field notation: [msb:lsb] NAME access reset. Access: RW read/
+       write; RO read-only; WO write-only; SC self-clearing (write 1 to
+       trigger, reads 0); WC write 1 to clear; WF write pushes to a FIFO;
+       RF read pops from a FIFO. Unlisted bits are reserved: write 0.
+
+       The registers can only be used by privileged code. A YasOS user
+       process runs unprivileged and the kernel's MPU setup gives it no
+       access to the peripheral space, so these addresses fault there;
+       they are for the kernel, a boot loader, or a bare-metal program.
+       The hardware side (ACCESSCTRL, base 0x40060000, registers PIO0
+       +0x04c, PIO1 +0x050, PIO2 +0x054) resets to 0x000000fc: secure
+       code (privileged and unprivileged), both cores, DMA and the
+       debugger may access, non-secure code may not.
+
+BASE ADDRESSES
+           PIO0         0x50200000
+           PIO1         0x50300000
+           PIO2         0x50400000
+           RESETS       0x40020000
+           IO_BANK0     0x40028000
+           PADS_BANK0   0x40038000
+           SIO          0xd0000000
+           ACCESSCTRL   0x40060000
+
+ATOMIC ALIASES
+       Every register of these blocks (not SIO) is also visible at
+       three aliases that change bits without a read-modify-write:
+
+           base + 0x0000 + offset   normal read/write
+           base + 0x1000 + offset   XOR: each 1 bit written flips
+           base + 0x2000 + offset   SET: each 1 bit written is set
+           base + 0x3000 + offset   CLR: each 1 bit written is cleared
+
+       So 0x50202000 is PIO0 CTRL's set alias: writing 1 there enables
+       SM0 and leaves the other state machines alone.
+
+PIO REGISTER MAP
+       Offsets from the PIO block's base.
+
+           0x000  CTRL               SM enable, restart, clock sync
+           0x004  FSTAT              FIFO full/empty flags
+           0x008  FDEBUG             FIFO stall/overflow flags
+           0x00c  FLEVEL             FIFO levels
+           0x010  TXF0 ... 0x01c TXF3     TX FIFO of SM n: 0x010 + 4n
+           0x020  RXF0 ... 0x02c RXF3     RX FIFO of SM n: 0x020 + 4n
+           0x030  IRQ                the 8 PIO IRQ flags
+           0x034  IRQ_FORCE          force IRQ flags
+           0x038  INPUT_SYNC_BYPASS  per-GPIO input synchroniser bypass
+           0x03c  DBG_PADOUT         pad output values PIO drives
+           0x040  DBG_PADOE          pad output enables PIO drives
+           0x044  DBG_CFGINFO        hardware parameters
+           0x048  INSTR_MEM0 ... 0x0c4 INSTR_MEM31
+                                     instruction i: 0x048 + 4i
+           0x0c8  SM0_CLKDIV         SM n registers: base 0x0c8 + 0x18n
+           0x0cc  SM0_EXECCTRL
+           0x0d0  SM0_SHIFTCTRL
+           0x0d4  SM0_ADDR
+           0x0d8  SM0_INSTR
+           0x0dc  SM0_PINCTRL
+           0x0e0  SM1_CLKDIV ... 0x0f4 SM1_PINCTRL
+           0x0f8  SM2_CLKDIV ... 0x10c SM2_PINCTRL
+           0x110  SM3_CLKDIV ... 0x124 SM3_PINCTRL
+           0x128  RXF0_PUTGET0 ... 0x164 RXF3_PUTGET3
+                                     entry m of SM n: 0x128 + 0x10n + 4m
+           0x168  GPIOBASE           PIO's GPIO window: 0-31 or 16-47
+           0x16c  INTR               raw interrupt sources
+           0x170  IRQ0_INTE          IRQ0 enable
+           0x174  IRQ0_INTF          IRQ0 force
+           0x178  IRQ0_INTS          IRQ0 status (masked and forced)
+           0x17c  IRQ1_INTE          IRQ1 enable
+           0x180  IRQ1_INTF          IRQ1 force
+           0x184  IRQ1_INTS          IRQ1 status
+
+       Per state machine n (0-3), offsets of its registers:
+
+           CLKDIV 0x0c8+0x18n  EXECCTRL 0x0cc+0x18n  SHIFTCTRL 0x0d0+0x18n
+           ADDR   0x0d4+0x18n  INSTR    0x0d8+0x18n  PINCTRL   0x0dc+0x18n
+
+PIO REGISTERS
+   CTRL (0x000), reset 0x00000000
+           [26]    NEXTPREV_CLKDIV_RESTART SC  restart the clock dividers
+                   of the SMs selected by NEXT/PREV_PIO_MASK
+           [25]    NEXTPREV_SM_DISABLE SC  disable those SMs
+           [24]    NEXTPREV_SM_ENABLE  SC  enable those SMs (disable wins
+                   if both are set)
+           [23:20] NEXT_PIO_MASK  SC  SMs of the next PIO block (PIO2's
+                   next is PIO0) that the three bits above act on
+           [19:16] PREV_PIO_MASK  SC  SMs of the previous block (PIO0's
+                   previous is PIO2)
+           [11:8]  CLKDIV_RESTART SC  restart SM n's clock divider at
+                   phase 0; several at once run in lockstep
+           [7:4]   SM_RESTART     SC  clear SM n's internal state: shift
+                   counters, ISR contents, delay counter, IRQ wait, a
+                   stalled SMx_INSTR or OUT/MOV EXEC instruction, sticky
+                   pin writes. OSR, X and Y are kept
+           [3:0]   SM_ENABLE      RW  1 runs SM n, 0 halts it (an
+                   instruction written to SMx_INSTR still executes)
+
+       The NEXT/PREV bits act on a neighbouring block only when both
+       blocks have the same security (secure / non-secure) access.
+
+   FSTAT (0x004), reset 0x0f000f00, all RO
+           [27:24] TXEMPTY   TX FIFO of SM n is empty
+           [19:16] TXFULL    TX FIFO of SM n is full
+           [11:8]  RXEMPTY   RX FIFO of SM n is empty
+           [3:0]   RXFULL    RX FIFO of SM n is full
+
+   FDEBUG (0x008), reset 0x00000000, all WC
+           [27:24] TXSTALL   SM n stalled on an empty TX FIFO (blocking
+                             PULL, or OUT with autopull)
+           [19:16] TXOVER    the CPU wrote to a full TX FIFO (the word
+                             was dropped)
+           [11:8]  RXUNDER   the CPU read an empty RX FIFO (the value
+                             read is undefined)
+           [3:0]   RXSTALL   SM n stalled on a full RX FIFO (blocking
+                             PUSH, IN with autopush), or a non-blocking
+                             PUSH dropped data
+
+   FLEVEL (0x00c), reset 0x00000000, all RO
+           [31:28] RX3  [27:24] TX3  [23:20] RX2  [19:16] TX2
+           [15:12] RX1  [11:8]  TX1  [7:4]   RX0  [3:0]   TX0
+       Number of words in each FIFO.
+
+   TXF0-3 (0x010-0x01c), WF; RXF0-3 (0x020-0x02c), RF
+       A write to TXFn pushes a word to SM n's TX FIFO; writing a full
+       FIFO drops the word and sets FDEBUG_TXOVER. A read of RXFn pops a
+       word from the RX FIFO; reading an empty FIFO returns an undefined
+       value and sets FDEBUG_RXUNDER. Each FIFO holds 4 words, or 8 when
+       joined (SHIFTCTRL_FJOIN_TX / FJOIN_RX). The FIFOs are DMA
+       sources and targets: DREQ number = 8 * pio + sm for TX and
+       8 * pio + 4 + sm for RX (DREQ_PIO0_TX0 = 0 ... DREQ_PIO2_RX3 = 23).
+
+   IRQ (0x030), [7:0] WC, reset 0
+       The eight PIO IRQ flags, raised by "irq" and waited on by
+       "wait irq". Any SM may use any flag. Write 1 to clear a flag
+       (this releases an SM blocked in "irq wait").
+
+   IRQ_FORCE (0x034), [7:0] WF, reset 0
+       Write 1 to raise a flag, as an "irq" instruction would (visible
+       to the SMs, unlike IRQx_INTF).
+
+   INPUT_SYNC_BYPASS (0x038), [31:0] RW, reset 0
+       Bit n set: GPIO n bypasses the 2-flip-flop input
+       synchroniser. Saves 2 cycles of input delay for
+       fast synchronous inputs such as SPI MISO; leave 0 otherwise.
+
+   DBG_PADOUT (0x03c), DBG_PADOE (0x040), [31:0] RO
+       The output values and output enables PIO currently drives to the
+       32 GPIOs it sees.
+
+   DBG_CFGINFO (0x044), RO, reset 0x10000000
+           [31:28] VERSION     0 = RP2040 PIO, 1 = RP2350 PIO
+           [21:16] IMEM_SIZE   instruction memory size (32)
+           [11:8]  SM_COUNT    state machines per block (4)
+           [5:0]   FIFO_DEPTH  words per FIFO (4)
+
+   INSTR_MEM0-31 (0x048 + 4i), [15:0] WO, reset 0
+       The shared instruction memory. Write only; read back the current
+       instruction of an SM through SMx_INSTR.
+
+   SMx_CLKDIV (0x0c8 + 0x18n), reset 0x00010000
+           [31:16] INT   RW  integer part, reset 1; 0 means 65536
+           [15:8]  FRAC  RW  fractional part in 1/256; must be 0 when
+                             INT is 0
+       The SM runs at clk_sys / (INT + FRAC/256). Changing it while
+       the SM runs is allowed; CTRL_CLKDIV_RESTART resynchronises.
+
+   SMx_EXECCTRL (0x0cc + 0x18n), reset 0x0001f000
+           [31]    EXEC_STALLED  RO  an instruction written to SMx_INSTR
+                                     is stalled
+           [30]    SIDE_EN       RW  the top delay/side-set bit is a
+                                     side-set enable (.side_set ... opt)
+           [29]    SIDE_PINDIR   RW  side-set drives pin directions
+                                     (.side_set ... pindirs)
+           [28:24] JMP_PIN       RW  GPIO tested by "jmp pin" and
+                                     "wait jmppin"
+           [23:19] OUT_EN_SEL    RW  OUT data bit used as inline output
+                                     enable
+           [18]    INLINE_OUT_EN RW  use that bit as write enable
+           [17]    OUT_STICKY    RW  keep asserting the last OUT/SET
+                                     pin values
+           [16:12] WRAP_TOP      RW  after this address continue at
+                                     WRAP_BOTTOM (reset 0x1f)
+           [11:7]  WRAP_BOTTOM   RW  wrap destination
+           [6:5]   STATUS_SEL    RW  what "mov x, status" tests:
+                                     0 TX level < N, 1 RX level < N,
+                                     2 IRQ flag N is set
+           [4:0]   STATUS_N      RW  the N; for STATUS_SEL 2: 0x00 +
+                                     flag in this block, 0x08 + flag in
+                                     the previous, 0x10 + flag in the
+                                     next block
+
+       WRAP_TOP and WRAP_BOTTOM are absolute: load offset + the
+       program's NAME_wrap and NAME_wrap_target.
+
+   SMx_SHIFTCTRL (0x0d0 + 0x18n), reset 0x000c0000
+           [31]    FJOIN_RX      RW  RX FIFO takes the TX FIFO's storage
+                                     (8 deep; TX disabled)
+           [30]    FJOIN_TX      RW  TX FIFO takes the RX FIFO's storage
+           [29:25] PULL_THRESH   RW  autopull / pull ifempty threshold in
+                                     bits, 0 = 32
+           [24:20] PUSH_THRESH   RW  autopush / push iffull threshold,
+                                     0 = 32
+           [19]    OUT_SHIFTDIR  RW  1 = OSR shifts right (LSB first),
+                                     0 = left (MSB first); reset 1
+           [18]    IN_SHIFTDIR   RW  1 = ISR shifts right (data enters
+                                     at bit 31), 0 = left; reset 1
+           [17]    AUTOPULL      RW  pull automatically
+           [16]    AUTOPUSH      RW  push automatically
+           [15]    FJOIN_RX_PUT  RW  SM writes the RX FIFO entries
+                                     ("mov rxfifo[], isr")
+           [14]    FJOIN_RX_GET  RW  SM reads the RX FIFO entries
+                                     ("mov osr, rxfifo[]")
+           [4:0]   IN_COUNT      RW  IN pins visible to IN PINS, WAIT
+                                     PIN and MOV x, PINS; the rest read
+                                     0; 0 = 32
+
+       Changing FJOIN_RX or FJOIN_TX flushes both FIFOs: flipping
+       FJOIN_RX twice (XOR alias) clears them. Setting FJOIN_RX_PUT or
+       FJOIN_RX_GET clears FJOIN_TX and FJOIN_RX. PUT alone is .fifo
+       txput, GET alone .fifo txget, both .fifo putget (see the putget
+       registers below).
+
+   SMx_ADDR (0x0d4 + 0x18n), [4:0] RO
+       The SM's current program counter.
+
+   SMx_INSTR (0x0d8 + 0x18n), [15:0] RW
+       Read: the instruction at the SM's PC. Write: execute the word
+       immediately (a JMP moves the PC), even when the SM is disabled;
+       then the SM resumes. Used to set pins and pindirs, to jump to the
+       entry point, and to load X/Y with SET.
+
+   SMx_PINCTRL (0x0dc + 0x18n), reset 0x14000000
+           [31:29] SIDESET_COUNT RW  side-set bits, including the enable
+                                     bit if SIDE_EN (0-5)
+           [28:26] SET_COUNT     RW  pins written by SET (0-5), reset 5
+           [25:20] OUT_COUNT     RW  pins written by OUT PINS/PINDIRS and
+                                     MOV PINS (0-32)
+           [19:15] IN_BASE       RW  GPIO read as bit 0 by IN, WAIT PIN,
+                                     MOV x, PINS
+           [14:10] SIDESET_BASE  RW  lowest side-set pin
+           [9:5]   SET_BASE      RW  lowest SET pin
+           [4:0]   OUT_BASE      RW  lowest OUT pin
+       Pin numbers wrap modulo 32 and count from GPIOBASE.
+
+   RXFx_PUTGETy (0x128 + 0x10x + 4y), [31:0] RW, reset 0
+       Direct access to entry y (0-3) of SM x's RX FIFO when exactly one
+       of SHIFTCTRL_FJOIN_RX_PUT and FJOIN_RX_GET is set: with PUT the
+       SM writes and the CPU reads here (status words); with GET the
+       CPU writes here (parameters) and the SM reads. With both, only
+       the SM has access.
+
+   GPIOBASE (0x168), [4] RW, reset 0
+       0: PIO sees GPIO 0-31. 16: PIO sees GPIO 16-47, as its pins 0-31
+       (only bit 4 is writable). The pin numbers in SMx_PINCTRL,
+       EXECCTRL_JMP_PIN and "wait gpio" are then relative to 16 (the
+       SDK's pio_sm_set_config and pio_add_program adjust them).
+
+   INTR (0x16c) RO, IRQ0_INTE (0x170) RW, IRQ0_INTF (0x174) RW,
+   IRQ0_INTS (0x178) RO, IRQ1_INTE (0x17c), IRQ1_INTF (0x180),
+   IRQ1_INTS (0x184): the same layout, reset 0
+           [15:8]  SM7 ... SM0      PIO IRQ flag 7 ... 0 is set
+           [7:4]   SM3_TXNFULL ... SM0_TXNFULL   TX FIFO not full
+           [3:0]   SM3_RXNEMPTY ... SM0_RXNEMPTY RX FIFO not empty
+       INTR shows the raw sources. Each block has two interrupt lines,
+       IRQ0 and IRQ1: INTS = (INTR & INTE) | INTF. A flag stays
+       asserted until cleared in IRQ (flags) or until the FIFO condition
+       ends. NVIC numbers: PIO0_IRQ_0 15, PIO0_IRQ_1 16, PIO1_IRQ_0 17,
+       PIO1_IRQ_1 18, PIO2_IRQ_0 19, PIO2_IRQ_1 20.
+
+RESETS
+       Each PIO block, IO_BANK0 and PADS_BANK0 start in reset. Base
+       0x40020000:
+
+           0x000  RESET       RW  1 = held in reset (reset 0x1fffffff)
+           0x004  WDSEL       RW  1 = reset by the watchdog
+           0x008  RESET_DONE  RO  1 = out of reset and ready
+
+           bit 6   IO_BANK0       bit 11  PIO0
+           bit 9   PADS_BANK0     bit 12  PIO1
+                                  bit 13  PIO2
+
+GPIO FUNCTION SELECT (IO_BANK0, base 0x40028000)
+       GPIOn_STATUS at 0x000 + 8n and GPIOn_CTRL at 0x004 + 8n, n 0-47
+       (GPIO5_CTRL 0x02c, GPIO18_CTRL 0x094, GPIO19_CTRL 0x09c,
+       GPIO22_CTRL 0x0b4). GPIOn_CTRL, reset 0x0000001f:
+
+           [29:28] IRQOVER   0 normal, 1 invert, 2 low, 3 high
+           [17:16] INOVER    0 normal, 1 invert, 2 low, 3 high
+           [15:14] OEOVER    0 normal, 1 invert, 2 disable, 3 enable
+           [13:12] OUTOVER   0 normal, 1 invert, 2 low, 3 high
+           [4:0]   FUNCSEL   function, reset 0x1f (none)
+
+       FUNCSEL values, the same on every GPIO 0-47:
+
+           5  SIO (CPU-controlled GPIO)      7  PIO1
+           6  PIO0                           8  PIO2
+
+       Function 1 is SPI, with a fixed signal per pin (GPIO5 SPI0 CSn,
+       GPIO18 and GPIO22 SPI0 SCK, GPIO19 SPI0 TX, ...); see pio(7) on
+       why that rules out the PL022 for the Pico Plus 2 SD slot.
+
+PADS (PADS_BANK0, base 0x40038000)
+       VOLTAGE_SELECT at 0x000 ([0]: 0 = 3.3 V, 1 = 1.8 V). Pad n
+       (0-47) at 0x004 + 4n (GPIO5 0x018, GPIO18 0x04c, GPIO19 0x050,
+       GPIO22 0x05c), reset 0x00000116:
+
+           [8]    ISO       1 = pad isolated (reset 1); clear it once the
+                            pad is configured
+           [7]    OD        output disable (overrides the peripheral)
+           [6]    IE        input enable (reset 0)
+           [5:4]  DRIVE     0 2 mA, 1 4 mA (reset), 2 8 mA, 3 12 mA
+           [3]    PUE       pull-up enable
+           [2]    PDE       pull-down enable (reset 1)
+           [1]    SCHMITT   Schmitt trigger (reset 1)
+           [0]    SLEWFAST  1 fast, 0 slow slew rate
+
+       On the RP2350 a pad stays isolated (ISO = 1) and its input
+       disabled (IE = 0) after reset until software changes them: a PIO
+       pin that skips this step neither drives nor reads anything.
+
+LOADING AND STARTING A PROGRAM ON SM0
+       This loads the SPI mode 0 program of pio(7) (instructions 0x6101
+       and 0x5101, NAME_wrap_target 0, NAME_wrap 1) at offset 0 of PIO0
+       and starts it on SM0, with SCK on GPIO5, MOSI on GPIO18, MISO on
+       GPIO19 and CS on GPIO22 (the Pimoroni Pico Plus 2 SD slot), at
+       400 kHz from clk_sys = 150 MHz. Every write is a 32-bit store;
+       "A <- V" writes V to address A.
+
+       1. Take PIO0, PADS_BANK0 and IO_BANK0 out of reset (RESETS RESET
+       CLR alias; bits 11, 9, 6), and wait until they are ready:
+
+           0x40023000 <- 0x00000a40
+           repeat: read 0x40020008 until (value & 0xa40) == 0xa40
+
+       2. Stop SM0 (it is already stopped after reset; CTRL CLR alias):
+
+           0x50203000 <- 0x00000001
+
+       3. Write the program to the instruction memory (INSTR_MEM0,
+       INSTR_MEM1):
+
+           0x50200048 <- 0x00006101
+           0x5020004c <- 0x00005101
+
+       At another offset k, instruction i goes to 0x50200048 +
+       4 * (k + i), and every JMP (bits 15:13 = 000) gets k added to
+       its address field: w + k. If GPIOBASE is 16, flip bit 4 of
+       every "wait gpio" (bits 15:13 = 001, bits 6:5 = 00).
+
+       4. Pads: input enabled, output allowed, still isolated. SCK and
+       MOSI: IE, 4 mA, Schmitt, fast slew (0x153); MISO: IE, 4 mA,
+       pull-up, Schmitt (0x15a); CS: IE, 4 mA, Schmitt (0x152):
+
+           0x40038018 <- 0x00000153     GPIO5  SCK
+           0x4003804c <- 0x00000153     GPIO18 MOSI
+           0x40038050 <- 0x0000015a     GPIO19 MISO
+           0x4003805c <- 0x00000152     GPIO22 CS
+
+       5. Functions: PIO0 (6) for the three SPI pins, SIO (5) for CS:
+
+           0x4002802c <- 0x00000006     GPIO5_CTRL
+           0x40028094 <- 0x00000006     GPIO18_CTRL
+           0x4002809c <- 0x00000006     GPIO19_CTRL
+           0x400280b4 <- 0x00000005     GPIO22_CTRL
+
+       6. Remove the isolation (pad register CLR alias, bit 8):
+
+           0x4003b018 <- 0x00000100
+           0x4003b04c <- 0x00000100
+           0x4003b050 <- 0x00000100
+           0x4003b05c <- 0x00000100
+
+       7. CS high (deselected) and driven, through SIO GPIO_OUT_SET
+       (0x018) and GPIO_OE_SET (0x038):
+
+           0xd0000018 <- 0x00400000
+           0xd0000038 <- 0x00400000
+
+       8. Bypass the input synchroniser for MISO (INPUT_SYNC_BYPASS
+       SET alias, bit 19):
+
+           0x50202038 <- 0x00080000
+
+       9. Drive SCK and MOSI low and make them outputs. SET reaches at
+       most 5 consecutive pins, so point SET at one pin at a time
+       (PINCTRL: SET_COUNT 1, SET_BASE n) and execute "set pins, 0"
+       (0xe000) and "set pindirs, 1" (0xe081) through SM0_INSTR. MISO
+       stays an input (all pindirs are 0 after reset):
+
+           0x502000dc <- 0x040000a0     SET_COUNT 1, SET_BASE 5
+           0x502000d8 <- 0x0000e000     set pins, 0
+           0x502000d8 <- 0x0000e081     set pindirs, 1
+           0x502000dc <- 0x04000240     SET_COUNT 1, SET_BASE 18
+           0x502000d8 <- 0x0000e000
+           0x502000d8 <- 0x0000e081
+
+       10. Configure SM0:
+
+           0x502000c8 <- 0x005dc000     SM0_CLKDIV: INT 93, FRAC 192
+                                        (93.75: 400 kHz SCK)
+           0x502000cc <- 0x00001000     SM0_EXECCTRL: WRAP_TOP 1,
+                                        WRAP_BOTTOM 0
+           0x502000d0 <- 0x10830000     SM0_SHIFTCTRL: PULL_THRESH 8,
+                                        PUSH_THRESH 8, both shift
+                                        left, AUTOPULL, AUTOPUSH,
+                                        IN_COUNT 0 (32)
+           0x502000dc <- 0x20199412     SM0_PINCTRL: SIDESET_COUNT 1,
+                                        SET_COUNT 0, OUT_COUNT 1,
+                                        IN_BASE 19, SIDESET_BASE 5,
+                                        SET_BASE 0, OUT_BASE 18
+
+       At offset k: EXECCTRL = (k + wrap) << 12 | (k + wrap_target)
+       << 7. For a ".side_set n opt" program also set EXECCTRL bit 30
+       and count the enable bit in SIDESET_COUNT; for "pindirs" set
+       bit 29.
+
+       11. Empty both FIFOs (flip FJOIN_RX twice, SHIFTCTRL XOR alias)
+       and clear SM0's FDEBUG flags:
+
+           0x502010d0 <- 0x80000000
+           0x502010d0 <- 0x80000000
+           0x50200008 <- 0x01010101
+
+       12. Restart SM0 and its clock divider (CTRL SET alias,
+       SM_RESTART bit 4, CLKDIV_RESTART bit 8; both self-clearing):
+
+           0x50202000 <- 0x00000110
+
+       13. Jump to the entry point, "jmp 0" (offset + 0 at offset k):
+
+           0x502000d8 <- 0x00000000
+
+       14. Enable SM0 (CTRL SET alias, SM_ENABLE bit 0):
+
+           0x50202000 <- 0x00000001
+
+       The SM now stalls on its first OUT with SCK low. To exchange a
+       byte b: CS low (SIO GPIO_OUT_CLR, 0xd0000020 <- 0x00400000);
+       wait while FSTAT (0x50200004) bit 16 (TXFULL SM0) is set; write
+       b << 24 to TXF0 (0x50200010); wait while FSTAT bit 8 (RXEMPTY
+       SM0) is set; read RXF0 (0x50200020), the received byte is bits
+       7:0. CS high again with 0xd0000018 <- 0x00400000. For 25 MHz
+       after the card is initialised, 0x502000c8 <- 0x00018000 (1.5).
+
+       To stop: 0x50203000 <- 0x00000001 (SM0 disabled; the pins keep
+       their last values). To unload, return the GPIOs to FUNCSEL 0x1f.
+
+SEE ALSO
+       pio(7), pioasm(1); RP2350 datasheet, chapters "PIO", "Resets",
+       "GPIO"; hal/libs/pico-sdk/src/rp2_common/hardware_pio/pio.c (the
+       SDK's pio_add_program and pio_sm_init do the same steps)
