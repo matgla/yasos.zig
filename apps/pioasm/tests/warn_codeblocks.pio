@@ -1,0 +1,22 @@
+.program w1
+    nop
+% zzz {
+one
+%}
+% foo {
+two
+%}
+% foo {
+three
+%}
+.program w2
+    nop
+% foo {
+four
+%}
+% bar-baz {
+five
+%}
+% python-extra {
+six
+%}

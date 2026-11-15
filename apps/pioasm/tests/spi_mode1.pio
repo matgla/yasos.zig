@@ -1,0 +1,9 @@
+; SPI mode 1 (CPOL=0, CPHA=1): data changes on the leading SCK edge and
+; is sampled on the trailing edge.
+
+.program spi_mode1
+.side_set 1
+
+    out x, 1    side 0     ; stall here on empty, SCK low
+    mov pins, x side 1 [1] ; drive MOSI, SCK high (mov pins uses OUT pins)
+    in pins, 1  side 0     ; sample MISO, SCK low

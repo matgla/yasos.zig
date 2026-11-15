@@ -1,0 +1,3 @@
+.program e
+    wait 1 gpio 5
+    wait 1 gpio 40

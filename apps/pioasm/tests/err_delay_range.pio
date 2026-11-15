@@ -1,0 +1,3 @@
+.program e
+.side_set 2
+    nop side 0 [8]

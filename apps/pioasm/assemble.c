@@ -428,16 +428,36 @@ PublicSymbol *public_symbols(Assembler *as, Program *p, int *count) {
     return rc;
 }
 
+/* An earlier program has a code block in `lang` (and was warned about it). */
+static int lang_seen_before(Assembler *as, int program, const char *lang) {
+    for (int i = 0; i < program; i++)
+        for (int j = 0; j < as->programs[i]->code_block_count; j++)
+            if (!strcmp(as->programs[i]->code_blocks[j].lang, lang)) return 1;
+    return 0;
+}
+
 void assemble(Assembler *as) {
+    int count;
+    /* Public symbols are resolved here, as the SDK does before writing any
+     * output, so a bad one fails without leaving a partial output file. */
+    free(public_symbols(as, as->global, &count));
     for (int i = 0; i < as->program_count; i++) {
         Program *p = as->programs[i];
+        const char **langs;
         finalize(as, p);
         for (int j = 0; j < p->instruction_count; j++)
             p->encoded[j] = encode(as, p, p->instructions[j]);
-        for (int j = 0; j < p->code_block_count; j++) {
-            if (!is_known_output_format(p->code_blocks[j].lang))
-                warn(p->code_blocks[j].loc, "warning, unknown code block output type '%s'", p->code_blocks[j].lang);
+        /* once per language, in the SDK's (sorted) order */
+        langs = block_languages(p, &count);
+        for (int j = 0; j < count; j++) {
+            if (is_known_output_format(langs[j]) || lang_seen_before(as, i, langs[j])) continue;
+            for (int k = 0; k < p->code_block_count; k++) {
+                if (strcmp(p->code_blocks[k].lang, langs[j])) continue;
+                warn(p->code_blocks[k].loc, "warning, unknown code block output type '%s'", langs[j]);
+                break;
+            }
         }
+        free(langs);
         if (p->wrap)
             p->final_wrap = resolve(as, p, p->wrap);
         else
@@ -450,5 +470,6 @@ void assemble(Assembler *as) {
             p->final_wrap_target = 0;
         }
         if (p->origin) p->final_origin = resolve(as, p, p->origin);
+        free(public_symbols(as, p, &count));
     }
 }

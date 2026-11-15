@@ -1,0 +1,16 @@
+.program opts
+.lang_opt python sideset_init = pico.PIO.OUT_HIGH
+.lang_opt python out_init = 1
+.lang_opt c-sdk foo = "bar baz"
+.side_set 1 opt pindirs
+    set pins, 1 side 1
+    .word 0xa042
+    .word ((1 << 15) | 3)
+public label_end:
+    nop side 0
+% c-sdk {
+// code block
+%}
+% python {
+# ignored
+%}

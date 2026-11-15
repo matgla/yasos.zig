@@ -44,7 +44,7 @@ static int compare_strings(const void *a, const void *b) {
 
 /* The code block languages of a program, sorted and unique: the SDK keeps its
  * blocks in a std::map keyed by language. */
-static const char **block_languages(Program *p, int *count) {
+const char **block_languages(Program *p, int *count) {
     const char **langs = xmalloc(sizeof(*langs) * (size_t)(p->code_block_count + 1));
     int n = 0;
     for (int i = 0; i < p->code_block_count; i++)

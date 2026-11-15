@@ -1,0 +1,31 @@
+; SPI mode 0 (CPOL=0, CPHA=0), full duplex, MSB first.
+; SCK is side-set pin 0, MOSI is OUT pin 0, MISO is IN pin 0.
+; Autopull and autopush with the frame size as threshold.
+; One SCK period is 4 PIO clocks.
+
+.program spi_mode0
+.side_set 1
+
+    out pins, 1 side 0 [1] ; data out while SCK low; stalls here on empty
+    in pins, 1  side 1 [1] ; sample MISO on the rising edge
+
+% c-sdk {
+static inline void spi_mode0_program_init(PIO pio, uint sm, uint offset,
+        uint n_bits, float clkdiv, uint pin_sck, uint pin_mosi, uint pin_miso) {
+    pio_sm_config c = spi_mode0_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, pin_mosi, 1);
+    sm_config_set_in_pins(&c, pin_miso);
+    sm_config_set_sideset_pins(&c, pin_sck);
+    sm_config_set_out_shift(&c, false, true, n_bits);
+    sm_config_set_in_shift(&c, false, true, n_bits);
+    sm_config_set_clkdiv(&c, clkdiv);
+    pio_sm_set_pins_with_mask(pio, sm, 0, (1u << pin_sck) | (1u << pin_mosi));
+    pio_sm_set_pindirs_with_mask(pio, sm, (1u << pin_sck) | (1u << pin_mosi),
+            (1u << pin_sck) | (1u << pin_mosi) | (1u << pin_miso));
+    pio_gpio_init(pio, pin_mosi);
+    pio_gpio_init(pio, pin_miso);
+    pio_gpio_init(pio, pin_sck);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

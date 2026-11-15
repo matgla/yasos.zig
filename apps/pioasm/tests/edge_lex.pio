@@ -1,0 +1,59 @@
+/* A block comment
+   spanning lines */ .define public GLOBAL_A 0x1F
+.define public GLOBAL_B 0b101
+.define public NEG (-3)
+// line comment
+.PROGRAM Lex_Test1   ; trailing comment
+.SIDE_SET 1 OPT
+.Origin (GLOBAL_B + 1)
+*star_label: NOP SIDE 1
+public plab:
+    JMP X−−, plab      ; unicode minus
+    jmp y--,plab
+    jmp !x star_label
+    jmp ~y, star_label
+    jmp x!=y star_label
+    jmp !osre plab
+    jmp pin plab
+    jmp plab [3]
+    wait irq, 3
+    wait 0 irq 3 rel
+    wait gpio, 31 sideset 1
+    wait pin 2 side_set 0 [1]
+    in pins 1
+    mov x y
+    mov x, !y
+    mov x, ~ y
+    mov x , :: y
+    irq 3
+    irq set 3 rel
+    irq wait 3
+    irq clear 3 rel
+    nop side 1 [2]
+    nop [2] side 1
+    nop [ GLOBAL_B + 1 ]
+    nop /* inline */ side 0
+    set x, GLOBAL_A
+    pull ifempty noblock
+    pull noblock
+    push iffull noblock
+lp: nop
+.define public in_prog lp
+.define public in_prog2 (lp+1)
+% c-sdk {
+    indented line
+
+	tab line
+   
+// after a whitespace-only line
+%}
+
+% c-sdk{
+second block
+%}
+%   python   {
+ignored
+%}
+.program second
+.side_set 1 pindirs
+    nop side 1
