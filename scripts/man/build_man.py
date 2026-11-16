@@ -19,7 +19,7 @@
 """Build the plain-text man pages YasOS reads with usr/bin/man.
 
     scripts/man/build_man.py rootfs/usr/share/man --rootfs rootfs \\
-        [--zig-source ~/repos/zig-0171] [--zig .cache/zig-build/host-st/bin/zig]
+        [--zig-source ~/repos/zig] [--zig .cache/zig-build/host-st/bin/zig]
 
 Pages are ASCII text in man layout.  By default they are packed into xz
 blocks of about 64 KB (OUT/bNN.xz) with OUT/index ("name block offset
