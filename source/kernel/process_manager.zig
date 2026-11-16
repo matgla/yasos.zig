@@ -306,6 +306,10 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             const flags = proctable_lock.lock_irqsave();
             defer proctable_lock.unlock_irqrestore(flags);
 
+            // Ctrl-C on the console, noted by the receive path: delivered here,
+            // under the lock the delivery needs and before the pick it affects.
+            if (console_interrupts.swap(0, .acq_rel) != 0) self.signal_foreground_locked(c.SIGINT);
+
             if (self.processes.first) |first| {
                 const action = self._scheduler.schedule_next(first);
                 if (action != .NoAction) return action;
@@ -329,9 +333,14 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         fn fall_back_to_idle(self: *Self) kernel.scheduler.Action {
             const idle_process = self.idle[hal.cpu.coreid()] orelse return .NoAction;
             const current = self._scheduler.get_current() orelse return self._scheduler.claim(&idle_process.node);
-            // Already parked, or still holding a process that can run: stay.
+            // Already parked, or still holding a process that can run: stay --
+            // unless a tracer asked that process to stop. The stop is taken where
+            // its context is stored (`Process.settle_ptrace_stop`), so the core
+            // has to switch away from it once, even with nothing else to run: a
+            // tracee spinning in user code on a core of its own never would, and
+            // PTRACE_INTERRUPT waited forever on the board's second core.
             if (current == idle_process) return .NoAction;
-            if (current.state == Process.State.Running) return .NoAction;
+            if (current.state == Process.State.Running and current.stop_request == 0) return .NoAction;
             return self._scheduler.claim(&idle_process.node);
         }
 
@@ -632,7 +641,16 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         if (p._parent) |parent| {
                             self.hold_pid(pid);
                             parent.record_child_exit(pid, return_code);
+                            // Even when the record could not be made: a parent
+                            // in waitpid looks at the table again on waking.
+                            parent.wake_from(parent.any_child_blocker());
                         }
+                        // A tracer that is not the parent learns of the exit too,
+                        // and a tracer that is exiting lets its tracees go.
+                        if (p.tracer) |tracer| {
+                            if (p._parent != tracer) tracer.record_tracee_exit(pid, return_code);
+                        }
+                        self.detach_tracees_locked(p);
                         p.unblock_parent();
                         p.schedule_removal();
                         p.unblock_all(return_code);
@@ -979,8 +997,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
             errdefer current_process.drop_pending_stack();
             const loaded = blk: {
-                if (node) |resolved| break :blk dynamic_loader.load_executable_node(resolved, path, load_allocator, current_process.pid, load_start_us);
-                break :blk dynamic_loader.load_executable(path, load_allocator, current_process.pid);
+                if (node) |resolved| break :blk dynamic_loader.load_executable_node(resolved, path, load_allocator, current_process.pid, load_start_us, current_process.tracer != null);
+                break :blk dynamic_loader.load_executable_in(path, load_allocator, current_process.pid, current_process.tracer != null);
             };
             const executable = loaded catch |err| {
                 return if (err == error.IncorrectSignature) kernel.errno.ErrnoSet.ExecFormatError else err;
@@ -1056,6 +1074,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             // An exec'd image is a user program and must run unprivileged so the
             // MPU keeps it out of the kernel heap and stack.
             current_process.privileged = false;
+            // Handlers do not survive exec (ignored signals do).
+            current_process.sig_handled = 0;
 
             // Apply the per-image stack hint from the YAFF header so an applet
             // sizes its stack to what it declared (e.g. shell tools want far
@@ -1110,6 +1130,10 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             const handoff = blk: {
                 const flags = proctable_lock.lock_irqsave();
                 defer proctable_lock.unlock_irqrestore(flags);
+                // A traced process stops before the first instruction of the new
+                // image, so its tracer can set breakpoints in it. Shown once its
+                // core lets go of it (`Process.settle_ptrace_stop`).
+                if (current_process.tracer != null) current_process.ptrace_stop_pending = c.SIGTRAP;
                 const decision = take_vfork_handoff("exec", current_process);
                 switch (decision) {
                     .take => |h| {
@@ -1308,96 +1332,394 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             const current_process = self.get_current_process();
             const nohang = (options & wnohang) != 0;
 
-            // Registration runs with preemption refused; the wait itself must
-            // not. `proctable_lock` is held across the whole decision, which is
-            // what makes it safe on two cores: refusing preemption stops only
-            // *this* core switching between the test and the block, and the
-            // child is exiting on the other one. Without it the wake lands
-            // before `block_on` and is lost, parking a shell forever on
-            // `hello & wait`. The exit path takes the same lock across
-            // `record_child_exit` and the wake.
-            {
-                preempt.preempt_disable();
-                defer preempt.preempt_enable();
+            // A tracer comes round again: a stop it has already reported, or
+            // another child's exit, wakes it without anything for this call.
+            while (true) {
+                // Woken for a stop as well as for an exit: a tracer waiting for a
+                // tracee blocks on its collection list, which both wake.
+                var waits_for_tracee = false;
 
-                const flags = proctable_lock.lock_irqsave();
-                defer proctable_lock.unlock_irqrestore(flags);
+                // Registration runs with preemption refused; the wait itself must
+                // not. `proctable_lock` is held across the whole decision, which is
+                // what makes it safe on two cores: refusing preemption stops only
+                // *this* core switching between the test and the block, and the
+                // child is exiting on the other one. Without it the wake lands
+                // before `block_on` and is lost, parking a shell forever on
+                // `hello & wait`. The exit path takes the same lock across
+                // `record_child_exit` and the wake.
+                {
+                    preempt.preempt_disable();
+                    defer preempt.preempt_enable();
 
-                // A child that has already finished is collected without
-                // blocking, whichever form of the call this is.
+                    const flags = proctable_lock.lock_irqsave();
+                    defer proctable_lock.unlock_irqrestore(flags);
+
+                    // A child that has already finished is collected without
+                    // blocking, whichever form of the call this is.
+                    if (current_process.take_exited_child(pid)) |exited| {
+                        if (exited.owned) self.release_pid(exited.pid);
+                        status.* = exited.status;
+                        return exited.pid;
+                    }
+                    // So is a tracee's stop nobody has been told of yet.
+                    if (self.take_tracee_stop_locked(current_process, pid)) |stop| {
+                        status.* = stop.status;
+                        return stop.pid;
+                    }
+
+                    if (pid == -1) {
+                        waits_for_tracee = self.has_live_tracee_locked(current_process);
+                        if (!waits_for_tracee and !self.has_live_child_locked(current_process)) {
+                            return kernel.errno.ErrnoSet.NoChildProcesses;
+                        }
+                        if (nohang) return 0;
+                        // Any child's exit ends this wait, so only a lone child
+                        // makes it safe to swap this process out for.
+                        current_process.swap_heir = if (self.sole_live_child_locked(current_process)) |child| child.pid else 0;
+                        // Blocking on the collection list rather than on one child:
+                        // whichever child finishes first records its exit there and
+                        // wakes this process (`Process.record_child_exit`).
+                        current_process.block_on(current_process.any_child_blocker());
+                    } else {
+                        // Not in the table and not among the collected exits above:
+                        // nothing by that pid is left to wait for (it was collected
+                        // already, or never existed), so ECHILD. Answering `pid`
+                        // with a stale status told the caller it had just collected
+                        // it -- toysh's `wait`, which asked again for the pid it
+                        // last reaped, spun on that answer forever.
+                        const p = self.get_process_for_pid_locked(pid) orelse return kernel.errno.ErrnoSet.NoChildProcesses;
+                        if (p.state == Process.State.Terminated) {
+                            status.* = current_process.child_exit_code;
+                            return pid;
+                        }
+                        if (nohang) return 0;
+                        current_process.swap_heir = p.pid;
+
+                        if (p.tracer == current_process or p._parent == current_process) {
+                            // Its exit records itself on the collection list and
+                            // wakes it, and so does a tracee's stop
+                            // (`Process.wake_tracer`): wait there, and look again.
+                            waits_for_tracee = true;
+                            current_process.block_on(current_process.any_child_blocker());
+                        } else {
+                            // The status comes from the child's exit record, read below
+                            // once this process runs again: written from the child's
+                            // exit, it went into this process's memory while that may
+                            // have been out on swap -- into somebody else's pages.
+                            const Action = struct {
+                                pub fn on_process_finished(_: ?*anyopaque, _: i32) void {}
+                            };
+                            current_process.wait_for_process(p, &Action.on_process_finished, null) catch {
+                                return -1;
+                            };
+                        }
+                    }
+                }
+
+                // Preemption is enabled here, which is the point: yielding is the
+                // only way the child ever runs.  Nothing below touches this
+                // process's memory but its stack until the swap-in, so the pool may
+                // write the rest out meanwhile (`swap_out_waiting`).
+                current_process.swap_eligible = true;
+                // A signal for this process cuts the wait short (EINTR below);
+                // the collection-list waits re-check what they wait for.
+                current_process.interruptible_wait = pid == -1 or waits_for_tracee;
+                while (current_process.state == Process.State.Blocked) {
+                    hal.irq.trigger(.pendsv);
+                    current_process.reevaluate_state();
+                }
+                current_process.interruptible_wait = false;
+                current_process.swap_eligible = false;
+                if (current_process.swapped and !self.swap_in_current(current_process)) {
+                    // Killed by the swap-in watchdog. Nothing of this process may be
+                    // touched from here on -- `status` least of all: it points into
+                    // memory that belongs to somebody else now.
+                    return kernel.errno.ErrnoSet.OutOfMemory;
+                }
+
+                // Woken because a child finished: which one is known only from the
+                // record it left, so `waitpid(-1)` reports the pid it collected.
                 if (current_process.take_exited_child(pid)) |exited| {
-                    self.release_pid(exited.pid);
+                    if (exited.owned) self.release_pid(exited.pid);
                     status.* = exited.status;
                     return exited.pid;
                 }
-
-                if (pid == -1) {
-                    if (!self.has_live_child_locked(current_process)) {
-                        return kernel.errno.ErrnoSet.NoChildProcesses;
+                {
+                    const flags = proctable_lock.lock_irqsave();
+                    defer proctable_lock.unlock_irqrestore(flags);
+                    if (self.take_tracee_stop_locked(current_process, pid)) |stop| {
+                        status.* = stop.status;
+                        return stop.pid;
                     }
-                    if (nohang) return 0;
-                    // Any child's exit ends this wait, so only a lone child
-                    // makes it safe to swap this process out for.
-                    current_process.swap_heir = if (self.sole_live_child_locked(current_process)) |child| child.pid else 0;
-                    // Blocking on the collection list rather than on one child:
-                    // whichever child finishes first records its exit there and
-                    // wakes this process (`Process.record_child_exit`).
-                    current_process.block_on(current_process.any_child_blocker());
-                } else {
-                    // Not in the table and not among the collected exits above:
-                    // nothing by that pid is left to wait for (it was collected
-                    // already, or never existed), so ECHILD. Answering `pid`
-                    // with a stale status told the caller it had just collected
-                    // it -- toysh's `wait`, which asked again for the pid it
-                    // last reaped, spun on that answer forever.
-                    const p = self.get_process_for_pid_locked(pid) orelse return kernel.errno.ErrnoSet.NoChildProcesses;
-                    if (p.state == Process.State.Terminated) {
-                        status.* = current_process.child_exit_code;
-                        return pid;
-                    }
-                    if (nohang) return 0;
-
-                    // The status comes from the child's exit record, read below
-                    // once this process runs again: written from the child's
-                    // exit, it went into this process's memory while that may
-                    // have been out on swap -- into somebody else's pages.
-                    const Action = struct {
-                        pub fn on_process_finished(_: ?*anyopaque, _: i32) void {}
-                    };
-                    current_process.swap_heir = p.pid;
-                    current_process.wait_for_process(p, &Action.on_process_finished, null) catch {
-                        return -1;
-                    };
                 }
+                if (current_process.signal_pending()) return kernel.errno.ErrnoSet.InterruptedSystemCall;
+                if (waits_for_tracee) continue;
+                // Falling past this means the exit could not be recorded at all.
+                status.* = current_process.child_exit_code;
+                return pid;
             }
+        }
 
-            // Preemption is enabled here, which is the point: yielding is the
-            // only way the child ever runs.  Nothing below touches this
-            // process's memory but its stack until the swap-in, so the pool may
-            // write the rest out meanwhile (`swap_out_waiting`).
-            current_process.swap_eligible = true;
-            while (current_process.state == Process.State.Blocked) {
-                hal.irq.trigger(.pendsv);
-                current_process.reevaluate_state();
-            }
-            current_process.swap_eligible = false;
-            if (current_process.swapped and !self.swap_in_current(current_process)) {
-                // Killed by the swap-in watchdog. Nothing of this process may be
-                // touched from here on -- `status` least of all: it points into
-                // memory that belongs to somebody else now.
-                return kernel.errno.ErrnoSet.OutOfMemory;
-            }
+        const TraceeStop = struct { pid: c.pid_t, status: i32 };
 
-            // Woken because a child finished: which one is known only from the
-            // record it left, so `waitpid(-1)` reports the pid it collected.
-            // Falling past this means the exit could not be recorded at all.
-            if (current_process.take_exited_child(pid)) |exited| {
-                self.release_pid(exited.pid);
-                status.* = exited.status;
-                return exited.pid;
+        /// A stop of one of `tracer`'s tracees (`pid`, or any for -1) that its
+        /// waitpid has not reported, as a wait status: WIFSTOPPED, WSTOPSIG the
+        /// signal.  Marked reported.  Caller holds `proctable_lock`.
+        fn take_tracee_stop_locked(self: *Self, tracer: *const Process, pid: c.pid_t) ?TraceeStop {
+            var next = self.processes.first;
+            while (next) |node| : (next = node.next) {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (p.tracer != tracer or p.ptrace_stop == 0 or p.ptrace_stop_reported) continue;
+                if (pid != -1 and p.pid != pid) continue;
+                p.ptrace_stop_reported = true;
+                return .{ .pid = p.pid, .status = (@as(i32, p.ptrace_stop) << 8) | 0x7f };
             }
-            status.* = current_process.child_exit_code;
-            return pid;
+            return null;
+        }
+
+        /// Does `tracer` trace a process that is still alive?  Caller holds
+        /// `proctable_lock`.
+        fn has_live_tracee_locked(self: *Self, tracer: *const Process) bool {
+            var next = self.processes.first;
+            while (next) |node| : (next = node.next) {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (p.tracer == tracer and p.state != Process.State.Terminated) return true;
+            }
+            return false;
+        }
+
+        /// The tracer is going away: its tracees are let go and resume, as on
+        /// Linux.  Caller holds `proctable_lock`.
+        fn detach_tracees_locked(self: *Self, tracer: *const Process) void {
+            var next = self.processes.first;
+            while (next) |node| : (next = node.next) {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (p.tracer != tracer) continue;
+                ptrace_release(p);
+            }
+            next = self.terminate_list.first;
+            while (next) |node| : (next = node.next) {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (p.tracer == tracer) p.tracer = null;
+            }
+        }
+
+        /// Untrace `tracee` and let it run.
+        fn ptrace_release(tracee: *Process) void {
+            tracee.tracer = null;
+            tracee.ptrace_stop = 0;
+            tracee.ptrace_stop_pending = 0;
+            tracee.stop_request = 0;
+            tracee.ptrace_stop_reported = false;
+            tracee.reevaluate_state();
+        }
+
+        /// Ask `target` to stop with `sig`: at once when it is switched out in
+        /// user code, otherwise at its next stop point
+        /// (`Process.settle_ptrace_stop`, `syscall_return_ptrace_check`) -- and
+        /// an interruptible wait it is in ends with EINTR to get it there.
+        /// Caller holds `proctable_lock`.
+        fn request_stop_locked(self: *Self, target: *Process, sig: u8) void {
+            if (target.ptrace_stop != 0 or target.ptrace_stop_pending != 0) return;
+            target.stop_request = sig;
+            ptrace_stop_requests +%= 1;
+            if (target.interruptible_wait and target.waiting_for != null) {
+                target.waiting_for = null;
+                target.reevaluate_state();
+            }
+            if (target.state != Process.State.Running and !target.resume_privileged and
+                !self._scheduler.is_claimed_by_any_core(&target.node))
+            {
+                target.settle_ptrace_stop();
+                target.reevaluate_state();
+            }
+        }
+
+        /// Deliver `sig` to `target`.  There are no handlers: a tracee stops with
+        /// it and its tracer decides (PTRACE_CONT with 0 drops it, with the signal
+        /// lets it act); otherwise a signal the process ignores or catches is
+        /// dropped, and any other ends it -- it is resumed at `_exit`, and its
+        /// exit reports the signal.  Never to the root process or a kernel
+        /// thread.  Caller holds `proctable_lock`.
+        fn deliver_signal_locked(self: *Self, target: *Process, sig: u8) void {
+            if (target.pid == 1 or target.privileged or target.state == Process.State.Terminated) return;
+            if (target.tracer != null and sig != c.SIGKILL) {
+                self.request_stop_locked(target, sig);
+                return;
+            }
+            if (!target.signal_is_fatal(sig)) return;
+            self.kill_tracee_locked(target, sig);
+        }
+
+        /// SIGINT for Ctrl-C goes to the console's foreground program: from the
+        /// root shell down the chain of processes waiting in waitpid for one
+        /// process, the one at the end.  A shell at its prompt is that end itself
+        /// and gets nothing (it reads the console in raw mode, where ^C is just a
+        /// byte anyway); a background job is on no such chain.  Caller holds
+        /// `proctable_lock`.
+        fn signal_foreground_locked(self: *Self, sig: u8) void {
+            var p = self.get_process_for_pid_locked(1) orelse return;
+            var depth: usize = 0;
+            while (depth < 64) : (depth += 1) {
+                if (!p.swap_eligible or p.swap_heir == 0) break;
+                const next = self.get_process_for_pid_locked(p.swap_heir) orelse break;
+                if (next.state == Process.State.Terminated) break;
+                p = next;
+            }
+            if (p.pid == 1) return;
+            self.deliver_signal_locked(p, sig);
+        }
+
+        /// kill(2) for another process: SIGKILL, and the signals whose default
+        /// action ends a process, delivered as `deliver_signal_locked` says; 0
+        /// only asks whether `pid` exists.  The stop/continue signals of job
+        /// control are not there (EINVAL).
+        pub fn send_signal(self: *Self, pid: c.pid_t, sig: c_int) !i32 {
+            switch (sig) {
+                0, c.SIGHUP, c.SIGINT, c.SIGQUIT, c.SIGKILL, c.SIGUSR1, c.SIGUSR2, c.SIGPIPE, c.SIGALRM, c.SIGTERM => {},
+                else => return kernel.errno.ErrnoSet.InvalidArgument,
+            }
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const target = self.get_process_for_pid_locked(pid) orelse return kernel.errno.ErrnoSet.NoSuchProcess;
+            if (target.state == Process.State.Terminated) return kernel.errno.ErrnoSet.NoSuchProcess;
+            if (sig == 0) return 0;
+            if (target.pid == 1 or target.privileged) return kernel.errno.ErrnoSet.NotPermitted;
+            self.deliver_signal_locked(target, @intCast(sig));
+            smp.kick_idle_core();
+            return 0;
+        }
+
+        /// The tracee `pid` of the caller, which has to be stopped for every
+        /// request but the ones that resume or stop it.  ESRCH otherwise, as on
+        /// Linux.  Caller holds `proctable_lock`.
+        fn tracee_locked(self: *Self, pid: c.pid_t, stopped: bool) !*Process {
+            const tracee = self.get_process_for_pid_locked(pid) orelse return kernel.errno.ErrnoSet.NoSuchProcess;
+            if (tracee.tracer != self.get_current_process()) return kernel.errno.ErrnoSet.NoSuchProcess;
+            if (tracee.state == Process.State.Terminated) return kernel.errno.ErrnoSet.NoSuchProcess;
+            if (stopped and tracee.ptrace_stop == 0) return kernel.errno.ErrnoSet.NoSuchProcess;
+            return tracee;
+        }
+
+        /// PTRACE_TRACEME: the parent traces the caller.
+        pub fn ptrace_traceme(self: *Self) !i32 {
+            const current = self.get_current_process();
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            if (current.tracer != null) return kernel.errno.ErrnoSet.NotPermitted;
+            current.tracer = current._parent orelse return kernel.errno.ErrnoSet.NotPermitted;
+            return 0;
+        }
+
+        /// PTRACE_ATTACH: trace a descendant of the caller, and stop it.
+        pub fn ptrace_attach(self: *Self, pid: c.pid_t) !i32 {
+            const current = self.get_current_process();
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const target = self.get_process_for_pid_locked(pid) orelse return kernel.errno.ErrnoSet.NoSuchProcess;
+            if (target == current or !target.descends_from(current) or target.tracer != null or
+                target.state == Process.State.Terminated or target.privileged)
+                return kernel.errno.ErrnoSet.NotPermitted;
+            target.tracer = current;
+            self.request_stop_locked(target, c.SIGSTOP);
+            return 0;
+        }
+
+        /// PTRACE_CONT, PTRACE_DETACH, PTRACE_KILL, PTRACE_INTERRUPT. A signal
+        /// passed to CONT or DETACH kills the tracee with it: there are no
+        /// signal handlers to deliver it to.
+        pub fn ptrace_resume(self: *Self, request: c_int, pid: c.pid_t, signal: usize) !i32 {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const stopped = request == c.PTRACE_CONT or request == c.PTRACE_DETACH;
+            const tracee = try self.tracee_locked(pid, stopped);
+            if (signal > 127) return kernel.errno.ErrnoSet.InvalidArgument;
+            switch (request) {
+                c.PTRACE_INTERRUPT => self.request_stop_locked(tracee, c.SIGSTOP),
+                c.PTRACE_KILL => self.kill_tracee_locked(tracee, c.SIGKILL),
+                c.PTRACE_CONT, c.PTRACE_DETACH => {
+                    if (signal != 0) {
+                        self.kill_tracee_locked(tracee, @intCast(signal));
+                        if (request == c.PTRACE_DETACH) tracee.tracer = null;
+                    } else if (request == c.PTRACE_DETACH) {
+                        ptrace_release(tracee);
+                    } else {
+                        tracee.ptrace_stop = 0;
+                        tracee.reevaluate_state();
+                    }
+                },
+                else => return kernel.errno.ErrnoSet.InputOutputError,
+            }
+            smp.kick_idle_core();
+            return 0;
+        }
+
+        /// End a tracee with `signal`: a stopped one is resumed at `_exit`, a
+        /// running one is stopped first and sent there from the stop
+        /// (`Process.settle_ptrace_stop`).  Its exit reports the signal.
+        fn kill_tracee_locked(self: *Self, tracee: *Process, signal: u8) void {
+            tracee.kill_signal = signal;
+            if (tracee.ptrace_stop != 0) {
+                tracee.resume_at_exit();
+                tracee.reevaluate_state();
+            } else {
+                self.request_stop_locked(tracee, signal);
+            }
+        }
+
+        /// A word of a stopped tracee's memory: its own pages, or the read-only
+        /// image (code and constants in flash) every process can read.
+        pub fn ptrace_peek(self: *Self, pid: c.pid_t, address: usize) !u32 {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const tracee = try self.tracee_locked(pid, true);
+            if (!self._process_memory_pool.owns_range(tracee.pid, address, 4) and
+                !kernel.uaccess.access_ok(address, 4, .read)) return kernel.errno.ErrnoSet.InputOutputError;
+            return std.mem.readInt(u32, @as(*const [4]u8, @ptrFromInt(address)), .little);
+        }
+
+        /// Write a word of a stopped tracee's memory: only its own pages -- code
+        /// in flash cannot be written, which is why a traced process runs its
+        /// executable from RAM.
+        pub fn ptrace_poke(self: *Self, pid: c.pid_t, address: usize, word: u32) !void {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const tracee = try self.tracee_locked(pid, true);
+            if (!self._process_memory_pool.owns_range(tracee.pid, address, 4)) return kernel.errno.ErrnoSet.InputOutputError;
+            std.mem.writeInt(u32, @as(*[4]u8, @ptrFromInt(address)), word, .little);
+            // It may be code: the tracee's next instruction fetch must see it.
+            if (comptime builtin.cpu.arch.isThumb()) {
+                asm volatile ("dsb" ::: .{ .memory = true });
+                asm volatile ("isb");
+            }
+        }
+
+        pub fn ptrace_get_registers(self: *Self, pid: c.pid_t) !arch.process.UserRegisters {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const tracee = try self.tracee_locked(pid, true);
+            return tracee.user_registers() orelse kernel.errno.ErrnoSet.InputOutputError;
+        }
+
+        pub fn ptrace_set_registers(self: *Self, pid: c.pid_t, registers: *const arch.process.UserRegisters) !void {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const tracee = try self.tracee_locked(pid, true);
+            if (!tracee.set_user_registers(registers)) return kernel.errno.ErrnoSet.InputOutputError;
+        }
+
+        pub fn ptrace_get_fp_registers(self: *Self, pid: c.pid_t) !arch.process.FpRegisters {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const tracee = try self.tracee_locked(pid, true);
+            return tracee.fp_registers() orelse kernel.errno.ErrnoSet.InputOutputError;
+        }
+
+        pub fn ptrace_set_fp_registers(self: *Self, pid: c.pid_t, registers: *const arch.process.FpRegisters) !void {
+            const flags = proctable_lock.lock_irqsave();
+            defer proctable_lock.unlock_irqrestore(flags);
+            const tracee = try self.tracee_locked(pid, true);
+            if (!tracee.set_fp_registers(registers)) return kernel.errno.ErrnoSet.InputOutputError;
         }
 
         /// ProcessMemoryPool.swap_hook: an allocation by the running process
@@ -2022,6 +2344,86 @@ export fn abandon_faulting_thread() bool {
     sync_mutex.release_held_by(current);
     preempt.forget_nesting();
     return true;
+}
+
+/// Ctrl-C presses on the console not delivered yet: the receive interrupt counts
+/// them (`note_console_interrupt`), `schedule_next` delivers SIGINT.
+var console_interrupts: std.atomic.Value(u32) = .init(0);
+
+/// The console's interrupt character arrived (ISIG on): from the UART's receive
+/// path, interrupt context, so only a counter -- the next scheduler pass sends
+/// the signal, and kicks that pass off now rather than at the next tick.
+pub fn note_console_interrupt() void {
+    _ = console_interrupts.fetchAdd(1, .acq_rel);
+    hal.irq.trigger(.pendsv);
+}
+
+/// PTRACE_ATTACH/INTERRUPT/KILL requests not taken yet, system wide: a hint that
+/// lets the syscall return path skip `syscall_return_ptrace_check` almost always.
+/// Only ever grows; a stale nonzero costs one function call per syscall.
+pub var ptrace_stop_requests: u32 = 0;
+
+/// The fault handler: the process running on this core faulted in user code
+/// (CFSR/HFSR as the fault left them, pc the faulting instruction).  A traced
+/// one stops with the matching signal instead of being killed -- the context
+/// switch asked for here stores its registers, the faulting pc among them, and
+/// `Process.settle_ptrace_stop` then shows the stop to the tracer.  Returns
+/// false for an untraced process, which the caller kills as before.
+export fn ptrace_trap(cfsr: u32, hfsr: u32, pc: u32) bool {
+    const current = instance.core[hal.cpu.coreid()];
+    if (current.tracer == null or current.privileged) return false;
+    const signal = fault_signal(cfsr, hfsr, pc);
+    const flags = proctable_lock.lock_irqsave();
+    defer proctable_lock.unlock_irqrestore(flags);
+    if (current.tracer == null) return false;
+    current.ptrace_stop_pending = signal;
+    current.reevaluate_state();
+    hal.irq.trigger(.pendsv);
+    return true;
+}
+
+/// The signal a fault is reported to a tracer with.  UNDEFINSTR at the
+/// breakpoint instruction (UDF #1) is SIGTRAP; any other undefined or invalid
+/// instruction SIGILL.
+fn fault_signal(cfsr: u32, hfsr: u32, pc: u32) u8 {
+    const undefined_instruction: u32 = 1 << 16;
+    const invalid_state: u32 = (1 << 17) | (1 << 18) | (1 << 19); // INVSTATE, INVPC, NOCP
+    const unaligned: u32 = 1 << 24;
+    const divide_by_zero: u32 = 1 << 25;
+    const debug_event: u32 = 1 << 31; // HFSR.DEBUGEVT: a BKPT with no debugger
+    if (cfsr & undefined_instruction != 0) {
+        const at = pc & ~@as(u32, 1);
+        if (kernel.uaccess.access_ok(at, 2, .read) and
+            std.mem.readInt(u16, @as(*const [2]u8, @ptrFromInt(at)), .little) == breakpoint_instruction)
+            return c.SIGTRAP;
+        return c.SIGILL;
+    }
+    if (cfsr & invalid_state != 0) return c.SIGILL;
+    if (cfsr & divide_by_zero != 0) return c.SIGFPE;
+    if (cfsr & unaligned != 0) return c.SIGBUS;
+    if (cfsr & 0xFF != 0) return c.SIGSEGV; // MemManage
+    if (cfsr & 0xFF00 != 0) return c.SIGBUS; // BusFault
+    if (hfsr & debug_event != 0) return c.SIGTRAP;
+    return c.SIGSEGV;
+}
+
+/// UDF #1, the breakpoint a debugger plants (libc YASOS_PTRACE_BREAKPOINT).
+const breakpoint_instruction: u16 = 0xde01;
+
+/// The syscall return path, on its way back to user code with the process's
+/// own frame on its stack: where a stop asked of a process inside a system
+/// call is taken (see `Process.settle_ptrace_stop` for why not earlier).
+export fn syscall_return_ptrace_check() void {
+    if (ptrace_stop_requests == 0) return;
+    const current = instance.core[hal.cpu.coreid()];
+    if (current.stop_request == 0 or current.privileged) return;
+    const flags = proctable_lock.lock_irqsave();
+    defer proctable_lock.unlock_irqrestore(flags);
+    if (current.stop_request == 0) return;
+    current.ptrace_stop_pending = current.stop_request;
+    current.stop_request = 0;
+    current.reevaluate_state();
+    hal.irq.trigger(.pendsv);
 }
 
 export fn get_stack_top() *const u8 {

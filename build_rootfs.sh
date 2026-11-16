@@ -254,6 +254,8 @@ if $CLEAR; then
   rm -rf apps/ccat/build
   rm -rf apps/yaffdump/build
   rm -rf apps/yaffdump/tests/build
+  rm -rf apps/strip/build apps/strip/build-host apps/strip/tests/build
+  rm -rf apps/ptracetest/build
   rm -rf apps/time/build
   rm -rf libs/libm/build
   rm -rf apps/yasvi/build
@@ -1036,6 +1038,8 @@ build_makefile pioasm
 build_makefile more
 build_makefile ccat
 build_makefile yaffdump
+build_makefile strip
+build_makefile ptracetest
 build_makefile time
 build_makefile yasvi
 build_makefile mkfs

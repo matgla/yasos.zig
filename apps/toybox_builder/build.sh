@@ -31,6 +31,12 @@ touch .config
 
 TOYBOX_CFLAGS="-I$1/usr/include -fvisibility=hidden${TOYBOX_EXTRA_CFLAGS:+ }$TOYBOX_EXTRA_CFLAGS"
 export LDOPTIMIZE="-Wl,--gc-sections -Wl,--as-needed"
+# No strip: make.sh would run ${CROSS_COMPILE}strip -- "armv8m-tstrip", which
+# does not exist -- with binutils flags, print "strip failed, using unstripped"
+# and copy the binary anyway.  Nothing here wants it stripped: toybox.elf is
+# kept for its symbols, and the YAFF image has debug data only in a --debug
+# build, which asked for it (apps/strip takes it out by hand if wanted).
+export NOSTRIP=1
 CROSS_COMPILE=../../libs/tinycc/bin/armv8m-t CFLAGS="$TOYBOX_CFLAGS" LDFLAGS="-Wl,-oformat=elf32-littlearm -lm" make toybox
 mv -f ../toybox/toybox ../toybox/toybox.elf
 # Per-image stack profile: toybox applets (and the shell) run in 8 KiB rather

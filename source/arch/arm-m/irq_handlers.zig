@@ -41,6 +41,7 @@ extern fn dump_ctx_ring() void;
 extern fn dump_vreg_status() void;
 extern fn _exit(code: c_int) void;
 extern fn abandon_faulting_thread() bool;
+extern fn ptrace_trap(cfsr: u32, hfsr: u32, pc: u32) bool;
 
 const usage_fault_stkof_mask: u32 = 1 << 20;
 const stack_overflow_exit_code: c_int = -1;
@@ -247,6 +248,10 @@ export fn report_bad_exc_return(value: usize) callconv(.c) void {
 }
 
 export fn hard_fault_main(exc_return: usize, active_stack_address: usize) callconv(.c) void {
+    // A traced process that faulted -- a breakpoint among the faults -- stops
+    // for its tracer instead of dying, and without the postmortem: on the
+    // board the console is the debugger's screen.
+    if (stopped_for_tracer(exc_return, active_stack_address)) return;
     const callee = hardfault_callee;
     // First: the diagnostics below take masked sections of their own.
     const interrupted_masked = read_primask() != 0;
@@ -489,6 +494,33 @@ inline fn write_psp(value: usize) void {
         \\ dsb
         :
         : [value] "r" (value),
+    );
+}
+
+/// User code of a traced process faulted: hand it to ptrace (`ptrace_trap`),
+/// which stops it and asks for the context switch that stores its registers.
+/// Only for a fault in unprivileged thread code with its whole frame stacked:
+/// a fault inside a system call is a kernel matter, and a stack overflow left
+/// no frame to resume from -- both are still handled below.
+fn stopped_for_tracer(exc_return: usize, active_stack_address: usize) bool {
+    if (!uses_process_stack(exc_return) or read_primask() != 0) return false;
+    if (read_control() & 1 == 0) return false; // CONTROL.nPRIV: privileged thread
+    const scb = CpuRegisters.scb;
+    const cfsr_raw: u32 = @as(u32, @bitCast(scb.cfsr.read()));
+    if (cfsr_raw & usage_fault_stkof_mask != 0) return false;
+    const hfsr_raw: u32 = scb.hfsr.read();
+    const frame: *volatile FaultFrame = @ptrFromInt(active_stack_address);
+    if (!ptrace_trap(cfsr_raw, hfsr_raw, frame.pc)) return false;
+    // Write-one-to-clear, as on the kill path below.
+    scb.cfsr.write_raw(cfsr_raw);
+    scb.hfsr.write_raw(hfsr_raw);
+    return true;
+}
+
+inline fn read_control() usize {
+    return asm volatile (
+        \\ mrs %[out], CONTROL
+        : [out] "=r" (-> usize),
     );
 }
 

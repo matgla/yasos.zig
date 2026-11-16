@@ -259,7 +259,7 @@ fn is_requested_file(file: kernel.fs.IFile, context: *ModuleContext) bool {
     const size = std.math.cast(usize, fc.interface.size()) orelse return false;
     if (@intFromPtr(address) % 4 != 0) return false;
     const bytes: [*]align(4) const u8 = @ptrCast(@alignCast(address));
-    context.image = bytes[0..size];
+    context.image = bytes[0..yasld.image_length(bytes[0..@min(size, yasld.image_length_prefix)], size)];
     return true;
 }
 
@@ -503,6 +503,11 @@ pub fn deinit() void {
 }
 
 pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Executable {
+    return load_executable_in(path, process_allocator, pid, false);
+}
+
+/// `load_executable`, with `in_ram` as `load_executable_node` takes it.
+pub fn load_executable_in(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t, in_ram: bool) !*yasld.Executable {
     last_executable_load_us = 0; // a load that fails reports nothing, not the previous one
     // Start the clock at the path lookup, not at the relocation. For an image
     // the filesystem cannot memory-map (anything outside the XIP romfs -- /tmp,
@@ -512,25 +517,67 @@ pub fn load_executable(path: []const u8, process_allocator: std.mem.Allocator, p
     // looking for.
     const load_start_us = hal.time.get_time_us();
     var node = try fs.get_ivfs().interface.get(path);
-    return load_executable_node(&node, path, process_allocator, pid, load_start_us);
+    return load_executable_node(&node, path, process_allocator, pid, load_start_us, in_ram);
 }
 
 /// Reads are streams: positive partial reads are progress, EOF is final.
-fn read_image(file: *kernel.fs.IFile, allocator: std.mem.Allocator, size: usize) ![]align(16) u8 {
-    const pos = try file.interface.seek(0, c.SEEK_SET);
-    if (pos != 0) return kernel.errno.ErrnoSet.InputOutputError;
-    const memory = try allocator.alignedAlloc(u8, .@"16", size);
-    errdefer allocator.free(memory);
+/// Fills `buffer` from `file`, however many reads that takes; a stream that ends
+/// first is not a whole image.
+fn read_all(file: *kernel.fs.IFile, buffer: []u8) !void {
     var filled: usize = 0;
-    while (filled < memory.len) {
-        const got = file.interface.read(memory[filled..]);
+    while (filled < buffer.len) {
+        const got = file.interface.read(buffer[filled..]);
         if (got < 0) return kernel.errno.ErrnoSet.InputOutputError;
         if (got == 0) return kernel.errno.ErrnoSet.ExecFormatError;
         const count: usize = @intCast(got);
-        if (count > memory.len - filled) return kernel.errno.ErrnoSet.InputOutputError;
+        if (count > buffer.len - filled) return kernel.errno.ErrnoSet.InputOutputError;
         filled += count;
     }
-    return memory;
+}
+
+/// A RAM copy of the image in the first `size` bytes of `file`: all of them, or
+/// only those before its debug data (`yasld.image_length`) -- a -g image's debug
+/// data is for a debugger, which reads the file itself, and can be several times
+/// the size of the code.  The header is read first to know which.
+///
+/// `memory` is the allocation (to free), `image` the copy inside it.  Where the
+/// board has a code granule (`hal.memory.code_granule`, QEMU), the image starts
+/// on one and the granules it touches are all its own: the process pool hands
+/// out 256-byte pages regardless of alignment, and a stack ending in the
+/// image's first granule made QEMU run a compute loop 15x slower.
+const RamImage = struct {
+    memory: []align(16) u8,
+    image: []align(16) u8,
+};
+
+fn read_image(file: *kernel.fs.IFile, allocator: std.mem.Allocator, size: usize) !RamImage {
+    const pos = try file.interface.seek(0, c.SEEK_SET);
+    if (pos != 0) return kernel.errno.ErrnoSet.InputOutputError;
+    var head: [yasld.image_length_prefix]u8 = @splat(0);
+    const head_len = @min(size, head.len);
+    try read_all(file, head[0..head_len]);
+    const length = yasld.image_length(head[0..head_len], size);
+    const granule = @TypeOf(hal.memory).code_granule;
+    const memory = try allocator.alignedAlloc(u8, .@"16", granule_padded_length(length, granule));
+    errdefer allocator.free(memory);
+    const image = place_in_granules(memory, length, granule);
+    @memcpy(image[0..head_len], head[0..head_len]);
+    try read_all(file, image[head_len..]);
+    return .{ .memory = memory, .image = image };
+}
+
+/// Bytes to allocate (16-byte aligned) so that `place_in_granules` fits.
+fn granule_padded_length(length: usize, granule: usize) usize {
+    if (granule <= 16) return length;
+    return std.mem.alignForward(usize, length, granule) + granule - 16;
+}
+
+/// `length` bytes of `memory` starting on a `granule` boundary; every granule
+/// they touch lies inside `memory`.
+fn place_in_granules(memory: []align(16) u8, length: usize, granule: usize) []align(16) u8 {
+    const address = @intFromPtr(memory.ptr);
+    const offset = std.mem.alignForward(usize, address, @max(granule, 16)) - address;
+    return @alignCast(memory[offset..][0..length]);
 }
 
 /// Out of line for the stack: its hash map work has no need to sit in
@@ -551,7 +598,13 @@ fn install_executable(pid: c.pid_t, entry: *ExecutableHandle) !*yasld.Executable
 /// consumes it: `defer node.delete()` runs on every exit, including the ones
 /// that install no image, so nothing holds it once this returns -- which is
 /// what the vfork handoff in `prepare_exec` relies on.
-pub fn load_executable_node(node: *kernel.fs.Node, path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t, load_start_us: u64) !*yasld.Executable {
+///
+/// `in_ram`: copy the image into RAM even when the filesystem maps it (romfs
+/// XIP) -- for a process being debugged (PTRACE_TRACEME), whose code a debugger
+/// has to be able to patch with breakpoints.  Flash cannot be written; the copy
+/// is private to this process, which the loader's shared-text cache keeps out
+/// of (it caches only mapped images).  Its shared libraries still run in place.
+pub fn load_executable_node(node: *kernel.fs.Node, path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t, load_start_us: u64, in_ram: bool) !*yasld.Executable {
     loader_lock.lock();
     defer loader_lock.unlock();
     last_executable_load_us = 0;
@@ -577,14 +630,17 @@ pub fn load_executable_node(node: *kernel.fs.Node, path: []const u8, process_all
             .memory = null,
         };
         errdefer if (entry.memory) |memory| process_allocator.free(memory);
-        if (attr.mapped_address_r) |address| {
+        const mapped = if (in_ram) null else attr.mapped_address_r;
+        if (mapped) |address| {
             if (@intFromPtr(address) % 4 != 0) return kernel.errno.ErrnoSet.ExecFormatError;
             const bytes: [*]align(4) const u8 = @ptrCast(@alignCast(address));
-            image = bytes[0..size];
+            // In place, the debug data costs nothing but address space; the
+            // loader is still handed only the image.
+            image = bytes[0..yasld.image_length(bytes[0..@min(size, yasld.image_length_prefix)], size)];
         } else {
-            const memory = try @call(.never_inline, read_image, .{ f, process_allocator, size });
-            entry.memory = memory;
-            image = memory;
+            const copy = try @call(.never_inline, read_image, .{ f, process_allocator, size });
+            entry.memory = copy.memory;
+            image = copy.image;
         }
         if (!builtin.is_test) CachePages.pool().set_prefers_slow(pid, yasld.image_prefers_slow_memory(image));
         if (yasld.get_loader()) |loader| {
@@ -675,7 +731,8 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
             const size = std.math.cast(usize, f.interface.size()) orelse return kernel.errno.ErrnoSet.ExecFormatError;
             if (size < yasld.header_size or @intFromPtr(header_address) % 4 != 0) return kernel.errno.ErrnoSet.ExecFormatError;
             const bytes: [*]align(4) const u8 = @ptrCast(@alignCast(header_address));
-            const library = loader.*.load_library(bytes[0..size], process_allocator, node.immutable_backing) catch |err| {
+            const image = bytes[0..yasld.image_length(bytes[0..@min(size, yasld.image_length_prefix)], size)];
+            const library = loader.*.load_library(image, process_allocator, node.immutable_backing) catch |err| {
                 log.err("loading library '{s}' failed: {s}", .{ path, @errorName(err) });
                 return map_load_error(err);
             };
@@ -759,7 +816,9 @@ fn release_executable_locked(pid: c.pid_t) void {
 }
 
 fn append_section(buffer: []u8, name: []const u8, section: []const u8, address: usize, size: usize) usize {
-    const written = vfmt.print(buffer, "{s} {s} 0x{x} 0x{x}\n", .{ name, section, address, size });
+    // An empty region has no address worth printing (its slice's pointer is
+    // whatever was left there, 0xaaaaaaaa in a debug build).
+    const written = vfmt.print(buffer, "{s} {s} 0x{x} 0x{x}\n", .{ name, section, if (size == 0) 0 else address, size });
     return written.len;
 }
 
@@ -773,6 +832,10 @@ fn format_module(module: *const yasld.Module, buffer: []u8, depth: usize) usize 
     const got = module.get_got();
     written += append_section(buffer[written..], name, ".text", @intFromPtr(text.ptr), text.len);
     written += append_section(buffer[written..], name, ".plt", @intFromPtr(plt.ptr), plt.len);
+    // The shared .rodata in the image, where a debugger finds the constants
+    // below const_rodata_length (docs/ydb_plan.md); only when there is some.
+    const rodata = module.get_rodata();
+    if (rodata.len != 0) written += append_section(buffer[written..], name, ".rodata", @intFromPtr(rodata.ptr), rodata.len);
     written += append_section(buffer[written..], name, ".data", @intFromPtr(data.ptr), data.len);
     written += append_section(buffer[written..], name, ".bss", @intFromPtr(bss.ptr), bss.len);
     written += append_section(buffer[written..], name, ".got", @intFromPtr(got.ptr), got.len);
@@ -1202,7 +1265,7 @@ test "Modules.LoadsAnExecutableFromANodeTheCallerAlreadyResolved" {
     var file_node = kernel.fs.Node.create_file(file_mock.get_interface());
 
     const pid: c.pid_t = 123;
-    _ = try load_executable_node(&file_node, "/test_executable", std.testing.allocator, pid, hal.time.get_time_us());
+    _ = try load_executable_node(&file_node, "/test_executable", std.testing.allocator, pid, hal.time.get_time_us(), false);
 
     try std.testing.expect(get_executable_for_pid(pid) != null);
     release_executable(pid);
@@ -1222,10 +1285,11 @@ test "Modules.ShouldRejectAnImageThatCameUpShort" {
 
     var file_mock = try FileMock.create(std.testing.allocator);
     // Unmapped: the ioctl leaves `mapped_address_r` alone, so the image is
-    // read into a copy -- and that stream ends before the image is whole.
+    // read into a copy -- its header, then the rest -- and that stream ends
+    // before the image is whole.
     _ = file_mock.expectCall("ioctl").willReturn(0);
     _ = file_mock.expectCall("size").willReturn(@as(u64, 512));
-    _ = file_mock.expectCall("read").willReturn(@as(isize, 300));
+    _ = file_mock.expectCall("read").willReturn(@as(isize, @intCast(yasld.image_length_prefix)));
     _ = file_mock.expectCall("seek").withArgs(.{ @as(i64, 0), @as(i32, c.SEEK_SET) }).willReturn(@as(i64, 0));
     _ = file_mock.expectCall("read").willReturn(@as(isize, 0));
 
@@ -1634,9 +1698,50 @@ test "Modules.ReadImageRewindsAndCompletesPartialReads" {
         }
     };
     _ = mock.expectCall("read").times(interface.mock.any{}).invoke(&Reader.call, null);
-    const image = try read_image(&file, std.testing.allocator, 512);
-    defer std.testing.allocator.free(image);
+    const copy = try read_image(&file, std.testing.allocator, 512);
+    defer std.testing.allocator.free(copy.memory);
+    const image = copy.image;
     for (image) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
+}
+
+test "Modules.ReadImageStopsAtTheDebugData" {
+    // A YAFF v6 header saying its debug data starts at 256: the copy is the
+    // 256 bytes before it, not the 512-byte file.
+    const Reader = struct {
+        var offset: usize = 0;
+        var file: [512]u8 = undefined;
+        pub fn call(_: ?*const anyopaque, args: @Tuple(&.{[]u8})) anyerror!isize {
+            const n = @min(args[0].len, file.len - offset);
+            @memcpy(args[0][0..n], file[offset..][0..n]);
+            offset += n;
+            return @intCast(n);
+        }
+    };
+    @memset(&Reader.file, 0x5a);
+    @memcpy(Reader.file[0..4], "YAFF");
+    Reader.file[7] = 6;
+    std.mem.writeInt(u32, Reader.file[136..140], 256, .little);
+    Reader.offset = 0;
+    var mock = try FileMock.create(std.testing.allocator);
+    var file = mock.get_interface();
+    defer file.interface.delete();
+    _ = mock.expectCall("seek").withArgs(.{ @as(i64, 0), @as(i32, c.SEEK_SET) }).willReturn(@as(i64, 0));
+    _ = mock.expectCall("read").times(interface.mock.any{}).invoke(&Reader.call, null);
+    const copy = try read_image(&file, std.testing.allocator, Reader.file.len);
+    defer std.testing.allocator.free(copy.memory);
+    const image = copy.image;
+    try std.testing.expectEqual(@as(usize, 256), image.len);
+    try std.testing.expectEqualSlices(u8, Reader.file[0..256], image);
+
+    // An offset past the end of the file, or into the header, is no debug
+    // data at all: the whole file is the image and the loader judges it.
+    try std.testing.expectEqual(@as(usize, 200), yasld.image_length(Reader.file[0..yasld.image_length_prefix], 200));
+    std.mem.writeInt(u32, Reader.file[136..140], 8, .little);
+    try std.testing.expectEqual(@as(usize, 512), yasld.image_length(Reader.file[0..yasld.image_length_prefix], 512));
+    // Nor is a header of another version.
+    std.mem.writeInt(u32, Reader.file[136..140], 256, .little);
+    Reader.file[7] = 5;
+    try std.testing.expectEqual(@as(usize, 512), yasld.image_length(Reader.file[0..yasld.image_length_prefix], 512));
 }
 
 test "Modules.ReadImageReleasesMemoryOnReadAndSeekErrors" {
@@ -1744,4 +1849,28 @@ test "Modules.UnmappedDlopenReturnsAnErrorWithoutPanicking" {
     _ = file.expectCall("ioctl").willReturn(0);
     _ = mock.expectCall("get").withArgs(.{"unmapped"}).willReturn(kernel.fs.Node.create_file(file.get_interface()));
     try std.testing.expectError(kernel.errno.ErrnoSet.NotImplemented, load_shared_library("/unmapped", std.testing.allocator, 123));
+}
+
+test "Modules.RamImageKeepsWholeCodeGranules" {
+    // QEMU's 1 KB code pages: the image starts on one, and the pages it
+    // touches end inside the allocation, wherever the pool put it (256-byte
+    // pages, so any 256-byte offset into a granule).
+    const granule = 1024;
+    for ([_]usize{ 1, 1000, 1024, 3000, 4096 }) |length| {
+        const padded = granule_padded_length(length, granule);
+        var backing: [8192]u8 align(1024) = undefined;
+        var start: usize = 0;
+        while (start < granule) : (start += 256) {
+            const memory: []align(16) u8 = @alignCast(backing[start..][0..padded]);
+            const image = place_in_granules(memory, length, granule);
+            try std.testing.expectEqual(@as(usize, 0), @intFromPtr(image.ptr) % granule);
+            try std.testing.expectEqual(length, image.len);
+            const end = std.mem.alignForward(usize, @intFromPtr(image.ptr) + length, granule);
+            try std.testing.expect(end <= @intFromPtr(memory.ptr) + memory.len);
+        }
+    }
+    // Without a granule the allocation is the image, as before.
+    try std.testing.expectEqual(@as(usize, 3000), granule_padded_length(3000, 16));
+    var exact: [64]u8 align(16) = undefined;
+    try std.testing.expectEqual(@as([*]u8, &exact), place_in_granules(&exact, 40, 16).ptr);
 }

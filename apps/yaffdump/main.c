@@ -456,6 +456,49 @@ static void disassemble_region(YaffFile *yaff, const YaffRegion *region, const L
 /* the metadata reports                                                    */
 /* ---------------------------------------------------------------------- */
 
+/* The debug data a -g link appended (YaffDebugHeader in tccyaff.h): its
+ * sections, or the separate file a stripped image points to. */
+static void print_debug(const YaffFile *yaff) {
+  const YaffHeader *h = &yaff->header;
+  YaffDebugHeader dh;
+  YaffDebugSection section;
+  char name[64];
+  uint32_t i = 0;
+  if (!h->debug_offset) {
+    printf("  debug data        (none)\n");
+    return;
+  }
+  if (h->debug_length < sizeof(dh) ||
+      yaff_read((YaffFile *)yaff, h->debug_offset, &dh, sizeof(dh)) != sizeof(dh) ||
+      memcmp(dh.magic, YAFF_DEBUG_MAGIC, 4) != 0) {
+    printf("  debug data        WARNING: no YDBG blob at 0x%x\n", h->debug_offset);
+    return;
+  }
+  printf("  debug data        %u bytes at 0x%x, %u sections, image crc 0x%08x\n", h->debug_length,
+         h->debug_offset, dh.section_count, dh.image_crc);
+  for (i = 1; i < dh.section_count; ++i) {
+    uint32_t got = yaff_read((YaffFile *)yaff, h->debug_offset + dh.sections_offset + i * sizeof(section),
+                             &section, sizeof(section));
+    if (got != sizeof(section) || section.name >= dh.names_size) {
+      printf("    WARNING: section %u is cut short\n", i);
+      return;
+    }
+    memset(name, 0, sizeof(name));
+    yaff_read((YaffFile *)yaff, h->debug_offset + dh.names_offset + section.name, name, sizeof(name) - 1);
+    if (section.type == YAFF_SHT_DEBUGLINK) {
+      char link[256];
+      memset(link, 0, sizeof(link));
+      yaff_read((YaffFile *)yaff, h->debug_offset + section.offset, link,
+                section.size < sizeof(link) - 1 ? section.size : sizeof(link) - 1);
+      printf("    %-18s -> %s\n", name, link);
+    } else if (section.type == 8 /* SHT_NOBITS */) {
+      printf("    %-18s at 0x%x, %u bytes\n", name, section.address, section.size);
+    } else {
+      printf("    %-18s %u bytes\n", name, section.size);
+    }
+  }
+}
+
 static void print_header(const YaffFile *yaff) {
   const YaffHeader *h = &yaff->header;
   printf("%s: YAFF v%u %s, %s\n", yaff->path, h->yaff_version, yaff_module_type_name(h->module_type),
@@ -481,6 +524,7 @@ static void print_header(const YaffFile *yaff) {
   } else {
     printf("  arch section      (none)\n");
   }
+  print_debug(yaff);
 }
 
 /* The region walk doubles as a check on the file: the regions have to end
@@ -507,7 +551,17 @@ static void print_regions(const YaffFile *yaff) {
     }
     printf("  %-8s %10s %10s %10u\n", region->name, module, file, region->length);
   }
-  if (last == yaff->file_size) {
+  /* Debug data follows the image, 4-aligned, and ends the file. */
+  if (yaff->header.debug_offset) {
+    const YaffHeader *h = &yaff->header;
+    if (h->debug_offset >= last && h->debug_offset - last < 4 &&
+        h->debug_offset + h->debug_length == yaff->file_size) {
+      printf("\n  regions and the debug data account for every byte of the file\n");
+    } else {
+      printf("\n  WARNING: regions end at 0x%x, debug data is 0x%x+0x%x, the file is 0x%x bytes\n", last,
+             h->debug_offset, h->debug_length, yaff->file_size);
+    }
+  } else if (last == yaff->file_size) {
     printf("\n  regions account for every byte of the file\n");
   } else {
     printf("\n  WARNING: regions end at 0x%x but the file is 0x%x bytes\n", last, yaff->file_size);

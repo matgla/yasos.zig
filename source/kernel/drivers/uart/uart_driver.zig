@@ -111,6 +111,12 @@ pub fn UartDriver(comptime UartType: anytype) type {
                 }) catch |err| {
                     return err;
                 };
+                // ISIG starts on, as on Linux: ^C is SIGINT until a program
+                // puts the console in raw mode (UartFile.apply_termios).
+                const Decls = if (@TypeOf(uart) == type) uart else @TypeOf(uart);
+                if (@hasDecl(Decls, "set_interrupt_char")) {
+                    uart.set_interrupt_char(3, &kernel.process.process_manager.note_console_interrupt);
+                }
             }
 
             pub fn unload(self: *Self) bool {

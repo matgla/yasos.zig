@@ -598,7 +598,9 @@ pub fn sys_exit(arg: *const anyopaque) !i32 {
     }
     // Encode in Linux wait-status format: normal exit = (code << 8)
     // so that WEXITSTATUS/WIFEXITED macros work correctly.
-    const wait_status = @as(i32, context.*) << 8;
+    // A tracee killed by its tracer (PTRACE_KILL) reports the signal instead:
+    // WIFSIGNALED, WTERMSIG.
+    const wait_status = if (process.kill_signal != 0) @as(i32, process.kill_signal) else @as(i32, context.*) << 8;
     if (process._parent) |parent| {
         parent.child_exit_code = wait_status;
     }
@@ -627,6 +629,8 @@ pub fn sys_read(arg: *const anyopaque) !i32 {
             // Safe, serialized point to flush the buffered kernel log to SD
             // (no-op unless CONFIG_INSTRUMENTATION_LOG_TO_SD and data pending).
             kernel.file_log.drain();
+            // A blocking read a signal cut short (the console, a pipe).
+            if (result_out.* < 0 and process.signal_pending()) return ErrnoSet.InterruptedSystemCall;
             return 0;
         }
     }
@@ -709,16 +713,50 @@ pub fn sys_poll(arg: *const anyopaque) !i32 {
             if (now >= d) return 0;
             slice = @min(slice, d - now);
         }
-        time.sleep_us(@intCast(slice));
+        if (!process_manager.instance.get_current_process().sleep_for_us_interruptible(slice))
+            return ErrnoSet.InterruptedSystemCall;
     }
 }
 
+/// kill(2).  Another process gets the signal through
+/// `ProcessManager.send_signal`; the caller itself (pid 0 too: it is its own
+/// process group) ends here and now unless it ignores or catches the signal,
+/// its exit reporting the signal.
 pub fn sys_kill(arg: *const anyopaque) !i32 {
-    _ = arg;
+    const context: *const c.kill_context = @ptrCast(@alignCast(arg));
+    const process = process_manager.instance.get_current_process();
+    if (context.pid < 0) return ErrnoSet.NotPermitted;
+    if (context.pid != 0 and context.pid != process.pid) return process_manager.instance.send_signal(context.pid, context.sig);
+    if (context.sig < 0 or context.sig > 31) return ErrnoSet.InvalidArgument;
+    if (context.sig == 0) return 0;
+    if (!process.signal_is_fatal(@intCast(context.sig))) return 0;
     // Same hand-off as `sys_exit`; closed by `delete_process`.
     preempt.preempt_disable();
+    process_manager.instance.delete_process(process.pid, context.sig);
+    return 0;
+}
+
+/// sigaction(2): what a signal does to the caller (libc signal.c).  There are
+/// no handlers to run, so the kernel keeps only whether the signal is ignored,
+/// caught (both: it does not end the process) or left to its default.
+pub fn sys_sigaction(arg: *const anyopaque) !i32 {
+    const context: *const c.sigaction_context = @ptrCast(@alignCast(arg));
+    if (context.sig < 1 or context.sig > 31) return ErrnoSet.InvalidArgument;
     const process = process_manager.instance.get_current_process();
-    process_manager.instance.delete_process(process.pid, -1);
+    const bit = @as(u32, 1) << @intCast(context.sig);
+    if (context.old) |old| {
+        const out = try user_out(c_int, old);
+        out.* = if (process.sig_ignored & bit != 0) 1 else if (process.sig_handled & bit != 0) 2 else 0;
+    }
+    if (context.disposition < 0) return 0;
+    if (context.sig == c.SIGKILL or context.sig == c.SIGSTOP) return ErrnoSet.InvalidArgument;
+    process.sig_ignored &= ~bit;
+    process.sig_handled &= ~bit;
+    switch (context.disposition) {
+        0 => {},
+        1 => process.sig_ignored |= bit,
+        else => process.sig_handled |= bit,
+    }
     return 0;
 }
 
@@ -738,6 +776,7 @@ pub fn sys_write(arg: *const anyopaque) !i32 {
         if (maybe_file) |*file| {
             const is_tty = file.interface.filetype() == FileType.CharDevice;
             result_out.* = file.interface.write(data);
+            if (result_out.* < 0 and process.signal_pending()) return ErrnoSet.InterruptedSystemCall;
             if (result_out.* == -1 and file.interface.filetype() == FileType.Fifo) {
                 return file.as(kernel.fs.PipeFile).data().write_error();
             }
@@ -884,6 +923,73 @@ pub fn sys_chown(arg: *const anyopaque) !i32 {
     const gid: u32 = if (context.gid == std.math.maxInt(c.gid_t)) unchanged else context.gid;
     try fs.get_vfs().chown(path, uid, gid, follow);
     return 0;
+}
+
+/// ptrace(2): the requests and their limits are in libc sys/ptrace.h. The
+/// work is in ProcessManager (`ptrace_*`), under `proctable_lock`; here only
+/// the caller's pointers are checked and copied.
+pub fn sys_ptrace(arg: *const anyopaque) !i32 {
+    const context: *const c.ptrace_context = @ptrCast(@alignCast(arg));
+    const pm = &process_manager.instance;
+    const pid = context.pid;
+    const address = @intFromPtr(context.addr);
+    const Regs = arch.process.UserRegisters;
+    const FpRegs = arch.process.FpRegisters;
+    switch (context.request) {
+        c.PTRACE_TRACEME => return pm.ptrace_traceme(),
+        c.PTRACE_ATTACH => return pm.ptrace_attach(pid),
+        c.PTRACE_CONT, c.PTRACE_DETACH, c.PTRACE_KILL, c.PTRACE_INTERRUPT => {
+            return pm.ptrace_resume(context.request, pid, @intFromPtr(context.data));
+        },
+        c.PTRACE_PEEKTEXT, c.PTRACE_PEEKDATA => {
+            const out = try user_out(u32, @ptrCast(@alignCast(context.data)));
+            out.* = try pm.ptrace_peek(pid, address);
+            return 0;
+        },
+        c.PTRACE_POKETEXT, c.PTRACE_POKEDATA => {
+            try pm.ptrace_poke(pid, address, @truncate(@intFromPtr(context.data)));
+            return 0;
+        },
+        c.PTRACE_GETREGS => {
+            const out = try user_out(Regs, @ptrCast(@alignCast(context.data)));
+            out.* = try pm.ptrace_get_registers(pid);
+            return 0;
+        },
+        c.PTRACE_SETREGS => {
+            const in = try user_in(Regs, @ptrCast(@alignCast(context.data)));
+            const registers = in.*;
+            try pm.ptrace_set_registers(pid, &registers);
+            return 0;
+        },
+        // A word of `struct user_regs`, at a byte offset.
+        c.PTRACE_PEEKUSER, c.PTRACE_POKEUSER => {
+            if (address % 4 != 0 or address >= @sizeOf(Regs)) return kernel.errno.ErrnoSet.InputOutputError;
+            var registers = try pm.ptrace_get_registers(pid);
+            const words: *[@sizeOf(Regs) / 4]u32 = @ptrCast(&registers);
+            if (context.request == c.PTRACE_PEEKUSER) {
+                const out = try user_out(u32, @ptrCast(@alignCast(context.data)));
+                out.* = words[address / 4];
+                return 0;
+            }
+            words[address / 4] = @truncate(@intFromPtr(context.data));
+            try pm.ptrace_set_registers(pid, &registers);
+            return 0;
+        },
+        c.PTRACE_GETVFPREGS => {
+            const out = try user_out(FpRegs, @ptrCast(@alignCast(context.data)));
+            out.* = try pm.ptrace_get_fp_registers(pid);
+            return 0;
+        },
+        c.PTRACE_SETVFPREGS => {
+            const in = try user_in(FpRegs, @ptrCast(@alignCast(context.data)));
+            const registers = in.*;
+            try pm.ptrace_set_fp_registers(pid, &registers);
+            return 0;
+        },
+        // Not there: a debugger steps with breakpoints.
+        c.PTRACE_SINGLESTEP => return kernel.errno.ErrnoSet.NotImplemented,
+        else => return kernel.errno.ErrnoSet.InputOutputError,
+    }
 }
 
 /// lseek(2) with a 64-bit offset, for block devices bigger than 2 GiB.
@@ -1290,14 +1396,17 @@ pub fn sys_nanosleep(arg: *const anyopaque) !i32 {
         const nanoseconds = in.tv_nsec;
         // `> 0`, not `!= 0`: a negative field is out of spec, and the casts
         // below are to unsigned.
-        if (seconds > 0) {
-            time.sleep_ms(@intCast(seconds * 1000));
+        // Interruptible: a signal for this process ends the sleep (EINTR).
+        const process = process_manager.instance.get_current_process();
+        if (seconds > 0 and !process.sleep_for_us_interruptible(@as(u64, @intCast(seconds)) * 1_000_000)) {
+            return ErrnoSet.InterruptedSystemCall;
         }
         if (nanoseconds > 0) {
             // Rounded up. Truncating made every request under a microsecond a
             // no-op, the same way `us / 1000` in `sleep_for_us` did for every
             // request under a millisecond.
-            time.sleep_us(@intCast(@divFloor(nanoseconds + 999, 1000)));
+            if (!process.sleep_for_us_interruptible(@intCast(@divFloor(nanoseconds + 999, 1000))))
+                return ErrnoSet.InterruptedSystemCall;
         }
     }
     return 0;

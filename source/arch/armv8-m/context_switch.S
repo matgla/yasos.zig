@@ -253,6 +253,10 @@ process_syscall_return_without_fpu:
   // continue running privileged after returning from a syscall.
   push {r0, lr}
   bl apply_current_privilege
+  // A ptrace stop asked of this process while it was in the syscall is taken
+  // here, where its own frame is on PSP again: the check pends PendSV, which
+  // tail-chains after this return and stores the user context.
+  bl syscall_return_ptrace_check
   pop {r0, lr}
   bx lr
   //ldmia r2!, {r1}

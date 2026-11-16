@@ -82,6 +82,20 @@ pub fn Uart(comptime index: usize, comptime pins: Pins, comptime uart: anytype) 
             return self.impl.bytes_to_read();
         }
 
+        /// The tty's interrupt character (ISIG, ^C): while set, the receive
+        /// path hands that byte to `handler` -- in interrupt context -- instead
+        /// of queueing it, so it reaches the kernel whether or not anybody
+        /// reads the console.  Null switches it off.
+        pub fn set_interrupt_char(self: Self, ch: ?u8, handler: ?*const fn () void) void {
+            if (@hasDecl(UartImplementation, "set_interrupt_char")) self.impl.set_interrupt_char(ch, handler);
+        }
+
+        /// A backend with no receive interrupt looks at the line now; the tick
+        /// calls it, so the interrupt character is seen while nobody reads.
+        pub fn poll_rx(self: Self) void {
+            if (@hasDecl(UartImplementation, "poll_rx")) self.impl.poll_rx();
+        }
+
         /// Receive-path loss accounting. Backends that do not track it report
         /// zeros rather than failing to compile, so a diagnostic reader can be
         /// written once and built for every board.

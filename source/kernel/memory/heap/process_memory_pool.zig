@@ -1115,6 +1115,23 @@ pub const ProcessMemoryPool = struct {
         return false;
     }
 
+    /// True if [address, address + bytes) lies inside one live, resident mapping
+    /// of `pid` -- the memory ptrace may read or write in a tracee.
+    pub fn owns_range(self: *const ProcessMemoryPool, pid: c.pid_t, address: usize, bytes: usize) bool {
+        const end = std.math.add(usize, address, bytes) catch return false;
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        const mapping = self.memory_map.getPtr(pid) orelse return false;
+        var next = mapping.first;
+        while (next) |entity_node| {
+            const entity: *const ProcessMemoryEntity = @fieldParentPtr("node", entity_node);
+            const start = @intFromPtr(entity.address.ptr);
+            if (address >= start and end <= start + entity.address.len) return !entity.swapped();
+            next = entity_node.next;
+        }
+        return false;
+    }
+
     pub fn get_used_size(self: ProcessMemoryPool) usize {
         var used: usize = 0;
         for (self.regions) |region| {

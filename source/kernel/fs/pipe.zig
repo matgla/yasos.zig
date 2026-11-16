@@ -164,6 +164,14 @@ pub const Pipe = struct {
             hal.irq.trigger(.pendsv);
             process.reevaluate_state();
         }
+        process.interruptible_wait = false;
+    }
+
+    /// A signal for this process ends a blocked read or write (EINTR in
+    /// sys_read/sys_write), so it gets to where the signal is taken.
+    fn interrupted() bool {
+        if (!kernel.process.process_manager.is_initialized()) return false;
+        return kernel.process.process_manager.instance.get_current_process().signal_pending();
     }
 
     /// Mark this process blocked on `token`. Caller holds `pipe_lock`, which is
@@ -171,7 +179,10 @@ pub const Pipe = struct {
     /// as a waker is concerned.
     fn prepare_wait(token: *const anyopaque) bool {
         if (!kernel.process.process_manager.is_initialized()) return false;
-        kernel.process.process_manager.instance.get_current_process().block_on(token);
+        const process = kernel.process.process_manager.instance.get_current_process();
+        // `wait` re-checks the pipe when woken, so a signal may wake it early.
+        process.interruptible_wait = true;
+        process.block_on(token);
         return true;
     }
 
@@ -200,7 +211,7 @@ pub const Pipe = struct {
                     // Nothing to take. Only a live writer makes it worth
                     // waiting for; without one this is the end of the stream.
                     if (self._writers == 0) return 0;
-                    if (nonblocking) return -1;
+                    if (nonblocking or interrupted()) return -1;
                     waiting = prepare_wait(&self._data_available);
                     if (!waiting) return 0;
                 }
@@ -248,7 +259,7 @@ pub const Pipe = struct {
                 }
                 stored = self.put(data[written..]);
                 if (stored == 0) {
-                    if (nonblocking) {
+                    if (nonblocking or interrupted()) {
                         return if (written == 0) -1 else @intCast(written);
                     }
                     waiting = prepare_wait(&self._space_available);

@@ -117,3 +117,19 @@ pub const HostProcess = struct {
         _ = stack_size;
     }
 };
+
+/// ptrace's register views (arm-m/process.zig).  The host process keeps no
+/// stored exception frame, so it has no accessors and ptrace reads nothing.
+pub const UserRegisters = extern struct {
+    r: [13]u32,
+    sp: u32,
+    lr: u32,
+    pc: u32,
+    xpsr: u32,
+    orig_r0: u32,
+};
+
+pub const FpRegisters = extern struct {
+    fpregs: [32]u64,
+    fpscr: u32,
+};

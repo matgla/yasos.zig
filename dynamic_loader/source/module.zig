@@ -694,6 +694,15 @@ pub const Module = struct {
         return &.{};
     }
 
+    /// The shared .rodata in the image (RELRO), empty when the module keeps all
+    /// of its rodata in the per-process data region.
+    pub fn get_rodata(self: *const Module) []const u8 {
+        if (self.shared_data) |shared_data| {
+            if (shared_data.rodata) |rodata| return rodata;
+        }
+        return &.{};
+    }
+
     pub fn get_plt(self: *const Module) []const u8 {
         if (self.shared_data) |shared_data| {
             if (shared_data.plt) |plt| {

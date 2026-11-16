@@ -22,6 +22,14 @@ const config = @import("config");
 
 const hal = @import("hal");
 const arch = @import("arch");
+// The unit tests build the kernel without a board.
+const board = if (@import("builtin").is_test) struct {
+    pub const uart = struct {
+        pub const uart0 = struct {
+            pub fn poll_rx() void {}
+        };
+    };
+} else @import("board");
 
 const process_manager = @import("../process_manager.zig");
 const smp = @import("../smp.zig");
@@ -57,6 +65,10 @@ pub export fn irq_systick() void {
     // lose increments in the non-atomic `+%=`. Nothing is lost by sampling from
     // one core; the XIP cache is chip-wide and already counts both cores.
     if (kernel_sync.percpu.current_core() == timekeeper_core) {
+        // A console without a receive interrupt shows its ^C only when looked
+        // at (the QEMU boards' CMSDK UART); no-op where the receive path runs
+        // on its own.
+        board.uart.uart0.poll_rx();
         xip_stats.accumulate();
         // The regulator's VOUT_OK is live status, so a sag is seen only if it
         // is still under way when a tick looks. Timekeeper-only for the same

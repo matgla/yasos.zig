@@ -134,6 +134,12 @@ once — prefer that when a bug class repeats.
   `--build` for the board config + images, `--opt=-O0` for one level, `--no-wait` and
   `--logs`. Holds the board lock, flashes private images with hash checks, and keeps a
   per-checkout tree on the card (`/root/selfhost-<label>`). Rig side: `scripts/rig/`.
+- **Debug data and `strip`** ([`docs/debugging.md`](docs/debugging.md)): `tcc -g`
+  appends a `YDBG` blob (DWARF + full symtab) after the YAFF image (v6,
+  `debug_offset`); `strip [-f FILE.debug]` takes it out;
+  `libs/tinycc/scripts/yaff_debug_to_elf.py` makes an ELF of it for gdb/readelf.
+  `ptrace(2)` (stops, UDF #1 breakpoints, registers, memory, ATTACH to
+  descendants; `apps/ptracetest` on the device) -- a traced exec runs from RAM.
 - **`scripts/qemu_capture_yaff.py`** — older RAM-scan capture (slower/flakier;
   prefer the FAT drive).
 - **`scripts/run_qemu_smoke.sh`** — the pytest smoke suite on QEMU (no hardware).

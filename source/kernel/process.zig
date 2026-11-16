@@ -168,6 +168,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub const ExitedChild = struct {
             pid: c.pid_t,
             status: i32,
+            /// This process is the parent, and collecting the record releases
+            /// the pid. A tracer that is not the parent gets a copy of the exit
+            /// too (ptrace), which leaves the pid to the parent.
+            owned: bool = true,
             node: std.DoublyLinkedList.Node = .{},
         };
 
@@ -251,6 +255,45 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// exec'd, not a limit anyone asked for, so the next exec replaces it
         /// rather than handing it on (see `exec_stack_limit`). setrlimit clears it.
         stack_limit_from_image: bool = false,
+        /// ptrace: the process debugging this one (PTRACE_TRACEME names the
+        /// parent, PTRACE_ATTACH the caller), null when nobody does.  Kept across
+        /// exec, as on Linux, and exec of a traced process loads the image into
+        /// RAM even from the XIP romfs, where its code could not take a
+        /// breakpoint.  Cleared on every tracee when the tracer exits
+        /// (`ProcessManager.detach_tracees_locked`), so it never dangles.
+        tracer: ?*Self = null,
+        /// The signal a tracee is stopped with (SIGTRAP at exec or a breakpoint,
+        /// SIGILL/SIGSEGV/... at a fault, SIGSTOP when asked), 0 while it runs.
+        /// Set only in `settle_ptrace_stop`, once the context is stored, which is
+        /// what makes the registers a tracer reads the real ones.
+        ptrace_stop: u8 = 0,
+        /// A stop decided where the context is not stored yet -- the fault
+        /// handler, exec, a syscall return -- and made `ptrace_stop` by the next
+        /// `release_from_core`.  Keeps the process off the run queue meanwhile.
+        ptrace_stop_pending: u8 = 0,
+        /// The tracer's waitpid has reported the current stop; it reports each
+        /// stop once.
+        ptrace_stop_reported: bool = false,
+        /// A stop asked of this process from outside, as the signal it stops
+        /// with (0 none): PTRACE_ATTACH/INTERRUPT (SIGSTOP), a signal sent to a
+        /// tracee, or a kill on its way (`kill_signal`).  Taken at the next point
+        /// it is in user code with its context stored -- a switch while it runs
+        /// user code, or a syscall return -- and it cuts short an interruptible
+        /// wait (`signal_pending`).
+        stop_request: u8 = 0,
+        /// Signals this process ignores (SIG_IGN, kept across exec) and catches
+        /// (a handler, reset by exec), bit n for signal n.  There are no handlers
+        /// to run, so both keep the signal from ending the process.
+        sig_ignored: u32 = 0,
+        sig_handled: u32 = 0,
+        /// Waiting somewhere a signal may cut short -- a pipe, waitpid on a child
+        /// -- where the wait re-checks its condition when woken.  Sleeping mutexes
+        /// and semaphores are not: their waiters take a wakeup as the lock.
+        interruptible_wait: bool = false,
+        /// Killed by this signal (PTRACE_KILL, or a signal passed to PTRACE_CONT):
+        /// the process is resumed at `_exit`, and its exit reports this signal
+        /// instead of an exit code.
+        kill_signal: u8 = 0,
         node: std.DoublyLinkedList.Node,
         _parent: ?*Self = null,
         _child: ?*Self = null,
@@ -493,6 +536,10 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                 ._vfork_context = null,
                 ._initialized = false,
                 .stack_limit_from_image = self.stack_limit_from_image,
+                // Dispositions are inherited, as by fork(); exec resets the
+                // caught ones (`finish_exec`).
+                .sig_ignored = self.sig_ignored,
+                .sig_handled = self.sig_handled,
             };
             cold.* = .{
                 .allocator = self.cold.allocator,
@@ -748,6 +795,13 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             if (self.state == State.Terminated) {
                 return;
             }
+            // A stopped tracee runs only when its tracer lets it. Like a
+            // process blocking itself, `Running -> Blocked` is the one owner's
+            // move: a stop is decided on the core running the process.
+            if (self.ptrace_stop != 0 or self.ptrace_stop_pending != 0) {
+                self.state = Process.State.Blocked;
+                return;
+            }
             if (self.waiting_for != null) {
                 self.state = Process.State.Blocked;
                 return;
@@ -772,9 +826,107 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
             if (self.state == State.Running) {
                 self.state = State.Ready;
             }
+            // The context is stored now: a stop decided while it ran can be
+            // shown to the tracer.
+            self.settle_ptrace_stop();
             // It may have blocked itself while it was running, so the wait lists
             // still get the final word.
             self.reevaluate_state();
+        }
+
+        /// Make a pending ptrace stop visible: `ptrace_stop` set, the tracer
+        /// woken.  Only where this process's context is stored and no core runs
+        /// it -- `release_from_core`, or a tracer finding it switched out in user
+        /// code -- with `proctable_lock` held.  A stop asked for from outside is
+        /// taken here only when the process was switched out in user code: inside
+        /// a syscall its stored context is the kernel's, not its own registers,
+        /// so that one waits for the syscall to return
+        /// (`ProcessManager.syscall_return_ptrace_check`).
+        ///
+        /// Allocation-free: this runs inside the context switch.
+        pub fn settle_ptrace_stop(self: *Self) void {
+            if (self.ptrace_stop_pending == 0 and self.stop_request != 0 and !self.resume_privileged) {
+                self.ptrace_stop_pending = self.stop_request;
+                self.stop_request = 0;
+            }
+            if (self.ptrace_stop_pending == 0) return;
+            const signal = self.ptrace_stop_pending;
+            self.ptrace_stop_pending = 0;
+            if (self.kill_signal != 0) {
+                // PTRACE_KILL of a running process: it was stopped only to be
+                // sent to `_exit`.
+                self.resume_at_exit();
+                return;
+            }
+            self.ptrace_stop = signal;
+            self.ptrace_stop_reported = false;
+            self.wake_tracer();
+        }
+
+        /// Wake a tracer parked in waitpid: it blocks on its collection list
+        /// for its tracees, whichever form of the call (see `waitpid`).
+        pub fn wake_tracer(self: *Self) void {
+            if (self.tracer) |tracer| tracer.wake_from(tracer.any_child_blocker());
+        }
+
+        /// Resume this switched-out process at `_exit`: its saved frame is
+        /// rewritten to call it.  For a stopped tracee killed by its tracer,
+        /// whose `kill_signal` the exit then reports.
+        pub fn resume_at_exit(self: *Self) void {
+            if (comptime @hasDecl(ImplType, "redirect_saved_frame")) {
+                // The kernel's `_exit` stub (interrupts/system_stubs.zig), which
+                // the fault path resumes a killed process at the same way.
+                const exit_stub = @extern(*const fn (c_int) callconv(.c) void, .{ .name = "_exit" });
+                self.impl.redirect_saved_frame(@intFromPtr(exit_stub), 0);
+            }
+            self.ptrace_stop = 0;
+            self.ptrace_stop_pending = 0;
+            self.stop_request = 0;
+        }
+
+        /// The registers of a stopped tracee, from its stored context; null when
+        /// that context cannot be read (or the architecture has none).
+        pub fn user_registers(self: *const Self) ?arch_process.UserRegisters {
+            if (comptime !@hasDecl(ImplType, "read_user_registers")) return null;
+            return self.impl.read_user_registers();
+        }
+
+        pub fn set_user_registers(self: *Self, registers: *const arch_process.UserRegisters) bool {
+            if (comptime !@hasDecl(ImplType, "write_user_registers")) return false;
+            return self.impl.write_user_registers(registers);
+        }
+
+        pub fn fp_registers(self: *const Self) ?arch_process.FpRegisters {
+            if (comptime !@hasDecl(ImplType, "read_fp_registers")) return null;
+            return self.impl.read_fp_registers();
+        }
+
+        pub fn set_fp_registers(self: *Self, registers: *const arch_process.FpRegisters) bool {
+            if (comptime !@hasDecl(ImplType, "write_fp_registers")) return false;
+            return self.impl.write_fp_registers(registers);
+        }
+
+        /// A stop or a kill is on its way: an interruptible wait gives up (EINTR)
+        /// so the process reaches the point where it is taken.
+        pub fn signal_pending(self: *const Self) bool {
+            return self.stop_request != 0 or self.kill_signal != 0 or self.ptrace_stop_pending != 0;
+        }
+
+        /// Whether `sig` would end this process now: not ignored, not caught.
+        /// SIGKILL always does.
+        pub fn signal_is_fatal(self: *const Self, sig: u8) bool {
+            if (sig == c.SIGKILL) return true;
+            const bit = @as(u32, 1) << @intCast(sig & 31);
+            return (self.sig_ignored | self.sig_handled) & bit == 0;
+        }
+
+        /// Whether `self` descends from `ancestor` -- what PTRACE_ATTACH asks.
+        pub fn descends_from(self: *const Self, ancestor: *const Self) bool {
+            var it = self._parent;
+            while (it) |p| : (it = p._parent) {
+                if (p == ancestor) return true;
+            }
+            return false;
         }
 
         pub fn is_blocked_by(self: Self, semaphore: *const Semaphore) bool {
@@ -820,11 +972,22 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// effort: if the record cannot be allocated the exit is still reported
         /// through `child_exit_code`.
         pub fn record_child_exit(self: *Self, child_pid: c.pid_t, status: i32) void {
+            self.record_exit(child_pid, status, true);
+        }
+
+        /// A tracee this process is not the parent of has exited: the tracer
+        /// learns of it as a parent would, but collecting it leaves the pid to
+        /// the parent.
+        pub fn record_tracee_exit(self: *Self, tracee_pid: c.pid_t, status: i32) void {
+            self.record_exit(tracee_pid, status, false);
+        }
+
+        fn record_exit(self: *Self, child_pid: c.pid_t, status: i32, owned: bool) void {
             const entry = self.cold.allocator.create(ExitedChild) catch {
                 log.err("no room to record the exit of pid={d}", .{child_pid});
                 return;
             };
-            entry.* = .{ .pid = child_pid, .status = status };
+            entry.* = .{ .pid = child_pid, .status = status, .owned = owned };
             self._exited_children.append(&entry.node);
             // Anything parked in waitpid(-1) is waiting on exactly this list.
             self.wake_from(&self._exited_children);
@@ -856,7 +1019,7 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         pub fn release_exited_children(self: *Self, owner: anytype) void {
             while (self._exited_children.pop()) |node| {
                 const entry: *ExitedChild = @fieldParentPtr("node", node);
-                owner.release_pid(entry.pid);
+                if (entry.owned) owner.release_pid(entry.pid);
                 self.cold.allocator.destroy(entry);
             }
         }
@@ -1053,6 +1216,21 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
                     // Context switch, we are waiting for the deadline.
                     hal.irq.trigger(.pendsv);
                 }
+            }
+        }
+
+        /// `sleep_for_us` that a signal for this process ends early (nanosleep,
+        /// poll): false when it did.  Kernel delays keep the plain one -- a
+        /// hardware wait is not shortened by a pending kill.
+        pub fn sleep_for_us_interruptible(self: *Self, us: u64) bool {
+            const deadline = hal.time.get_time_us() +| us;
+            self.sleeping_until_us = deadline;
+            defer self.sleeping_until_us = 0;
+            while (true) {
+                if (self.signal_pending()) return false;
+                const now = hal.time.get_time_us();
+                if (now >= deadline) return true;
+                if (deadline - now >= tick_us) hal.irq.trigger(.pendsv);
             }
         }
 
@@ -1922,4 +2100,102 @@ test "FileHandle.ShouldRejectIteratorForFileDescriptor" {
     defer handle.close();
 
     try std.testing.expectError(kernel.errno.ErrnoSet.NotADirectory, handle.get_iterator());
+}
+
+test "Process.PtraceStopIsShownOnlyOnceTheContextIsStored" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var tracer = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 170, false);
+    defer tracer.deinit();
+    var tracee = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, tracer, 171, false);
+    defer tracee.deinit();
+    tracee.tracer = tracer;
+
+    // The tracer parks in waitpid on its collection list.
+    tracer.block_on(tracer.any_child_blocker());
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, tracer.state);
+
+    // A breakpoint while the tracee runs: off the run queue at once, but the
+    // tracer hears nothing until the core has stored the context.
+    tracee.state = .Running;
+    tracee.resume_privileged = false;
+    tracee.ptrace_stop_pending = c.SIGTRAP;
+    tracee.reevaluate_state();
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, tracee.state);
+    try std.testing.expectEqual(@as(u8, 0), tracee.ptrace_stop);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, tracer.state);
+
+    tracee.release_from_core();
+    try std.testing.expectEqual(@as(u8, c.SIGTRAP), tracee.ptrace_stop);
+    try std.testing.expectEqual(@as(u8, 0), tracee.ptrace_stop_pending);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, tracee.state);
+    try std.testing.expect(tracer.state != ProcessUnderTest.State.Blocked);
+
+    // PTRACE_CONT: runnable again.
+    tracee.ptrace_stop = 0;
+    tracee.reevaluate_state();
+    try std.testing.expectEqual(ProcessUnderTest.State.Ready, tracee.state);
+}
+
+test "Process.PtraceStopRequestWaitsForUserCode" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var tracer = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 172, false);
+    defer tracer.deinit();
+    var tracee = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, tracer, 173, false);
+    defer tracee.deinit();
+    tracee.tracer = tracer;
+    tracee.stop_request = c.SIGSTOP;
+
+    // Switched out inside a system call: its stored context is the kernel's,
+    // so the request waits.
+    tracee.state = .Running;
+    tracee.resume_privileged = true;
+    tracee.release_from_core();
+    try std.testing.expectEqual(@as(u8, 0), tracee.ptrace_stop);
+    try std.testing.expectEqual(@as(u8, c.SIGSTOP), tracee.stop_request);
+
+    // Switched out in user code: stopped, with SIGSTOP.
+    tracee.state = .Running;
+    tracee.resume_privileged = false;
+    tracee.release_from_core();
+    try std.testing.expectEqual(@as(u8, c.SIGSTOP), tracee.ptrace_stop);
+    try std.testing.expectEqual(@as(u8, 0), tracee.stop_request);
+    try std.testing.expectEqual(ProcessUnderTest.State.Blocked, tracee.state);
+}
+
+test "Process.TraceeExitRecordLeavesThePidToTheParent" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var tracer = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 174, false);
+    defer tracer.deinit();
+    tracer.record_tracee_exit(175, 9);
+    tracer.record_child_exit(176, 0x100);
+    const tracee_exit = tracer.take_exited_child(175).?;
+    try std.testing.expect(!tracee_exit.owned);
+    try std.testing.expectEqual(@as(i32, 9), tracee_exit.status);
+    try std.testing.expect(tracer.take_exited_child(176).?.owned);
+}
+
+test "Process.DescendsFromWalksTheParentChain" {
+    var pool = ProcessMemoryPoolForTests{};
+    var arg: usize = 1;
+    hal.time.impl.set_time(0);
+
+    var root = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, null, 177, false);
+    defer root.deinit();
+    var child = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, root, 178, false);
+    defer child.deinit();
+    var grandchild = try ProcessUnderTest.init(std.testing.allocator, 1024, &process_init, &arg, "/", &pool, child, 179, false);
+    defer grandchild.deinit();
+    try std.testing.expect(grandchild.descends_from(root));
+    try std.testing.expect(grandchild.descends_from(child));
+    try std.testing.expect(!root.descends_from(grandchild));
+    try std.testing.expect(!child.descends_from(child));
 }

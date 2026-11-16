@@ -53,6 +53,23 @@ pub const Image = @import("loader.zig").Image;
 
 pub const header_size: usize = @sizeOf(Header);
 
+/// How much of a YAFF file `image_length` needs to see: through debug_length.
+pub const image_length_prefix: usize = @offsetOf(Header, "debug_length") + @sizeOf(u32);
+
+/// The bytes of a `file_size`-byte YAFF file the loader uses: everything up to
+/// its debug data (header.debug_offset, YAFF_VERSION 6), which only a debugger
+/// reads -- it can be several times the size of the image.  `prefix` is the
+/// start of the file; a file too short to tell, of another version or with no
+/// debug data is image to its end, and the loader judges the rest.
+pub fn image_length(prefix: []const u8, file_size: usize) usize {
+    const std = @import("std");
+    if (prefix.len < image_length_prefix or !std.mem.eql(u8, prefix[0..4], "YAFF") or
+        prefix[@offsetOf(Header, "yaff_version")] != @import("header.zig").supported_yaff_version) return file_size;
+    const offset = std.mem.readInt(u32, prefix[@offsetOf(Header, "debug_offset")..][0..4], .little);
+    if (offset < header_size or offset > file_size) return file_size;
+    return offset;
+}
+
 /// Whether this image asked to live in slow memory (tcc's -slow-memory). The
 /// loader rejects a malformed image later; its flag just has no effect then.
 pub fn image_prefers_slow_memory(image: Image) bool {
