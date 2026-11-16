@@ -484,6 +484,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
                 var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, false);
                 new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
+                // No parent: a pid used before must not keep the old one's link.
+                self._process_memory_pool.set_parent(pid, 0);
 
                 {
                     const flags = proctable_lock.lock_irqsave();
@@ -505,6 +507,8 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 const effective_stack_size = self.runtime_configuration.resolve_stack_size(stack_size);
                 var new_process = try Process.init(self.allocator, effective_stack_size, process_entry, args, cwd, &self._process_memory_pool, null, pid, true);
                 new_process.set_resource_limits(self.runtime_configuration.create_process_limits(effective_stack_size));
+                // No parent: a pid used before must not keep the old one's link.
+                self._process_memory_pool.set_parent(pid, 0);
                 {
                     const flags = proctable_lock.lock_irqsave();
                     defer proctable_lock.unlock_irqrestore(flags);
@@ -633,6 +637,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         p.schedule_removal();
                         p.unblock_all(return_code);
                         self.orphan_children_locked(p);
+                        self._process_memory_pool.forget_process(pid);
 
                         self.processes.remove(&p.node);
                         self.terminate_list.append(&p.node);
@@ -722,6 +727,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 log.err("vfork failed creating child for pid={d}: {s}", .{ current_process.pid, @errorName(err) });
                 return -1;
             };
+            // The pool's copy of the link: who may have a swapped-out
+            // process's pages (`ProcessMemoryPool.may_take_lent`).
+            self._process_memory_pool.set_parent(new_process.pid, current_process.pid);
 
             // Both of these take `loader_lock`, so they have to happen up here.
             // Safe to be preempted across: the parent is still `Running` and the
@@ -1259,6 +1267,20 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             }
         }
 
+        /// The only child of `parent` still running, or null for none or several.
+        /// Caller holds `proctable_lock`.
+        fn sole_live_child_locked(self: *Self, parent: *const Process) ?*Process {
+            var found: ?*Process = null;
+            var next = self.processes.first;
+            while (next) |node| : (next = node.next) {
+                const p: *Process = @alignCast(@fieldParentPtr("node", node));
+                if (p._parent != parent or p.state == Process.State.Terminated) continue;
+                if (found != null) return null;
+                found = p;
+            }
+            return found;
+        }
+
         pub fn has_live_child(self: *Self, parent: *const Process) bool {
             const flags = proctable_lock.lock_irqsave();
             defer proctable_lock.unlock_irqrestore(flags);
@@ -1314,6 +1336,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                         return kernel.errno.ErrnoSet.NoChildProcesses;
                     }
                     if (nohang) return 0;
+                    // Any child's exit ends this wait, so only a lone child
+                    // makes it safe to swap this process out for.
+                    current_process.swap_heir = if (self.sole_live_child_locked(current_process)) |child| child.pid else 0;
                     // Blocking on the collection list rather than on one child:
                     // whichever child finishes first records its exit there and
                     // wakes this process (`Process.record_child_exit`).
@@ -1339,6 +1364,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     const Action = struct {
                         pub fn on_process_finished(_: ?*anyopaque, _: i32) void {}
                     };
+                    current_process.swap_heir = p.pid;
                     current_process.wait_for_process(p, &Action.on_process_finished, null) catch {
                         return -1;
                     };
@@ -1375,8 +1401,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
         }
 
         /// ProcessMemoryPool.swap_hook: an allocation by the running process
-        /// found the pool full.  Write out processes waiting in waitpid, the
-        /// largest first, until about `bytes` are free; returns how much was.
+        /// found the pool full.  Write out processes waiting in waitpid for it
+        /// or an ancestor of it (`Process.swap_heir`), the largest first, until
+        /// about `bytes` are free; returns how much was.
         pub fn swap_out_waiting(self: *Self, bytes: usize) usize {
             // The swap file's I/O sleeps; an allocation that cannot wait for
             // it gets nothing (its caller holds a spinlock, or is the idle
@@ -1397,7 +1424,7 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     if (tried == 0) self.log_swap_candidates(current);
                     break;
                 };
-                const out = pool.swap_out(victim.pid, victim.get_stack_bottom(), io);
+                const out = pool.swap_out(victim.pid, victim.get_stack_bottom(), victim.swap_heir, io);
                 log.info("swap: pid {d} out, {d} KiB, for pid {d}", .{ victim.pid, out / 1024, current.pid });
                 if (!pool.is_swapped_out(victim.pid)) {
                     const flags = proctable_lock.lock_irqsave();
@@ -1409,8 +1436,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return freed;
         }
 
-        /// The largest process waiting in waitpid, marked swapped: from here
-        /// until its swap-in it goes no further than that, even woken.
+        /// The largest process waiting in waitpid whose wait `current` or an
+        /// ancestor of it ends, marked swapped: from here until its swap-in it
+        /// goes no further than that, even woken.
         fn claim_swap_victim(self: *Self, current: *Process) ?*Process {
             const pool = self.get_process_memory_pool();
             var best: ?*Process = null;
@@ -1423,7 +1451,9 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                 var next = self.processes.first;
                 while (next) |node| : (next = node.next) {
                     const p: *Process = @alignCast(@fieldParentPtr("node", node));
-                    if (p == current or !swappable(p)) continue;
+                    // Only a process that `current` is the heir of, or a
+                    // descendant of the heir: the pages go to `current`.
+                    if (p == current or !swappable(p) or !descends_from_locked(current, p.swap_heir)) continue;
                     if (count == candidates.len) break;
                     candidates[count] = p;
                     count += 1;
@@ -1446,10 +1476,19 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
             return chosen;
         }
 
+        /// When `log_swap_candidates` last listed them. A process with nobody to
+        /// swap for it -- not the heir of any waiting process -- finds the same
+        /// nothing at every allocation on a full pool; once a second is enough
+        /// on a console. Under the swap mutex.
+        var swap_candidates_logged_us: u64 = 0;
+
         /// Why nothing could be swapped: every other process and what
         /// `swappable` looks at.
         fn log_swap_candidates(self: *Self, current: *Process) void {
-            const Row = struct { pid: c.pid_t, eligible: bool, swapped: bool, blocked: bool, shared: bool };
+            const now = hal.time.get_time_us();
+            if (swap_candidates_logged_us != 0 and now -% swap_candidates_logged_us < 1_000_000) return;
+            swap_candidates_logged_us = now;
+            const Row = struct { pid: c.pid_t, eligible: bool, swapped: bool, blocked: bool, shared: bool, heir: c.pid_t, for_heir: bool };
             var rows: [12]Row = undefined;
             var count: usize = 0;
             {
@@ -1460,16 +1499,35 @@ fn ProcessManagerGenerator(comptime SchedulerType: anytype) type {
                     const p: *Process = @alignCast(@fieldParentPtr("node", node));
                     if (p == current) continue;
                     if (count == rows.len) break;
-                    rows[count] = .{ .pid = p.pid, .eligible = p.swap_eligible, .swapped = p.swapped, .blocked = p.state == Process.State.Blocked, .shared = p._stack_shared_with_parent };
+                    rows[count] = .{ .pid = p.pid, .eligible = p.swap_eligible, .swapped = p.swapped, .blocked = p.state == Process.State.Blocked, .shared = p._stack_shared_with_parent, .heir = p.swap_heir, .for_heir = descends_from_locked(current, p.swap_heir) };
                     count += 1;
                 }
             }
             log.err("swap: nothing to swap for pid {d}", .{current.pid});
-            for (rows[0..count]) |r| log.err("  pid {d}: waiting {} swapped {} blocked {} vfork-stack {}", .{ r.pid, r.eligible, r.swapped, r.blocked, r.shared });
+            // `heir`: whose exit ends its wait (0: several children could);
+            // `ours`: whether the asking process is that one or below it.
+            for (rows[0..count]) |r| log.err("  pid {d}: waiting {} swapped {} blocked {} vfork-stack {} heir {d} ours {}", .{ r.pid, r.eligible, r.swapped, r.blocked, r.shared, r.heir, r.for_heir });
         }
 
         fn swappable(p: *const Process) bool {
-            return p.swap_eligible and !p.swapped and p.state == Process.State.Blocked and !p._stack_shared_with_parent;
+            const Pool = kernel.memory.heap.ProcessMemoryPool;
+            return p.swap_eligible and Pool.tracks_pid(p.pid) and Pool.tracks_pid(p.swap_heir) and !p.swapped and p.state == Process.State.Blocked and !p._stack_shared_with_parent;
+        }
+
+        /// Whether `p` is the process `heir`, or one of its descendants. A
+        /// process whose wait ends at `heir`'s exit may be swapped out for
+        /// these and its pages given to them: they are gone by the time it
+        /// comes back for them. Caller holds `proctable_lock`.
+        fn descends_from_locked(p: *const Process, heir: c.pid_t) bool {
+            if (heir <= 0) return false;
+            var next: ?*const Process = p;
+            var depth: usize = 0;
+            while (next) |q| : (next = q._parent) {
+                if (q.pid == heir) return true;
+                depth += 1;
+                if (depth > config.process.max_pid_value) return false;
+            }
+            return false;
         }
 
         /// Bring the calling process's memory back from swap, waiting until

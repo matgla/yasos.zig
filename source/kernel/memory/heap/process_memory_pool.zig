@@ -374,6 +374,16 @@ pub const ProcessMemoryPool = struct {
     /// Hand a swapped-out process's pages out last (see `reserve_pages`). Off in
     /// the tests that need something to land on them.
     avoid_lent: bool = true,
+    /// Each process's parent, both as `owner_tag`s (0: none, or a pid past the
+    /// tag's range): a copy of the process table's links that this pool can
+    /// read under its own lock, kept by the process manager (`set_parent`,
+    /// `forget_process`). The process table's lock ranks below this one, so an
+    /// allocation cannot ask it.
+    parent_tags: [max_tags]u8 = @splat(0),
+    /// For each process out on swap, the one process whose exit ends its wait
+    /// (`swap_out`'s `heir`, as a tag): its lent pages go to that process and
+    /// its descendants only. See `may_take_lent`.
+    heir_tags: [max_tags]u8 = @splat(0),
     /// Pids whose image asked for slow memory: what they allocate without a
     /// stated tier starts at the slow end. See `set_prefers_slow`.
     /// Plain words: StaticBitSet's accessors take the set by value, 256 bytes copied
@@ -628,6 +638,80 @@ pub const ProcessMemoryPool = struct {
         return if (pid > 0 and pid <= std.math.maxInt(u8)) @intCast(pid) else 0;
     }
 
+    const max_tags = std.math.maxInt(u8) + 1;
+
+    /// Whether `pid` fits a page tag. A process that does not cannot have its
+    /// lent pages kept for it, nor be anybody's heir, so it is never swapped
+    /// out or swapped out for.
+    pub fn tracks_pid(pid: c.pid_t) bool {
+        return owner_tag(pid) != 0;
+    }
+
+    /// `pid` was created as `parent`'s child (0 for none). The process manager
+    /// calls this for every process it creates.
+    pub fn set_parent(self: *ProcessMemoryPool, pid: c.pid_t, parent: c.pid_t) void {
+        const tag = owner_tag(pid);
+        if (tag == 0) return;
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        self.parent_tags[tag] = owner_tag(parent);
+    }
+
+    /// `pid` exited: its children are orphans from here on, as in the process
+    /// table, and a process waiting for it has no heir any more -- nothing new
+    /// is given its lent pages.
+    pub fn forget_process(self: *ProcessMemoryPool, pid: c.pid_t) void {
+        const tag = owner_tag(pid);
+        if (tag == 0) return;
+        const flags = pagepool_lock.lock_irqsave();
+        defer pagepool_lock.unlock_irqrestore(flags);
+        self.parent_tags[tag] = 0;
+        self.heir_tags[tag] = 0;
+        for (&self.parent_tags) |*parent| {
+            if (parent.* == tag) parent.* = 0;
+        }
+        for (&self.heir_tags) |*heir| {
+            if (heir.* == tag) heir.* = 0;
+        }
+    }
+
+    /// Whether `pid` may be given a page that the process tagged `lender` left
+    /// when it went out on swap. It comes back at the same addresses as soon as
+    /// its wait ends, so the page must be free again by then: only the process
+    /// it waits for (its heir) and that process's descendants qualify, which
+    /// are gone by the time the wait ends. Anything else -- another job, the
+    /// shell's background loop, the loader's own pseudo-pids -- may still hold
+    /// the page then, and the waiting process could not come back until it
+    /// let go. Caller holds the pool's lock.
+    fn may_take_lent(self: *const ProcessMemoryPool, pid: c.pid_t, lender: u8) bool {
+        const heir = self.heir_tags[lender];
+        if (heir == 0) return false;
+        var tag = owner_tag(pid);
+        var steps: usize = 0;
+        while (tag != 0 and steps < max_tags) : (steps += 1) {
+            if (tag == heir) return true;
+            tag = self.parent_tags[tag];
+        }
+        return false;
+    }
+
+    /// The first page of `[from, to)` that `pid` may not be given because a
+    /// swapped-out process left it: any such page when `any` (the first pass of
+    /// `reserve_pages`), otherwise one whose lender `pid` is no heir of. Caller
+    /// holds the pool's lock.
+    fn first_barred_lent(self: *const ProcessMemoryPool, region: *const Region, from: usize, to: usize, pid: c.pid_t, any: bool) ?usize {
+        const tags = region.lent_by orelse return null;
+        if (region.lent_pages == 0) return null;
+        // A run's lent pages nearly always share one lender: ask once.
+        var allowed: u8 = 0;
+        for (tags[from..to], from..) |t, page| {
+            if (t == 0 or t == allowed) continue;
+            if (any or !self.may_take_lent(pid, t)) return page;
+            allowed = t;
+        }
+        return null;
+    }
+
     fn set_last_owner(region: *Region, from: usize, to: usize, tag: u8) void {
         if (region.last_owner) |owners| @memset(owners[from..@min(to, owners.len)], tag);
     }
@@ -695,8 +779,10 @@ pub const ProcessMemoryPool = struct {
         // to something that outlives the wait keeps it out for good -- first fit
         // used to hand a waiting shell's low pages to every small allocation of
         // a background job. What still ends up on them is what found no room
-        // anywhere else: the big child the swap was made for, which is gone
-        // before its parent wakes.
+        // anywhere else, and only from the process the swapped one waits for
+        // or its descendants: the big child the swap was made for, which is
+        // gone before its parent wakes. Anything else that finds no room fails
+        // as it would without swap.
         var pass: usize = if (self.avoid_lent and self.any_lent_pages()) 0 else 1;
         while (pass < 2) : (pass += 1) {
         const avoid_lent = pass == 0;
@@ -719,8 +805,10 @@ pub const ProcessMemoryPool = struct {
                 @call(.never_inline, find_free_run_top, .{ region, region_pages_usize }) orelse continue
             else
                 @call(.never_inline, find_free_run, .{ region, region_pages_usize, advance_free_hint(region), region.page_count }) orelse continue;
-            if (avoid_lent) {
-                while (first_lent(region, slot_start, slot_start + region_pages_usize)) |lent_page| {
+            // The second pass still keeps a page lent by a swapped-out process
+            // from anyone but its heir's line (`may_take_lent`).
+            if (region.lent_pages != 0) {
+                while (self.first_barred_lent(region, slot_start, slot_start + region_pages_usize, pid, avoid_lent)) |lent_page| {
                     if (source == .heap_top) continue :tiers;
                     slot_start = @call(.never_inline, find_free_run, .{ region, region_pages_usize, lent_page + 1, region.page_count }) orelse continue :tiers;
                 }
@@ -1107,8 +1195,16 @@ pub const ProcessMemoryPool = struct {
     /// until `swap_in` -- the caller guarantees that.  Returns the bytes freed.
     /// A run at a time, nothing collected on the stack: this runs inside the
     /// allocating process's mmap, on its stack.
-    pub fn swap_out(self: *ProcessMemoryPool, pid: c.pid_t, keep: *const anyopaque, io: SwapIo) usize {
+    /// `heir`: the process whose exit ends `pid`'s wait. Only it and its
+    /// descendants may be given the freed pages (`may_take_lent`).
+    pub fn swap_out(self: *ProcessMemoryPool, pid: c.pid_t, keep: *const anyopaque, heir: c.pid_t, io: SwapIo) usize {
         self.ensure_claim_tags();
+        {
+            const flags = pagepool_lock.lock_irqsave();
+            defer pagepool_lock.unlock_irqrestore(flags);
+            const tag = owner_tag(pid);
+            if (tag != 0) self.heir_tags[tag] = owner_tag(heir);
+        }
         var freed: usize = 0;
         while (self.next_to_swap_out(pid, keep)) |entity| {
             // Outside the lock, which masks interrupts: this is SD card I/O.
@@ -1410,16 +1506,6 @@ pub const ProcessMemoryPool = struct {
         }
     }
 
-    /// The first page of `[from, to)` a swapped-out process is still owed, if any.
-    fn first_lent(region: *const Region, from: usize, to: usize) ?usize {
-        const tags = region.lent_by orelse return null;
-        if (region.lent_pages == 0) return null;
-        for (tags[from..to], from..) |t, page| {
-            if (t != 0) return page;
-        }
-        return null;
-    }
-
     /// Give back what `claim_swapped_pages` took of one swapped run. Caller holds
     /// the pool's lock.
     fn release_claims(self: *ProcessMemoryPool, entity: *const ProcessMemoryEntity, pid: c.pid_t) void {
@@ -1616,6 +1702,9 @@ pub const ProcessMemoryPool = struct {
         for (old_end..new_end) |i| {
             if (region.page_bitmap.isSet(i)) return null;
         }
+        // Nor lent by a swapped-out process this one is no heir of: growing in
+        // place is the one way onto a free page that skips `reserve_pages`.
+        if (self.first_barred_lent(region, old_end, new_end, pid, false) != null) return null;
 
         // Mark extension pages as used
         mark_used(region, old_end, new_end);
@@ -2418,6 +2507,9 @@ test "ProcessMemoryPool.ShouldFallBackToSecondRegionWhenFirstFull" {
     try std.testing.expect(addr < second.start_address + second.page_count * ProcessMemoryPool.page_size);
 }
 
+/// `swap_out`'s heir when no test process is to land on the lent pages.
+const nobody: c.pid_t = 0;
+
 /// A swap device in a test: slots in memory, counted.
 const FakeSwap = struct {
     slots: [16]?[]u8 = @splat(null),
@@ -2476,7 +2568,7 @@ test "ProcessMemoryPool.SwapOutKeepsTheStackAndSwapInRestoresAtTheSameAddresses"
     for (heap, 0..) |*b, i| b.* = @truncate(i * 7);
     const used = pool.get_used_size();
 
-    const freed = pool.swap_out(pid, stack.ptr + 10, swap.io());
+    const freed = pool.swap_out(pid, stack.ptr + 10, nobody, swap.io());
     try std.testing.expectEqual(data.len + heap.len, freed);
     try std.testing.expectEqual(used - freed, pool.get_used_size());
     try std.testing.expect(pool.is_swapped_out(pid));
@@ -2512,7 +2604,7 @@ test "ProcessMemoryPool.SwapOutWritesOnlyRunsThatChangedSinceTheyCameBack" {
     const heap = pool.allocate_pages_from(16, pid, .heap).?;
     @memset(data, 0x11);
     @memset(heap, 0x22);
-    _ = pool.swap_out(pid, stack.ptr, swap.io());
+    _ = pool.swap_out(pid, stack.ptr, nobody, swap.io());
     try std.testing.expect(try pool.swap_in(pid, swap.io()));
     try std.testing.expectEqual(@as(usize, 2), swap.stores);
     const written = ProcessMemoryPool.swap_written_runs;
@@ -2520,7 +2612,7 @@ test "ProcessMemoryPool.SwapOutWritesOnlyRunsThatChangedSinceTheyCameBack" {
 
     // Only the heap changed while the process ran.
     heap[100] = 0x23;
-    try std.testing.expectEqual(data.len + heap.len, pool.swap_out(pid, stack.ptr, swap.io()));
+    try std.testing.expectEqual(data.len + heap.len, pool.swap_out(pid, stack.ptr, nobody, swap.io()));
     try std.testing.expectEqual(@as(usize, 3), swap.stores);
     try std.testing.expectEqual(@as(usize, 1), swap.drops); // the heap's stale copy
     try std.testing.expectEqual(written + 1, ProcessMemoryPool.swap_written_runs);
@@ -2545,7 +2637,7 @@ test "ProcessMemoryPool.FreeingOrResizingARunGivesItsSwapCopyBack" {
     const stack = pool.allocate_pages(4, pid).?;
     const a = pool.allocate_pages_from(16, pid, .heap).?;
     const b = pool.allocate_pages_from(16, pid, .heap).?;
-    _ = pool.swap_out(pid, stack.ptr, swap.io());
+    _ = pool.swap_out(pid, stack.ptr, nobody, swap.io());
     try std.testing.expect(try pool.swap_in(pid, swap.io()));
     try std.testing.expectEqual(@as(usize, 2), swap.used());
 
@@ -2568,13 +2660,13 @@ test "ProcessMemoryPool.AFullSwapGivesUpKeptCopiesBeforeASwapOutFails" {
     const stack1 = pool.allocate_pages(4, first).?;
     _ = pool.allocate_pages_from(16, first, .heap).?;
     _ = pool.allocate_pages_from(16, first, .heap).?;
-    _ = pool.swap_out(first, stack1.ptr, swap.io());
+    _ = pool.swap_out(first, stack1.ptr, nobody, swap.io());
     try std.testing.expect(try pool.swap_in(first, swap.io()));
     try std.testing.expectEqual(@as(usize, 2), swap.used()); // both kept
 
     const stack2 = pool.allocate_pages(4, second).?;
     const heap2 = pool.allocate_pages_from(16, second, .heap).?;
-    try std.testing.expectEqual(heap2.len, pool.swap_out(second, stack2.ptr, swap.io()));
+    try std.testing.expectEqual(heap2.len, pool.swap_out(second, stack2.ptr, nobody, swap.io()));
     try std.testing.expect(pool.is_swapped_out(second));
     try std.testing.expectEqual(@as(usize, 0), pool.swap_bytes().cached);
 }
@@ -2588,11 +2680,12 @@ test "ProcessMemoryPool.SwapInWaitsUntilEveryPageIsFreeAgain" {
     pool.avoid_lent = false;
     const parent: c.pid_t = 7;
     const child: c.pid_t = 8;
+    pool.set_parent(child, parent);
 
     const stack = pool.allocate_pages(4, parent).?;
     const heap = pool.allocate_pages_from(16, parent, .heap).?;
     heap[0] = 42;
-    _ = pool.swap_out(parent, stack.ptr, swap.io());
+    _ = pool.swap_out(parent, stack.ptr, child, swap.io());
 
     // The child is handed the parent's pages: first fit finds them.
     const taken = pool.allocate_pages_from(16, child, .heap).?;
@@ -2614,11 +2707,16 @@ test "ProcessMemoryPool.SwapInHoldsThePagesItFindsFreeAgainstAStreamOfShortLived
     pool.avoid_lent = false;
     const parent: c.pid_t = 7;
     const ps = ProcessMemoryPool.page_size;
+    // The helpers are the children of the process the parent waits for.
+    const child: c.pid_t = 8;
+    pool.set_parent(child, parent);
+    pool.set_parent(20, child);
+    pool.set_parent(21, child);
 
     const stack = pool.allocate_pages(4, parent).?;
     const heap = pool.allocate_pages_from(16, parent, .heap).?;
     heap[0] = 42;
-    _ = pool.swap_out(parent, stack.ptr, swap.io());
+    _ = pool.swap_out(parent, stack.ptr, child, swap.io());
 
     // A helper is loaded onto the first of the parent's pages: the parent cannot
     // come back yet, but it holds the other fifteen from now on.
@@ -2654,7 +2752,7 @@ test "ProcessMemoryPool.ASwappedOutProcessesPagesAreTheLastOnesHandedOut" {
     const stack = pool.allocate_pages(4, parent).?;
     const heap = pool.allocate_pages_from(16, parent, .heap).?;
     heap[0] = 42;
-    _ = pool.swap_out(parent, stack.ptr, swap.io());
+    _ = pool.swap_out(parent, stack.ptr, nobody, swap.io());
 
     // A background job's small allocation: first fit would put it on the
     // parent's pages. It goes past them.
@@ -2678,10 +2776,11 @@ test "ProcessMemoryPool.AProcessKilledWhileWaitingForItsPagesGivesBackTheOnesItH
     defer pool.deinit();
     pool.avoid_lent = false;
     const parent: c.pid_t = 7;
+    pool.set_parent(20, parent);
 
     const stack = pool.allocate_pages(4, parent).?;
     const heap = pool.allocate_pages_from(16, parent, .heap).?;
-    _ = pool.swap_out(parent, stack.ptr, swap.io());
+    _ = pool.swap_out(parent, stack.ptr, 20, swap.io());
     const holder = pool.allocate_pages_from(2, 20, .heap).?;
     try std.testing.expectEqual(heap.ptr, holder.ptr);
     try std.testing.expect(!try pool.swap_in(parent, swap.io()));
@@ -2700,6 +2799,91 @@ test "ProcessMemoryPool.AProcessKilledWhileWaitingForItsPagesGivesBackTheOnesItH
     try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
 }
 
+/// Allocate for `pid` until nothing fits any more, in halving runs.
+fn fill_pool(pool: *ProcessMemoryPool, pid: c.pid_t) void {
+    var pages: i32 = 1 << 20;
+    while (pages >= 1) : (pages = @divTrunc(pages, 2)) {
+        while (pool.allocate_pages_from(pages, pid, .heap) != null) {}
+    }
+}
+
+test "ProcessMemoryPool.LentPagesGoOnlyToTheProcessTheSwappedOneWaitsForAndItsDescendants" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const shell: c.pid_t = 7;
+    const make: c.pid_t = 8; // what the shell waits for
+    const cc: c.pid_t = 9; // make's child
+    const job: c.pid_t = 10; // the shell's background job: its child, not what it waits for
+    const other: c.pid_t = 20; // a process of nobody's here
+    pool.set_parent(make, shell);
+    pool.set_parent(cc, make);
+    pool.set_parent(job, shell);
+
+    const stack = pool.allocate_pages(4, shell).?;
+    const heap = pool.allocate_pages_from(16, shell, .heap).?;
+    heap[0] = 42;
+    _ = pool.swap_out(shell, stack.ptr, make, swap.io());
+    // Everything else fills up: what is left free is the shell's pages.
+    fill_pool(&pool, other);
+
+    // None of these is gone when make exits (-4 and -2 are the loader's hot
+    // text and image cache, modules.zig), so none of them may have the
+    // pages: the shell could not come back while it held one.
+    try std.testing.expect(pool.allocate_pages_from(1, other, .heap) == null);
+    try std.testing.expect(pool.allocate_pages_from(1, job, .heap) == null);
+    try std.testing.expect(pool.allocate_pages_from(1, -4, .loader) == null);
+    try std.testing.expect(pool.allocate_pages_from(1, -2, .cache) == null);
+    // make's child may: it is gone before make, and make before the shell wakes.
+    const taken = pool.allocate_pages_from(8, cc, .heap).?;
+    try std.testing.expectEqual(heap.ptr, taken.ptr);
+    // make exits: its child is an orphan now and gets no more of them.
+    pool.forget_process(make);
+    try std.testing.expect(pool.allocate_pages_from(8, cc, .heap) == null);
+    try std.testing.expect(!try pool.swap_in(shell, swap.io()));
+    pool.release_pages_for(cc);
+    try std.testing.expect(try pool.swap_in(shell, swap.io()));
+    try std.testing.expectEqual(@as(u8, 42), heap[0]);
+
+    pool.release_pages_for(other);
+    pool.release_pages_for(shell);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+    try expect_counts_match_bitmap(&pool);
+}
+
+test "ProcessMemoryPool.GrowingInPlaceStopsAtPagesLentToSomebodyElse" {
+    var swap = FakeSwap{};
+    ProcessMemoryPool.swap_io = swap.io();
+    defer ProcessMemoryPool.swap_io = null;
+    var pool = try ProcessMemoryPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const shell: c.pid_t = 7;
+    const make: c.pid_t = 8;
+    const other: c.pid_t = 20;
+    pool.set_parent(make, shell);
+
+    const before = pool.allocate_pages_from(4, other, .heap).?;
+    const heap = pool.allocate_pages_from(16, shell, .heap).?;
+    const stack = pool.allocate_pages(4, shell).?;
+    try std.testing.expectEqual(@intFromPtr(before.ptr) + before.len, @intFromPtr(heap.ptr));
+    _ = pool.swap_out(shell, stack.ptr, make, swap.io());
+
+    // The run right below the shell's pages cannot grow into them...
+    try std.testing.expect(pool.try_extend_pages(before.ptr, 4, 8, other) == null);
+    pool.release_pages_for(other);
+    // ...unless it is the process the shell waits for.
+    const mine = pool.allocate_pages_from(4, make, .heap).?;
+    try std.testing.expectEqual(before.ptr, mine.ptr);
+    try std.testing.expect(pool.try_extend_pages(mine.ptr, 4, 8, make) != null);
+    pool.release_pages_for(make);
+    try std.testing.expect(try pool.swap_in(shell, swap.io()));
+    pool.release_pages_for(shell);
+    try std.testing.expectEqual(@as(usize, 0), pool.get_used_size());
+    try expect_counts_match_bitmap(&pool);
+}
+
 test "ProcessMemoryPool.ReleasingASwappedOutProcessDropsItsCopiesOnly" {
     var swap = FakeSwap{};
     ProcessMemoryPool.swap_io = swap.io();
@@ -2711,7 +2895,7 @@ test "ProcessMemoryPool.ReleasingASwappedOutProcessDropsItsCopiesOnly" {
 
     const stack = pool.allocate_pages(4, pid).?;
     _ = pool.allocate_pages_from(16, pid, .heap).?;
-    _ = pool.swap_out(pid, stack.ptr, swap.io());
+    _ = pool.swap_out(pid, stack.ptr, nobody, swap.io());
     const other_pages = pool.allocate_pages_from(16, other, .heap).?;
     const used = pool.get_used_size();
 
@@ -2732,10 +2916,10 @@ test "ProcessMemoryPool.SwapOutLeavesTheLoaderCacheAndStopsAtAFailingDevice" {
 
     const stack = pool.allocate_pages(4, pid).?;
     _ = pool.allocate_pages_from(16, pid, .cache).?;
-    try std.testing.expectEqual(@as(usize, 0), pool.swap_out(pid, stack.ptr, swap.io()));
+    try std.testing.expectEqual(@as(usize, 0), pool.swap_out(pid, stack.ptr, nobody, swap.io()));
 
     _ = pool.allocate_pages_from(16, pid, .heap).?;
     swap.fail_store = true;
-    try std.testing.expectEqual(@as(usize, 0), pool.swap_out(pid, stack.ptr, swap.io()));
+    try std.testing.expectEqual(@as(usize, 0), pool.swap_out(pid, stack.ptr, nobody, swap.io()));
     try std.testing.expect(!pool.is_swapped_out(pid));
 }

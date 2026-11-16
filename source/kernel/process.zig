@@ -267,6 +267,13 @@ pub fn ProcessInterface(comptime ProcessType: type, comptime ProcessMemoryPoolTy
         /// is touched until that ends: a process the pool may swap out
         /// (process_manager.zig, `swap_out_waiting`).
         swap_eligible: bool = false,
+        /// The process whose exit ends that wait: the pid waited for, or the one
+        /// live child of a `waitpid(-1)`; 0 when several could. Only it and its
+        /// descendants may swap this process out and have its pages, because
+        /// they are gone when it wakes -- anything else could still hold them,
+        /// and the process could not come back at its addresses. With 0 it
+        /// stays in memory. Set with `swap_eligible`, under `proctable_lock`.
+        swap_heir: c.pid_t = 0,
         /// Its memory, but the stack, is out on swap; waitpid brings it back
         /// before it returns.  Set and cleared under `proctable_lock` and the
         /// swap mutex.
