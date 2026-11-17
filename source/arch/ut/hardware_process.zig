@@ -145,3 +145,19 @@ pub export fn process_get_back_to_parent_vfork(pid: i32, sp: usize, lr: usize, s
 }
 
 // pub fn
+
+/// ptrace's register views (arm-m/process.zig).  The unit-test process keeps
+/// no stored exception frame, so it has no accessors and ptrace reads nothing.
+pub const UserRegisters = extern struct {
+    r: [13]u32,
+    sp: u32,
+    lr: u32,
+    pc: u32,
+    xpsr: u32,
+    orig_r0: u32,
+};
+
+pub const FpRegisters = extern struct {
+    fpregs: [32]u64,
+    fpscr: u32,
+};

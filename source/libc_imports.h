@@ -29,3 +29,5 @@
 #include <libs/libc/sys/resource.h>
 #include <libs/libc/sys/statvfs.h>
 #include <libs/libc/sys/mount.h>
+#include <libs/libc/sys/ptrace.h>
+#include <libs/libc/signal.h>

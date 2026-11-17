@@ -1,0 +1,34 @@
+.pio_version 1
+.program cfg_a
+.in 32 right auto 32
+.out 0 left manual 1
+.set 5
+.clock_div 1.5
+    nop
+.program cfg_b
+.in 16
+.out 32 right
+.set 0
+.clock_div 65535.99
+.mov_status rxfifo < 31
+    nop
+.program cfg_c
+.out 8 auto
+.clock_div 1
+.side_set 0
+    nop side 0
+.program cfg_d
+.clock_div 2.25
+.side_set 5
+    nop side 31
+.program cfg_e
+.clock_div 3.141592
+.side_set 4 opt pindirs
+    nop side 15
+.program cfg_f
+.fifo txrx
+.clock_div 65535
+.wrap_target
+    nop
+.wrap
+    nop

@@ -46,5 +46,15 @@ pub const set_load_map_logging = loader.set_load_map_logging;
 pub const Image = @import("loader.zig").Image;
 
 pub const header_size: usize = 132;
+
+/// The real loader's `image_length` (source/yasld.zig), on the YAFF_VERSION 6
+/// layout: debug_offset at 136, the version byte at 7.
+pub const image_length_prefix: usize = 144;
+pub fn image_length(prefix: []const u8, file_size: usize) usize {
+    if (prefix.len < image_length_prefix or !std.mem.eql(u8, prefix[0..4], "YAFF") or prefix[7] != 6) return file_size;
+    const offset = std.mem.readInt(u32, prefix[136..][0..4], .little);
+    if (offset < image_length_prefix or offset > file_size) return file_size;
+    return offset;
+}
 /// What the kernel reads of a YAFF header without loading the image (the stack hint).
 pub const Header = extern struct { magic: u32, _rest: [124]u8, stack_size: u32 };

@@ -1,0 +1,4 @@
+.pio_version 1
+.program e
+.fifo putget
+    mov rxfifo[8], isr

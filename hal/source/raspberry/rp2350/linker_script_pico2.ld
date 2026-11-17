@@ -24,7 +24,17 @@ linker_script.ld* Based on https://github.com/ARM-software/CMSIS_5/blob/develop/
 
 MEMORY
 {
+  /* The kernel lives in partition 1, "yasos", which starts 128 KB into flash
+   * (partitions/partition_table.json: the table, then the bootloader's
+   * partition; the table is the .partition_table section below).  The
+   * bootrom maps the partition it boots at 0x10000000
+   * (QMI ATRANS), so the kernel runs at `flash`, and its bytes are loaded
+   * into `flash_load`, KERNEL_PARTITION_OFFSET higher: OpenOCD and GDB write
+   * the load addresses, so the ELF programs to the right place unchanged.
+   * The romfs below is seen the same way: virtual 0x10100000 is flash
+   * offset 0x120000. */
   flash(rx!w)       : ORIGIN = 0x10000000, LENGTH = 1024K
+  flash_load(r)     : ORIGIN = 0x10020000, LENGTH = 1024K
   /* 4096K -> 8192K (2026-10-02): the rootfs image reached 4.03 MB, and its
    * tail -- fdisk's .text -- sat past the MPU's executable window, so the
    * program faulted (IACCVIOL) on its first instruction.  Both rp2350 boards
@@ -83,6 +93,17 @@ MEMORY
 
 SECTIONS
 {
+  KERNEL_PARTITION_OFFSET = ORIGIN(flash_load) - ORIGIN(flash);
+
+  /* The RP2350 partition table (partitions/partition_table.zig): loaded at
+   * flash offset 0, linked at 0x1c000000 -- the untranslated XIP alias that
+   * reads that offset -- so it overlaps nothing the kernel runs at, and
+   * programming this ELF writes sector 0 too. */
+  .partition_table 0x1c000000 : AT(0x10000000)
+  {
+    KEEP(*(.partition_table))
+  }
+
   .text :
   {
     . = ALIGN(4);
@@ -127,19 +148,19 @@ SECTIONS
     KEEP(*(SORT(.fini_array.*)))
     KEEP(*(.fini_array))
     PROVIDE_HIDDEN(__fini_array_end = .);
-  } > flash
+  } > flash AT> flash_load
 
   /* ARM exception handling */
   .ARM.extab :
   {
     *(.ARM.extab* .gnu.linkonce.armextab.*)
-  } > flash
+  } > flash AT> flash_load
 
   __exidx_start = .;
   .ARM.exidx :
   {
     *(.ARM.exidx* .gnu.linkonce.armexidx.*)
-  } > flash
+  } > flash AT> flash_load
   __exidx_end = .;
 
    .romfs :
@@ -160,7 +181,9 @@ SECTIONS
     *(.ram_vector_table)
   } > kernel_ram
 
-  __data_start_flash__ = LOADADDR(.data);
+  /* crt_init copies .data from here: its load address, where the CPU sees
+   * those bytes through the partition's address translation. */
+  __data_start_flash__ = LOADADDR(.data) - KERNEL_PARTITION_OFFSET;
   .data :
   {
     . = ALIGN(4);
@@ -171,7 +194,7 @@ SECTIONS
     *(.data)
     *(.data*)
     __data_end__ = .;
-  } > kernel_ram AT> flash
+  } > kernel_ram AT> flash_load
 
   .bss (NOLOAD) :
   {

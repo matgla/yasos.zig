@@ -172,6 +172,8 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_symlink => return handlers.sys_symlink,
             c.sys_chmod => return handlers.sys_chmod,
             c.sys_chown => return handlers.sys_chown,
+            c.sys_ptrace => return handlers.sys_ptrace,
+            c.sys_sigaction => return handlers.sys_sigaction,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -280,6 +282,8 @@ fn syscall_arg_bytes(comptime index: usize) ?usize {
         c.sys_symlink => @sizeOf(c.symlink_context),
         c.sys_chmod => @sizeOf(c.chmod_context),
         c.sys_chown => @sizeOf(c.chown_context),
+        c.sys_ptrace => @sizeOf(c.ptrace_context),
+        c.sys_sigaction => @sizeOf(c.sigaction_context),
         else => null,
     };
 }
@@ -571,6 +575,8 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_symlink, syscall_lookup_table[c.sys_symlink]);
     try std.testing.expectEqual(handlers.sys_chmod, syscall_lookup_table[c.sys_chmod]);
     try std.testing.expectEqual(handlers.sys_chown, syscall_lookup_table[c.sys_chown]);
+    try std.testing.expectEqual(handlers.sys_ptrace, syscall_lookup_table[c.sys_ptrace]);
+    try std.testing.expectEqual(handlers.sys_sigaction, syscall_lookup_table[c.sys_sigaction]);
     try std.testing.expectEqual(handlers.sys_geteuid, syscall_lookup_table[c.sys_geteuid]);
     try std.testing.expectEqual(handlers.sys_dup, syscall_lookup_table[c.sys_dup]);
     try std.testing.expectEqual(handlers.sys_sysinfo, syscall_lookup_table[c.sys_sysinfo]);

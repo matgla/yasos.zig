@@ -66,6 +66,10 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         // how long the interrupt had been away when a byte was last lost --
         // i.e. the length of the critical section responsible.
         var stats: interface.uart.RxStats = .{};
+        /// `set_interrupt_char`: the byte the receive drain hands to the kernel
+        /// instead of the ring (^C while the console has ISIG), and to what.
+        var interrupt_char: u8 = 0;
+        var interrupt_handler: ?*const fn () void = null;
         var last_irq_us: u32 = 0;
 
         // The receive lock. The RX path has two producers on SMP: the RX
@@ -164,8 +168,16 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
             while (uart_is_readable()) {
                 const derived_ptr = &RegisterVolatile.*.dr;
                 const byte: u32 = derived_ptr.*;
-                rx_buffer.push(@truncate(byte));
                 stats.bytes +%= 1;
+                // The tty's interrupt character goes to the kernel, not to
+                // whoever reads next (`set_interrupt_char`).
+                if (interrupt_handler) |handler| {
+                    if (@as(u8, @truncate(byte)) == interrupt_char) {
+                        handler();
+                        continue;
+                    }
+                }
+                rx_buffer.push(@truncate(byte));
             }
 
             // Again on the way out: the FIFO can just as easily overrun while
@@ -238,6 +250,13 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
 
         pub fn is_readable(_: Self) bool {
             return rx_buffer.size() != 0;
+        }
+
+        pub fn set_interrupt_char(_: Self, ch: ?u8, handler: ?*const fn () void) void {
+            const flags = rx_lock_acquire();
+            defer rx_lock_release(flags);
+            interrupt_char = ch orelse 0;
+            interrupt_handler = if (ch != null) handler else null;
         }
 
         pub fn getc(self: Self) !u8 {

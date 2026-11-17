@@ -90,7 +90,7 @@ once — prefer that when a bug class repeats.
   (`.cache/zig-build/host-st`, built by build_zig.sh): single-threaded, the fork creates a
   declaration's Nav on first use, which numbers the C differently from a threaded build.
 - **`scripts/zig_board.py [--flash] push | run CMD`** — the device zig on the rig's board:
-  `./build_rootfs.sh -c -o rootfs.img --zig ~/repos/zig-0171` keeps it in an rp2350 image
+  `./build_rootfs.sh -c -o rootfs.img --zig ~/repos/zig` keeps it in an rp2350 image
   (3.7 MB; the build fails if the image passes the 8 MB romfs region), `push` puts its lib
   on the card (`/var/lib/zig` -> `/var/lib/zigm/tree/src`), `run` runs a command under the
   board lock. A `std.fmt` build-obj takes ~10 s and 2.5 MB on the Pico Plus 2.
@@ -134,6 +134,12 @@ once — prefer that when a bug class repeats.
   `--build` for the board config + images, `--opt=-O0` for one level, `--no-wait` and
   `--logs`. Holds the board lock, flashes private images with hash checks, and keeps a
   per-checkout tree on the card (`/root/selfhost-<label>`). Rig side: `scripts/rig/`.
+- **Debug data and `strip`** ([`docs/debugging.md`](docs/debugging.md)): `tcc -g`
+  appends a `YDBG` blob (DWARF + full symtab) after the YAFF image (v6,
+  `debug_offset`); `strip [-f FILE.debug]` takes it out;
+  `libs/tinycc/scripts/yaff_debug_to_elf.py` makes an ELF of it for gdb/readelf.
+  `ptrace(2)` (stops, UDF #1 breakpoints, registers, memory, ATTACH to
+  descendants; `apps/ptracetest` on the device) -- a traced exec runs from RAM.
 - **`scripts/qemu_capture_yaff.py`** — older RAM-scan capture (slower/flakier;
   prefer the FAT drive).
 - **`scripts/run_qemu_smoke.sh`** — the pytest smoke suite on QEMU (no hardware).
@@ -150,6 +156,21 @@ once — prefer that when a bug class repeats.
   the RP2350 timing plugin (the disk remains RAM-backed). For the boards'
   cache-off FAT path, configure `configs/qemu_mps3_an524_nofatcache_defconfig`,
   build, then use the smoke runner's `--no-build` so it retains that config.
+
+## Flash layout (RP2350): partitions
+
+`hal/source/raspberry/rp2350/partitions/partition_table.json` (2026-11-16): the
+RP2350 partition table at flash offset 0, partition 0 "yasboot" at 0x2000
+(120 KB, the bootloader, tried first), partition 1 "yasos" at 0x20000 (kernel,
+then romfs) to 0xFFF000. The bootrom boots the first partition with a valid
+IMAGE_DEF and maps it at 0x10000000 (QMI ATRANS), so the kernel stays linked at
+0x10000000; the linker scripts load it at `flash_load` (0x10020000) and the
+romfs (virtual 0x10100000) is flashed at 0x10120000. The table itself is in
+the kernel ELF (`partitions/partition_table.zig`, regenerated with
+`partitions/generate.sh` from the JSON, picotool): section `.partition_table`,
+run 0x1c000000 (the untranslated XIP alias), load 0x10000000 -- so every flash
+path writes it with the kernel. This needs the tinycc linker fixes of
+2026-11-16 (`AT(lma)`, explicit section addresses, `LOADADDR() - const`).
 
 ## Build / run
 

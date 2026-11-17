@@ -1,0 +1,41 @@
+MORE(1)                          YasOS Manual                          MORE(1)
+
+NAME
+       more - page through text files
+
+SYNOPSIS
+       more FILE...
+       command | more
+
+DESCRIPTION
+       more shows each FILE a screen at a time. The whole file is read into
+       memory, so it can page backwards and search. With output that is not
+       a terminal it copies the files through, like cat.
+
+       YasOS has no /dev/tty, so the keyboard is standard input: name the
+       file on the command line. Without a FILE, more copies standard input
+       to standard output.
+
+KEYS
+       space, f, PgDn    next page (at the end: next file, or quit)
+       Enter, j, Down    next line
+       b, PgUp           previous page
+       k, Up             previous line
+       g, G              first / last line
+       /text             search forward, case-insensitive; every match
+                         on the screen is shown in reverse video
+       n, N              next / previous match
+       u                 stop marking the matches (n or N marks them
+                         again)
+       h, ?              this list
+       q                 quit this file (go on to the next)
+       Q                 quit
+
+TERMINAL SIZE
+       From LINES and COLUMNS when both are set; otherwise more asks the
+       terminal (cursor position report, ESC [6n) and falls back to 24x80
+       when it does not answer. The kernel's own window size is always
+       24x80, so the question is what makes a bigger terminal work.
+
+SEE ALSO
+       man(1)

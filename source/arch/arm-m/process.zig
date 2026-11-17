@@ -150,6 +150,51 @@ pub const SoftwareStoredRegisters = extern struct {
     dcp_engaged: void_or_dcp_register(),
 };
 
+const has_fp_registers = config.cpu.has_fpu and config.cpu.use_fpu;
+/// is_fpu_frame, EXC_RETURN, r4-r11: the software frame without FP or DCP words.
+const software_frame_words = 10;
+const max_saved_frame_words = software_frame_words + 16 + 7 + @sizeOf(HardwareStoredRegisters) / 4;
+const xpsr_thumb: u32 = 1 << 24;
+/// The hardware skipped a word to 8-align the frame; it pops it on return.
+const xpsr_stack_aligned: u32 = 1 << 9;
+/// N Z C V Q and GE[3:0]: what a debugger may change.
+const xpsr_flags: u32 = 0xF80F0000;
+/// IT/ICI: the state of an IT block, meaningless at another pc.
+const xpsr_it_bits: u32 = 0x0600FC00;
+
+const SavedFrame = struct {
+    sw: usize,
+    sw_fp: bool,
+    hw: usize,
+    hw_fp: bool,
+    hw_size: usize,
+    /// The thread's sp once the hardware frame is popped.
+    end: usize,
+};
+
+/// What ptrace shows of a process: Linux/ARM's `struct user_regs` -- r0-r12,
+/// sp, lr, pc, xPSR, orig_r0 (always 0 here).  libc sys/ptrace.h.
+pub const UserRegisters = extern struct {
+    r: [13]u32,
+    sp: u32,
+    lr: u32,
+    pc: u32,
+    xpsr: u32,
+    orig_r0: u32,
+};
+
+/// Linux/ARM's `struct user_vfp`: d0-d31 and FPSCR.  The FPv5-SP unit has
+/// s0-s31, which are d0-d15; d16-d31 stay 0.
+pub const FpRegisters = extern struct {
+    fpregs: [32]u64,
+    fpscr: u32,
+};
+
+comptime {
+    if (@sizeOf(UserRegisters) != 18 * 4) @compileError("struct user_regs is 18 words");
+    if (@sizeOf(FpRegisters) != 264) @compileError("struct user_vfp is 264 bytes");
+}
+
 fn create_default_hardware_registers(comptime exit_handler: *const fn () void, process_entry: anytype) HardwareStoredRegisters {
     return .{
         .r0 = 0,
@@ -401,6 +446,148 @@ pub const ArmProcess = struct {
         if (hw + basic_frame_size > hi) return null;
         const frame: *const [8]u32 = @ptrFromInt(hw);
         return .{ frame[6], frame[5] };
+    }
+
+    /// Where a switched-out process's context lies on its stack: the software
+    /// frame at `stack_position` ([is_fpu_frame, EXC_RETURN, r4-r11],
+    /// s16-s31 when is_fpu_frame, the DCP words on a DCP build), then the
+    /// hardware frame (r0-r3, r12, lr, pc, xPSR, and s0-s15, FPSCR and the
+    /// reserved word when EXC_RETURN says it is an FP frame), then the word the
+    /// hardware skipped to 8-align it when xPSR bit 9 says so.  Null when that
+    /// does not fit the stack, or the frame is not an exception frame (the root
+    /// process's first one).
+    fn saved_frame(self: *const Self) ?SavedFrame {
+        const sp = @intFromPtr(self.stack_position);
+        const lo = @intFromPtr(self.stack.ptr);
+        const hi = lo + self.stack.len;
+        if (sp < lo or sp % 4 != 0 or sp + software_frame_words * 4 > hi) return null;
+        const words: [*]const u32 = @ptrFromInt(sp);
+        const exc = words[1];
+        if (exc & 0xFF000000 != 0xFF000000) return null;
+        const sw_fp = has_fp_registers and words[0] != 0;
+        const dcp_bytes: usize = if (saves_dcp_state) 7 * @sizeOf(u32) else 0;
+        const hw = sp + software_frame_words * 4 + (if (sw_fp) @as(usize, 16 * @sizeOf(u32)) else 0) + dcp_bytes;
+        const hw_fp = has_fp_registers and (exc & 0x10) == 0;
+        const hw_size: usize = if (hw_fp) @sizeOf(HardwareStoredRegisters) else basic_frame_size;
+        if (hw + hw_size > hi) return null;
+        const psr = @as(*const u32, @ptrFromInt(hw + 7 * 4)).*;
+        const end = hw + hw_size + (if (psr & xpsr_stack_aligned != 0) @as(usize, 4) else 0);
+        if (end > hi) return null;
+        return .{ .sw = sp, .sw_fp = sw_fp, .hw = hw, .hw_fp = hw_fp, .hw_size = hw_size, .end = end };
+    }
+
+    /// The registers of a switched-out process, as ptrace shows them.
+    pub fn read_user_registers(self: *const Self) ?UserRegisters {
+        const f = self.saved_frame() orelse return null;
+        const sw: [*]const u32 = @ptrFromInt(f.sw);
+        const hw: [*]const u32 = @ptrFromInt(f.hw);
+        var regs = std.mem.zeroes(UserRegisters);
+        @memcpy(regs.r[0..4], hw[0..4]);
+        @memcpy(regs.r[4..12], sw[2..10]);
+        regs.r[12] = hw[4];
+        regs.sp = @intCast(f.end);
+        regs.lr = hw[5];
+        regs.pc = hw[6];
+        regs.xpsr = hw[7];
+        return regs;
+    }
+
+    /// Write the registers of a switched-out process back into its stored
+    /// context.  pc keeps the Thumb state and loses bit 0, which a stacked
+    /// return address may not have; of xPSR only the flags (N Z C V Q, GE) are
+    /// the debugger's, and a moved pc leaves any IT block.  A different sp
+    /// moves the whole stored context there.  False when the context cannot be
+    /// read or the new sp is outside the stack.
+    pub fn write_user_registers(self: *Self, regs: *const UserRegisters) bool {
+        var f = self.saved_frame() orelse return false;
+        if (regs.sp != f.end) {
+            if (!self.move_saved_frame(f, regs.sp)) return false;
+            f = self.saved_frame() orelse return false;
+        }
+        const sw: [*]u32 = @ptrFromInt(f.sw);
+        const hw: [*]u32 = @ptrFromInt(f.hw);
+        @memcpy(hw[0..4], regs.r[0..4]);
+        @memcpy(sw[2..10], regs.r[4..12]);
+        hw[4] = regs.r[12];
+        hw[5] = regs.lr;
+        const old_pc = hw[6];
+        hw[6] = regs.pc & ~@as(u32, 1);
+        var psr = (hw[7] & ~xpsr_flags) | (regs.xpsr & xpsr_flags) | xpsr_thumb;
+        if (hw[6] != old_pc) psr &= ~xpsr_it_bits;
+        hw[7] = psr;
+        return true;
+    }
+
+    /// Move the stored context so the thread resumes with sp = `new_sp`.
+    fn move_saved_frame(self: *Self, f: SavedFrame, new_sp: usize) bool {
+        const lo = @intFromPtr(self.stack.ptr);
+        const hi = lo + self.stack.len;
+        if (new_sp % 4 != 0 or new_sp > hi) return false;
+        const sw_size = f.hw - f.sw;
+        var hw_new = std.math.sub(usize, new_sp, f.hw_size) catch return false;
+        const pad = hw_new % 8 != 0;
+        if (pad) hw_new -= 4;
+        const sw_new = std.math.sub(usize, hw_new, sw_size) catch return false;
+        if (sw_new < lo) return false;
+        var buffer: [max_saved_frame_words]u32 = undefined;
+        const total = sw_size + f.hw_size;
+        const bytes = std.mem.sliceAsBytes(buffer[0..])[0..total];
+        @memcpy(bytes, @as([*]const u8, @ptrFromInt(f.sw))[0..total]);
+        @memcpy(@as([*]u8, @ptrFromInt(sw_new))[0..total], bytes);
+        const psr: *u32 = @ptrFromInt(hw_new + 7 * 4);
+        psr.* = if (pad) psr.* | xpsr_stack_aligned else psr.* & ~xpsr_stack_aligned;
+        self.stack_position = @ptrFromInt(sw_new);
+        return true;
+    }
+
+    /// s0-s31 (as d0-d15) and FPSCR of a switched-out process; all zero when it
+    /// has no FP context stored.
+    pub fn read_fp_registers(self: *const Self) ?FpRegisters {
+        const f = self.saved_frame() orelse return null;
+        var regs = std.mem.zeroes(FpRegisters);
+        if (!f.sw_fp or !f.hw_fp) return regs;
+        const sw: [*]const u32 = @ptrFromInt(f.sw);
+        const hw: [*]const u32 = @ptrFromInt(f.hw);
+        var single: [32]u32 = undefined;
+        @memcpy(single[0..16], hw[8..24]);
+        @memcpy(single[16..32], sw[software_frame_words..][0..16]);
+        for (0..16) |i| regs.fpregs[i] = @as(u64, single[2 * i]) | (@as(u64, single[2 * i + 1]) << 32);
+        regs.fpscr = hw[24];
+        return regs;
+    }
+
+    /// Write s0-s31 and FPSCR back; false when the process has no FP context
+    /// stored to write them into.
+    pub fn write_fp_registers(self: *Self, regs: *const FpRegisters) bool {
+        const f = self.saved_frame() orelse return false;
+        if (!f.sw_fp or !f.hw_fp) return false;
+        const sw: [*]u32 = @ptrFromInt(f.sw);
+        const hw: [*]u32 = @ptrFromInt(f.hw);
+        for (0..16) |i| {
+            const lo: u32 = @truncate(regs.fpregs[i]);
+            const hi: u32 = @truncate(regs.fpregs[i] >> 32);
+            if (i < 8) {
+                hw[8 + 2 * i] = lo;
+                hw[8 + 2 * i + 1] = hi;
+            } else {
+                sw[software_frame_words + 2 * (i - 8)] = lo;
+                sw[software_frame_words + 2 * (i - 8) + 1] = hi;
+            }
+        }
+        hw[24] = regs.fpscr;
+        return true;
+    }
+
+    /// Have a switched-out process resume by calling `pc` with r0 = `r0`, as if
+    /// interrupted at its first instruction -- how a killed tracee is sent to
+    /// `_exit`.
+    pub fn redirect_saved_frame(self: *Self, pc: usize, r0: u32) void {
+        const f = self.saved_frame() orelse return;
+        const hw: [*]u32 = @ptrFromInt(f.hw);
+        hw[0] = r0;
+        hw[5] = 0;
+        hw[6] = @as(u32, @intCast(pc)) & ~@as(u32, 1);
+        hw[7] = (hw[7] & xpsr_stack_aligned) | xpsr_thumb;
     }
 
     pub fn get_stack_top(self: *const Self) *const u8 {

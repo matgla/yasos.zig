@@ -75,6 +75,25 @@ pub fn UartFile(comptime UartType: anytype) type {
             };
             var output: Output = .{};
 
+            /// ISIG, also the tty's rather than a file's: ^C becomes SIGINT for
+            /// the console's foreground program (`ProcessManager`), which the
+            /// UART's receive path hands it straight from the line, read or
+            /// not.  Off in raw mode (cfmakeraw clears it), where ^C is a byte.
+            var isig: bool = true;
+
+            /// Tell the UART which byte to divert, for the current ISIG.
+            pub fn arm_interrupt_char() void {
+                const Decls = if (@TypeOf(uart) == type) uart else @TypeOf(uart);
+                if (!@hasDecl(Decls, "set_interrupt_char")) return;
+                if (isig) {
+                    uart.set_interrupt_char(interrupt_char, &kernel.process.process_manager.note_console_interrupt);
+                } else {
+                    uart.set_interrupt_char(null, null);
+                }
+            }
+
+            const interrupt_char: u8 = 3; // ^C, VINTR
+
             pub fn delete(self: *Self) void {
                 _ = self;
             }
@@ -139,6 +158,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                 // whole word read that as cooked, and read() then waited for a
                 // full buffer -- the sh line editor never saw a key.
                 self._raw_mode = (termios.c_oflag & c.OPOST) == 0;
+                const want_isig = (termios.c_lflag & c.ISIG) != 0;
+                if (want_isig != isig) {
+                    isig = want_isig;
+                    arm_interrupt_char();
+                }
                 output.opost = !self._raw_mode;
                 // Kept while raw and only acted on under OPOST, as on Linux,
                 // so a tcgetattr taken in raw mode restores it intact.
@@ -167,6 +191,11 @@ pub fn UartFile(comptime UartType: anytype) type {
                 return kernel.fs.Node.create_file(file);
             }
 
+            fn signal_pending() bool {
+                if (!kernel.process.process_manager.is_initialized()) return false;
+                return kernel.process.process_manager.instance.get_current_process().signal_pending();
+            }
+
             pub fn read(self: *Self, buffer: []u8) isize {
                 var index: usize = 0;
                 var cursor_pos: usize = 0;
@@ -189,6 +218,9 @@ pub fn UartFile(comptime UartType: anytype) type {
                         } else if (self._raw_mode and index >= self._minimum_bytes_to_read) {
                             return @intCast(index);
                         }
+                        // A signal for this process (Ctrl-C, kill) ends the
+                        // wait: -1, EINTR in sys_read.
+                        if (index == 0 and signal_pending()) return -1;
                         continue;
                     }
 
@@ -197,6 +229,12 @@ pub fn UartFile(comptime UartType: anytype) type {
                     };
 
                     if (result == 0) {
+                        // Nothing after all, and the line quiet again: the byte
+                        // that made it readable was the interrupt character,
+                        // which went to the kernel -- keep waiting, it is no end
+                        // of file.  A line still readable that gives nothing is
+                        // the end, as before.
+                        if (!Self.uart.is_readable()) continue;
                         return @intCast(index);
                     }
 
@@ -424,6 +462,8 @@ pub fn UartFile(comptime UartType: anytype) type {
                             termios.c_cc[1] = 0;
                             termios.c_cc[2] = 0;
                             termios.c_cc[3] = 0;
+                            termios.c_cc[c.VINTR] = interrupt_char;
+                            if (isig) termios.c_lflag |= c.ISIG;
                             termios.c_cc[c.VTIME] = self._read_timeout;
                             termios.c_cc[c.VMIN] = @intCast(self._minimum_bytes_to_read);
                             if (self._icanonical) {

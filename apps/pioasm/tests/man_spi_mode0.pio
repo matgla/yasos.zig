@@ -1,0 +1,22 @@
+; spi_mode0.pio - SPI master, mode 0, MSB first, 8-bit
+; frames, one SCK period = 4 PIO cycles.
+;
+; Pins (set in PINCTRL by the loader, not in this file):
+;   side-set pin 0 = SCK     (Pico Plus 2 SD card: GP5)
+;   OUT pin 0      = MOSI    (GP18, card CMD/DI)
+;   IN pin 0       = MISO    (GP19, card DAT0/DO)
+;   CS is an ordinary GPIO   (GP22, card DAT3/CS), driven
+;   by the CPU.
+
+.program spi_mode0
+.side_set 1         ; 1 side-set bit: SCK; 4 delay bits left
+.out 1 left auto 8  ; 1 OUT pin, MSB first, autopull at 8
+.in 32 left auto 8  ; IN (32 on v0), MSB first, autopush at 8
+
+.wrap_target
+    out pins, 1 side 0 [1] ; MOSI <- next bit, SCK low,
+                           ; 2 cycles. Stalls here, SCK
+                           ; low, while TX FIFO is empty.
+    in  pins, 1 side 1 [1] ; SCK high: sample MISO on the
+                           ; rising edge, 2 cycles.
+.wrap                      ; back to out, no jmp needed

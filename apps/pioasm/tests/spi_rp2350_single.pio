@@ -1,0 +1,8 @@
+; Single-program RP2350 SPI (for -o hex), no .pio_version: needs -v 1.
+.program spi_v1_single
+.side_set 1
+    wait 1 jmppin      side 0
+    out pins, 1        side 0 [1]
+    in pins, 1         side 1 [1]
+    irq next set 1     side 0
+    mov pindirs, null  side 0

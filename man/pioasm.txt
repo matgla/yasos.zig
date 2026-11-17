@@ -1,0 +1,247 @@
+PIOASM(1)                        YasOS Manual                        PIOASM(1)
+
+NAME
+       pioasm - assemble RP2040/RP2350 PIO programs into C, Zig or hex
+
+SYNOPSIS
+       pioasm [-o format] [-p param] [-v version] input [output]
+       pioasm -? | --help
+
+DESCRIPTION
+       pioasm reads a file of PIO assembly (see pio(7)), assembles every
+       .program in it and writes the result in one of three formats. It
+       is a C port of the Raspberry Pi Pico SDK's pioasm
+       (tools/pioasm), built by tcc so it runs on YasOS as well as on a
+       PC. For the formats both support (c-sdk and hex) the output is
+       byte for byte what the SDK's pioasm writes for the same input;
+       apps/pioasm/tests holds the regression test that checks this.
+
+       input is a file name, or - for standard input. output is a file
+       name; without it (or with -) the result goes to standard output.
+       The output file is only created once the whole input has
+       assembled, so an assembly error leaves no partial file behind.
+
+       Every program is assembled as if loaded at address 0: JMP targets
+       in the output are relative to the start of the program. Whoever
+       loads it at another offset adds that offset to the address field
+       of each JMP (see rp2350-pio(7)); the SDK's pio_add_program() does
+       this.
+
+OPTIONS
+       -o format
+              Output format: c-sdk (the default), zig or hex. See OUTPUT
+              FORMATS. The SDK's python, json, ada and go formats are not
+              part of this port.
+
+       -p param
+              A parameter for the output format generator. Accepted for
+              compatibility with the SDK's pioasm and ignored: none of
+              the formats here takes parameters.
+
+       -v version
+              The PIO version a program has when it does not say with
+              .pio_version: 0 (RP2040, the default) or 1 (RP2350). With
+              -v 1, RP2350-only instructions are accepted in a file that
+              has no .pio_version, and the generated NAME_pio_version is
+              1.
+
+       -?, --help
+              Print a usage summary on standard error and exit with
+              status 1.
+
+       Options must come before input. Anything other than -o, -p, -v,
+       -? and --help that starts with - (except a lone -) is an error.
+
+OUTPUT FORMATS
+   c-sdk
+       A C header for the Pico SDK. For each program NAME:
+
+           #define NAME_wrap_target  N     .wrap_target address
+           #define NAME_wrap         N     .wrap address
+           #define NAME_pio_version  N     0 or 1
+           #define NAME_xxx          N     each .define public xxx
+           #define NAME_offset_lbl   Nu    each public label lbl
+           static const uint16_t NAME_program_instructions[]
+
+       and, unless PICO_NO_HARDWARE is defined to non-zero:
+
+           static const struct pio_program NAME_program
+           static inline pio_sm_config
+               NAME_program_get_default_config(uint offset)
+           the program's % c-sdk { ... %} code blocks
+
+       NAME_program_get_default_config() returns pio_get_default_sm_config()
+       with the wrap set and with whatever .side_set, .in, .out, .set,
+       .fifo, .mov_status and .clock_div asked for. A .define public
+       outside any program becomes a plain #define xxx at the top. Each
+       instruction is followed by its disassembly in a comment.
+
+   zig
+       Zig declarations for the same things, so Zig code needs no
+       translate-c pass over a C header. The file starts with
+
+           pub const Program = extern struct {
+               instructions: [*]const u16,
+               length: u8, origin: i8,
+               pio_version: u8, used_gpio_ranges: u8,
+           };
+
+       laid out like the SDK's struct pio_program, so a pointer to one
+       can be @ptrCast to the SDK type. For each program NAME it
+       declares NAME_wrap_target, NAME_wrap, NAME_pio_version, the public
+       defines and NAME_offset_lbl labels as pub const integers,
+       NAME_program_instructions ([_]u16), NAME_program (a Program) and
+
+           pub fn NAME_program_get_default_config(comptime sdk: type,
+                   offset: c_uint) sdk.pio_sm_config
+
+       where sdk is the translated hardware/pio.h. The program's
+       % zig { ... %} code blocks are copied after it. A name that is a
+       Zig keyword or primitive type is written as @"name".
+
+   hex
+       One instruction per line as four lower-case hex digits, nothing
+       else. Only for input with exactly one program; with more pioasm
+       fails with "hex output only supports a single program input".
+
+CODE BLOCKS
+       Text between a line "% lang {" and a line "%}" is copied, not
+       assembled. c-sdk writes the "c-sdk" blocks and zig the "zig"
+       blocks of each program; every other language is skipped. The
+       SDK's language names (c-sdk, python, hex, json, ada, go), zig, and
+       names starting with one of them and "-" are known; any other name
+       gets a warning (once per name). .lang_opt lines are accepted and
+       ignored, with a warning when their language is the selected
+       output format.
+
+DIAGNOSTICS
+       Errors and warnings go to standard error as
+
+           file:line.column[-endcolumn]: message
+
+       pioasm stops at the first error. The messages follow the SDK's
+       pioasm; syntax errors are shorter ("syntax error, unexpected
+       token") and the source line is not echoed. "warning: input
+       contained no programs" is written to standard output, as the SDK
+       does.
+
+EXIT STATUS
+       0 on success. 1 on a bad command line, -? or --help, an unreadable
+       input or unwritable output, any assembly error, -o hex with more
+       or fewer than one program, and when out of memory.
+
+USING THE OUTPUT FROM A C PROGRAM ON YASOS
+       YasOS processes run unprivileged, and with the default kernel
+       configuration (CONFIG_PROCESS_USE_MPU_KERNEL_PROTECTION=y) the MPU
+       gives them access to flash, the romfs and user RAM only. The PIO
+       registers are not reachable: a load or store there faults and the
+       process is killed. A user program therefore uses the generated
+       header for its data (the instruction words, wrap addresses,
+       public symbols), for example to inspect a program or to hand it to
+       code that runs privileged. There is no Pico SDK on YasOS, so
+       define PICO_NO_HARDWARE to drop the parts that need
+       hardware/pio.h, and include <stdint.h> first:
+
+           $ pioasm spi.pio spi.pio.h
+           $ cat show.c
+           #include <stdint.h>
+           #include <stdio.h>
+           #define PICO_NO_HARDWARE 1
+           #include "spi.pio.h"
+
+           int main(void)
+           {
+               unsigned i, n = sizeof(spi_mode0_program_instructions)
+                               / sizeof(uint16_t);
+               for (i = 0; i < n; i++)
+                   printf("%2u: %04x\n", i,
+                          spi_mode0_program_instructions[i]);
+               printf("wrap %d..%d\n", spi_mode0_wrap_target,
+                      spi_mode0_wrap);
+               return 0;
+           }
+           $ tcc -o show show.c && ./show
+            0: 6101
+            1: 5101
+           wrap 0..1
+
+       The same works with gcc on a PC, and with the armv8m-tcc cross
+       compiler (add -I rootfs/usr/include -L rootfs/lib).
+
+USING THE OUTPUT FROM BARE-METAL CODE
+   With the Pico SDK
+       Include the header as is (PICO_NO_HARDWARE unset) after
+       hardware/pio.h is available, then:
+
+           uint offset = pio_add_program(pio0, &spi_mode0_program);
+           pio_sm_config c =
+               spi_mode0_program_get_default_config(offset);
+           sm_config_set_out_pins(&c, 18, 1);   /* MOSI */
+           sm_config_set_in_pins(&c, 19);       /* MISO */
+           sm_config_set_sideset_pins(&c, 5);   /* SCK */
+           sm_config_set_clkdiv(&c, 93.75f);    /* 400 kHz at 150 MHz */
+           pio_gpio_init(pio0, 5);
+           pio_gpio_init(pio0, 18);
+           pio_gpio_init(pio0, 19);
+           pio_sm_set_consecutive_pindirs(pio0, 0, 5, 1, true);
+           pio_sm_set_consecutive_pindirs(pio0, 0, 18, 1, true);
+           pio_sm_init(pio0, 0, offset, &c);
+           pio_sm_set_enabled(pio0, 0, true);
+
+       pio_add_program() relocates the JMPs and, on RP2350, adjusts
+       "wait gpio" for the PIO's GPIOBASE.
+
+   Without the SDK
+       Define PICO_NO_HARDWARE, take NAME_program_instructions,
+       NAME_wrap_target and NAME_wrap from the header and program the
+       registers yourself. rp2350-pio(7) lists them and spells out every
+       write needed to load and start a program; the instruction words
+       are written to INSTR_MEM[offset + i], adding offset to the low
+       five bits of every JMP (top three bits 000).
+
+   From Zig
+       The kernel's HAL does this: hal/source/raspberry/rp2350/build.zig
+       runs "pioasm -o zig" over mmc.pio, mmc/mmc_spi.pio and
+       mmc/mmc_sdio.pio and imports the results as modules. The generated
+       NAME_program is passed to the SDK with @ptrCast(&NAME_program),
+       and NAME_program_get_default_config(sdk, offset) is called with
+       the translated SDK headers as sdk.
+
+EXAMPLES
+       Assemble to a C header:
+
+           pioasm spi.pio spi.pio.h
+
+       Print the instruction words of a one-program file:
+
+           pioasm -o hex spi.pio
+
+       Assemble an RP2350 program that has no .pio_version line:
+
+           pioasm -v 1 -o hex spi_rp2350.pio
+
+       Zig declarations for the kernel build:
+
+           pioasm -o zig mmc_spi.pio mmc_spi.pio.zig
+
+       Read the program from standard input:
+
+           cat spi.pio | pioasm -o hex -
+
+DIFFERENCES FROM THE SDK PIOASM
+       Only the c-sdk and hex formats of the SDK, plus zig, which the SDK
+       does not have. Input - reads standard input (the SDK's pioasm
+       rejects a lone - as an unknown option). pioasm stops at the first
+       error instead of trying to report several. Where the SDK's pioasm
+       crashes (a program defined twice, "irq next ... rel", -o hex with
+       no programs) this one reports an error and exits with 1.
+
+FILES
+       apps/pioasm/            the sources; "make host" builds it for the
+                               PC, "make" with armv8m-tcc for YasOS,
+                               "make test" runs the regression test
+       hal/libs/pico-sdk/tools/pioasm
+                               the SDK's C++ pioasm it was ported from
+
+SEE ALSO
+       pio(7), rp2350-pio(7), tcc(1)

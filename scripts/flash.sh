@@ -45,7 +45,7 @@
 #       --kernel PATH       Kernel ELF, implies --no-build
 #                           (default zig-out/bin/yasos_kernel)
 #       --rootfs PATH       Rootfs image        (default rootfs.img)
-#       --rootfs-address A  Rootfs flash address (default 0x10100000)
+#       --rootfs-address A  Rootfs flash address (default 0x10120000)
 #       --interface CFG     OpenOCD probe config (default interface/cmsis-dap.cfg)
 #       --target CFG        OpenOCD target config (default target/rp2350.cfg)
 #       --speed KHZ         Adapter speed, capped at 25000 (default 15000)
@@ -69,7 +69,7 @@ RESCUE_CFG="${YASOS_FLASH_RESCUE_CFG:-target/rp2350-rescue.cfg}"
 
 KERNEL="$REPO_ROOT/zig-out/bin/yasos_kernel"
 ROOTFS="$REPO_ROOT/rootfs.img"
-ROOTFS_ADDR=0x10100000
+ROOTFS_ADDR=0x10120000
 SPEED=15000
 KERNEL_ONLY=0
 FORCE=0

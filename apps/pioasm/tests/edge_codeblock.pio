@@ -1,0 +1,10 @@
+% c-sdk {
+// a global code block before any program
+%}
+.program cb
+    nop
+% c-sdk {
+line one
+  %} not the end
+still inside
+%} 

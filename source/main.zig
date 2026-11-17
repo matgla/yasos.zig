@@ -680,10 +680,15 @@ export fn kernel_process() void {
     };
 
     var arg1: [8]u8 = [_]u8{ '/', 'b', 'i', 'n', '/', 's', 'h', 0 };
-    // Layout: [ argv0, NULL (argv terminator), NULL (empty-env terminator) ].
-    // crt1 derives `environ = &argv[argc + 1]`, so the trailing NULL must be
-    // present even though the init process starts with an empty environment.
-    var args: [3][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0), @ptrFromInt(0) };
+    // HOME for everything the shell starts. toybox sh sets HOME itself
+    // (from getpwuid: /root) but only as a shell variable, never exported, so
+    // children saw none; what pid 1 gets in its environment the shell imports
+    // as exported. sh keeps the string by pointer (VAR_NOFREE), and this frame
+    // lives as long as the shell does.
+    var home_env: [11]u8 = "HOME=/root\x00".*;
+    // Layout: [ argv0, NULL (argv terminator), env..., NULL (env terminator) ].
+    // crt1 derives `environ = &argv[argc + 1]`.
+    var args: [4][*c]u8 = .{ @ptrCast(&arg1), @ptrFromInt(0), @ptrCast(&home_env), @ptrFromInt(0) };
 
     _ = sh.main(@ptrCast(&args[0]), 1) catch |err| {
         kernel.log.err("Cannot execute main: {s}", .{@errorName(err)});

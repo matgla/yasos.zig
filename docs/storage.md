@@ -187,12 +187,24 @@ image test that lays out a 16 MiB image and checks it with `sfdisk`, `blkid`,
 ## Swap
 
 When an allocation finds the process pool full, the kernel writes out the
-largest process that is waiting in `waitpid` -- make while its compiler runs,
-a shell while make runs -- and hands its pages to the allocation. The waiting
+largest process that is waiting in `waitpid` for the allocating process or an
+ancestor of it -- make while its compiler runs, a shell while make runs -- and
+hands its pages to the allocation. The waiting
 process reads itself back, at the same addresses, when its wait ends: before
 `waitpid` returns, so it never sees the difference. Its stack stays resident.
 Only heap, data and bss go out; a running process is never touched. With
 nothing waiting, an allocation that does not fit fails as before.
+
+There is no MMU, so those addresses must be free again when the wait ends.
+A process is therefore swapped out only for the process it waits for or one
+of that process's descendants, and only they are given its pages: they are
+gone by the time it wakes. Another job running beside it (a second shell's
+build, a background loop, a shell's `&` job while it waits for the
+foreground) neither swaps it out nor lands on its pages; when the pool is full
+for that job, its allocation fails as it would without swap. A `waitpid(-1)`
+with several children running is never swapped out: any of them could end
+it. Once the awaited process exits, its own leftover children (orphans now)
+get none of the pages either.
 
 Swap space is a partition of MBR type 82 (`PARTTYPE=82` in /etc/fstab, what
 `cardreformat` makes) or a file (`/var/swap none swap size=8M`). A device given

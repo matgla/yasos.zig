@@ -1,0 +1,57 @@
+; SPI master using RP2350 (PIO version 1) features.
+.pio_version 1
+
+.program spi_v1
+.side_set 1 opt
+.fifo txput                   ; the SM posts status words into RX FIFO slots
+.in 1 left manual 8           ; one IN pin
+.out 1 left auto 8            ; one OUT pin, autopull 8 bits
+.set 1
+.clock_div 2.5
+.mov_status txfifo < 2
+.wrap_target
+    wait 1 jmppin    side 0   ; wait for the CS input (the jmp pin) high
+    wait 0 jmppin + 1         ; and its neighbour low
+    out pins, 1      side 0 [1]
+    in pins, 1       side 1 [1]
+    mov rxfifo[y], isr
+    mov rxfifo[3], isr
+    irq next set 0
+    irq prev wait 1
+    irq next clear 7
+    wait 1 irq next 2
+    wait 0 irq prev, 3
+    mov pindirs, x
+    mov pindirs, ~y
+    mov x, status
+.wrap
+
+.program spi_v1_get
+.fifo txget
+.mov_status irq next set 5
+    mov osr, rxfifo[y]
+    mov osr, rxfifo[7]
+    out pins, 8
+    wait 1 gpio 40
+    wait 0 gpio 47
+
+.program spi_v1_putget
+.pio_version rp2350
+.fifo putget
+.mov_status irq prev set 2
+    mov rxfifo[0], isr
+    mov osr, rxfifo[1]
+
+.program spi_v1_tx
+.fifo tx
+.mov_status rxfifo < 4
+.clock_div 125
+    pull
+    out pins, 32
+
+.program spi_v1_rx
+.fifo rx
+.mov_status irq set 3
+.clock_div 1.75
+    in pins, 32
+    push

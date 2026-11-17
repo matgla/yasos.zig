@@ -238,6 +238,7 @@ int output_c_sdk(Assembler *as, FILE *out);
 int output_zig(Assembler *as, FILE *out);
 int output_hex(Assembler *as, FILE *out);
 int is_known_output_format(const char *lang);
+const char **block_languages(Program *p, int *count);
 
 /* main.c */
 _Noreturn void fail(Loc loc, const char *fmt, ...);

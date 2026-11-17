@@ -1,0 +1,27 @@
+.define A 3
+.define B (A * 2 + 1)
+.define public C ((B << 2) >> 1)
+.define public D (::1)
+.define E ((-1) & 31)
+.define H (1 + 2 * 3 | 4)
+.define F (5 ^ 3 | 8)
+.define G (31 / 3 - 1)
+.program exprs
+    set x, A
+    set y, B
+    set pins, (C & 31)
+    jmp (E & 7)
+    set x, F
+    set x, G
+    set x, H
+    set x, ((::4) >> 27)
+lbl:
+    nop [E]
+    jmp lbl
+    jmp ((lbl + 1) - 1)
+    JMP X-- lbl
+    Set X, ONE
+    set y, zero
+    MOV x, ~ x
+    nop
+    nop

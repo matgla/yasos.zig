@@ -11,7 +11,7 @@
 #                  YASOS_QEMU_OPTIMIZE to any zig optimize mode). Implies --build.
 #   --zig DIR      Build the Zig compiler from the Zig tree DIR into the image
 #                  (build_rootfs.sh --zig). Implies --build. Default with
-#                  --build: $YASOS_ZIG_SOURCE, else a sibling ../zig-mem
+#                  --build: $YASOS_ZIG_SOURCE, else a sibling ../zig
 #                  checkout when there is one.
 #   --no-zig       Leave the Zig compiler out of a --build.
 #   --an505        Boot the older mps2-an505 board. Its 5 MB romfs window
@@ -105,8 +105,8 @@ if [ "$#" -gt 0 ]; then
 fi
 
 if [ -z "$ELF" ] && [ "$BUILD" = "1" ] && [ "$WITH_ZIG" = "1" ]; then
-    if [ -z "$ZIG_SOURCE" ] && [ -f "$REPO_ROOT/../zig-mem/build.zig" ]; then
-        ZIG_SOURCE="$REPO_ROOT/../zig-mem"
+    if [ -z "$ZIG_SOURCE" ] && [ -f "$REPO_ROOT/../zig/build.zig" ]; then
+        ZIG_SOURCE="$REPO_ROOT/../zig"
     fi
     if [ -z "$ZIG_SOURCE" ]; then
         echo "note: no Zig source tree (--zig DIR or YASOS_ZIG_SOURCE); building without the Zig compiler." >&2

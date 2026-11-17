@@ -47,9 +47,9 @@
 #   tcc/yasos/yasos_compat.o, compiler_rt.o   linked into every native program
 #   tcc/yasos/ip-hints-configurer       InternPool sizes for the configurer's first compile
 # and compiler/configurer.zig, which the device compiles per project.  `zig build`'s
-# maker, built here on the PC (its C is 36 MB), goes into the rootfs as
+# maker, built here on the PC (its C is 36 MB), went into the rootfs as
 # /usr/bin/zig-maker (-Dprebuilt-maker): from the romfs its code runs in place
-# instead of taking RAM.
+# instead of taking RAM.  Only with YASOS_ZIG_MAKER=1 now (see the install).
 set -euo pipefail
 
 ZIG_SRC="$(realpath "${1:?zig source dir}")"
@@ -152,7 +152,14 @@ ZIG_LIB_DIR="$CARD_DIR$LIB_ON_CARD" ZIG_TCC="$(command -v "$CC")" "$WORK/host-st
     --tcc-arg -stack-size=262144 \
     -Mroot="$ZIG_SRC/lib/compiler/Maker.zig" --name maker \
     --cache-dir "$WORK/maker-cache" --global-cache-dir "$WORK/maker-cache" -femit-bin="$WORK/maker"
-install -D -m 755 "$WORK/maker" "$ROOTFS/usr/bin/zig-maker"
+# Not shipped by default: at 2.3 MB it was a fifth of the rp2350 image, and
+# `zig build` on the board is not used (zig build-obj + tcc is).  Set
+# YASOS_ZIG_MAKER=1 to put it in the rootfs again.
+if [ "${YASOS_ZIG_MAKER:-0}" = 1 ]; then
+  install -D -m 755 "$WORK/maker" "$ROOTFS/usr/bin/zig-maker"
+else
+  rm -f "$ROOTFS/usr/bin/zig-maker"
+fi
 
 # The configurer's InternPool sizes, for its first compile on the device (the
 # device compiler keeps its own afterwards, in its global cache).  A hello-world

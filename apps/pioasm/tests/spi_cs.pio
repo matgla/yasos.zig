@@ -1,0 +1,63 @@
+; Two programs in one file, with public symbols, defines, wrap and an
+; optional side-set driving both SCK and CS.
+
+.define public SPI_BITS 8
+.define PERIOD 2
+
+.program spi_cs_mode0
+.side_set 2 opt               ; bit 1 = CS, bit 0 = SCK
+
+public entry:
+    pull block      side 0b10 ; CS high while idle
+    set x, (SPI_BITS - 1) side 0b00
+.wrap_target
+bitloop:
+    out pins, 1     side 0b00 [PERIOD - 1]
+    in pins, 1      side 0b01 [PERIOD - 1]
+    jmp x-- bitloop
+    push noblock
+    jmp !osre bitloop
+    jmp entry       side 0b10
+.wrap
+
+.program spi_cs_mode1
+.side_set 2
+.origin 4
+public start:
+    pull ifempty block side 2
+    set y, 7          side 0
+loop:
+    out x, 1          side 1
+    mov pins, x       side 1
+    in pins, 1        side 0
+    jmp y-- loop      side 0
+    push iffull block side 0
+    jmp x != y, start side 2
+    jmp pin, start    side 2
+    jmp !x start      side 2
+    jmp !y start      side 2
+    jmp x-- start     side 2
+.program spi_cs_misc
+.side_set 2
+    mov isr, ~null    side 0
+    mov osr, ::x      side 0
+    mov y, !status    side 0
+    mov exec, isr     side 0
+    mov pc, y         side 0
+    out pc, 5         side 0
+    out exec, 16      side 0
+    out pindirs, 2    side 0
+    out null, 32      side 0
+    in null, 32       side 0
+    in isr, 1         side 0
+    in osr, 3         side 0
+    set pindirs, 3    side 0
+    set pins, 31      side 0
+    nop               side 3 [7]
+    wait 0 gpio 31    side 0
+    wait 1 pin 3      side 0
+    wait irq 7 rel    side 0
+    irq clear 3       side 0
+    irq wait 2 rel    side 0
+    irq nowait 1      side 0
+    irq set 0         side 0

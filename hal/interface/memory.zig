@@ -57,6 +57,14 @@ pub fn Memory(comptime MemoryImpl: anytype) type {
             };
         }
 
+        /// The span in which writes cost code that runs there: QEMU's TCG
+        /// tracks translated code by target page, and a store into such a page
+        /// takes the self-modifying-code slow path even when it misses the
+        /// code.  Code loaded into RAM keeps whole granules to itself, so a
+        /// stack or data block beside it does not slow it down ~15x.  Boards
+        /// without one keep plain 16-byte alignment.
+        pub const code_granule: usize = if (@hasDecl(MemoryImpl, "code_granule")) MemoryImpl.code_granule else 16;
+
         pub fn get_memory_layout(self: Self) []const MemoryInfo {
             return self.impl.get_memory_layout();
         }

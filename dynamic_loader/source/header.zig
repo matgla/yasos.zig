@@ -305,12 +305,13 @@ pub fn print_header(header: *const Header) void {
 }
 
 comptime {
-    // 136 bytes since YAFF_VERSION 5, which appended memory_flags; 132 in
+    // 144 bytes since YAFF_VERSION 6, which appended debug_offset and
+    // debug_length; 136 in version 5, which appended memory_flags; 132 in
     // version 4, which appended data_alignment and data_alignment_offset; 124 in
     // version 3, which widened every table offset
     // and the relocation/symbol counts from 16 to 32 bits (92 before that). The
     // check is here so a toolchain/loader mismatch is a build error rather than
     // a module that loads with its sections read from the wrong offsets.
     var buf: [30]u8 = undefined;
-    if (@sizeOf(Header) != 136) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
+    if (@sizeOf(Header) != 144) @compileError("Header has incorrect size: " ++ (std.fmt.bufPrint(&buf, "{d}", .{@sizeOf(Header)}) catch "unknown"));
 }

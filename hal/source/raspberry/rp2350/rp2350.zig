@@ -60,6 +60,7 @@ pub const sensors = @import("source/sensors.zig");
 
 comptime {
     _ = @import("startup/boot2_rom.zig");
+    _ = @import("partitions/partition_table.zig");
     _ = @import("hal_common");
     _ = @import("startup/crt.zig");
 }

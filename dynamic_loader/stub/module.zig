@@ -82,6 +82,11 @@ pub const Module = struct {
         return empty_section[0..];
     }
 
+    pub fn get_rodata(self: *const Module) []const u8 {
+        _ = self;
+        return &.{};
+    }
+
     pub fn get_plt(self: *const Module) []const u8 {
         _ = self;
         return empty_section[0..];

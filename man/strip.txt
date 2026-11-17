@@ -1,0 +1,46 @@
+STRIP(1)                         YasOS Manual                         STRIP(1)
+
+NAME
+       strip - take the debug data out of a program
+
+SYNOPSIS
+       strip FILE...
+       strip -o OUTPUT FILE
+       strip -f DEBUGFILE FILE
+
+DESCRIPTION
+       A program or library linked with tcc -g carries its debug data --
+       DWARF line tables and types, and every symbol, static functions
+       included -- at the end of its YAFF file, after everything the loader
+       reads. It runs as it is: the loader never reads the debug data, and
+       a copy into memory stops where it starts. It only costs space on the
+       card or in the romfs.
+
+       strip removes it, and leaves the program itself byte for byte as it
+       was. A file with no debug data is left alone.
+
+OPTIONS
+       -o OUTPUT
+              Write the stripped program to OUTPUT, and leave FILE as it is.
+
+       -f DEBUGFILE
+              First save the debug data to DEBUGFILE, then leave FILE naming
+              it (a .yaff_debuglink), so a debugger can still find it. Both
+              record the program's CRC-32: a debug file from another build
+              of the program is told apart.
+
+       -o and -f take a single FILE. A plain strip of a program stripped
+       with -f keeps the link.
+
+EXAMPLES
+       tcc -g -o prog prog.c
+       strip -f prog.debug prog
+
+       On the PC, libs/tinycc/scripts/yaff_debug_to_elf.py turns prog.debug
+       (or an unstripped prog) into an ELF file gdb and readelf read.
+
+FILES
+       The format is YaffDebugHeader in the compiler's tccyaff.h.
+
+SEE ALSO
+       tcc(1); yaffdump -f FILE shows a program's debug data.

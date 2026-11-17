@@ -81,6 +81,9 @@ var memory_layout: [5]MemoryInfo = [_]MemoryInfo{
 const kernel_slow_fraction: usize = 16;
 
 pub const Memory = struct {
+    /// TCG's target page on Arm (TARGET_PAGE_BITS_MIN 10); see the interface.
+    pub const code_granule: usize = 1024;
+
     pub fn get_memory_layout(self: Memory) []const MemoryInfo {
         _ = self;
         memory_layout[0].start_address = @intFromPtr(&__kernel_ram_start__);
