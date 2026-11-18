@@ -2,4 +2,4 @@
 # Bump `commit` with the fork; it must be reachable from `branch` on `url`.
 url https://github.com/matgla/zig.git
 branch feat/zig-build-on-yasos
-commit 1b5a96157e54a8dce006cb2aafcc98b7ebcca59b
+commit 241a70ce575f04d7bb8060e079431ece04abc592

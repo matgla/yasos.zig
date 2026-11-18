@@ -337,8 +337,11 @@ ptrace(PTRACE_DETACH, pid, 0, 0);             /* runs on, untraced */
 
 ## 4. Structure
 
-A suggestion, in `apps/ydb/`, built like `apps/yaffdump` (cross tcc for the
-board, `make host` where it makes sense for unit tests):
+ydb is written in C, on the board, built with the board's tcc (the cross tcc
+builds it for the image, like `apps/yaffdump`), and tested on the board with
+libc's `utest.h`. The step-by-step plan, by video part, is `apps/ydb/plan.md`.
+
+The split, in `apps/ydb/src/`:
 
 - `target.c` -- the ptrace layer: launch, wait/decode status, regs, memory
   (word cache), the breakpoint table (insert/remove/step-over), kill/detach.
@@ -361,8 +364,9 @@ board, `make host` where it makes sense for unit tests):
 
 ## 5. Milestones
 
-Each one usable on its own, each with a smoke test (`tests/smoke/`, ydb driven
-by a command file, e.g. `ydb -x cmds prog`):
+Each one usable on its own (the video parts in `apps/ydb/plan.md`), each
+with a smoke test (`tests/smoke/`, ydb driven by a command file, e.g.
+`ydb -x cmds prog`):
 
 | | Commands | Needs |
 |---|---|---|

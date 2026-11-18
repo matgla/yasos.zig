@@ -1,8 +1,10 @@
 import contextlib
 import json
+import posixpath
 from pathlib import Path
 import shlex
 import sys
+import tarfile
 import types
 
 import pytest
@@ -275,6 +277,10 @@ def manifest(tmp_path, monkeypatch):
         suite, "_source_manifest_state", {"generation": None, "digest": None, "count": 0}
     )
     monkeypatch.setattr(suite, "_missing_after_repush", set())
+    # A card-backed root that takes writes, without asking a device about it.
+    monkeypatch.setattr(
+        suite, "sources_root_state", lambda _session: {"ram": False, "heap": None, "unusable": None}
+    )
     return types.SimpleNamespace(path=path, corpus=corpus)
 
 
@@ -445,13 +451,17 @@ def push_mode(manifest, monkeypatch, tmp_path):
     monkeypatch.setattr(suite, "_verify_corpus_on_device", _unexpected_check)
 
     pushed = []
+    sent = []
 
-    def _send_files(_session, transfers, timeout=30.0, on_progress=None):
-        transfers = list(transfers)
-        pushed.extend(remote for _local, remote in transfers)
-        return sum(len(Path(local).read_bytes()) for local, _remote in transfers)
+    def _send_file(_session, local_path, remote_path, timeout=5.0, on_progress=None):
+        # What lands on the device: the members of the archive, under the root.
+        with tarfile.open(local_path) as archive:
+            for member in archive:
+                pushed.append(posixpath.join(suite.REMOTE_SOURCES_ROOT, member.name))
+                sent.append(archive.extractfile(member).read())
+        assert remote_path == posixpath.join(suite.REMOTE_SOURCES_ROOT, suite.CORPUS_ARCHIVE_NAME)
 
-    monkeypatch.setattr(suite, "serial_send_files", _send_files)
+    monkeypatch.setattr(suite, "serial_send_file", _send_file)
 
     # Local files for whatever the corpus names, so the push has something to
     # size and send.
@@ -464,26 +474,34 @@ def push_mode(manifest, monkeypatch, tmp_path):
         return files
 
     monkeypatch.setattr(suite, "_corpus_source_files", _corpus_files)
-    return types.SimpleNamespace(pushed=pushed)
+    return types.SimpleNamespace(pushed=pushed, sent=sent)
 
 
-def test_push_progress_line_reports_bar_counts_rate_and_eta():
+def test_push_progress_line_reports_bar_bytes_rate_and_eta():
     line = suite._format_push_progress(
-        done=1000, total=4000, sent=1024 * 1024, total_bytes=4 * 1024 * 1024,
-        elapsed=16.0, width=8,
+        sent=1024 * 1024, total_bytes=4 * 1024 * 1024, elapsed=16.0, width=8,
     )
     # A quarter sent in 16 s: 64 KiB/s, and 3 MiB left is 48 s more.
-    assert line == (
-        "pushing [##------] 1000/4000 sources  1024/4096 KiB  64 KiB/s  eta 0:48"
-    )
+    assert line == "pushing [##------] 1024/4096 KiB  64 KiB/s  eta 0:48"
 
 
 def test_push_progress_line_survives_a_stalled_start():
     """No throughput yet must not divide by zero or invent an ETA."""
-    line = suite._format_push_progress(
-        done=0, total=10, sent=0, total_bytes=1024, elapsed=0.0, width=4,
-    )
-    assert line == "pushing [----] 0/10 sources  0/1 KiB  0 KiB/s  eta --:--"
+    line = suite._format_push_progress(sent=0, total_bytes=1024, elapsed=0.0, width=4)
+    assert line == "pushing [----] 0/1 KiB  0 KiB/s  eta --:--"
+
+
+def test_push_falls_back_when_the_device_cannot_unpack(push_mode, manifest, tmp_path):
+    _, entries = _manifest_case(tmp_path)
+    manifest.corpus.update(entries)
+    session = FakeSession([[], ["tar: short read"]])  # the mkdir, the unpack
+
+    suite.ensure_source_manifest_seeded(session)
+
+    assert session.confirmed_uploads == {}
+    assert not manifest.path.exists()
+    # The archive does not stay behind on the card.
+    assert "rm -f " in session.commands[-1]
 
 
 def test_progress_lines_redraw_in_place_only_on_a_terminal(monkeypatch, capsys):
@@ -553,6 +571,8 @@ def test_push_uploads_only_what_the_device_is_not_known_to_hold(
     manifest.corpus.update(grown)
     session = FakeSession([
         [suite._source_manifest_digest(entries)],  # the token read
+        [],                                        # the mkdir
+        ["corpus-unpack-ok"],                      # the unpack
         [],                                        # the token write
     ])
 
@@ -569,11 +589,13 @@ def test_push_uploads_the_whole_corpus_when_the_device_witnesses_nothing(
     _, entries = _manifest_case(tmp_path)
     manifest.corpus.update(entries)
     manifest.corpus[suite.remote_source_path("second.c")] = "d" * 64
-    session = FakeSession([[]])  # no map to read a token for, just the write
+    # No map to read a token for: the mkdir, the unpack, the token write.
+    session = FakeSession([[], ["corpus-unpack-ok"], []])
 
     suite.ensure_source_manifest_seeded(session)
 
     assert push_mode.pushed == sorted(manifest.corpus)
+    assert any(command.startswith("tar -C ") for command in session.commands)
     assert session.confirmed_uploads == manifest.corpus
 
 
@@ -597,11 +619,11 @@ def test_push_falls_back_to_per_test_verification_when_the_transfer_fails(
     _, entries = _manifest_case(tmp_path)
     manifest.corpus.update(entries)
 
-    def _failing_send(_session, _transfers, timeout=30.0, on_progress=None):
+    def _failing_send(_session, _local, _remote, timeout=5.0, on_progress=None):
         raise TransferError("target went away mid-batch")
 
-    monkeypatch.setattr(suite, "serial_send_files", _failing_send)
-    session = FakeSession([])
+    monkeypatch.setattr(suite, "serial_send_file", _failing_send)
+    session = FakeSession([[]])  # the mkdir before the send
 
     suite.ensure_source_manifest_seeded(session)
 

@@ -98,8 +98,10 @@ once — prefer that when a bug class repeats.
   self-host test: builds the stage-2 native tcc with the cross in
   `.cache/tcc_selfhost`, sends sources + host-cross objects, the device's tcc
   builds tinycc (compared with the host objects), then that new tcc rebuilds
-  itself and must reach a byte-identical fixpoint. `--tu REGEX` for a quick
-  compile-only check; `--stages 2` to skip the fixpoint.
+  itself and must reach a byte-identical fixpoint -- skipped when the new tcc is
+  byte-identical to the rootfs tcc (CI builds both from one checkout, so the
+  fixpoint holds by identity; `--full-fixpoint` runs it anyway). `--tu REGEX` for
+  a quick compile-only check; `--stages 2` to skip the fixpoint.
 - **Storage layout** ([`docs/storage.md`](docs/storage.md)): the kernel mounts
   from `/etc/fstab` (in-tree `etc/fstab`) -- SD partitions by `LABEL=`: FAT
   `/boot` (yasboot reads it), ext4 `/var /home` (lwext4 fork in

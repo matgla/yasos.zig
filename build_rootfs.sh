@@ -1184,6 +1184,27 @@ if $BUILD_IMAGE; then
     echo "WARNING: scripts/man/build_man.py failed; the image has no man pages."
     rm -rf rootfs/usr/share/man
   fi
+  # The C library's tags for yasvi (YASVI_SYSTEM_TAGS in apps/yasvi/editor.h:
+  # Ctrl-N completion and Ctrl-] in C files): the headers' functions, macros,
+  # types and enum values, without struct members and _reserved names, with
+  # absolute paths so a jump opens /usr/include/... .  Needs a host ctags
+  # (Universal Ctags); without one the image has none and yasvi does without.
+  if command -v ctags >/dev/null 2>&1; then
+    mkdir -p rootfs/usr/share/yasvi
+    libc_tags_raw="$(mktemp)"
+    if (cd rootfs && ctags -f "$libc_tags_raw" --languages=C --langmap=C:+.h \
+          --kinds-C=pdtsuegx --fields=k --exclude=tcclib.h -R usr/include 2>/dev/null) &&
+       awk -F'\t' 'BEGIN { OFS = "\t" } /^!/ { print; next } $1 !~ /^_/ { $2 = "/" $2; print }' \
+         "$libc_tags_raw" > rootfs/usr/share/yasvi/libc.tags; then
+      echo "yasvi libc tags: $(grep -vc '^!' rootfs/usr/share/yasvi/libc.tags) names"
+    else
+      echo "WARNING: ctags failed; yasvi has no libc tags."
+      rm -rf rootfs/usr/share/yasvi
+    fi
+    rm -f "$libc_tags_raw"
+  else
+    echo "WARNING: no host ctags; yasvi has no libc tags (completion keeps keywords and project tags)."
+  fi
   # Stale programs: rootfs/ is only cleared by -c, so what earlier builds
   # installed stays unless removed here -- the benchmarks and test programs
   # no longer built (above), and zig build's maker (YASOS_ZIG_MAKER).
