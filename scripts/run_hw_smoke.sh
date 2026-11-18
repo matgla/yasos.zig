@@ -86,24 +86,12 @@ for artifact in "$KERNEL" "$ROOTFS" "$YAFF_DONOR"; do
     fi
 done
 
-rescue_dp() {
-    # Clear QSPI Quad I/O / double-fault lockup left by a prior run before
-    # programming (same rescue the reset/reflash paths use).
-    openocd -f interface/cmsis-dap.cfg -f target/rp2350-rescue.cfg \
-        -c "adapter speed 5000" -c "init" -c "exit" 2>/dev/null || true
-    sleep 1
-}
-
 # flash_rp2350.cfg programs rootfs.img @ 0x10120000 + zig-out/bin/yasos_kernel
-# (which also writes the partition table at 0x10000000)
-# relative to cwd (= REPO_ROOT). A board left wedged by a prior run can refuse the
-# first program; rescue the DP and retry once before giving up.
-echo ">> Flashing prebuilt image (no rebuild): $(basename "$ROOTFS") @ $ROOTFS_ADDR + $(basename "$KERNEL")"
-if ! openocd -f flash_rp2350.cfg; then
-    echo ">> Initial flash failed; rescuing DP and retrying once" >&2
-    rescue_dp
-    openocd -f flash_rp2350.cfg
-fi
+# (which also writes the partition table at 0x10000000); hw_flash.sh skips the
+# programming when the board already holds both, and rescues the DP and retries
+# once when a board left wedged by a prior run refuses the first program.
+echo ">> Prebuilt image (no rebuild): $(basename "$ROOTFS") @ $ROOTFS_ADDR + $(basename "$KERNEL")"
+"$SCRIPT_DIR/hw_flash.sh"
 
 # Match the QEMU gate's coverage on real silicon: all -O levels + gcc-torture.
 export YASOS_SMOKE_TCC_OPT_LEVELS="${OPT_LEVELS:--O0 -O1 -O2}"

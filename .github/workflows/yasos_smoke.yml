@@ -272,8 +272,10 @@ jobs:
 
   # The board compiles its own compiler: the rootfs tcc builds tinycc (object for
   # object equal to the host cross's), and the tcc it built rebuilds itself to a
-  # byte-identical fixpoint (scripts/tcc_selfhost.py, stage 3).  Same package as
-  # hardware_smoke; the single board runner runs the two one after the other.
+  # byte-identical fixpoint (scripts/tcc_selfhost.py, stage 3; it holds by identity,
+  # and stage 3 is skipped, when that tcc is the rootfs tcc byte for byte).  Same
+  # package as hardware_smoke, so hw_flash.sh finds it already on the board and only
+  # resets it; the single board runner runs the two one after the other.
   hardware_selfhost:
     needs: build_hw
     runs-on: [self-hosted, pimoroni_pico_plus2]

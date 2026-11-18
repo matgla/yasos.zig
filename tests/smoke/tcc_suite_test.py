@@ -42,6 +42,8 @@ import re
 import shlex
 import posixpath
 import sys
+import tarfile
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from typing import Optional, Any
@@ -52,7 +54,6 @@ import zlib
 import pytest
 
 from .framework.file_transfer import send_file as serial_send_file
-from .framework.file_transfer import send_files as serial_send_files
 
 logger = logging.getLogger(__name__)
 
@@ -1520,6 +1521,17 @@ SOURCE_MANIFEST_FLUSH_EVERY = int(
 SOURCE_MANIFEST_PROGRESS_INTERVAL = float(
     os.environ.get("YASOS_SMOKE_SOURCE_MANIFEST_PROGRESS_INTERVAL", "2")
 )
+# The push sends the corpus as one gzipped tar and unpacks it on the device.
+# File by file, each sub-kilobyte source cost a zmodem header, a create on the
+# card and an ack round trip -- about 12 ms against 1.5 ms of bytes at 3 Mbaud,
+# so the link sat idle most of the time (35 KiB/s); one archive streams at bulk
+# speed and compresses about 4x on top.
+CORPUS_ARCHIVE_NAME = ".corpus_push.tar.gz"
+# `tar x` says nothing while it creates several thousand files on the card, so
+# the silence window has to cover the whole unpack.
+SOURCE_MANIFEST_UNPACK_TIMEOUT = float(
+    os.environ.get("YASOS_SMOKE_SOURCE_MANIFEST_UNPACK_TIMEOUT", "600")
+)
 # tcc could not open an input: "file 'x.c' not found", "include file 'y.h' not
 # found".
 MISSING_INPUT_PATTERN = re.compile(r"\bfile '(?P<name>[^']*)' not found")
@@ -1623,12 +1635,13 @@ def _format_duration(seconds):
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-def _format_push_progress(done, total, sent, total_bytes, elapsed, width=24):
-    """One line of push progress: bar, counts, throughput and what is left.
+def _format_push_progress(sent, total_bytes, elapsed, width=24):
+    """One line of push progress: bar, bytes, throughput and what is left.
 
     Throughput is what tells the operator whether a push is progressing or the
-    link has gone quiet, and it is the number the whole bootstrap trade-off
-    rests on -- so it is on screen rather than only in the summary.
+    link has gone quiet, so it is on screen rather than only in the summary.
+    The push is a single archive, so bytes are the whole story: the rate is
+    steady and the ETA follows from it.
     """
     fraction = (sent / total_bytes) if total_bytes else 1.0
     fraction = min(max(fraction, 0.0), 1.0)
@@ -1637,8 +1650,7 @@ def _format_push_progress(done, total, sent, total_bytes, elapsed, width=24):
     rate = (sent / elapsed) if elapsed > 0 else 0.0
     remaining = (total_bytes - sent) / rate if rate > 0 else None
     return (
-        f"pushing [{bar}] {done}/{total} sources  "
-        f"{sent // 1024}/{total_bytes // 1024} KiB  "
+        f"pushing [{bar}] {sent // 1024}/{total_bytes // 1024} KiB  "
         f"{rate / 1024:.0f} KiB/s  eta {_format_duration(remaining)}"
     )
 
@@ -1689,6 +1701,53 @@ def _corpus_source_files():
     }
 
 
+def _build_corpus_archive(transfers, archive_path):
+    """Write *transfers* ((local, remote) pairs) as a gzipped tar whose members
+    are named relative to REMOTE_SOURCES_ROOT, ready for ``tar -C root -x``."""
+    root = REMOTE_SOURCES_ROOT.rstrip("/") + "/"
+    with tarfile.open(
+        archive_path, "w:gz", compresslevel=6, format=tarfile.USTAR_FORMAT
+    ) as out:
+        for local_path, remote_path in transfers:
+            if not remote_path.startswith(root):
+                raise ValueError(f"{remote_path} is outside {REMOTE_SOURCES_ROOT}")
+            info = out.gettarinfo(local_path, arcname=remote_path[len(root):])
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            with open(local_path, "rb") as source:
+                out.addfile(info, source)
+
+
+def _send_corpus_archive(session, transfers, on_progress=None):
+    """Send *transfers* as one archive and unpack it under REMOTE_SOURCES_ROOT.
+
+    Returns the archive's size; raises if the transfer or the unpack fails. The
+    archive is removed on the device either way."""
+    remote_archive = posixpath.join(REMOTE_SOURCES_ROOT, CORPUS_ARCHIVE_NAME)
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / CORPUS_ARCHIVE_NAME
+        _build_corpus_archive(transfers, archive)
+        size = archive.stat().st_size
+        session.write_command("mkdir -p " + shlex.quote(REMOTE_SOURCES_ROOT))
+        session.wait_for_prompt_except_logs()
+        serial_send_file(
+            session, str(archive), remote_archive, timeout=30.0, on_progress=on_progress
+        )
+    started = time.monotonic()
+    _manifest_progress(f"unpacking {len(transfers)} sources on the device")
+    session.write_command(
+        f"tar -C {shlex.quote(REMOTE_SOURCES_ROOT)} -xzf {shlex.quote(remote_archive)} "
+        f"&& echo corpus-unpack-ok; rm -f {shlex.quote(remote_archive)}"
+    )
+    lines = session.wait_for_prompt_except_logs(timeout=SOURCE_MANIFEST_UNPACK_TIMEOUT)
+    if "corpus-unpack-ok" not in lines:
+        raise RuntimeError(f"unpacking the corpus failed: {' | '.join(lines[-3:])}")
+    _manifest_progress(
+        f"unpacked in {_format_duration(time.monotonic() - started)}"
+    )
+    return size
+
+
 def _push_corpus_to_device(session, corpus, witnessed):
     """Upload every source the device is not already known to hold.
 
@@ -1700,6 +1759,8 @@ def _push_corpus_to_device(session, corpus, witnessed):
     also the only bootstrap that works on a target holding nothing at all (a
     fresh card, or QEMU), where a check can only report that everything is
     missing.
+
+    The sources go over as one archive (CORPUS_ARCHIVE_NAME), not file by file.
 
     Returns the set actually established, or None if the transfer failed and
     the caller should fall back to per-test verification.
@@ -1717,7 +1778,8 @@ def _push_corpus_to_device(session, corpus, witnessed):
         os.path.getsize(local_path) for local_path, _ in transfers
     )
     # A RAM-backed root holds the corpus on the kernel heap, with a node per
-    # file on top of the bytes; twice the corpus is the least to try it with.
+    # file on top of the bytes, and the archive beside it until the unpack is
+    # done; twice the corpus is the least to try it with.
     root = sources_root_state(session)
     if root["ram"] and (root["heap"] is None or root["heap"] < 2 * total_bytes):
         _manifest_progress(
@@ -1727,37 +1789,33 @@ def _push_corpus_to_device(session, corpus, witnessed):
         return None
     _manifest_progress(
         f"pushing {len(transfers)} of {len(corpus)} sources "
-        f"({total_bytes // 1024} KiB) in one batch"
+        f"({total_bytes // 1024} KiB) as one archive"
     )
 
-    # Paced by the clock rather than by a file count: the corpus runs from
-    # empty files to 400 KiB ones, so "every N files" would be a burst of lines
-    # through the small ones and silence through the big ones.
     started = time.monotonic()
     last_report = [started]
 
-    def _on_progress(done, total, sent):
+    def _on_progress(sent, archive_bytes):
         now = time.monotonic()
         if now - last_report[0] < SOURCE_MANIFEST_PROGRESS_INTERVAL:
             return
         last_report[0] = now
         _manifest_progress(
-            _format_push_progress(done, total, sent, total_bytes, now - started),
+            _format_push_progress(sent, archive_bytes, now - started),
             transient=True,
         )
 
     try:
-        sent_bytes = serial_send_files(session, transfers, on_progress=_on_progress)
+        archive_bytes = _send_corpus_archive(session, transfers, on_progress=_on_progress)
     except Exception as error:  # transfer failures must not fail the run
         logger.warning("source manifest: push failed (%s)", error)
         _manifest_progress(f"push failed ({error}), verifying per test instead")
         return None
 
     elapsed = time.monotonic() - started
-    rate = (sent_bytes / elapsed / 1024) if elapsed > 0 else 0.0
     _manifest_progress(
-        f"pushed {len(transfers)} sources ({sent_bytes // 1024} KiB) "
-        f"in {_format_duration(elapsed)} at {rate:.0f} KiB/s"
+        f"pushed {len(transfers)} sources ({total_bytes // 1024} KiB, "
+        f"{archive_bytes // 1024} KiB compressed) in {_format_duration(elapsed)}"
     )
     return dict(corpus)
 

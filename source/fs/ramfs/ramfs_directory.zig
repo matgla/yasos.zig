@@ -151,6 +151,16 @@ pub const RamFsDirectory = interface.DeriveFromBase(kernel.fs.IDirectory, struct
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
+    /// Drops one of this directory's entries whatever it holds, a non-empty
+    /// directory too: rename's last step, after the contents went on under the
+    /// new name (the entry only held a reference to them).  Cannot fail.
+    /// `unlink` keeps rmdir's rule.
+    pub fn detach(self: *Self, node: *RamFsNode) void {
+        self._root.remove(&node.list_node);
+        node.delete(self._allocator);
+        self._shared.times.record_write(kernel.time.now_timespec());
+    }
+
     pub fn iterator(self: *const Self) anyerror!kernel.fs.IDirectoryIterator {
         return try RamFsDirectoryIterator.InstanceType.create(self._root).interface.new(self._allocator);
     }

@@ -563,6 +563,15 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
             try parent_dir.as(RamFsDirectory).data().unlink(new_basename);
         }
 
+        // The old entry, found before anything moves: once the new one is in
+        // its parent nothing may fail, or the errdefers below would free a
+        // node a directory already holds.
+        const old_basename = std.fs.path.basenamePosix(old_resolved);
+        const old_dirpath = std.fs.path.dirname(old_resolved) orelse "/";
+        var old_parent = try self.borrow_directory(old_dirpath);
+        const old_dir = old_parent.as(RamFsDirectory).data();
+        const old_entry = old_dir.get_node(old_basename) orelse return kernel.errno.ErrnoSet.NoEntry;
+
         const filename = try self._allocator.dupe(u8, new_basename);
         errdefer self._allocator.free(filename);
         const new_node = try self._allocator.create(RamFsNode);
@@ -586,11 +595,8 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         try parent_dir.as(RamFsDirectory).data().append(new_node);
 
         // The new entry holds the contents now, so dropping the old one only
-        // releases a reference.
-        const old_basename = std.fs.path.basenamePosix(old_resolved);
-        const old_dirpath = std.fs.path.dirname(old_resolved) orelse "/";
-        var old_parent = try self.borrow_directory(old_dirpath);
-        try old_parent.as(RamFsDirectory).data().unlink(old_basename);
+        // releases a reference -- a non-empty directory included.
+        old_dir.detach(old_entry);
     }
 
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
@@ -1119,6 +1125,62 @@ test "RamFs.ShouldCreateLink" {
     _ = try link_file.?.interface.seek(0, c.SEEK_SET);
     try std.testing.expectEqual(28, link_file.?.interface.read(buffer[0..]));
     try std.testing.expectEqualStrings("Some data for file More data", buffer[0..28]);
+}
+
+test "RamFs.ShouldRenameANonEmptyDirectory" {
+    const verify_directory_content = @import("../tests/directory_traverser.zig").verify_directory_content;
+    var fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    // A cache publishing a finished directory: tmp/x (with files) -> o/digest.
+    try sut.interface.mkdir("/tmp", 0);
+    try sut.interface.mkdir("/tmp/x", 0);
+    try sut.interface.mkdir("/o", 0);
+    try sut.interface.create("/tmp/x/out.zig", 0);
+    try sut.interface.mkdir("/tmp/x/sub", 0);
+    try sut.interface.create("/tmp/x/sub/deep", 0);
+    {
+        var node = try sut.interface.get("/tmp/x/out.zig");
+        defer node.delete();
+        var file = node.as_file().?;
+        try std.testing.expectEqual(4, file.interface.write("data"));
+    }
+
+    try sut.interface.rename("/tmp/x", "/o/digest");
+
+    try std.testing.expect(!has_path(&sut, "/tmp/x"));
+    try verify_directory_content(&sut, "/tmp", &.{});
+    try verify_directory_content(&sut, "/o/digest", &.{
+        .{ .name = "out.zig", .kind = .File },
+        .{ .name = "sub", .kind = .Directory },
+    });
+    try std.testing.expect(has_path(&sut, "/o/digest/sub/deep"));
+    var node = try sut.interface.get("/o/digest/out.zig");
+    defer node.delete();
+    var buffer: [8]u8 = undefined;
+    var file = node.as_file().?;
+    try std.testing.expectEqual(4, file.interface.read(buffer[0..]));
+    try std.testing.expectEqualStrings("data", buffer[0..4]);
+
+    // The moved directory still takes new entries, and empties and goes away.
+    try sut.interface.create("/o/digest/new", 0);
+    try std.testing.expect(has_path(&sut, "/o/digest/new"));
+    try sut.interface.unlink("/o/digest/new");
+    try sut.interface.unlink("/o/digest/sub/deep");
+    try sut.interface.unlink("/o/digest/sub");
+    try sut.interface.unlink("/o/digest/out.zig");
+    try sut.interface.unlink("/o/digest");
+    try verify_directory_content(&sut, "/o", &.{});
+
+    // rename(2) onto a non-empty directory is still refused, nothing moved.
+    try sut.interface.mkdir("/a", 0);
+    try sut.interface.create("/a/f", 0);
+    try sut.interface.mkdir("/b", 0);
+    try sut.interface.create("/b/g", 0);
+    try std.testing.expectError(kernel.errno.ErrnoSet.DeviceOrResourceBusy, sut.interface.rename("/a", "/b"));
+    try std.testing.expect(has_path(&sut, "/a/f"));
+    try std.testing.expect(has_path(&sut, "/b/g"));
 }
 
 test "RamFs.ShouldFormat" {

@@ -85,7 +85,8 @@ echo "zig: rendering the compiler as C"
     -Denable-llvm=false -Dsingle-threaded -Dforce-link-libc -Dtarget=thumb-linux-musleabi \
     -Dcpu=cortex_m33 -Doptimize=ReleaseFast -Dstrip ${CPU_FAMILY_FLAGS[@]+"${CPU_FAMILY_FLAGS[@]}"} \
     -Dzir-budget="$ZIR_BUDGET" -Dzig-lib-search="$LIB_ON_CARD" \
-    -Dtcc-default -Dyasos-host -Dprebuilt-maker=/usr/bin/zig-maker --prefix "$WORK/zigc")
+    -Dtcc-default -Dyasos-host -Dprebuilt-maker=/usr/bin/zig-maker \
+    -Dprebuilt-translate-c=compiler/translate-c --prefix "$WORK/zigc")
 
 echo "zig: compiler-rt"
 ZIG="$FORK_ZIG" "$HERE/build_compiler_rt.sh" "$ZIG_SRC" "$CC" "$WORK/compiler_rt.o" "$WORK/compiler_rt"
@@ -152,6 +153,31 @@ ZIG_LIB_DIR="$CARD_DIR$LIB_ON_CARD" ZIG_TCC="$(command -v "$CC")" "$WORK/host-st
     --tcc-arg -stack-size=262144 \
     -Mroot="$ZIG_SRC/lib/compiler/Maker.zig" --name maker \
     --cache-dir "$WORK/maker-cache" --global-cache-dir "$WORK/maker-cache" -femit-bin="$WORK/maker"
+# translate-c (C headers to Zig: `zig translate-c`, b.addTranslateC), built here the same
+# way: the device's jitCmd would compile lib/compiler/translate-c with Aro, 6 MB of Zig and
+# 41 MB of C (-Dprebuilt-translate-c=compiler/translate-c, relative to the lib).  It goes on
+# the card with Aro's builtin headers (compiler/aro/include), 2.4 MB.  Its root module has
+# to be lib/compiler (translate-c imports ../util.zig), hence the shim directory.  Stack:
+# the YasOS libc headers (stdio.h, unistd.h, signal.h...) overflow 256 KB in Aro's parser.
+# ReleaseFast, i.e. tcc -O2.  Before tinycc fix/link-split-text-mixed-chunks the -Os and -O0
+# builds called a missing copy of zig.h's static zig_shr_i128: the link dropped the C's copy
+# of a function compiler_rt.o also defines statically (2026-11-18).
+echo "zig: translate-c for YasOS"
+TC="$WORK/translate-c-root"
+rm -rf "$TC" && mkdir -p "$TC"
+ln -s "$ZIG_SRC/lib/compiler/translate-c" "$TC/translate-c"
+ln -s "$ZIG_SRC/lib/compiler/util.zig" "$TC/util.zig"
+printf 'pub const main = @import("translate-c/main.zig").main;\n' > "$TC/root.zig"
+ZIG_LIB_DIR="$CARD_DIR$LIB_ON_CARD" ZIG_TCC="$(command -v "$CC")" "$WORK/host-st/bin/zig" build-exe -ftcc \
+    -target thumb-linux-musleabi -mcpu cortex_m33 -OReleaseFast -fsingle-threaded -lc -fstrip \
+    --tcc-arg -stack-size=524288 \
+    --dep aro -Mroot="$TC/root.zig" -Maro="$ZIG_SRC/lib/compiler/aro/aro.zig" --name translate-c \
+    --cache-dir "$WORK/translate-c-cache" --global-cache-dir "$WORK/translate-c-cache" \
+    -femit-bin="$CARD_DIR$LIB_ON_CARD/compiler/translate-c"
+rm -f "$CARD_DIR$LIB_ON_CARD/compiler/translate-c.c"
+mkdir -p "$CARD_DIR$LIB_ON_CARD/compiler/aro"
+cp -r "$ZIG_SRC/lib/compiler/aro/include" "$CARD_DIR$LIB_ON_CARD/compiler/aro/include"
+
 # Not shipped by default: at 2.3 MB it was a fifth of the rp2350 image, and
 # `zig build` on the board is not used (zig build-obj + tcc is).  Set
 # YASOS_ZIG_MAKER=1 to put it in the rootfs again.
