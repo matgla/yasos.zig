@@ -217,3 +217,5 @@ menu "Filesystem Options"
   rsource "source/fs/KConfig"
 
 endmenu
+
+source "./apps/Kconfig"

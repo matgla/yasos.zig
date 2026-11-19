@@ -202,6 +202,13 @@ pub const IFileSystem = interface.ConstructInterface(struct {
         return interface.VirtualCall(self, "supports_symlinks", .{}, bool);
     }
 
+    /// sync(2): put on the medium whatever this filesystem holds back -- a
+    /// block cache, a write-combining buffer. Files a process still has open
+    /// keep their own buffers; `fsync` and `close` are what write those.
+    pub fn sync(self: *Self) i32 {
+        return interface.VirtualCall(self, "sync", .{}, i32);
+    }
+
     /// Capacity and free space, for statvfs(2) and `df`.
     pub fn statvfs(self: *Self) anyerror!FsStats {
         return interface.VirtualCall(self, "statvfs", .{}, anyerror!FsStats);
@@ -232,6 +239,11 @@ pub const ReadOnlyFileSystem = interface.DeriveFromBase(IFileSystem, struct {
     pub fn umount(self: *Self) i32 {
         _ = self;
         return 0; // Read-only filesystem does not need to do anything on unmount
+    }
+
+    pub fn sync(self: *Self) i32 {
+        _ = self;
+        return 0; // Nothing is ever written, so nothing is held back
     }
 
     pub fn create(self: *Self, path: []const u8, flags: i32) anyerror!void {

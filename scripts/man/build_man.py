@@ -220,7 +220,11 @@ def handwritten(pages, src):
         return
     count = 0
     for path in sorted(src.glob("*.txt")):
-        pages.add(path.stem, path.read_text())
+        text = path.read_text()
+        pages.add(path.stem, text)
+        # "reboot, halt, poweroff - ..." on the NAME line: `man halt` finds it.
+        for other in page_names(text):
+            pages.alias(other, path.stem)
         count += 1
     log(f"{count} hand-written page(s) from {src}")
 

@@ -45,6 +45,11 @@ const cpuwait: *volatile u32 = @ptrFromInt(sse_sysctrl + 0x118);
 /// Core 1's reset vector table (startup.S): initial MSP and `_start_core1`.
 extern var __vector_table_core1: u8;
 
+/// SCB AIRCR, for `Cpu.reset`. Writes need the key in the top half.
+const aircr: *volatile u32 = @ptrFromInt(0xe000ed0c);
+const aircr_vectkey: u32 = 0x05fa << 16;
+const aircr_sysresetreq: u32 = 1 << 2;
+
 pub const Cpu = struct {
     pub const Registers = ArchRegisters;
 
@@ -78,4 +83,25 @@ pub const Cpu = struct {
     }
 
     pub fn set_stack_guard(_: ?*const u8) void {}
+
+    /// SYSRESETREQ: QEMU turns it into a reset of the whole machine, which
+    /// loads the kernel image again and boots it from the top.
+    pub fn reset() noreturn {
+        aircr.* = aircr_vectkey | aircr_sysresetreq;
+        asm volatile ("dsb" ::: .{ .memory = true });
+        while (true) asm volatile ("wfi");
+    }
+
+    /// Switch the emulator off: semihosting SYS_EXIT_EXTENDED with "application
+    /// exit", status 0. Every launch script runs QEMU with semihosting on.
+    pub fn halt() noreturn {
+        const block = [2]usize{ 0x20026, 0 };
+        while (true) {
+            asm volatile ("bkpt 0xAB"
+                :
+                : [op] "{r0}" (@as(usize, 0x20)),
+                  [blk] "{r1}" (@intFromPtr(&block)),
+                : .{ .memory = true });
+        }
+    }
 };

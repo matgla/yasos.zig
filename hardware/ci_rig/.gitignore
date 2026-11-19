@@ -1,2 +1,4 @@
 *.stl
 *.png
+*.gcode
+*.3mf

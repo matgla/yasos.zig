@@ -214,6 +214,36 @@ if [ "$FP_LINKAGE" = "shared" ]; then
 fi
 echo "Userspace floating point: $FP_MODE (runtime linkage: $FP_LINKAGE)"
 
+# ---- Applications (KConfig: apps/Kconfig, CONFIG_APP_<NAME>) ----
+#
+# The apps the configuration leaves out, by directory name (build_app below);
+# with no configuration every app goes in. CONFIG_APP_ZIG builds the Zig
+# compiler without --zig: from $YASOS_IMAGE_ZIG, else the fork pinned in
+# apps/zig/zig_fork.txt.
+APPS_LEFT_OUT=""
+APP_ZIG=false
+if [ -f "$KERNEL_CONFIG_JSON" ] && command -v python3 >/dev/null 2>&1; then
+  APPS_LEFT_OUT=$(python3 - "$KERNEL_CONFIG_JSON" <<'PYEOF'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+print(" ".join(k[len("app_"):] for k, v in sorted(cfg.items()) if k.startswith("app_") and v is False))
+PYEOF
+)
+  grep -q '"app_zig": *true' "$KERNEL_CONFIG_JSON" && APP_ZIG=true
+fi
+[ -n "$APPS_LEFT_OUT" ] && echo "Applications left out (CONFIG_APP_*=n): $APPS_LEFT_OUT"
+if [ -z "$ZIG_SOURCE" ] && $APP_ZIG; then
+  if [ -n "${YASOS_IMAGE_ZIG:-}" ]; then
+    ZIG_SOURCE=$YASOS_IMAGE_ZIG
+  else
+    "$SCRIPT_DIR/apps/zig/fetch_fork.sh" "$SCRIPT_DIR/.cache/zig-fork" || exit 1
+    ZIG_SOURCE=$SCRIPT_DIR/.cache/zig-fork
+  fi
+fi
+
 # Switching FP mode changes code generation for every object, but make only
 # looks at timestamps -- an incremental build would silently keep soft-float
 # objects and link them against a hardware FP runtime. Force the full rebuild
@@ -286,6 +316,10 @@ mkdir -p rootfs/opt
 # scripts that ship in /usr (usr/bin/cardreformat).
 mkdir -p rootfs/etc
 cp $SCRIPT_DIR/etc/* rootfs/etc/
+# The system time zone (docs/timezones.md): /etc/localtime is read-only here,
+# so it points to the card, where `settz` puts a link to a zone. Dangling --
+# no card, nothing chosen -- means UTC.
+ln -sfn /var/etc/localtime rootfs/etc/localtime
 mkdir -p rootfs/usr/bin
 # The previous image build linked duplicate files (scripts/rootfs_dedupe.py);
 # turn them back into files before anything installs over them.
@@ -870,6 +904,30 @@ build_zork_makefile()
   cd ..
 }
 
+# build_app <app> <builder>: build an app with its builder, or leave it out
+# (CONFIG_APP_<APP>=n). rootfs/ is cleared by -c only, so what an app installs
+# is recorded -- the files its builder wrote into rootfs/ -- and a later build
+# that leaves it out removes them.
+build_app()
+{
+  local list="$SCRIPT_DIR/.cache/rootfs-apps/$1.files"
+  case " $APPS_LEFT_OUT " in
+    *" $1 "*)
+      echo "Leaving $1 out of the rootfs (CONFIG_APP_$(echo "$1" | tr a-z A-Z)=n)"
+      [ -f "$list" ] && (cd "$SCRIPT_DIR/rootfs" && xargs -r rm -f < "$list")
+      return 0
+      ;;
+  esac
+  local mark="$SCRIPT_DIR/.cache/rootfs-apps/.mark"
+  mkdir -p "$(dirname "$mark")"
+  touch "$mark"
+  "$2" "$1"
+  local installed
+  installed=$(cd "$SCRIPT_DIR/rootfs" && find . -newer "$mark" \( -type f -o -type l \))
+  [ -n "$installed" ] && echo "$installed" > "$list"
+  return 0
+}
+
 build_ctags()
 {
   cd $1
@@ -1026,41 +1084,42 @@ cd ..
 
 cd apps
 
-build_makefile coreutils
-build_makefile cowsay
-build_makefile ascii_animations
-build_makefile textvaders
-build_makefile hello_world
-build_makefile prun
-build_makefile fbdemo
-build_makefile hexdump
-build_makefile pioasm
-build_makefile more
-build_makefile ccat
-build_makefile yaffdump
-build_makefile strip
-build_makefile ptracetest
-build_makefile time
-build_makefile yasvi
-build_makefile mkfs
-build_makefile fdisk
-build_zork_makefile zork
-build_makefile rzsz
-build_makefile sha
+# Each one can be left out in menuconfig (apps/Kconfig).
+build_app coreutils build_makefile
+build_app cowsay build_makefile
+build_app ascii_animations build_makefile
+build_app textvaders build_makefile
+build_app hello_world build_makefile
+build_app prun build_makefile
+build_app fbdemo build_makefile
+build_app hexdump build_makefile
+build_app pioasm build_makefile
+build_app more build_makefile
+build_app ccat build_makefile
+build_app yaffdump build_makefile
+build_app strip build_makefile
+build_app ptracetest build_makefile
+build_app time build_makefile
+build_app yasvi build_makefile
+build_app mkfs build_makefile
+build_app fdisk build_makefile
+build_app zork build_zork_makefile
+build_app rzsz build_makefile
+build_app sha build_makefile
 # Benchmarks and test programs are not in the image any more (sdbench,
 # syscallbench, fpbench, longjump_tester's jump_test); build one by hand with
 # `make -C apps/<name>` and copy it to the card when it is wanted.
-build_gnumake make
-build_ctags ctags
+build_app make build_gnumake
+build_app ctags build_ctags
 
 TOYBOX_EXTRA_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS $DEBUG_CFLAGS" $SCRIPT_DIR/apps/toybox_builder/build.sh $PREFIX
 if [ $? -ne 0 ]; then
   exit -1;
 fi
 
-# --zig <zig-source-dir>: the Zig compiler, rendered to C by a compiler built
-# from that tree and compiled by the cross (apps/zig/build_zig.sh).  Opt-in: it
-# takes minutes and ~6 MB of image, and the rp2350 image drops it below anyway.
+# --zig <zig-source-dir> (or CONFIG_APP_ZIG, above): the Zig compiler, rendered
+# to C by a compiler built from that tree and compiled by the cross
+# (apps/zig/build_zig.sh).  Opt-in: it takes minutes and 3.7 MB of image.
 if [ -n "$ZIG_SOURCE" ]; then
   "$SCRIPT_DIR/apps/zig/build_zig.sh" "$ZIG_SOURCE" "$SCRIPT_DIR/rootfs" "$SCRIPT_DIR/.cache/zig-build" || exit 1
 fi
@@ -1160,11 +1219,11 @@ if $BUILD_IMAGE; then
   # rootfs/ is a staging dir only --clear wipes, so a zig copied in by hand
   # (for QEMU) rides along into every later image; at 11.6 MB it was three
   # quarters of the image the board is flashed with.  On rp2350 the compiler
-  # stays only when this build was asked for it (--zig): 3.7 MB, its lib on the
-  # card (/var/lib/zig).
+  # stays only when this build was asked for it (--zig, CONFIG_APP_ZIG): 3.7 MB,
+  # its lib on the card (/var/lib/zig).
   if [ -z "$ZIG_SOURCE" ] && [ -f "$KERNEL_CONFIG_JSON" ] && grep -q '"cpu": *"rp2350"' "$KERNEL_CONFIG_JSON"; then
     if [ -e rootfs/usr/bin/zig ] || [ -e rootfs/usr/lib/zig ]; then
-      echo "Leaving the Zig compiler out of the rp2350 rootfs (not ready yet)."
+      echo "Leaving the Zig compiler out of the rp2350 rootfs (CONFIG_APP_ZIG=n)."
     fi
     rm -rf rootfs/usr/bin/zig rootfs/usr/bin/zig-maker rootfs/usr/lib/zig
   fi
@@ -1204,6 +1263,24 @@ if $BUILD_IMAGE; then
     rm -f "$libc_tags_raw"
   else
     echo "WARNING: no host ctags; yasvi has no libc tags (completion keeps keywords and project tags)."
+  fi
+  # Time zones (docs/timezones.md): the IANA database compiled from the
+  # in-tree tools/tzdata/tzdata.zi -- the same zones whatever tzdata this
+  # machine has -- by the host's zic. -b slim: no 32-bit data, and the rules
+  # after the last transition left to each file's POSIX footer, which libc
+  # reads; about 200 KB for 600 names once rootfs_dedupe.py below has turned
+  # zic's hard-linked aliases into symlinks. Without zic the image has no
+  # zones, and only POSIX TZ strings and UTC work.
+  if command -v zic >/dev/null 2>&1; then
+    if zic -b slim -d rootfs/usr/share/zoneinfo "$SCRIPT_DIR/tools/tzdata/tzdata.zi"; then
+      echo "zoneinfo: $(find rootfs/usr/share/zoneinfo -type f | wc -l) zones," \
+           "tzdata $(sed -n '1s/^# version //p' "$SCRIPT_DIR/tools/tzdata/tzdata.zi")"
+    else
+      echo "WARNING: zic failed; the image has no time zones (TZ strings and UTC only)."
+      rm -rf rootfs/usr/share/zoneinfo
+    fi
+  else
+    echo "WARNING: no host zic; the image has no time zones (TZ strings and UTC only)."
   fi
   # Stale programs: rootfs/ is only cleared by -c, so what earlier builds
   # installed stays unless removed here -- the benchmarks and test programs

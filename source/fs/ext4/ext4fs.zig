@@ -437,6 +437,14 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return self.umount_locked();
     }
 
+    /// Dirty blocks in lwext4's cache, should a write-back hold be open.
+    pub fn sync(self: *Self) i32 {
+        lock.lock();
+        defer lock.unlock();
+        if (!self._volume.mounted) return 0;
+        return if (lwext4.ext4_cache_flush(self.mount_point()) == 0) 0 else -1;
+    }
+
     fn umount_locked(self: *Self) i32 {
         const volume = self._volume;
         if (!volume.mounted) return 0;

@@ -208,6 +208,20 @@ fn write_mount_lines(root: *const MountPoint, writer: *std.Io.Writer) std.Io.Wri
     try walk_mounts(root, "", &columns, writer);
 }
 
+fn sync_subtree(point: *MountPoint) i32 {
+    var result: i32 = 0;
+    var next = point.children.first;
+    while (next) |node| : (next = node.next) {
+        const child: *MountPoint = @fieldParentPtr("list_node", node);
+        if (sync_subtree(child) != 0) result = -1;
+    }
+    if (point.filesystem.interface.sync() != 0) {
+        log.warn("sync {s}: failed", .{point.path});
+        result = -1;
+    }
+    return result;
+}
+
 pub const MountPoints = struct {
     allocator: std.mem.Allocator,
     root: ?MountPoint = null,
@@ -432,6 +446,17 @@ pub const MountPoints = struct {
         if (self.root) |*root| {
             try write_mount_lines(root, writer);
         }
+    }
+
+    /// Sync every mounted filesystem, children before their parents. Under
+    /// `mount_lock`, so nothing is unmounted under the walk; that holds opens
+    /// back for the duration, which a sync is rare enough to afford. No
+    /// filesystem's sync goes back through the VFS, so it cannot re-enter.
+    pub fn sync_all(self: *MountPoints) i32 {
+        mount_lock.lock();
+        defer mount_lock.unlock();
+        const root = &(self.root orelse return 0);
+        return sync_subtree(root);
     }
 
     pub fn umount(self: *MountPoints, path: []const u8) !void {

@@ -73,6 +73,12 @@ pub const VirtualFileSystem = interface.DeriveFromBase(IFileSystem, struct {
         return 0;
     }
 
+    /// sync(2): every mounted filesystem. -1 if any of them failed, after
+    /// trying the rest.
+    pub fn sync(self: *Self) i32 {
+        return self.mount_points.sync_all();
+    }
+
     // ------------------------------------------------------------------
     // Raw delegation helpers — route a path to the owning mounted filesystem
     // WITHOUT any symbolic-link resolution. The public methods below add

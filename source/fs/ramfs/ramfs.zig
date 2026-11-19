@@ -130,6 +130,13 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return 0;
     }
 
+    /// Nothing to write out. Bodies spilled to the tier's directory live on
+    /// another mount, which is synced in its own right.
+    pub fn sync(self: *Self) i32 {
+        _ = self;
+        return 0;
+    }
+
     fn get_parent_node(self: *Self, path: []const u8) !kernel.fs.Node {
         if (is_normal_path(path)) return self.parent_of_resolved(path);
         return @call(.never_inline, parent_of_unresolved, .{ self, path });
@@ -144,7 +151,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         const maybe_dirpath: ?[]const u8 = std.fs.path.dirname(resolved_path);
 
         if (maybe_dirpath) |dirpath| {
-            return try self.get(dirpath);
+            return try self.get_entry(dirpath);
         }
         return try self._root.clone();
     }
@@ -161,7 +168,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         if (path.len == 0) {
             return kernel.errno.ErrnoSet.InvalidArgument;
         }
-        var maybe_node: ?kernel.fs.Node = self.get(path) catch |err| blk: {
+        var maybe_node: ?kernel.fs.Node = self.get_entry(path) catch |err| blk: {
             if (err != kernel.errno.ErrnoSet.NoEntry) {
                 return err;
             }
@@ -201,7 +208,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
             // never creates the children.
             return kernel.errno.ErrnoSet.FileExists;
         }
-        var maybe_node = self.get(path) catch |err| blk: {
+        var maybe_node = self.get_entry(path) catch |err| blk: {
             if (err != kernel.errno.ErrnoSet.NoEntry) {
                 return err;
             }
@@ -305,7 +312,6 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_symlinks: bool) anyerror!void {
-        _ = follow_symlinks;
         initialize_stat_identity(data, path);
         // Per instance, like a real device number: /var and /home can both be
         // RAM fallbacks, and they are not one filesystem.
@@ -314,6 +320,12 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         // makes a full /tmp unremovable even though the unlink itself would have
         // worked. Nothing here needs a handle — the node is only read.
         var node = try self.borrow_node(path);
+        // stat(2) of a link describes its target: following is the VFS's job,
+        // and refusing sends it there (ext4 does the same). lstat(2) gets the
+        // link.
+        if (follow_symlinks and node.filetype() == FileType.SymbolicLink) {
+            return kernel.errno.ErrnoSet.NoEntry;
+        }
         data.st_mode = switch (node.filetype()) {
             .File => c.S_IFREG,
             .Directory => c.S_IFDIR,
@@ -338,10 +350,13 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_symlinks: bool) anyerror!void {
-        _ = follow_symlinks;
         // Borrowed for the same reason `stat` borrows: `touch` on a full /tmp
         // has to keep working, and it changes no allocation of its own.
         var node = try self.borrow_node(path);
+        // As in `stat`: the VFS follows the link to the file it names.
+        if (follow_symlinks and node.filetype() == FileType.SymbolicLink) {
+            return kernel.errno.ErrnoSet.NoEntry;
+        }
         const current = kernel.time.now_timespec();
         if (node.as_file()) |file| {
             var handle = file;
@@ -356,7 +371,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         if (linkpath.len == 0) {
             return kernel.errno.ErrnoSet.InvalidArgument;
         }
-        var maybe_node: ?kernel.fs.Node = self.get(linkpath) catch |err| blk: {
+        var maybe_node: ?kernel.fs.Node = self.get_entry(linkpath) catch |err| blk: {
             if (err != kernel.errno.ErrnoSet.NoEntry) {
                 return err;
             }
@@ -425,7 +440,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
-        var node = try self.get(path);
+        var node = try self.get_entry(path);
         defer node.delete();
         if (node.filetype() != FileType.SymbolicLink) {
             return kernel.errno.ErrnoSet.InvalidArgument; // not a symbolic link
@@ -439,7 +454,23 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
         return @intCast(n);
     }
 
+    /// The node at `path` for the VFS -- which is what open(2) reaches. A
+    /// symbolic link as the last component is refused, as ext4 refuses it: the
+    /// VFS follows links when a lookup fails (resolve_symlinks), and a link
+    /// handed back as a node was opened as a file holding its target's path.
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
+        var node = try self.get_entry(path);
+        if (node.filetype() == FileType.SymbolicLink) {
+            node.delete();
+            return kernel.errno.ErrnoSet.NoEntry;
+        }
+        return node;
+    }
+
+    /// The entry at `path` itself, a symbolic link included: for this
+    /// filesystem's own work on names (readlink, link, rename, the existence
+    /// checks of create, mkdir and symlink).
+    fn get_entry(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
         if (path.len == 0 or std.mem.eql(u8, path, "/")) {
             return try self._root.clone();
         }
@@ -470,7 +501,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     }
 
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
-        var node = try self.get(old_path);
+        var node = try self.get_entry(old_path);
         defer node.delete();
         if (node.filetype() == FileType.Directory) {
             return kernel.errno.ErrnoSet.IsADirectory;
@@ -484,9 +515,10 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
             const filename = try self._allocator.dupe(u8, std.fs.path.basename(new_path));
             const new_node = try self._allocator.create(RamFsNode);
             var file = node.as_file().?;
-            const new_file = try RamFsFile.InstanceType.create_node(
+            // A link to a symbolic link is one too, as link(2) has it.
+            const new_file = try RamFsFile.InstanceType.create_node_like(
                 self._allocator,
-                file.as(RamFsFile).data()._data.share(),
+                file.as(RamFsFile).data(),
                 filename,
             );
 
@@ -529,7 +561,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
     fn rename_resolved(self: *Self, old_resolved: []const u8, new_resolved: []const u8) anyerror!void {
         if (std.mem.eql(u8, old_resolved, new_resolved)) {
             // Same name: POSIX says do nothing and report success.
-            var existing = try self.get(old_resolved);
+            var existing = try self.get_entry(old_resolved);
             existing.delete();
             return;
         }
@@ -543,7 +575,7 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
             return kernel.errno.ErrnoSet.InvalidArgument;
         }
 
-        var node = try self.get(old_resolved);
+        var node = try self.get_entry(old_resolved);
         defer node.delete();
 
         const new_basename = std.fs.path.basenamePosix(new_resolved);
@@ -583,9 +615,11 @@ pub const RamFs = interface.DeriveFromBase(IFileSystem, struct {
                 break :blk try directory.as(RamFsDirectory).data().alias(self._allocator, filename);
             } else if (node.as_file()) |file_handle| blk: {
                 var file = file_handle;
-                break :blk try RamFsFile.InstanceType.create_node(
+                // Same type as the old entry: `ln -sf` renames a fresh symbolic
+                // link into place.
+                break :blk try RamFsFile.InstanceType.create_node_like(
                     self._allocator,
-                    file.as(RamFsFile).data()._data.share(),
+                    file.as(RamFsFile).data(),
                     filename,
                 );
             } else return kernel.errno.ErrnoSet.InvalidArgument,
@@ -1624,4 +1658,76 @@ test "RamFs.ASymlinkOnlyNeedsRoomForANode" {
 
     Heap.room = 1024;
     try std.testing.expectError(kernel.errno.ErrnoSet.NoSpaceLeftOnDevice, sut.interface.symlink("/target", "/low"));
+}
+
+fn expect_symlink(sut: *kernel.fs.IFileSystem, path: []const u8, target: []const u8) !void {
+    var buffer: [64]u8 = undefined;
+    const length = try sut.interface.readlink(path, &buffer);
+    try std.testing.expectEqualStrings(target, buffer[0..length]);
+    var st: c.struct_stat = undefined;
+    try sut.interface.stat(path, &st, false);
+    try std.testing.expectEqual(@as(c_uint, c.S_IFLNK), @as(c_uint, @intCast(st.st_mode)) & c.S_IFMT);
+}
+
+test "RamFs.RenameKeepsASymbolicLinkALink" {
+    // `ln -sf` makes the link under a temporary name and renames it into
+    // place. The rename rebuilt the entry as a regular file holding the
+    // target's path, so /var/etc/localtime on a card-less board read as
+    // "/usr/share/zoneinfo/..." instead of the zone.
+    var sut_fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = sut_fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try sut.interface.symlink("/usr/share/zoneinfo/Europe/Warsaw", "/localtime_Ab12Cd");
+    try sut.interface.rename("/localtime_Ab12Cd", "/localtime");
+    try expect_symlink(&sut, "/localtime", "/usr/share/zoneinfo/Europe/Warsaw");
+    try std.testing.expect(!has_path(&sut, "/localtime_Ab12Cd"));
+
+    // ... and over an existing link, which is what `ln -sf` replaces.
+    try sut.interface.symlink("/usr/share/zoneinfo/Asia/Tokyo", "/localtime_Ef34Gh");
+    try sut.interface.rename("/localtime_Ef34Gh", "/localtime");
+    try expect_symlink(&sut, "/localtime", "/usr/share/zoneinfo/Asia/Tokyo");
+}
+
+test "RamFs.ASymbolicLinkIsTheVfssToFollow" {
+    // Opening a link on a card-less board's /var returned the link's own
+    // body: the VFS only follows links when the filesystem's lookup fails, and
+    // RamFs handed the link back as a file. Now, as ext4: get and a following
+    // stat refuse it; lstat, readlink and the name itself still see it.
+    var sut_fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = sut_fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try sut.interface.create("/real", 0);
+    try sut.interface.symlink("/real", "/link");
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.get("/link"));
+    var st: c.struct_stat = undefined;
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.stat("/link", &st, true));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, sut.interface.utimens("/link", .{ .accessed = null, .modified = null }, true));
+    try expect_symlink(&sut, "/link", "/real");
+    try sut.interface.utimens("/link", .{ .accessed = null, .modified = null }, false);
+
+    // The name is taken: nothing may be created over it.
+    try std.testing.expectError(kernel.errno.ErrnoSet.FileExists, sut.interface.create("/link", 0));
+    try std.testing.expectError(kernel.errno.ErrnoSet.FileExists, sut.interface.mkdir("/link", 0));
+    try std.testing.expectError(kernel.errno.ErrnoSet.FileExists, sut.interface.symlink("/x", "/link"));
+
+    // ... and it goes away by its own name, leaving the target.
+    try sut.interface.unlink("/link");
+    try std.testing.expect(!has_path(&sut, "/link"));
+    try std.testing.expect(has_path(&sut, "/real"));
+}
+
+test "RamFs.HardLinkToASymbolicLinkIsALink" {
+    // link(2) on a symlink links the symlink itself (Linux, POSIX-2008
+    // without AT_SYMLINK_FOLLOW), so the second name is a symlink too.
+    var sut_fs = try RamFs.InstanceType.init(std.testing.allocator);
+    var sut = sut_fs.interface.create();
+    defer _ = sut.interface.delete();
+
+    try sut.interface.symlink("/target", "/sym");
+    try sut.interface.link("/sym", "/second");
+    try expect_symlink(&sut, "/second", "/target");
+    try expect_symlink(&sut, "/sym", "/target");
 }

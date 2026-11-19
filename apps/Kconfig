@@ -1,0 +1,156 @@
+#
+# KConfig
+#
+# Copyright (C) 2026 Mateusz Stadnik <matgla@live.com>
+#
+# This program is free software: you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation, either version
+# 3 of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be
+# useful, but WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+# PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General
+# Public License along with this program. If not, see
+# <https://www.gnu.org/licenses/>.
+#
+
+# The programs build_rootfs.sh puts in the rootfs image. The libraries, the
+# native tcc and toybox (the shell and the base commands) always go in. An app
+# left out is not built, and build_rootfs.sh removes what an earlier build of
+# it installed.
+menu "Applications"
+
+comment "Tools the board's own workflows need"
+
+config CONFIG_APP_RZSZ
+  bool "rz, sz: zmodem transfers"
+  default y
+  help
+    scripts/transfer.py, target_sync.py and tinycc_board.py move files to and
+    from a board through these.
+
+config CONFIG_APP_MKFS
+  bool "mkfs.fat, mkfs.ext4, mkfs.lfs"
+  default y
+  help
+    cardreformat lays out an SD card with these and fdisk.
+
+config CONFIG_APP_FDISK
+  bool "fdisk: MBR partition tables"
+  default y
+
+config CONFIG_APP_MAKE
+  bool "GNU make"
+  default y
+  help
+    configure && make of tinycc on the board. The first build of a checkout
+    bootstraps it, which clones gnulib (network, autoconf, automake,
+    autopoint, makeinfo).
+
+config CONFIG_APP_ZIG
+  bool "Zig compiler (/usr/bin/zig, its lib on the SD card)"
+  default n
+  help
+    The device Zig compiler, about 3.7 MB of the romfs. Its lib/std is too big
+    for the image and goes to the card staging tree sdcard/var/lib/zig
+    (scripts/zig_board.py push, or the sdcard/ directory of a release
+    package, copied to /var/lib/zig on the card).
+
+    It is built from the yasos Zig fork: build_rootfs.sh --zig DIR, else
+    $YASOS_IMAGE_ZIG, else the commit pinned in apps/zig/zig_fork.txt, fetched
+    into .cache/zig-fork. Adds several minutes to a build; --zig DIR builds it
+    whatever this says.
+
+comment "Development"
+
+config CONFIG_APP_STRIP
+  bool "strip: take the debug data out of a YAFF image"
+  default y
+
+config CONFIG_APP_YAFFDUMP
+  bool "yaffdump: print a YAFF image's headers"
+  default y
+
+config CONFIG_APP_CTAGS
+  bool "ctags (C, Asm, Make, Sh, Kconfig, Zig)"
+  default y
+
+config CONFIG_APP_PTRACETEST
+  bool "ptracetest: ptrace(2) checks"
+  default y
+
+config CONFIG_APP_PIOASM
+  bool "pioasm: RP2350 PIO assembler"
+  default y
+
+config CONFIG_APP_PRUN
+  bool "prun: run a batch of commands concurrently"
+  default y
+
+config CONFIG_APP_TIME
+  bool "time: wall-clock time of a command"
+  default y
+
+comment "Files and text"
+
+config CONFIG_APP_YASVI
+  bool "yasvi: vi-like editor"
+  default y
+
+config CONFIG_APP_MORE
+  bool "more: pager"
+  default y
+  help
+    man shows its pages through more: without it the image keeps the man
+    pages and has no way to read them.
+
+config CONFIG_APP_CCAT
+  bool "ccat: cat with C syntax colours"
+  default y
+
+config CONFIG_APP_HEXDUMP
+  bool "hexdump"
+  default y
+
+config CONFIG_APP_SHA
+  bool "sha256sum"
+  default y
+
+config CONFIG_APP_COREUTILS
+  bool "coreutils: the commands toybox leaves out (touch)"
+  default y
+
+comment "Demos and games"
+
+config CONFIG_APP_HELLO_WORLD
+  bool "hello"
+  default y
+  help
+    The board smoke suite's yaff_arch_test takes this binary from the
+    package (build_image.sh) to corrupt and upload.
+
+config CONFIG_APP_FBDEMO
+  bool "fbdemo: /dev/fb0 test"
+  default y
+
+config CONFIG_APP_COWSAY
+  bool "cowsay"
+  default y
+
+config CONFIG_APP_ASCII_ANIMATIONS
+  bool "ASCII animations"
+  default y
+
+config CONFIG_APP_TEXTVADERS
+  bool "textvaders: text-mode shooter"
+  default y
+
+config CONFIG_APP_ZORK
+  bool "zork"
+  default y
+
+endmenu

@@ -80,6 +80,20 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return kernel.fs.Node.create_file(file);
     }
 
+    /// Another name for `like`'s contents, of the same type: `link` and
+    /// `rename` make the new entry this way, and a symbolic link must stay one
+    /// (built as a regular file it reads back as its target's path).
+    pub fn create_node_like(allocator: std.mem.Allocator, like: *const Self, filename: []const u8) anyerror!kernel.fs.Node {
+        const file = RamFsFile.init(.{
+            ._data = like._data.share(),
+            ._allocator = allocator,
+            ._position = 0,
+            ._name = filename,
+            ._filetype = like._filetype,
+        });
+        return kernel.fs.Node.create_file(try file.interface.new(allocator));
+    }
+
     pub fn create_symlink_node(allocator: std.mem.Allocator, data: *RamFsData, filename: []const u8) anyerror!kernel.fs.Node {
         const file = try create_symlink(allocator, data, filename).interface.new(allocator);
         return kernel.fs.Node.create_file(file);

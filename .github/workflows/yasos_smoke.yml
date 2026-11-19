@@ -23,7 +23,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
         with:
           submodules: 'recursive'
       # build_rootfs.sh bootstraps apps/make, which needs these. The Dockerfile
@@ -99,7 +99,7 @@ jobs:
         run: ./scripts/collect_decode_bundle.sh decode_bundle
       - name: Upload QEMU gate logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qemu_gate_logs
           path: |
@@ -123,7 +123,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
         with:
           submodules: 'recursive'
       - name: Install GNU make bootstrap tools
@@ -141,7 +141,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ./build_image.sh pimoroni_pico_plus2_and_vga_defconfig
       - name: Upload hardware smoke package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hw_smoke_package
           path: output/*.tar.gz
@@ -152,7 +152,7 @@ jobs:
         shell: bash
         run: python3 scripts/tcc_selfhost.py --prepare-only
       - name: Upload tcc self-host payload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: selfhost_payload
           path: .cache/tcc_selfhost/payload
@@ -170,7 +170,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
         with:
           submodules: 'recursive'
       - name: Install GNU make bootstrap tools
@@ -195,12 +195,12 @@ jobs:
           python3 scripts/kernel_tcc/zig_device.py prepare
           python3 scripts/kernel_tcc/zig_device.py full --package zig_kernel_package
       - name: Upload hardware zig package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hw_zig_package
           path: output/*.tar.gz
       - name: Upload zig kernel package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zig_kernel_package
           path: zig_kernel_package
@@ -220,11 +220,11 @@ jobs:
         run: |
           rm -rf "$GITHUB_WORKSPACE"
           mkdir -p "$GITHUB_WORKSPACE"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
         with:
           submodules: 'recursive'
       - name: Download hardware smoke package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: hw_smoke_package
           path: artifact
@@ -265,7 +265,7 @@ jobs:
           if [ -n "$bundle" ]; then cp -r "$bundle"/. "$dest/"; fi
       - name: Upload Test Logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoke_test_logs
           path: ${{ github.workspace }}/tests/smoke/logs/*
@@ -284,16 +284,16 @@ jobs:
         run: |
           rm -rf "$GITHUB_WORKSPACE"
           mkdir -p "$GITHUB_WORKSPACE"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
         with:
           submodules: 'recursive'
       - name: Download hardware smoke package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: hw_smoke_package
           path: artifact
       - name: Download tcc self-host payload
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: selfhost_payload
           path: selfhost_payload
@@ -312,7 +312,7 @@ jobs:
           make run_selfhost_packaged SELFHOST_PAYLOAD=selfhost_payload
       - name: Upload self-host logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: selfhost_logs
           path: ${{ github.workspace }}/.cache/tcc_selfhost/run_*.log
@@ -328,14 +328,14 @@ jobs:
         run: |
           rm -rf "$GITHUB_WORKSPACE"
           mkdir -p "$GITHUB_WORKSPACE"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
       - name: Download hardware zig package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: hw_zig_package
           path: artifact
       - name: Download zig kernel package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: zig_kernel_package
           path: zig_kernel_package
@@ -352,7 +352,7 @@ jobs:
           make run_zig_kernel_packaged ZIG_KERNEL_PACKAGE=zig_kernel_package
       - name: Upload board build log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zig_kernel_logs
           path: ${{ github.workspace }}/.cache/zig_device/board_run.log

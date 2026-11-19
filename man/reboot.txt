@@ -1,0 +1,68 @@
+REBOOT(8)                        YasOS Manual                        REBOOT(8)
+
+NAME
+       reboot, halt, poweroff, sync - restart or stop the system
+
+SYNOPSIS
+       reboot [-fn] [-d DELAY]
+       halt [-fn] [-d DELAY]
+       poweroff [-fn] [-d DELAY]
+       sync
+
+DESCRIPTION
+       reboot restarts the board as the reset button does: every core and
+       the peripherals, back through the boot ROM and yasboot.
+
+       halt stops every core and leaves them stopped until the next reset.
+
+       poweroff switches off as much as the chip can. On an RP2350 that is
+       POWMAN's deepest state: the cores, SRAM and the XIP cache lose power
+       and only the always-on domain keeps running, waiting for a reset
+       (the RUN pin or a button on it, a debugger's rescue, a power cycle).
+       The board's regulator, PSRAM and SD card stay powered: they are not
+       the chip's to switch. A board with nothing deeper, halts. With a
+       debug probe connected over SWD the chip stays powered and halts
+       instead: the probe's power-up request is honoured, so the debugger
+       can always reset it, and a probe connected later wakes a chip that
+       did power down.
+
+       Under QEMU, halt and poweroff exit the emulator with status 0, and
+       reboot resets the machine.
+
+       All three first write out what the mounted filesystems hold back,
+       as sync does, and close the kernel log on /var/log. The kernel does
+       this itself in reboot(2), so it happens even with -n. What they do
+       not do is stop other processes first: YasOS has no init to ask
+       them. A file another program still has open can lose what that
+       program has not written yet, as at a power cut. Close it, or quit
+       the program, first.
+
+       sync writes out the filesystems' buffered blocks: lwext4's block
+       cache, the FAT driver's write-combining buffer, the kernel log.
+       Files a process has open keep their own buffers until fsync(2) or
+       close(2).
+
+OPTIONS
+       -d DELAY
+              Wait DELAY seconds first (m, h and d suffixes: -d 1.5m is 90
+              seconds).
+
+       -f     Accepted. Linux's reboot signals init without it; YasOS always
+              calls reboot(2) directly.
+
+       -n     Do not call sync(2) first. The kernel syncs anyway.
+
+EXAMPLES
+       poweroff
+              Before pulling the power on a Pico Plus 2 with an SD card.
+
+       reboot -d 5
+              Restart in five seconds.
+
+SEE ALSO
+       sys/reboot.h (reboot(2)), unistd.h (sync(2))
+
+NOTES
+       On QEMU (mps3-an524) the second core does not come back after a
+       reset; the rebooted guest runs on core 0 only. QEMU's own
+       system_reset does the same.
