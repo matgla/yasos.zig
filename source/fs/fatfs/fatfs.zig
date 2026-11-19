@@ -177,6 +177,16 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return self.umount_locked();
     }
 
+    /// The write-combining buffer is all this level holds: FatFs writes its
+    /// directory and FAT sectors out at the end of each call. An open file's
+    /// sector buffer is the file's to write, at `fsync` or `close`.
+    pub fn sync(self: *Self) i32 {
+        fs_lock.acquire();
+        defer fs_lock.release();
+        self._disk_wrapper.flush() catch return -1;
+        return 0;
+    }
+
     /// `umount` with the FatFs lock already held. See `mount_locked`.
     fn umount_locked(self: *Self) i32 {
         fs_lock.lock.assert_held();
@@ -659,6 +669,14 @@ pub const FatFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
                 shared.lines = &.{};
                 shared.combine = &.{};
             }
+        }
+
+        /// sync(2): issue the buffered run if it is this volume's. What FatFs
+        /// itself asks for with CTRL_SYNC, for a caller outside FatFs.
+        fn flush(self: *DiskWrapper) fatfs.Disk.Error!void {
+            dev_lock.acquire();
+            defer dev_lock.release();
+            if (shared.combine_owner == self) try flush_combined();
         }
 
         fn drop_lines(self: *DiskWrapper) void {

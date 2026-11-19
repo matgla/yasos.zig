@@ -44,5 +44,21 @@ pub const Cpu = struct {
         return @intCast(sio_impl.cpuid.read());
     }
 
+    /// The watchdog's forced reset, as pico-sdk's `watchdog_reboot(0, 0, 0)`:
+    /// everything but the oscillators, and scratch 4 cleared so the boot ROM
+    /// boots from flash. SYSRESETREQ would restart the cores alone.
+    pub fn reset() noreturn {
+        const watchdog_base: usize = 0x40058000;
+        const ctrl_set: *volatile u32 = @ptrFromInt(watchdog_base + 0x2000);
+        const ctrl_clr: *volatile u32 = @ptrFromInt(watchdog_base + 0x3000);
+        const scratch4: *volatile u32 = @ptrFromInt(watchdog_base + 0x1c);
+        const psm_wdsel_set: *volatile u32 = @ptrFromInt(0x40010000 + 0x2000 + 0x008);
+        ctrl_clr.* = 1 << 30; // ENABLE
+        scratch4.* = 0;
+        psm_wdsel_set.* = 0x0001ffff & ~@as(u32, 0x3); // all but ROSC, XOSC
+        ctrl_set.* = 1 << 31; // TRIGGER
+        while (true) asm volatile ("wfi");
+    }
+
     pub const Registers = RegistersImplementation;
 };

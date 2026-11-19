@@ -1579,6 +1579,57 @@ pub fn sys_umount(arg: *const anyopaque) !i32 {
     return 0;
 }
 
+/// sync(2). The kernel log's ring first, so its file is among what gets
+/// written. Errors are logged by the walk; sync(2) has no way to report them.
+pub fn sys_sync(arg: *const anyopaque) !i32 {
+    _ = arg;
+    kernel.file_log.drain();
+    _ = fs.get_ivfs().interface.sync();
+    return 0;
+}
+
+/// reboot(2), with Linux's command values (`sys/reboot.h`). Every command that
+/// stops the machine syncs first: a caller that forgot to cannot lose what the
+/// filesystems hold back, and a second sync costs nothing.
+///
+/// What it does not do is stop the other processes first -- there is no init
+/// to ask them -- so a file a process still has open can lose what it has not
+/// yet written, as at a power cut. The mounts stay mounted: unmounting ext4
+/// under a process on the other core would leave its next call reading a
+/// superblock that is gone, and a reset needs nothing more than the sync.
+pub fn sys_reboot(arg: *const anyopaque) !i32 {
+    const context: *const c.reboot_context = @ptrCast(@alignCast(arg));
+    // No EPERM yet: every process is uid 0 (`sys_getuid`). `is_privileged` is
+    // the CPU's privilege, which only the kernel's own processes run with, so
+    // it would refuse every command typed at the shell.
+    const Command = enum { reset, halt, power_off };
+    const command: Command = switch (@as(u32, @bitCast(context.cmd))) {
+        c.RB_AUTOBOOT => .reset,
+        c.RB_HALT_SYSTEM => .halt,
+        c.RB_POWER_OFF => .power_off,
+        c.RB_ENABLE_CAD, c.RB_DISABLE_CAD => return 0,
+        else => return ErrnoSet.InvalidArgument,
+    };
+    kernel.log.info("{s}: syncing filesystems", .{@tagName(command)});
+    // Released rather than only drained: the log file is closed, so nothing
+    // logged from here on starts a new write to a card about to lose power.
+    kernel.file_log.release() catch {};
+    _ = fs.get_ivfs().interface.sync();
+    // Through the console driver, not the log: info lines are kept off the
+    // serial console, and this is the line a person at it is waiting for.
+    kernel.stdout.write_bytes(switch (command) {
+        .reset => "\r\nRebooting.\r\n",
+        .halt => "\r\nSystem halted.\r\n",
+        .power_off => "\r\nPower down.\r\n",
+    });
+    _ = arch.sync.save_and_disable_interrupts();
+    switch (command) {
+        .reset => hal.cpu.reset(),
+        .halt => hal.cpu.halt(),
+        .power_off => hal.cpu.power_off(),
+    }
+}
+
 /// statvfs(2) / fstatvfs(2): `path`, or the file `fd` is open on when `path`
 /// is null.
 pub fn sys_statvfs(arg: *const anyopaque) !i32 {
@@ -1760,10 +1811,20 @@ const utsname = struct {
     /// There is no network for this machine to have a name on, so it is called
     /// what it is: the board the kernel was configured for.
     const nodename = config.board.board;
-    /// build.zig.zon's `.version`, handed over by build.zig.
-    const release = @import("build_info").release;
     const machine = config.cpu.arch;
 };
+
+/// `git describe` of the checkout the kernel was built from (0.9.0,
+/// 0.9.0-2-g293b22dc51, ...-dirty), NUL-terminated. Data in the generated
+/// release.S (build.zig), so a new commit does not change the kernel's C.
+extern const __yasos_release: u8;
+
+/// The release uname(2) reports; "unknown" in host unit tests, which link no
+/// release.S.
+fn release() []const u8 {
+    if (@import("builtin").is_test) return "unknown";
+    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&__yasos_release)), 0);
+}
 
 /// "YYYY-MM-DD" for `seconds` since the Unix epoch, "unknown" when it is not
 /// positive. `buf` holds the result; the image's build time is read at run
@@ -1794,7 +1855,7 @@ pub fn sys_uname(arg: *const anyopaque) !i32 {
     const buf = try user_out(c.struct_utsname, context.buf);
     fill_utsname_field(&buf.sysname, utsname.sysname);
     fill_utsname_field(&buf.nodename, utsname.nodename);
-    fill_utsname_field(&buf.release, utsname.release);
+    fill_utsname_field(&buf.release, release());
     var date: [10]u8 = undefined;
     fill_utsname_field(&buf.version, build_date(kernel.time.build_epoch_seconds(), &date));
     fill_utsname_field(&buf.machine, utsname.machine);
@@ -1957,7 +2018,7 @@ test "Uname.FillsEveryFieldTerminated" {
     try std.testing.expectEqual(@as(i32, 0), try sys_uname(&context));
     try std.testing.expectEqualStrings("YasOS", std.mem.sliceTo(&buf.sysname, 0));
     try std.testing.expectEqualStrings(config.board.board, std.mem.sliceTo(&buf.nodename, 0));
-    try std.testing.expectEqualStrings(@import("build_info").release, std.mem.sliceTo(&buf.release, 0));
+    try std.testing.expectEqualStrings("unknown", std.mem.sliceTo(&buf.release, 0));
     try std.testing.expectEqualStrings("unknown", std.mem.sliceTo(&buf.version, 0));
     try std.testing.expectEqualStrings(config.cpu.arch, std.mem.sliceTo(&buf.machine, 0));
     // Nothing of what the caller left in the buffer survives past a terminator.

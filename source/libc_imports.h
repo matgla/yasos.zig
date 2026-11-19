@@ -30,4 +30,5 @@
 #include <libs/libc/sys/statvfs.h>
 #include <libs/libc/sys/mount.h>
 #include <libs/libc/sys/ptrace.h>
+#include <libs/libc/sys/reboot.h>
 #include <libs/libc/signal.h>

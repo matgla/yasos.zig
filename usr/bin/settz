@@ -1,0 +1,70 @@
+#!/bin/sh
+# settz -- show or set the system time zone (docs/timezones.md).
+#
+# libc reads the zone from $TZ when it is set, else from /etc/localtime. In
+# the image that is a symlink to /var/etc/localtime, on the card's /var (the
+# romfs is read-only); this makes /var/etc/localtime a symlink to a zone in
+# /usr/share/zoneinfo -- a link, not a copy, so a newer image's tzdata takes
+# effect without running settz again. Without a card /var is RAM and the
+# choice lasts until the next boot.
+
+zoneinfo=${TZDIR:-/usr/share/zoneinfo}
+link=/var/etc/localtime
+
+usage() {
+  echo "usage: settz [ZONE | -u | -l]"
+  echo
+  echo "Without arguments, show the system time zone and the time in it."
+  echo "ZONE  make it ZONE, an IANA name such as Europe/Warsaw (see -l)"
+  echo "-u    make it UTC (remove the setting)"
+  echo "-l    list the zones in $zoneinfo"
+  echo
+  echo "TZ=ZONE in the environment overrides it for one program or shell."
+}
+
+case "$1" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  -l)
+    cd "$zoneinfo" || exit 1
+    find . -type f -o -type l | sed 's|^\./||' | sort
+    exit 0
+    ;;
+  -u)
+    rm -f "$link" || exit 1
+    echo "UTC"
+    exit 0
+    ;;
+  -*)
+    usage >&2
+    exit 1
+    ;;
+  "")
+    if [ -L "$link" ]; then
+      ls -l "$link" | sed "s|.* -> ||; s|^$zoneinfo/||"
+    elif [ -e "$link" ]; then
+      echo "$link (a zone file put there by hand)"
+    else
+      echo "UTC (no zone set)"
+    fi
+    [ -n "$TZ" ] && echo "TZ=$TZ overrides it in this shell"
+    date
+    exit 0
+    ;;
+esac
+
+zone=$1
+case "$zone" in
+  /*|*..*)
+    echo "settz: $zone: give a zone name such as Europe/Warsaw" >&2
+    exit 1
+    ;;
+esac
+if [ ! -f "$zoneinfo/$zone" ]; then
+  echo "settz: no zone $zone in $zoneinfo (settz -l lists them)" >&2
+  exit 1
+fi
+mkdir -p "${link%/*}" && ln -sfn "$zoneinfo/$zone" "$link" || exit 1
+echo "$zone"

@@ -88,6 +88,13 @@ pub const BindFs = interface.DeriveFromBase(IFileSystem, struct {
         return 0;
     }
 
+    /// The bound directory belongs to a filesystem mounted in its own right,
+    /// which a sync of the tree reaches without help.
+    pub fn sync(self: *Self) i32 {
+        _ = self;
+        return 0;
+    }
+
     pub fn delete(self: *Self) void {
         _ = self.umount();
         self._allocator.free(self._source);

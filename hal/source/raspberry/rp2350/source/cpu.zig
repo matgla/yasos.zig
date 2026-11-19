@@ -35,6 +35,46 @@ const psm_frce_off: *volatile u32 = @ptrFromInt(0x40018000 + 0x004);
 const psm_frce_off_set: *volatile u32 = @ptrFromInt(0x40018000 + 0x2000 + 0x004);
 const psm_frce_off_clr: *volatile u32 = @ptrFromInt(0x40018000 + 0x3000 + 0x004);
 const psm_frce_off_proc1: u32 = 1 << 24;
+const psm_frce_off_proc0: u32 = 1 << 23;
+
+/// For `Cpu.power_off`: POWMAN (pico-sdk `regs/powman.h`; every write carries
+/// the password in its top half, a write without it is dropped) and the core's
+/// own SysTick, ICSR, NVIC and SCR. 52 interrupt lines: two NVIC words.
+const powman_base: usize = 0x40100000;
+const powman_password: u32 = 0x5afe << 16;
+const powman_state: usize = 0x38;
+const powman_state_req_ignored: u32 = 1 << 8;
+const powman_state_bad_sw_req: u32 = 1 << 10;
+const powman_state_req_all_off: u32 = 0xf << 4;
+const powman_timer: usize = 0x88;
+const powman_timer_pwrup_on_alarm: u32 = 1 << 5;
+const powman_pwrup0: usize = 0x8c;
+const powman_dbg_pwrcfg: usize = 0xa4;
+fn powman_reg(offset: usize) *volatile u32 {
+    return @ptrFromInt(powman_base + offset);
+}
+const syst_csr: *volatile u32 = @ptrFromInt(0xe000e010);
+const icsr: *volatile u32 = @ptrFromInt(0xe000ed04);
+const icsr_pendstclr: u32 = 1 << 25;
+const icsr_pendsvclr: u32 = 1 << 27;
+const nvic_icer: *volatile [2]u32 = @ptrFromInt(0xe000e180);
+const nvic_icpr: *volatile [2]u32 = @ptrFromInt(0xe000e280);
+const scr: *volatile u32 = @ptrFromInt(0xe000ed10);
+const scr_sleepdeep: u32 = 1 << 2;
+
+/// For `Cpu.reset`: the watchdog's control and scratch 4, and PSM `WDSEL` --
+/// which blocks the watchdog resets. Offsets from pico-sdk's `regs/watchdog.h`
+/// and `regs/psm.h`.
+const watchdog_base: usize = 0x400d8000;
+const watchdog_ctrl_set: *volatile u32 = @ptrFromInt(watchdog_base + 0x2000);
+const watchdog_ctrl_clr: *volatile u32 = @ptrFromInt(watchdog_base + 0x3000);
+const watchdog_scratch4: *volatile u32 = @ptrFromInt(watchdog_base + 0x1c);
+const watchdog_ctrl_trigger: u32 = 1 << 31;
+const watchdog_ctrl_enable: u32 = 1 << 30;
+const psm_wdsel_set: *volatile u32 = @ptrFromInt(0x40018000 + 0x2000 + 0x008);
+const psm_wdsel_all: u32 = 0x01ffffff;
+const psm_wdsel_xosc: u32 = 1 << 3;
+const psm_wdsel_rosc: u32 = 1 << 2;
 
 /// Core 1's reset entry (`startup.S`), reached via the bootrom trampoline.
 extern fn _start_core1() callconv(.c) noreturn;
@@ -228,6 +268,87 @@ pub const Cpu = struct {
     pub fn vreg_vsel() u8 {
         const POWMAN_VREG: *volatile u32 = @ptrFromInt(0x4010000c);
         return @intCast((POWMAN_VREG.* >> 4) & 0x1f);
+    }
+
+    /// The watchdog's forced reset, as pico-sdk's `watchdog_reboot(0, 0, 0)`:
+    /// SYSRESETREQ restarts only the cores, and the peripherals -- QMI with the
+    /// PSRAM window, the SD card's PIO -- would come back in whatever state the
+    /// kernel left them. The PSM selection is everything but the oscillators.
+    /// A zero in scratch 4 tells the boot ROM this is not a "jump to" reboot, so
+    /// it boots from flash (yasboot) as it does at power-on.
+    pub fn reset() noreturn {
+        watchdog_ctrl_clr.* = watchdog_ctrl_enable;
+        watchdog_scratch4.* = 0;
+        psm_wdsel_set.* = psm_wdsel_all & ~(psm_wdsel_rosc | psm_wdsel_xosc);
+        watchdog_ctrl_set.* = watchdog_ctrl_trigger;
+        while (true) asm volatile ("wfi");
+    }
+
+    /// Power both cores down through the PSM: the other one first, then the
+    /// caller, which stops on that store. Only a reset (the button, the
+    /// debugger, the RUN pin) starts them again.
+    pub fn halt() noreturn {
+        const own: u32 = if (coreid() == 0) psm_frce_off_proc0 else psm_frce_off_proc1;
+        const other: u32 = (psm_frce_off_proc0 | psm_frce_off_proc1) & ~own;
+        psm_frce_off_set.* = other;
+        while (psm_frce_off.* & other == 0) {}
+        psm_frce_off_set.* = own;
+        while (true) asm volatile ("wfi");
+    }
+
+    /// POWMAN state P1.7: every switchable domain off -- the switched core
+    /// with both processors, both SRAM banks, the XIP cache. Only the
+    /// always-on domain keeps running, and nothing is set to wake it: the
+    /// next start is a reset (the RUN pin or a button on it, a debugger's
+    /// rescue, a power cycle), which boots from flash like a cold start.
+    ///
+    /// The switched core goes down only once the caller is in deep sleep, so
+    /// everything that could wake it has to be quiet first: the other core
+    /// powered down as `halt` does, SysTick stopped, every NVIC line disabled
+    /// and cleared. Interrupts are already masked, but a pending one still
+    /// ends a WFI.
+    ///
+    /// A debugger's power-up request is honoured, never ignored (DBG_PWRCFG
+    /// is cleared, not set): it is the only way back in short of the RUN pin.
+    /// With IGNORE set the chip powered down under the rig's probe and no SWD
+    /// access worked any more -- not even the rescue DP, which needs the same
+    /// power-up handshake -- and a board with its own supply needed a hand on
+    /// its reset button. So with a probe attached the switched core stays up
+    /// and this core sleeps (deep sleep, nothing to wake it): halted, and the
+    /// debugger can still reset it. Without one, the chip powers down, and a
+    /// probe connected later wakes it.
+    ///
+    /// If POWMAN refuses the request (a power-up already pending), this halts.
+    pub fn power_off() noreturn {
+        const own: u32 = if (coreid() == 0) psm_frce_off_proc0 else psm_frce_off_proc1;
+        const other: u32 = (psm_frce_off_proc0 | psm_frce_off_proc1) & ~own;
+        psm_frce_off_set.* = other;
+        while (psm_frce_off.* & other == 0) {}
+
+        syst_csr.* = 0;
+        icsr.* = icsr_pendstclr | icsr_pendsvclr;
+        for (0..2) |word| {
+            nvic_icer[word] = 0xffff_ffff;
+            nvic_icpr[word] = 0xffff_ffff;
+        }
+
+        powman_reg(powman_dbg_pwrcfg).* = powman_password;
+        inline for (.{ powman_pwrup0, powman_pwrup0 + 4, powman_pwrup0 + 8, powman_pwrup0 + 12 }) |offset| {
+            powman_reg(offset).* = powman_password;
+        }
+        powman_reg(powman_timer + 0x3000).* = powman_password | powman_timer_pwrup_on_alarm;
+
+        scr.* |= scr_sleepdeep;
+        powman_reg(powman_state + 0x3000).* = powman_password | powman_state_req_ignored;
+        // REQ is inverted: a set bit asks for that domain off. All four off.
+        powman_reg(powman_state).* = powman_password | powman_state_req_all_off;
+        if (powman_reg(powman_state).* & (powman_state_req_ignored | powman_state_bad_sw_req) != 0) {
+            scr.* &= ~scr_sleepdeep;
+            psm_frce_off_set.* = own;
+        }
+        while (true) {
+            asm volatile ("dsb\n wfi" ::: .{ .memory = true });
+        }
     }
 
     pub const Registers = ArchRegisters;

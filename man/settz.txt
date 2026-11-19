@@ -1,0 +1,55 @@
+SETTZ(8)                         YasOS Manual                         SETTZ(8)
+
+NAME
+       settz - show or set the system time zone
+
+SYNOPSIS
+       settz
+       settz ZONE
+       settz -u
+       settz -l
+
+DESCRIPTION
+       The kernel keeps time in UTC; local time is the C library's work, and
+       it takes the zone from TZ when that is set, else from /etc/localtime.
+       In the image /etc/localtime is a symbolic link to /var/etc/localtime
+       on the card, since the romfs cannot change, and settz makes that a
+       link to one of the IANA zones in /usr/share/zoneinfo.
+
+       Without arguments settz shows the zone and the time in it.
+
+       ZONE   An IANA name: Europe/Warsaw, America/New_York, Asia/Tokyo,
+              UTC. Programs started afterwards use it.
+
+       -u     Back to UTC: removes /var/etc/localtime.
+
+       -l     Lists the zone names.
+
+       Without a card /var is RAM, and the setting lasts until the next
+       boot.
+
+ENVIRONMENT
+       TZ     Overrides the system zone for a program or a shell. Either an
+              IANA name (TZ=Europe/Warsaw), an absolute path to a zone file,
+              or a POSIX TZ string with the rules written out, which needs
+              no file at all:
+
+                     TZ='CET-1CEST,M3.5.0,M10.5.0/3' date
+
+              TZ='' is UTC. A value that is neither a zone nor a valid
+              string is UTC too.
+
+       TZDIR  Where zones are looked up before /usr/share/zoneinfo.
+
+FILES
+       /etc/localtime        the system zone (a link to /var/etc/localtime)
+       /var/etc/localtime    what settz writes: a link to the zone
+       /usr/share/zoneinfo   the zones, compiled from tools/tzdata in the tree
+
+EXAMPLES
+       settz Europe/Warsaw
+       TZ=Asia/Tokyo date
+       date -u
+
+SEE ALSO
+       date(1), tzset(3), localtime(3), strftime(3)

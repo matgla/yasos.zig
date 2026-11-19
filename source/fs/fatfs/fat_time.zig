@@ -38,9 +38,10 @@
 //!    tell them apart, which is exactly why `make` uses `older than` rather
 //!    than `not equal`.
 //!
-//! FAT has no timezone: the date in the entry is local time, and this system
-//! has no timezone either (`gettimeofday` reports tz_minuteswest 0), so local
-//! and UTC are the same thing here and no conversion is applied.
+//! FAT has no timezone: the date in the entry is meant as local time. The
+//! kernel has no zone (`gettimeofday` reports tz_minuteswest 0; time zones
+//! are libc's, docs/timezones.md), so it writes and reads UTC there and
+//! applies no conversion -- a PC reading the card shows UTC times.
 
 const std = @import("std");
 

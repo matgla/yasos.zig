@@ -36,6 +36,13 @@ zig build menuconfig
 
 Then select `Board selection` -> `MSPC v2/Pimoroni Pico Plus2` since they are only supported board right now.
 
+`Applications` picks the programs that go into the rootfs image; the libraries,
+the native tcc and toybox always do. `Zig compiler` adds the device Zig
+compiler (off by default; the releases carry it): it is built from the fork
+pinned in `apps/zig/zig_fork.txt`, and its lib goes to the SD card, not the
+image -- copy `sdcard/var/lib/zig` (in the build tree and in a release package)
+to `/var/lib/zig` on the card.
+
 After configuration build the root filesystem image first. It also builds the
 cross compiler (`libs/tinycc/bin/armv8m-tcc`) the kernel is compiled with, and
 then rebuilds the kernel with the fresh image embedded:

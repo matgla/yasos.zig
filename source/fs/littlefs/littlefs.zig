@@ -167,6 +167,13 @@ pub const LittleFs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
         return 0;
     }
 
+    /// littlefs commits each operation as it completes; only open files hold
+    /// data back, until `lfs_file_sync`.
+    pub fn sync(self: *Self) i32 {
+        _ = self;
+        return 0;
+    }
+
     pub fn create(self: *Self, path: []const u8, _: i32) anyerror!void {
         const path_c = try std.fmt.allocPrintSentinel(self._allocator, "/{s}", .{path}, 0);
         defer self._allocator.free(path_c);

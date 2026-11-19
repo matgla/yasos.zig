@@ -113,6 +113,44 @@ pub fn Cpu(comptime cpu: anytype) type {
             }
         }
 
+        /// Restart the whole chip, as the reset button does: every core and the
+        /// peripherals, back through the boot ROM. The caller has written out
+        /// whatever must survive and disabled interrupts. A board without a
+        /// reset of its own (the host, the unit-test stub) just stops here.
+        pub fn reset(_: Self) noreturn {
+            if (@hasDecl(CpuImplementation, "reset")) {
+                CpuImplementation.reset();
+            }
+            while (true) {}
+        }
+
+        /// Stop the machine for good: every core, not only the caller, or the
+        /// scheduler on the others carries on without it. A board that can
+        /// switch itself off (QEMU, through semihosting) does; the RP2350 powers
+        /// its cores down. The default parks the calling core, which stops the
+        /// machine only where there is one core.
+        pub fn halt(_: Self) noreturn {
+            if (@hasDecl(CpuImplementation, "halt")) {
+                CpuImplementation.halt();
+            }
+            while (true) {}
+        }
+
+        /// Switch off as far as the chip can. On the RP2350 that is POWMAN's
+        /// deepest state: the cores, SRAM and XIP unpowered, the always-on
+        /// domain waiting for a reset -- the board's regulator, PSRAM and SD
+        /// card stay powered, they are not the chip's to switch. A board with
+        /// nothing deeper than `halt` halts.
+        pub fn power_off(_: Self) noreturn {
+            if (@hasDecl(CpuImplementation, "power_off")) {
+                CpuImplementation.power_off();
+            }
+            if (@hasDecl(CpuImplementation, "halt")) {
+                CpuImplementation.halt();
+            }
+            while (true) {}
+        }
+
         pub fn vreg_vsel(_: Self) ?u8 {
             if (@hasDecl(CpuImplementation, "vreg_vsel")) {
                 return CpuImplementation.vreg_vsel();
