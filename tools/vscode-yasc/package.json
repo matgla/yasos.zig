@@ -1,0 +1,19 @@
+{
+  "name": "yasc-syntax",
+  "displayName": "yasc (tinycc C dialect) syntax",
+  "description": "Highlights tinycc's yasc dialect in C files: owned/view/maybe/out/drop, defer/errdefer, error sets, !T, try/catch, modules",
+  "version": "0.2.0",
+  "publisher": "yasos",
+  "license": "GPL-3.0-or-later",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "grammars": [
+      {
+        "scopeName": "source.c.yasc",
+        "path": "./syntaxes/yasc.tmLanguage.json",
+        "injectTo": ["source.c"]
+      }
+    ]
+  }
+}

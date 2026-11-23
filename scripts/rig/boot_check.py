@@ -1,9 +1,16 @@
 """Reset the board and check that its shell answers at the working baud rate."""
-import glob, subprocess, sys, time, serial
-s = serial.Serial(glob.glob('/dev/serial/by-id/*Debugprobe*-if01')[0], 3000000, timeout=0.2)
+import glob, os, subprocess, sys, time, serial
+# The board's UART: SERIAL_DEVICE (boards.py run), else its probe's, else the only probe's.
+probe = os.environ.get('YASOS_PROBE_SERIAL', '').strip()
+pattern = f'*_{glob.escape(probe)}-if01' if probe else '*Debugprobe*-if01'
+by_id = os.environ.get('YASOS_RIG_SERIAL_BY_ID', '/dev/serial/by-id')
+port = os.environ.get('SERIAL_DEVICE', '').strip() or next(iter(sorted(glob.glob(os.path.join(by_id, pattern)))), '')
+if not port:
+    sys.exit(f'no UART for the probe {probe or "(any)"}')
+s = serial.Serial(port, int(os.environ.get("YASOS_SMOKE_CONSOLE_BAUDRATE", "6000000")), timeout=0.2)  # CONFIG_CONSOLE_BAUDRATE
 s.reset_input_buffer()
 subprocess.run(['openocd','-f','interface/cmsis-dap.cfg','-f','target/rp2350-rescue.cfg','-c','adapter speed 5000','-c','init','-c','exit'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(1)
-r = subprocess.run(['openocd','-c','set USE_CORE 0','-f','interface/cmsis-dap.cfg','-f','target/rp2350.cfg','-c','adapter speed 8000','-c','init','-c','reset run','-c','exit'],
+r = subprocess.run(['openocd','-c','set USE_CORE 0','-f','interface/cmsis-dap.cfg','-f','target/rp2350.cfg','-c','adapter speed 5000','-c','init','-c','reset run','-c','exit'],
                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 print('reset rc', r.returncode)
 if r.returncode: print(r.stdout[-700:]); sys.exit(4)

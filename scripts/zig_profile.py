@@ -100,13 +100,13 @@ def cmd_image(args):
     w = REPO / ".cache/zig-build"
     cross = REPO / "libs/tinycc/bin/armv8m-tcc"
     # build_zig.sh's link, as an ELF with symbols: same objects, same order, same layout.
-    sh(f"{cross} -g -fvisibility=hidden -stack-size=196608 -Wl,--hot-text={REPO}/apps/zig/hot_functions.txt {w}/zig.o {w}/compat.o {w}/compiler_rt.o -lm "
+    sh(f"{cross} -ccompat -g -fvisibility=hidden -stack-size=196608 -Wl,--hot-text={REPO}/apps/zig/hot_functions.txt {w}/zig.o {w}/compat.o {w}/compiler_rt.o -lm "
        f"-Wl,-oformat=elf32-littlearm -o {d}/zig.elf")
     shutil.copy2(w / "zig", d / "zig.yaff")
     libc_lines = [l for l in (d / "board_model_rootfs.log").read_text(errors="replace").splitlines()
                   if l.startswith("armv8m-tcc ") and "-o build/libc.so.elf" in l]
     if libc_lines:
-        line = libc_lines[-1].replace("armv8m-tcc ", f"{cross} -g ", 1).replace("-o build/libc.so.elf", f"-o {d}/libc.elf")
+        line = libc_lines[-1].replace("armv8m-tcc ", f"{cross} -ccompat -g ", 1).replace("-o build/libc.so.elf", f"-o {d}/libc.elf")
         subprocess.run(line, shell=True, cwd=REPO / "libs/libc", capture_output=True)
     shutil.copy2(REPO / "libs/libc/build/libc.so.elf", d / "libc.so.elf")
     (d / "board_model_image.json").write_text('{"zig": "%s"}\n' % args.zig)

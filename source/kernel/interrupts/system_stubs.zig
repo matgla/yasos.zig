@@ -66,6 +66,14 @@ pub export fn abort() noreturn {
     @panic("abort()");
 }
 
+// libc's assert() (assert.h) calls this; the kernel's C asks for its asserts
+// (littlefs builds with LFS_YES_ASSERT), and a failed one is a kernel panic.
+pub export fn __assert_fail(expr: [*:0]const u8, file: [*:0]const u8, line: c_uint, func: [*:0]const u8) noreturn {
+    var buf: [192]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "assert {s} failed: {s}:{d} ({s})", .{ expr, file, line, func }) catch "assert failed";
+    @panic(msg);
+}
+
 pub export fn _exit(code: c_int) void {
     var status: c_int = code;
     _ = trigger_syscall(c.sys_exit, &status);

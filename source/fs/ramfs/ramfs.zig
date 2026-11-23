@@ -940,6 +940,32 @@ test "RamFs.Tiered.ShouldTruncateAndSeekASpilledFile" {
     try fixture.expect_content("/edited", "abcde   \x00\x00");
 }
 
+test "RamFs.Tiered.ShouldKeepItsPlaceAcrossReadsAndAppendsWhenSpilled" {
+    // A spilled body skips the seek when its handle is already in place; a read
+    // in between moves the handle, and the next append must still land at the end.
+    var fixture = try TieredFixture.init(std.testing.allocator, std.testing.allocator, 8);
+    defer fixture.deinit(std.testing.allocator);
+
+    try fixture.sut.interface.create("/log", 0);
+    var node = try fixture.sut.interface.get("/log");
+    defer node.delete();
+    var file = node.as_file().?;
+    try std.testing.expectEqual(@as(isize, 10), file.interface.write("0123456789"));
+    try std.testing.expectEqual(@as(usize, 1), fixture.tier.spills);
+    try std.testing.expectEqual(@as(isize, 5), file.interface.write("abcde"));
+
+    var reader_node = try fixture.sut.interface.get("/log");
+    defer reader_node.delete();
+    var reader = reader_node.as_file().?;
+    var buffer: [4]u8 = undefined;
+    _ = try reader.interface.seek(3, c.SEEK_SET);
+    try std.testing.expectEqual(@as(isize, 4), reader.interface.read(&buffer));
+    try std.testing.expectEqualStrings("3456", &buffer);
+
+    try std.testing.expectEqual(@as(isize, 3), file.interface.write("XYZ"));
+    try fixture.expect_content("/log", "0123456789abcdeXYZ");
+}
+
 test "RamFs.Tiered.ShouldRemoveTheSpilledBodyOnUnlink" {
     var fixture = try TieredFixture.init(std.testing.allocator, std.testing.allocator, 8);
     defer fixture.deinit(std.testing.allocator);
@@ -980,7 +1006,8 @@ test "RamFs.Tiered.ShouldNotSpillWhileDetached" {
         var node = try fixture.sut.interface.get("/late");
         defer node.delete();
         var file = node.as_file().?;
-        try std.testing.expectEqual(@as(isize, 0), file.interface.write("long enough to spill"));
+        // -ENOSPC, which sys_write turns into the caller's errno.
+        try std.testing.expectEqual(-@as(isize, c.ENOSPC), file.interface.write("long enough to spill"));
     }
     try std.testing.expectEqual(@as(usize, 0), fixture.spilled_body_count());
 
@@ -1017,6 +1044,41 @@ test "RamFs.Tiered.ShouldKeepBigFilesInTheArenaWhileDetached" {
     try fixture.write("/big", 25, "!");
     try std.testing.expectEqual(@as(usize, 1), fixture.spilled_body_count());
     try fixture.expect_content("/big", "past the 8-byte threshold!");
+}
+
+test "RamFs.Tiered.ShouldSpillToARamDirectoryOnlyWhenTheArenaIsFull" {
+    // A card-less rp2350: /var is a RamFs on the kernel heap. A file past the
+    // size threshold stays in the arena while it fits (the heap is no place
+    // for what the arena holds), and moves to the RAM directory only once the
+    // arena cannot hold it -- it used to fail with the arena instead.
+    var arena_memory: [8192]u8 align(256) = undefined;
+    var pool = try kernel.memory.heap.TmpMemoryPool(256).init(std.testing.allocator, &arena_memory);
+    defer pool.deinit();
+    var page_allocator = kernel.memory.heap.TmpPageAllocator(@TypeOf(pool)).init(&pool);
+
+    var fixture = try TieredFixture.init(std.testing.allocator, page_allocator.allocator(), 8);
+    defer fixture.deinit(std.testing.allocator);
+    const Arena = struct {
+        fn free(context: *anyopaque) usize {
+            const p: *@TypeOf(pool) = @ptrCast(@alignCast(context));
+            return p.memory_size - p.get_used_size();
+        }
+    };
+    fixture.tier.set_arena(.{ .context = &pool, .free_bytes = &Arena.free }, 1024);
+    fixture.tier.set_prefer_arena(true);
+
+    try fixture.sut.interface.create("/grows", 0);
+    try fixture.write("/grows", 0, "past the 8-byte threshold");
+    try std.testing.expectEqual(@as(usize, 0), fixture.spilled_body_count());
+
+    var payload: [16384]u8 = undefined;
+    for (&payload, 0..) |*byte, index| {
+        byte.* = @truncate(index *% 7);
+    }
+    try fixture.write("/grows", 0, &payload);
+    try std.testing.expectEqual(@as(usize, 1), fixture.spilled_body_count());
+    try std.testing.expectEqual(@as(usize, 1), fixture.tier.spills);
+    try fixture.expect_content("/grows", &payload);
 }
 
 test "RamFs.Tiered.ShouldKeepSymbolicLinksInMemory" {

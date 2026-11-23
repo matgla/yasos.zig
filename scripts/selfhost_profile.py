@@ -162,7 +162,7 @@ def cmd_run(args):
             path.write_text(text)
         env = bm.qemu_env(image, f"{extra} -d plugin -D {log}")
         env["YASOS_QEMU_EXTRA_ARGS"] = bm.AN524_ARGS + " " + env.pop("YASOS_QEMU_EXTRA_ARGS_APPEND")
-        cmd = (f"cd /mnt && cat /proc/mempeak >/dev/null; ulimit -s {args.ulimit} && {prefix} tcc {rsp} -bench -o /tmp/o.o -c {source}; "
+        cmd = (f"cd /mnt && cat /proc/mempeak >/dev/null; ulimit -s {args.ulimit} && {prefix} tcc -ccompat {rsp} -bench -o /tmp/o.o -c {source}; "
                "echo RC=$?; sha256sum /tmp/o.o; cat /proc/mempeak")
         # The real build runs under shells, which hold memory the whole time.
         for depth in range(args.nest):
@@ -238,11 +238,11 @@ def relinked(image):
     libc_lines = [l for l in log if l.startswith("armv8m-tcc ") and "-o build/libc.so.elf" in l]
     cross = image / "libs/tinycc/bin/armv8m-tcc"
     if not (d / "tcc.elf").exists():
-        line = tcc_lines[-1].replace("armv8m-tcc -o armv8m-tcc ", f"{cross} -g -Wl,-oformat=elf32-littlearm -o {d}/tcc.elf ", 1)
+        line = tcc_lines[-1].replace("armv8m-tcc -o armv8m-tcc ", f"{cross} -ccompat -g -Wl,-oformat=elf32-littlearm -o {d}/tcc.elf ", 1)
         subprocess.run(line, shell=True, cwd=image / "libs/tinycc", check=True, capture_output=True,
                        env={**os.environ, "PATH": f"{cross.parent}:{os.environ['PATH']}"})
     if not (d / "libc.elf").exists():
-        line = libc_lines[-1].replace("armv8m-tcc ", f"{cross} -g ", 1).replace("-o build/libc.so.elf", f"-o {d}/libc.elf")
+        line = libc_lines[-1].replace("armv8m-tcc ", f"{cross} -ccompat -g ", 1).replace("-o build/libc.so.elf", f"-o {d}/libc.elf")
         subprocess.run(line, shell=True, cwd=image / "libs/libc", check=True, capture_output=True)
     return d / "tcc.elf", d / "libc.elf"
 
@@ -612,7 +612,7 @@ def cmd_identity(args):
             # tcc embeds the output's basename: same name, different directory
             (tmp / tag).mkdir(exist_ok=True)
             o = tmp / tag / f"{unit}.o"
-            r = subprocess.run([str(image / "libs/tinycc/bin/armv8m-tcc"), *flags, "-c", "-o", str(o), source], cwd=src,
+            r = subprocess.run([str(image / "libs/tinycc/bin/armv8m-tcc"), "-ccompat", *flags, "-c", "-o", str(o), source], cwd=src,
                                capture_output=True, text=True)
             objs.append((r.returncode, o.read_bytes() if o.exists() else b"", r.stderr[:200]))
         return unit, objs

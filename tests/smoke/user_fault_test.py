@@ -45,7 +45,7 @@ def _compile_and_run(session, source, name):
             f"/tmp is full while writing /tmp/{name}.c -- something earlier in "
             f"the run left files behind:\n{out}"
         )
-    session.write_command(f"tcc /tmp/{name}.c -o /tmp/{name}")
+    session.write_command(f"tcc -ccompat /tmp/{name}.c -o /tmp/{name}")
     session.read_until_prompt()
     session.write_command(f"/tmp/{name}")
     output = session.read_until_prompt()
@@ -160,7 +160,7 @@ def test_stack_overflow_inside_a_syscall_kills_only_that_process(request):
         redirect = ">" if index == 0 else ">>"
         session.write_command(f"echo '{line}' {redirect} /tmp/{name}.c")
         session.read_until_prompt()
-    session.write_command(f"tcc /tmp/{name}.c -o /tmp/{name} -stack-size={_PROBE_STACK}")
+    session.write_command(f"tcc -ccompat /tmp/{name}.c -o /tmp/{name} -stack-size={_PROBE_STACK}")
     assert "error" not in session.read_until_prompt()
     session.write_command(f"echo target > /tmp/{name}_target")
     session.read_until_prompt()

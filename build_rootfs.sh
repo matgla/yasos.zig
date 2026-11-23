@@ -117,9 +117,13 @@ if $BUILD_IMAGE && ! command -v genromfs >/dev/null 2>&1; then
 fi
 
 PREFIX=$SCRIPT_DIR/rootfs/usr
-TARGET_BUILD_EXTRA_CFLAGS=""
+# tcc is safe by default (the yasc dialect, -Wall, -Wlifetime, unsafe C as
+# errors).  Everything built here is regular C until it is ported, ours and
+# third-party alike, so every tcc compile gets -ccompat.
+COMPAT_CFLAGS="-ccompat"
+TARGET_BUILD_EXTRA_CFLAGS="$COMPAT_CFLAGS"
 if ! $DEBUG_TCC; then
-  TARGET_BUILD_EXTRA_CFLAGS="-O2"
+  TARGET_BUILD_EXTRA_CFLAGS="$COMPAT_CFLAGS -O2"
 fi
 # Debug info is opt-in (--debug): -g bloats every binary in the image and, under
 # tcc, pins otherwise-collectable code (do_compact keeps dead late-reopt bodies
@@ -282,6 +286,7 @@ if $CLEAR; then
   rm -rf apps/pioasm/build
   rm -rf apps/more/build
   rm -rf apps/ccat/build
+  rm -rf apps/mdcat/build
   rm -rf apps/yaffdump/build
   rm -rf apps/yaffdump/tests/build
   rm -rf apps/strip/build apps/strip/build-host apps/strip/tests/build
@@ -613,7 +618,7 @@ build_c_compiler()
     echo "Native compiler stage 1 already up to date."
   else
     ./configure --cc=tcc --cpu=armv8m \
-      --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
+      --extra-cflags="$COMPAT_CFLAGS -Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
       --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE $NATIVE_HOT_TEXT_FLAG -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB -Wl,-oformat=elf32-littlearm" \
       --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
       --disable-asan \
@@ -675,7 +680,7 @@ build_c_compiler()
     echo "Native compiler stage 2 already up to date."
   else
     ./configure --cc=tcc --cpu=armv8m \
-      --extra-cflags="-Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
+      --extra-cflags="$COMPAT_CFLAGS -Wall -Werror $NATIVE_TCC_DEBUG_DEFINE $DEBUG_CFLAGS $NATIVE_TCC_DEBUG_OPT -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB -DTCC_TARGET_ARM -DTCC_IS_NATIVE -I$PREFIX/include -fpie -fPIE -mcpu=cortex-m33 -fvisibility=hidden -ffunction-sections" \
       --extra-ldflags="-fpie -fPIE -fvisibility=hidden $DEBUG_CFLAGS -stack-size=$TCC_NATIVE_STACK_SIZE $NATIVE_HOT_TEXT_FLAG -Wl,--gc-sections -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -DTCC_ARM_VFP -DTCC_TARGET_ARM -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTCC_TARGET_ARM_THUMB" \
       --enable-cross --config-asm=yes --config-bcheck=no --config-pie=yes --config-pic=yes --config-ldl=no --config-pthread=no \
       --disable-asan \
@@ -867,11 +872,11 @@ build_makefile()
     make clean
   fi
   clean_if_compiler_changed
-  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" -j$JOBS
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$COMPAT_CFLAGS $DEBUG_CFLAGS" -j$JOBS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
-  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" install PREFIX=$PREFIX
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$COMPAT_CFLAGS $DEBUG_CFLAGS" install PREFIX=$PREFIX
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -889,7 +894,7 @@ build_zork_makefile()
   fi
   mv zork zork.elf
 
-  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" -j$JOBS
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$COMPAT_CFLAGS $DEBUG_CFLAGS" -j$JOBS
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -897,7 +902,7 @@ build_zork_makefile()
   mkdir -p $PREFIX/games
   mkdir -p $PREFIX/games/lib
 
-  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$DEBUG_CFLAGS" install BINDIR=$PREFIX/games/ DATADIR=$PREFIX/games/lib/ MANDIR=$PREFIX/share/man/man6
+  make CC="$CC" ROOTFS_OPT_CFLAGS="$TARGET_BUILD_EXTRA_CFLAGS" ROOTFS_DEBUG_CFLAGS="$COMPAT_CFLAGS $DEBUG_CFLAGS" install BINDIR=$PREFIX/games/ DATADIR=$PREFIX/games/lib/ MANDIR=$PREFIX/share/man/man6
   if [ $? -ne 0 ]; then
     exit -1;
   fi
@@ -1096,6 +1101,7 @@ build_app hexdump build_makefile
 build_app pioasm build_makefile
 build_app more build_makefile
 build_app ccat build_makefile
+build_app mdcat build_makefile
 build_app yaffdump build_makefile
 build_app strip build_makefile
 build_app ptracetest build_makefile
@@ -1162,7 +1168,7 @@ for hdr in $PCH_HEADERS; do
     oflags="${variant%:*}"
     suffix="${variant#*:}"
     pch_name="${hdr%.h}${suffix}.pch"
-    if armv8m-tcc $oflags -generate-pch "$hdr_path" -o "$PCH_DIR/$pch_name"; then
+    if armv8m-tcc $COMPAT_CFLAGS $oflags -generate-pch "$hdr_path" -o "$PCH_DIR/$pch_name"; then
       PCH_INDEX="${PCH_INDEX}/usr/include/${hdr}\t${pch_name}\n"
       echo "  Generated $pch_name (${oflags:-unoptimized})"
     else

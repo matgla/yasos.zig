@@ -780,6 +780,13 @@ pub fn sys_write(arg: *const anyopaque) !i32 {
             if (result_out.* == -1 and file.interface.filetype() == FileType.Fifo) {
                 return file.as(kernel.fs.PipeFile).data().write_error();
             }
+            // A file that knows why it failed returns -errno (RamFsFile);
+            // plain -1 stays the "no reason given" it always was.
+            if (result_out.* < -1) {
+                const code: u16 = @intCast(@min(-result_out.*, std.math.maxInt(u16)));
+                result_out.* = -1;
+                return kernel.errno.from_errno(code);
+            }
             if (is_tty and result_out.* > 0) {
                 process.record_tty_output(context.fd, data[0..@intCast(result_out.*)]);
             }

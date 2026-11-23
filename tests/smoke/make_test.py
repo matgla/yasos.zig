@@ -166,7 +166,7 @@ GREET_C = [
 # runs pattern_search, and $< / $@ make it depend on stem substitution too.
 PROGRAM_MAKEFILE = [
     ".RECIPEPREFIX = >",
-    "CC = tcc",
+    "CC = tcc -ccompat",
     "OBJS = main.o greet.o",
     "app: $(OBJS)",
     ">$(CC) -o app $(OBJS)",
@@ -221,9 +221,9 @@ def test_builds_a_c_program_with_tcc(request):
     """make drives tcc over a two-file program, then the result runs."""
     session = request.node.stash[session_key]
     out = _build_program(session)
-    assert "tcc -c main.c -o main.o" in out
-    assert "tcc -c greet.c -o greet.o" in out
-    assert "tcc -o app main.o greet.o" in out
+    assert "tcc -ccompat -c main.c -o main.o" in out
+    assert "tcc -ccompat -c greet.c -o greet.o" in out
+    assert "tcc -ccompat -o app main.o greet.o" in out
 
     session.write_command(PROGDIR + "/app")
     out = session.wait_for_prompt(timeout=30)
@@ -260,9 +260,9 @@ def test_recompiles_only_the_changed_source(request):
 
     session.write_command("make")
     out = session.wait_for_prompt(timeout=60)
-    assert "tcc -c main.c -o main.o" in out
-    assert "tcc -c greet.c -o greet.o" not in out
-    assert "tcc -o app main.o greet.o" in out
+    assert "tcc -ccompat -c main.c -o main.o" in out
+    assert "tcc -ccompat -c greet.c -o greet.o" not in out
+    assert "tcc -ccompat -o app main.o greet.o" in out
 
     session.write_command(PROGDIR + "/app")
     out = session.wait_for_prompt(timeout=30)

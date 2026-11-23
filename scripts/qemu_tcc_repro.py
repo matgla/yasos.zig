@@ -74,7 +74,7 @@ def drain(ser, secs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cmd", default="tcc /usr/citests/02_printf.c -o /tmp/02_printf && /tmp/02_printf; echo RC=$?")
+    ap.add_argument("--cmd", default="tcc -ccompat /usr/citests/02_printf.c -o /tmp/02_printf && /tmp/02_printf; echo RC=$?")
     ap.add_argument("--gdb", type=int, default=None)
     ap.add_argument("--timeout", type=float, default=30)
     ap.add_argument("--boot-wait", type=float, default=6)

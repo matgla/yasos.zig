@@ -69,7 +69,7 @@ def check_prereqs():
 def run_callgrind(src, cflags, link):
     out = tempfile.mktemp(prefix="tcc_cg_", suffix=".out")
     exe = tempfile.mktemp(prefix="tcc_out_")
-    comp = [CROSS] + ([] if link else ["-c"]) + cflags.split() + [src, "-o", exe]
+    comp = [CROSS, "-ccompat"] + ([] if link else ["-c"]) + cflags.split() + [src, "-o", exe]
     cg = ["valgrind", "--tool=callgrind", f"--callgrind-out-file={out}",
           "--cache-sim=yes", "--D1=32768,8,64", "--LL=524288,8,64"]
     r = subprocess.run(cg + comp, capture_output=True, text=True)
@@ -127,7 +127,7 @@ def count_io(src, cflags, link):
     if not shutil.which("strace"):
         return None
     exe = tempfile.mktemp(prefix="tcc_io_")
-    comp = [CROSS] + ([] if link else ["-c"]) + cflags.split() + [src, "-o", exe]
+    comp = [CROSS, "-ccompat"] + ([] if link else ["-c"]) + cflags.split() + [src, "-o", exe]
     log = tempfile.mktemp(prefix="tcc_strace_")
     subprocess.run(["strace", "-f", "-e", "trace=openat,read", "-o", log] + comp,
                    capture_output=True, text=True)

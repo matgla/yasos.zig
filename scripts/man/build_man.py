@@ -37,8 +37,10 @@ Pages, all generated on the PC (nothing is converted on the board):
                         Linux man-pages section 3 page of every function
                         the yasos libraries implement, with a YasOS note
                         on top; yasos-libc(7) summarises
-  tcc                   tinycc's tcc-doc.texi (makeinfo --plain) and the
-                        cross's -h/-hh option summary
+  tcc                   tinycc's tcc-doc.texi (makeinfo --plain), the
+                        cross's -h/-hh option summary, and the pages
+                        tinycc keeps beside its features
+                        (libs/tinycc/docs/man/*.txt: yasc-modules, ...)
   zig                   the language reference (doc/langref.html.in of
                         --zig-source, one page per chapter) and the CLI
                         help of --zig; skipped without them
@@ -612,6 +614,9 @@ def tcc_pages(pages):
         pages.add("tcc-options", "\n".join(out))
     else:
         log("no libs/tinycc/bin/armv8m-tcc: skipping tcc-options(1)")
+
+    # hand-written pages that live with the tinycc features they describe
+    handwritten(pages, tinycc / "docs/man")
 
 
 # ------------------------------------------------------------------ HTML -> text

@@ -38,10 +38,12 @@ const config = @import("config");
 /// `CONSOLE_BAUDRATE` fallback in `tests/smoke/framework/session.py`. A
 /// mismatch does not fail loudly, it just turns the console into garbage.
 ///
-/// 3 Mbaud is the PL011 ceiling here, not a round number picked for ambition:
-/// baud is clk_peri/(16*divisor), clk_peri is 48 MHz (`clk_peri_expected_khz`,
-/// hal/.../rp2350/startup/crt.zig), and the divisor bottoms out at 1. It is
-/// also *exact*, where the 921600 this replaces carried +0.16% error.
+/// baud is clk_peri/(16*divisor) and the divisor bottoms out at 1. Up to
+/// 3 Mbaud clk_peri is PLL_USB's 48 MHz (exact at 3 Mbaud); above it crt.zig
+/// (`clk_peri_from_pll_sys`) takes it from PLL_SYS, about 150 MHz. The Pico
+/// Plus 2 runs 6 Mbaud since 2026-11-20, from 133 MHz (-0.37%), which needs
+/// the DMA build of debugprobe on the host end: stock firmware polls its UART
+/// and drops board->host bytes already at 3 Mbaud.
 ///
 /// The rate was 460800 until the rig's debug probe was reflashed. At 921600
 /// the probe's USB-CDC-to-UART bridge silently dropped 32-48 bytes out of
@@ -54,8 +56,8 @@ const config = @import("config");
 ///
 /// What bounds the rate on this end is RX FIFO slack. `uart_set_irqs_enabled`
 /// leaves RXIFLSEL=0, so the interrupt trips at 4 of 32 bytes and 28 bytes can
-/// still land while the ISR is blocked -- 93 us at 3 Mbaud, against 608 us at
-/// 460800. Several kernel `cpsid i` sections (FatFs, MMC/SDIO, __malloc_lock)
+/// still land while the ISR is blocked -- 47 us at 6 Mbaud, 93 us at 3 Mbaud,
+/// 608 us at 460800. Several kernel `cpsid i` sections (FatFs, __malloc_lock; the SDIO driver masks nothing)
 /// are the things that have to fit inside that, and `Uart.write` already
 /// drains RX inline so the both-directions-at-once case is covered. If this is
 /// too fast, the symptom is `ovr` climbing in /proc/uart with `max_overrun_gap_us`

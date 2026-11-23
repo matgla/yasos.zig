@@ -412,7 +412,7 @@ def full(args):
     # YasOS's execve takes at most 256 arguments: long lists go in several commands.
     chunks = lambda xs: [xs[i:i + 100] for i in range(0, len(xs), 100)]
     L += ["mkdir -p " + " ".join(q(d) for d in part) for part in chunks([d for d in dirs if d])]
-    L += ["s=$(date +%s); tcc -O2 zigfix.c -o out/zigfix; step zigfix-build $? $s",
+    L += ["s=$(date +%s); tcc -ccompat -O2 zigfix.c -o out/zigfix; step zigfix-build $? $s",
           f"s=$(date +%s); \"$ZIGFIX\" fix-cbe out/yasos_kernel.c {q(plan.dev(kernel_c))}; step fix-cbe $? $s"]
     for k, c in enumerate(cmds):
         if k == c_i[0]:
@@ -620,13 +620,19 @@ def full_board(tree, host, compared, args):
     The board runs the images flashed last (scripts/zig_board.py --flash, or --flash here): a rootfs
     built with `build_rootfs.sh --zig` and the zig lib pushed with `zig_board.py push`."""
     zb = [sys.executable, str(REPO / "scripts/zig_board.py")]
+    # Every call on one board: a named one, or with auto the one the first call took (the
+    # wrapper keeps to the board it used last).
+    first = zb + (["--rig-board", args.rig_board] if args.rig_board else [])
+    if args.rig_board and args.rig_board != "auto":
+        zb = first
     if args.flash:
         log("board: flash this checkout's images, push the zig lib")
-        if subprocess.run(zb + ["--flash", "push"], cwd=REPO).returncode:
+        if subprocess.run(first + ["--flash", "push"], cwd=REPO).returncode:
             sys.exit("board: flash/push of the zig lib failed")
+        first = zb
     dest = args.board_dir
     log(f"board: tree to {dest}/tree/src")
-    if subprocess.run(zb + ["push", "--src", str(tree), "--exclude", "lib", "--dest", dest], cwd=REPO).returncode:
+    if subprocess.run(first + ["push", "--src", str(tree), "--exclude", "lib", "--dest", dest], cwd=REPO).returncode:
         sys.exit("board: pushing the tree failed")
     src = f"{dest}/tree/src"
     if args.hash_only:
@@ -666,6 +672,7 @@ def main():
     ap.add_argument("--hash-only", action="store_true", help="--board: only hash the outputs of the last run")
     ap.add_argument("--board-dir", default="/root/kfull", help="--board: where the tree goes on the card")
     ap.add_argument("--board-cache", default="/root/zc", help="--board: the zig cache on the card")
+    ap.add_argument("--rig-board", metavar="NAME", help="--board: which rig board (scripts/zig_board.py --rig-board)")
     args = ap.parse_args()
     if args.action == "board-run" and not args.package:
         ap.error("board-run needs --package")

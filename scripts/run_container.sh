@@ -66,8 +66,23 @@ for PAIR in "${PROBE_ALLOWED_LIST[@]}"; do
 done
 
 PROBE_UART_DEVICE=""
+CONTAINER_BOARD_ENV=""
 
-if [[ -n "$MATCHED_DEVICE" && "$(uname)" != "Darwin" ]]; then
+if [[ -n "${YASOS_PROBE_SERIAL:-}" && "$(uname)" != "Darwin" ]]; then
+    # A board taken with scripts/rig/boards.py run: only its UART goes in (the
+    # other board's job owns the rest), under the /dev name it resolves to, and
+    # openocd inside selects its probe through the same interface override.
+    if [[ -n "${SERIAL_DEVICE:-}" && -e "$SERIAL_DEVICE" ]]; then
+        uart=$(readlink -f "$SERIAL_DEVICE")
+        PROBE_UART_DEVICE="--device=$uart:$uart "
+        CONTAINER_BOARD_ENV="-e SERIAL_DEVICE=$uart"
+    fi
+    CONTAINER_BOARD_ENV="$CONTAINER_BOARD_ENV -e YASOS_BOARD -e YASOS_BOARD_TYPE -e YASOS_PROBE_SERIAL -e YASOS_POWER_PORTS"
+    if [[ -n "${OPENOCD_SCRIPTS:-}" ]]; then
+        CONTAINER_BOARD_ENV="$CONTAINER_BOARD_ENV -v $OPENOCD_SCRIPTS:/opt/yasos-rig-openocd:ro -e OPENOCD_SCRIPTS=/opt/yasos-rig-openocd"
+    fi
+    echo "Board ${YASOS_BOARD:-?}: probe $YASOS_PROBE_SERIAL, UART ${SERIAL_DEVICE:-not found}"
+elif [[ -n "$MATCHED_DEVICE" && "$(uname)" != "Darwin" ]]; then
     # Find the corresponding UART device (assuming /dev/ttyUSB or /dev/ttyACM)
     UART_DEVICES=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null)
     for UART_DEVICE in $UART_DEVICES; do
@@ -86,5 +101,5 @@ if [[ -z "$CONTAINER_INTERACTIVE" && -z "$COMMAND" ]]; then
     exit 1
 fi
 
-podman run $CONTAINER_MOUNT_UART --userns=keep-id -v $(pwd):/workspace ${CONTAINER_INTERACTIVE} -w /workspace matgla/yasos.zig:${CONTAINER_VERSION} ${COMMAND}
+podman run $CONTAINER_MOUNT_UART $CONTAINER_BOARD_ENV --userns=keep-id -v $(pwd):/workspace ${CONTAINER_INTERACTIVE} -w /workspace matgla/yasos.zig:${CONTAINER_VERSION} ${COMMAND}
 

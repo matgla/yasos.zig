@@ -1,0 +1,2 @@
+# Python tools under scripts/ that run from yasos_venv (build.zig installs this)
+pypandoc_binary==1.17   # scripts/md2txt.py: pandoc for Markdown -> ASCII text

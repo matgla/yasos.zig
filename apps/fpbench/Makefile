@@ -8,6 +8,9 @@
 # do not change code generation.
 CC ?= armv8m-tcc
 BASE_CFLAGS = -O2 $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib
+# tcc is safe by default (yasc, -Wall, unsafe C as errors); this code is
+# regular C until it is ported, so -ccompat whenever CC is a tcc.
+BASE_CFLAGS += $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-ccompat)
 BASE_LDFLAGS = -O2 -fvisibility=hidden $(ROOTFS_DEBUG_CFLAGS) -L../../rootfs/lib
 
 # The hardware arms name no -mfpu of their own.  The toolchain is built with

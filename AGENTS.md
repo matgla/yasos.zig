@@ -61,7 +61,23 @@ once — prefer that when a bug class repeats.
   **`scripts/target_sync.py push|pull|status HOST_DIR /abs/board/dir`** moves
   only changed files (rz up, `sz` down). Both are three-way: a file changed on
   both sides is never overwritten -- the target's copy lands as `<file>.target`,
-  and push holds that file back until the `.target` is deleted.
+  and push holds that file back until the `.target` is deleted. `--rig` does the
+  same on the rig's board over SSH (`.cache/remote_smoke_runner.json`): rsync
+  mirror on the Pi, the sync runs there under the board lock, state kept apart from
+  a local probe's.
+- **Several boards on the rig: `scripts/rig/boards.py`** ([`docs/rig_boards.md`](docs/rig_boards.md)) —
+  registry on the Pi (`~/.config/yasos-rig/boards.json`): each board's Debug Probe
+  serial, pools (`ci` = CI may use it, `dev` = personal work), power ports, lock.
+  Both lanes are `ci,dev` (CI tries A first, your runs B first); `reserve NAME` takes a board out of CI's pool for a while (`release`, or the TUI's `--reserve-rig-board`). `scan`, `register NAME`,
+  `list`, `reserve`/`release`, `run --board NAME|auto | --pool ci -- CMD` (holds the board's flock, sets
+  `YASOS_PROBE_SERIAL`, `SERIAL_DEVICE`, `OPENOCD_SCRIPTS` -> `scripts/rig/openocd`,
+  whose `interface/cmsis-dap.cfg` selects the probe, `YASOS_POWER_PORTS`,
+  `YASOS_BOARD_STATE`). Every board-touching tool goes through it: CI's hardware jobs
+  (`--pool ci`), `remote_smoke_tui.py` (Rig board field / `--rig-board`,
+  `--list-rig-boards`), the `scripts/rig/` wrappers and their `--rig-board`. **Never
+  run a bare `openocd` or open a `/dev/ttyACM*` on the rig with two probes attached**:
+  without `YASOS_PROBE_SERIAL` openocd takes the first probe, maybe someone else's
+  board. No registry = the old single-board lock.
 - **`scripts/tinycc_board.py push | make | run CMD | pull | all`** — work on
   tinycc on the board: the whole repository (or `--sources-only`) goes to
   `/root/tinycc/tree/src` as a compressed delta (first push ~5.5 min, then only
@@ -142,8 +158,17 @@ once — prefer that when a bug class repeats.
   `libs/tinycc/scripts/yaff_debug_to_elf.py` makes an ELF of it for gdb/readelf.
   `ptrace(2)` (stops, UDF #1 breakpoints, registers, memory, ATTACH to
   descendants; `apps/ptracetest` on the device) -- a traced exec runs from RAM.
+- **`scripts/md2txt.py IN.md [-o OUT.txt] [-w 78]`** — Markdown as ASCII text for the
+  board's console (`more`): underlined headings, `+---+` tables with wrapped cells.
+  pandoc via `pypandoc_binary` in `yasos_venv` (`scripts/requirements.txt`, installed by
+  `build.zig`); run it with `yasos_venv/bin/python`.
 - **`scripts/qemu_capture_yaff.py`** — older RAM-scan capture (slower/flakier;
   prefer the FAT drive).
+- **`scripts/safe_mode_ratchet.py`** — tcc's safe default (`-fsyntax-only`, no
+  `-ccompat`) over our C, per directory listed in `scripts/safe_mode_ratchet.json`:
+  warning/error counts may only go down (CI smoke step). `--update` keeps a new
+  floor, `--add DIR` starts counting a directory, `--report FILE` lists every
+  diagnostic. Needs `build_rootfs.sh`'s cross (`libs/tinycc/bin/armv8m-tcc`).
 - **`scripts/run_qemu_smoke.sh`** — the pytest smoke suite on QEMU (no hardware).
   `--no-build` reuses the current kernel; `-k <name>` selects tests.
 - **`scripts/stack_overflow_sweep.py [--kernel ELF] [--step N]`** — overflow a

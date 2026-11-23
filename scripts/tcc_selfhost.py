@@ -227,7 +227,7 @@ def configure_and_build(tinycc: Path, tree: Path, opt: str, work: Path) -> Path:
     mirror(tinycc, tree, TREE_EXCLUDES)
     env = dict(os.environ, PATH=f"{tinycc / 'bin'}:{os.environ['PATH']}")
     defines = f"-DTCC_DEBUG=0 -DCONFIG_TCC_DEBUG_ENV=0 -DCONFIG_TCC_CHECKS=0 {fp_define(tinycc)}"
-    cflags = (f"-Wall -Werror {defines} {opt} -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 "
+    cflags = (f"-ccompat -Wall -Werror {defines} {opt} -DTCC_ARM_VFP -DTCC_ARM_EABI=1 -DCONFIG_TCC_BCHECK=0 "
               "-DTCC_ARM_HARDFLOAT -DTCC_TARGET_ARM_ARCHV8M -DTARGETOS_YasOS=1 -DTCC_TARGET_ARM_THUMB "
               f"-DTCC_TARGET_ARM -DTCC_IS_NATIVE -I{ROOTFS_INCLUDE} -fpie -fPIE -mcpu=cortex-m33 "
               "-fvisibility=hidden -ffunction-sections")
@@ -485,7 +485,7 @@ fi
 if cmp -s "$W/s2/armv8m-tcc" "$REF/armv8m-tcc"; then echo "SELFHOST stage 2 tcc identical to the host-cross link"; else echo "SELFHOST stage 2 tcc differs from the host-cross link"; fi
 echo '#include <stdio.h>' > "$W/hello.c"
 echo 'int main(void) { printf("selfhost hello %d\n", 6 * 7); return 0; }' >> "$W/hello.c"
-"$W/s2/armv8m-tcc" "$W/hello.c" -o "$W/hello" || fail "new tcc cannot compile hello.c"
+"$W/s2/armv8m-tcc" -ccompat "$W/hello.c" -o "$W/hello" || fail "new tcc cannot compile hello.c"
 out=$("$W/hello")
 [ "$out" = "selfhost hello 42" ] || fail "hello printed '$out'"
 echo "SELFHOST new tcc builds a working hello"

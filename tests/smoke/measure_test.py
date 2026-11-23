@@ -173,7 +173,7 @@ def _compile_window(session, remote_source, label, extra_flags=""):
     """Bracket one compile. Includes the tcc spawn and module load, because that
     is what the plan's compile bucket includes."""
     output = posixpath.join("/tmp", "measure.out")
-    command = f"tcc {extra_flags} {remote_source} -o {output}".replace("  ", " ")
+    command = f"tcc -ccompat {extra_flags} {remote_source} -o {output}".replace("  ", " ")
     line, wall = _command_window(session, command, label)
     session.write_command(f"rm -f {output}")
     session.wait_for_prompt_except_logs()
@@ -371,7 +371,7 @@ def test_tcc_init_breakdown(request):
     # The uninstrumented envelope, for the spawn/load/exit remainder below.
     _, plain_wall = _median_command_wall(
         session,
-        "tcc -c /tmp/m_empty.c -o /tmp/measure.out",
+        "tcc -ccompat -c /tmp/m_empty.c -o /tmp/measure.out",
         "tcc -c empty (no -bench)",
         repeats,
     )
@@ -379,7 +379,7 @@ def test_tcc_init_breakdown(request):
     runs = []
     for _ in range(repeats):
         with session.timeout(COMPILE_TIMEOUT):
-            session.write_command("tcc -bench -c /tmp/m_empty.c -o /tmp/measure.out")
+            session.write_command("tcc -ccompat -bench -c /tmp/m_empty.c -o /tmp/measure.out")
             out = _as_text(session.wait_for_prompt_except_logs())
         phases = []
         total_us = None
@@ -464,7 +464,7 @@ def test_tcc_decls_programmatic_ab(request):
             for _ in range(repeats):
                 r, wall = _command_window(
                     session,
-                    f"{prefix}tcc -c /tmp/{name} -o /tmp/measure.out",
+                    f"{prefix}tcc -ccompat -c /tmp/{name} -o /tmp/measure.out",
                     f"{name} {arm}",
                 )
                 rows.append(r)
@@ -532,7 +532,7 @@ def test_predefine_marginal_cost(request):
         for _ in range(repeats):
             row, wall = _command_window(
                 session,
-                f"tcc -c $D{count} /tmp/m_empty.c -o /tmp/measure.out",
+                f"tcc -ccompat -c $D{count} /tmp/m_empty.c -o /tmp/measure.out",
                 f"empty + {count} -D",
             )
             samples.append((wall, row))
@@ -547,7 +547,7 @@ def test_predefine_marginal_cost(request):
     for count in (_PREDEFINE_LADDER[0], _PREDEFINE_LADDER[-1]):
         with session.timeout(COMPILE_TIMEOUT):
             session.write_command(
-                f"tcc -bench -c $D{count} /tmp/m_empty.c -o /tmp/measure.out"
+                f"tcc -ccompat -bench -c $D{count} /tmp/m_empty.c -o /tmp/measure.out"
             )
             out = _as_text(session.wait_for_prompt_except_logs())
         stamps[count] = {
@@ -636,7 +636,7 @@ def test_predefine_skip_ab(request):
     def predef_stamp(prefix, name):
         with session.timeout(COMPILE_TIMEOUT):
             session.write_command(
-                f"{prefix}tcc -bench -c /tmp/{name} -o /tmp/measure.out"
+                f"{prefix}tcc -ccompat -bench -c /tmp/{name} -o /tmp/measure.out"
             )
             out = _as_text(session.wait_for_prompt_except_logs())
         stamps = {
@@ -653,7 +653,7 @@ def test_predefine_skip_ab(request):
             for _ in range(repeats):
                 row, wall = _command_window(
                     session,
-                    f"{prefix}tcc -c /tmp/{name} -o /tmp/measure.out",
+                    f"{prefix}tcc -ccompat -c /tmp/{name} -o /tmp/measure.out",
                     f"{name} predefines {arm}",
                 )
                 walls.append(wall)
@@ -696,7 +696,7 @@ def test_predefine_skip_ab(request):
         for _ in range(repeats):
             _, wall = _command_window(
                 session,
-                f"TCC_DOUBLE_PREDEF_MACROS=1 tcc -c /tmp/{name} -o /tmp/measure.out",
+                f"TCC_DOUBLE_PREDEF_MACROS=1 tcc -ccompat -c /tmp/{name} -o /tmp/measure.out",
                 f"{name} predefines doubled",
             )
             walls.append(wall)
@@ -762,7 +762,7 @@ def test_fs_syscall_microbench(request):
     os.unlink(local)
 
     with session.timeout(COMPILE_TIMEOUT):
-        session.write_command("tcc /tmp/bench.c -o /tmp/bench")
+        session.write_command("tcc -ccompat /tmp/bench.c -o /tmp/bench")
         out = _as_text(session.wait_for_prompt_except_logs())
     if "error" in out.lower():
         print(out)
@@ -815,7 +815,7 @@ def test_tcc_rehearsal_ab(request):
             walls = []
             for _ in range(repeats):
                 _, wall = _command_window(
-                    session, f"{prefix}tcc -c {src} -o /tmp/m.o", f"{name} {arm}"
+                    session, f"{prefix}tcc -ccompat -c {src} -o /tmp/m.o", f"{name} {arm}"
                 )
                 walls.append(wall)
             walls.sort()
@@ -829,7 +829,7 @@ def test_tcc_rehearsal_ab(request):
 
     for name, src in sources[:2]:
         with session.timeout(COMPILE_TIMEOUT):
-            session.write_command(f"TCC_NO_REHEARSAL=1 tcc {src} -o /tmp/m.exe")
+            session.write_command(f"TCC_NO_REHEARSAL=1 tcc -ccompat {src} -o /tmp/m.exe")
             session.wait_for_prompt_except_logs()
         with session.timeout(COMPILE_TIMEOUT):
             session.write_command("/tmp/m.exe; echo RC=$?")
@@ -920,7 +920,7 @@ def test_malloc_microbench(request):
     os.unlink(local)
 
     with session.timeout(COMPILE_TIMEOUT):
-        session.write_command("tcc /tmp/mbench.c -o /tmp/mbench")
+        session.write_command("tcc -ccompat /tmp/mbench.c -o /tmp/mbench")
         out = _as_text(session.wait_for_prompt_except_logs())
     if "error" in out.lower():
         print(out)
@@ -988,15 +988,15 @@ def test_hello_world_breakdown(request):
         walls.sort()
         return walls[len(walls) // 2]
 
-    hello = median_window("tcc -c /usr/hello_world.c -o /tmp/hw.o", "hello_world -c")
+    hello = median_window("tcc -ccompat -c /usr/hello_world.c -o /tmp/hw.o", "hello_world -c")
     session.write_command("rm -f /tmp/hw.o")
     session.wait_for_prompt_except_logs()
 
-    minimal = median_window("tcc -c /tmp/min.c -o /tmp/min.o", "int x; -c")
+    minimal = median_window("tcc -ccompat -c /tmp/min.c -o /tmp/min.o", "int x; -c")
     session.write_command("rm -f /tmp/min.o")
     session.wait_for_prompt_except_logs()
 
-    preprocess = median_window("tcc -E /usr/hello_world.c -o /tmp/hw.i",
+    preprocess = median_window("tcc -ccompat -E /usr/hello_world.c -o /tmp/hw.i",
                                "hello_world -E")
     session.write_command("rm -f /tmp/hw.i")
     session.wait_for_prompt_except_logs()
@@ -1004,7 +1004,7 @@ def test_hello_world_breakdown(request):
     # The instrumented run. Everything tcc knows about itself comes out here;
     # the numbers above are what it costs when nobody is watching.
     with session.timeout(COMPILE_TIMEOUT):
-        session.write_command("tcc -bench -c /usr/hello_world.c -o /tmp/hw.o")
+        session.write_command("tcc -ccompat -bench -c /usr/hello_world.c -o /tmp/hw.o")
         bench = _as_text(session.wait_for_prompt_except_logs())
     session.write_command("rm -f /tmp/hw.o")
     session.wait_for_prompt_except_logs()

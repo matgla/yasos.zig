@@ -42,7 +42,7 @@ def commands(stack, step):
     out = ["rm -f /tmp/p /tmp/p.c"]
     for index, line in enumerate(probe_source()):
         out.append(f"echo '{line}' {'>' if index == 0 else '>>'} /tmp/p.c")
-    out.append(f"tcc /tmp/p.c -o /tmp/p -stack-size={stack}")
+    out.append(f"tcc -ccompat /tmp/p.c -o /tmp/p -stack-size={stack}")
     out.append("echo hello > /root/t; echo hello > /boot/t")
     for path, mode in TARGETS:
         out.append(

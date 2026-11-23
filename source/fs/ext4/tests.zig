@@ -452,3 +452,81 @@ test "Ext4.DotAndDotDotResolveInIndexedDirectories" {
     try std.testing.expectEqualStrings("source", try read_file(&fs, "/v2/ir_tests/./t.c", &buffer));
     try std.testing.expectEqualStrings("header", try read_file(&fs, "/v2/fp/../../v2/fp/h.h", &buffer));
 }
+
+test "Ext4.GatheredWritesAreSeenBeforeTheWriterCloses" {
+    // Short writes wait in the file's buffer for one ext4_fwrite; anything else
+    // on the volume -- another handle, a stat -- must see them all the same.
+    var fs = try create_formatted();
+    defer fs.interface.delete();
+    try fs.interface.create("/log", 0o644);
+    var writer_node = try fs.interface.get("/log");
+    defer writer_node.delete();
+    var writer = writer_node.as_file().?;
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(std.testing.allocator);
+    for (0..300) |i| {
+        var line_buffer: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&line_buffer, "line {d}\n", .{i});
+        try std.testing.expectEqual(@as(isize, @intCast(line.len)), writer.interface.write(line));
+        try expected.appendSlice(std.testing.allocator, line);
+    }
+
+    var st: c.struct_stat = undefined;
+    try fs.interface.stat("/log", &st, true);
+    try std.testing.expectEqual(@as(i64, @intCast(expected.items.len)), @as(i64, @intCast(st.st_size)));
+    try std.testing.expectEqual(@as(u64, expected.items.len), writer.interface.size());
+
+    const buffer = try std.testing.allocator.alloc(u8, expected.items.len + 16);
+    defer std.testing.allocator.free(buffer);
+    try std.testing.expectEqualSlices(u8, expected.items, try read_file(&fs, "/log", buffer));
+}
+
+test "Ext4.GatheredAndDirectWritesKeepTheirOrder" {
+    var fs = try create_formatted();
+    defer fs.interface.delete();
+    try fs.interface.create("/mixed", 0o644);
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(std.testing.allocator);
+    {
+        var node = try fs.interface.get("/mixed");
+        defer node.delete();
+        var file = node.as_file().?;
+        var big: [5000]u8 = undefined;
+        for (&big, 0..) |*byte, i| byte.* = @truncate(i *% 31);
+        const parts = [_][]const u8{ "short ", big[0..], "tail", big[0..3000], "x" };
+        for (parts) |part| {
+            try std.testing.expectEqual(@as(isize, @intCast(part.len)), file.interface.write(part));
+            try expected.appendSlice(std.testing.allocator, part);
+        }
+        // A seek hands over what is gathered first, and lands where the file
+        // really is: overwrite the start.
+        _ = try file.interface.seek(0, c.SEEK_SET);
+        try std.testing.expectEqual(@as(isize, 5), file.interface.write("SHORT"));
+        @memcpy(expected.items[0..5], "SHORT");
+        try std.testing.expectEqual(@as(i64, 5), file.interface.tell());
+    }
+    const buffer = try std.testing.allocator.alloc(u8, expected.items.len + 16);
+    defer std.testing.allocator.free(buffer);
+    try std.testing.expectEqualSlices(u8, expected.items, try read_file(&fs, "/mixed", buffer));
+}
+
+test "Ext4.TwoWritersHandOverInWriteOrder" {
+    // Each writer gathers on its own; a write through one hands the other's
+    // bytes to lwext4 first, so the file reads as the calls were made.
+    var fs = try create_formatted();
+    defer fs.interface.delete();
+    try write_file(&fs, "/shared", "0123456789");
+    var a_node = try fs.interface.get("/shared");
+    defer a_node.delete();
+    var b_node = try fs.interface.get("/shared");
+    defer b_node.delete();
+    var a = a_node.as_file().?;
+    var b = b_node.as_file().?;
+    _ = try a.interface.seek(2, c.SEEK_SET);
+    _ = try b.interface.seek(2, c.SEEK_SET);
+    try std.testing.expectEqual(@as(isize, 3), a.interface.write("aaa"));
+    try std.testing.expectEqual(@as(isize, 2), b.interface.write("bb"));
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("01bba56789", try read_file(&fs, "/shared", &buffer));
+}

@@ -18,6 +18,8 @@
 // <https://www.gnu.org/licenses/>.
 //
 
+const std = @import("std");
+
 const c = @import("crt_headers");
 
 const config = @import("config").cpu;
@@ -320,14 +322,25 @@ export fn apply_overclock() u32 {
         qmi_cfg.rcmd,
     );
 
-    // Step 4: Switch clk_peri to PLL_USB (48 MHz) for stable UART (matches test)
-    _ = c.clock_configure(
-        c.clk_peri,
-        0,
-        c.CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-        clk_peri_expected_khz * 1000,
-        clk_peri_expected_khz * 1000,
-    );
+    // Step 4: Switch clk_peri to its UART source: PLL_USB (48 MHz) for a
+    // console up to 3 Mbaud, PLL_SYS divided down for a faster one.
+    if (clk_peri_from_pll_sys) {
+        c.clock_configure_int_divider(
+            c.clk_peri,
+            0,
+            c.CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+            target_khz * 1000,
+            clk_peri_divider,
+        );
+    } else {
+        _ = c.clock_configure(
+            c.clk_peri,
+            0,
+            c.CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+            clk_peri_expected_khz * 1000,
+            clk_peri_expected_khz * 1000,
+        );
+    }
 
     // Step 5: Update SDK's cached frequencies (matches test)
     c.clock_set_reported_hz(c.clk_sys, target_khz * 1000);
@@ -364,8 +377,40 @@ export fn apply_overclock() u32 {
     return 0;
 }
 
+/// Console line rate (CONFIG_CONSOLE_BAUDRATE); the UART driver reads the same.
+const console_baudrate: u32 = if (@hasDecl(@import("config"), "console"))
+    @import("config").console.baudrate
+else
+    3_000_000;
+
+/// The PL011 runs at most clk_peri/16, so PLL_USB's 48 MHz stops the console
+/// at 3 Mbaud. A faster one takes clk_peri from PLL_SYS, divided (1..4, the
+/// width of CLK_PERI_DIV) to stay at or under 150 MHz where it can: 532 MHz / 4
+/// = 133 MHz gives 6 Mbaud at -0.37% (IBRD 1, FBRD 25); 618 MHz / 4 = 154.5 MHz,
+/// a little over, gives it exactly. Nothing else on the board uses clk_peri.
+/// PLL_USB stays at 48 MHz for USB either way.
+const clk_peri_from_pll_sys = console_baudrate > 3_000_000;
+const clk_peri_divider: u32 = if (clk_peri_from_pll_sys) @min(4, (clock_freq_mhz + 149) / 150) else 1;
+
 /// What Step 4 above asks clk_peri to become, in kHz.
-const clk_peri_expected_khz: u32 = 48_000;
+const clk_peri_expected_khz: u32 = if (clk_peri_from_pll_sys)
+    clock_freq_mhz * 1000 / clk_peri_divider
+else
+    48_000;
+
+comptime {
+    if (clk_peri_expected_khz > 160_000)
+        @compileError(std.fmt.comptimePrint("CONFIG_CONSOLE_BAUDRATE {d} needs clk_peri from PLL_SYS, and {d} MHz / 4 is over 160 MHz", .{ console_baudrate, clock_freq_mhz }));
+    // PL011: baud = clk_peri / (16 * (IBRD + FBRD/64)), i.e. clk_peri * 4 / d64.
+    const peri_hz: u64 = @as(u64, clk_peri_expected_khz) * 1000;
+    const d64: u64 = (peri_hz * 4 + console_baudrate / 2) / console_baudrate;
+    if (d64 < 64)
+        @compileError(std.fmt.comptimePrint("CONFIG_CONSOLE_BAUDRATE {d} is above clk_peri/16 ({d} kHz clk_peri)", .{ console_baudrate, clk_peri_expected_khz }));
+    const actual: u64 = peri_hz * 4 / d64;
+    const err_ppm: u64 = (if (actual > console_baudrate) actual - console_baudrate else console_baudrate - actual) * 1_000_000 / console_baudrate;
+    if (err_ppm > 10_000)
+        @compileError(std.fmt.comptimePrint("CONFIG_CONSOLE_BAUDRATE {d} comes out at {d} from {d} kHz clk_peri, more than 1% off", .{ console_baudrate, actual, clk_peri_expected_khz }));
+}
 
 /// Tolerance for "the clock is what we asked for", in tenths of a percent. A
 /// locked PLL measures within ~0.3% of nominal; the failure this guards against

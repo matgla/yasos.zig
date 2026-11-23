@@ -57,7 +57,7 @@ pub const Ext4Iterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, 
     }
 
     pub fn next(self: *Self) ?kernel.fs.DirectoryEntry {
-        ext4fs.lock.lock();
+        ext4fs.lock_settled();
         defer ext4fs.lock.unlock();
         while (lwext4.ext4_dir_entry_next(self._dir)) |entry| {
             const length = entry.*.name_length;
@@ -70,7 +70,7 @@ pub const Ext4Iterator = interface.DeriveFromBase(kernel.fs.IDirectoryIterator, 
     }
 
     pub fn delete(self: *Self) void {
-        ext4fs.lock.lock();
+        ext4fs.lock_settled();
         defer ext4fs.lock.unlock();
         _ = lwext4.ext4_dir_close(self._dir);
         self._allocator.destroy(self._dir);
@@ -107,7 +107,7 @@ pub const Ext4Directory = interface.DeriveFromBase(kernel.fs.IDirectory, struct 
     }
 
     pub fn iterator(self: *const Self) anyerror!kernel.fs.IDirectoryIterator {
-        ext4fs.lock.lock();
+        ext4fs.lock_settled();
         defer ext4fs.lock.unlock();
         const dir = try self._allocator.create(lwext4.ext4_dir);
         errdefer self._allocator.destroy(dir);

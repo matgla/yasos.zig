@@ -6,9 +6,10 @@ stand-in, this is the number that counts.
   board_selfhost.py --opt=-O0               # what this checkout has built, -O0 only
   board_selfhost.py --no-wait ; ... --logs  # leave it running, collect later
 
-Everything on the rig stays in ~/selfhost_measure/<label> and images reach the shared
+Everything on the rig stays in ~/selfhost_measure/<label> and images reach the board's
 workdir only under the board lock, so sessions queue on the lock instead of flashing each
-other's firmware.  <label> and the board's directory default to this checkout's name: a
+other's firmware.  A rig with several boards (scripts/rig/boards.py): --rig-board NAME,
+else the config's rig_board, else the first free board.  <label> and the board's directory default to this checkout's name: a
 tree on the card is another session's to change, and a manifest would then send too little.
 
 Reads the rig from .cache/remote_smoke_runner.json (remote_smoke_tui.py --reconfigure).
@@ -54,8 +55,8 @@ class Rig:
         return r
 
     def send(self, sources, dest):
-        files = [str(f) for f in sources if f.is_file()]
-        subprocess.run(["scp", "-q", "-P", self.port, *files, f"{self.target}:{dest}"], check=True)
+        files = [str(f) for f in sources if f.is_file() or f.name == "openocd"]
+        subprocess.run(["scp", "-q", "-r", "-P", self.port, *files, f"{self.target}:{dest}"], check=True)
 
     def fetch(self, source, dest):
         return subprocess.run(["scp", "-q", "-r", "-P", self.port, f"{self.target}:{source}", str(dest)]).returncode
@@ -105,6 +106,8 @@ def main():
     ap.add_argument("--full-send", action="store_true", help="send everything, not the manifest's difference")
     ap.add_argument("--no-wait", action="store_true", help="start it and print how to watch")
     ap.add_argument("--logs", action="store_true", help="only collect the logs of the last run")
+    ap.add_argument("--rig-board", metavar="NAME", help="which rig board (scripts/rig/boards.py; default: the config's "
+                    "rig_board, else the first free)")
     args = ap.parse_args()
     levels = args.opt or ["-O0", "-O2"]
     cfg = rig_config()
@@ -139,7 +142,9 @@ def main():
         rig.send(sorted((local / f"work{level}/payload").iterdir()), f"{d}/payload{level}/")
     mode = "full" if args.full_send else "delta"
     # relative paths would break once the script changes directory
-    cmd = (f"cd; D=$PWD/{d}; YASOS_RIG_REMOTE={remote} nohup bash $D/rig/run_selfhost.sh $D {rs} {ks} {dest} {mode} {' '.join(levels)} "
+    board = (args.rig_board or str(cfg.get("rig_board") or "")).strip()
+    board = f"YASOS_BOARD={shlex.quote(board)} " if board and board != "auto" else ""
+    cmd = (f"cd; D=$PWD/{d}; {board}YASOS_RIG_REMOTE={remote} nohup bash $D/rig/run_selfhost.sh $D {rs} {ks} {dest} {mode} {' '.join(levels)} "
            f"> $D/driver.out 2>&1 < /dev/null &")
     rig.ssh(cmd, capture=False)
     log(f"queued on the board lock; board directory {dest}")

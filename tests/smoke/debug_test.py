@@ -111,7 +111,7 @@ def _text_address(output):
 def test_traceme_exec_loads_the_program_into_ram(request):
     session = request.node.stash[session_key]
     _write_source(session, "traceme.c", TRACEME_SOURCE)
-    out = _run(session, "tcc traceme.c -o traceme && echo BUILD_OK")
+    out = _run(session, "tcc -ccompat traceme.c -o traceme && echo BUILD_OK")
     assert "BUILD_OK" in out, out
 
     plain = _run(session, "./traceme")
@@ -129,7 +129,7 @@ def test_traceme_exec_loads_the_program_into_ram(request):
 def test_debug_build_runs_and_strips_on_the_board(request):
     session = request.node.stash[session_key]
     _write_source(session, "hello.c", HELLO_SOURCE)
-    out = _run(session, "tcc -g hello.c -o hello && echo BUILD_OK")
+    out = _run(session, "tcc -ccompat -g hello.c -o hello && echo BUILD_OK")
     assert "BUILD_OK" in out, out
     assert "DEBUG_HELLO 42" in _run(session, "./hello")
 

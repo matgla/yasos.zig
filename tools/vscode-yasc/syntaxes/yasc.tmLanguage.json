@@ -1,0 +1,225 @@
+{
+  "$comment": "The yasc dialect of tinycc, injected into VSCode's C grammar. yasc is tcc's default dialect, so it applies to every C file; there is no parser, so each word is a keyword only where tcc would take it as one, guessed from its neighbours (tcc parses these words as names elsewhere). The same rules as yasvi's filetypes/c.c; test/run.js checks them.",
+  "scopeName": "source.c.yasc",
+  "injectionSelector": "L:source.c -comment -string",
+  "patterns": [
+    {
+      "include": "#module"
+    },
+    {
+      "include": "#qualifier-after-star"
+    },
+    {
+      "include": "#qualifier-before-type"
+    },
+    {
+      "include": "#statement"
+    },
+    {
+      "include": "#try"
+    },
+    {
+      "include": "#catch"
+    },
+    {
+      "include": "#error-set"
+    },
+    {
+      "include": "#error-value"
+    },
+    {
+      "include": "#error-type"
+    },
+    {
+      "include": "#error-builtin"
+    },
+    {
+      "include": "#error-union"
+    }
+  ],
+  "repository": {
+    "module": {
+      "$comment": "module a.b; import a.b; export DECL -- at the start of a file-scope declaration",
+      "patterns": [
+        {
+          "match": "^\\s*(module|import)\\s+([A-Za-z_][\\w.]*)\\s*(?=;)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.yasc.c"
+            },
+            "2": {
+              "name": "entity.name.namespace.yasc.c"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(export)\\b(?=\\s+[A-Za-z_])",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.export.yasc.c"
+            }
+          }
+        }
+      ]
+    },
+    "qualifier-after-star": {
+      "$comment": "owned / view / maybe qualify a pointer: they follow its '*' (or another of them): char * owned maybe p, f(char * view)",
+      "match": "(?<=\\*|\\* |\\*  |\\*\\t|\\bowned |\\bview |\\bmaybe )(owned|view|maybe)\\b(?=\\s*(?:[A-Za-z_*),]|$))",
+      "name": "storage.modifier.yasc.c"
+    },
+    "qualifier-before-type": {
+      "$comment": "out / drop come before a parameter's type: out int * view n, drop struct s * owned p",
+      "match": "(?<!\\.|->)\\b(out|drop)\\b(?=\\s+[A-Za-z_])",
+      "name": "storage.modifier.yasc.c"
+    },
+    "statement": {
+      "match": "(?<!\\.|->)\\b(defer|errdefer)\\b(?=\\s*(?:[A-Za-z_*{(]|$))",
+      "name": "keyword.control.defer.yasc.c"
+    },
+    "try": {
+      "match": "(?<!\\.|->)\\btry\\b(?=\\s*[A-Za-z_(*&])",
+      "name": "keyword.control.try.yasc.c"
+    },
+    "catch": {
+      "$comment": "f() catch X, f() catch |e| {...}: catch follows the end of an expression, starts a continuation line, or comes before |e| or {",
+      "patterns": [
+        {
+          "match": "(?<=[)\\]\\\"']|[\\w)\\]\\\"'] |[\\w)\\]\\\"']  |[\\w)\\]\\\"']\\t)\\b(catch)\\b(?=\\s*[^\\s;,=)\\].:])(?:\\s*(\\|)\\s*([A-Za-z_]\\w*)\\s*(\\|))?",
+          "captures": {
+            "1": {
+              "name": "keyword.control.catch.yasc.c"
+            },
+            "2": {
+              "name": "punctuation.definition.capture.begin.yasc.c"
+            },
+            "3": {
+              "name": "variable.parameter.capture.yasc.c"
+            },
+            "4": {
+              "name": "punctuation.definition.capture.end.yasc.c"
+            }
+          }
+        },
+        {
+          "match": "(?<!\\.|->)\\b(catch)\\b(?=\\s*[|{])(?:\\s*(\\|)\\s*([A-Za-z_]\\w*)\\s*(\\|))?",
+          "captures": {
+            "1": {
+              "name": "keyword.control.catch.yasc.c"
+            },
+            "2": {
+              "name": "punctuation.definition.capture.begin.yasc.c"
+            },
+            "3": {
+              "name": "variable.parameter.capture.yasc.c"
+            },
+            "4": {
+              "name": "punctuation.definition.capture.end.yasc.c"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(catch)\\b(?=\\s*[^\\s;,=)\\].:(])(?:\\s*(\\|)\\s*([A-Za-z_]\\w*)\\s*(\\|))?",
+          "captures": {
+            "1": {
+              "name": "keyword.control.catch.yasc.c"
+            },
+            "2": {
+              "name": "punctuation.definition.capture.begin.yasc.c"
+            },
+            "3": {
+              "name": "variable.parameter.capture.yasc.c"
+            },
+            "4": {
+              "name": "punctuation.definition.capture.end.yasc.c"
+            }
+          }
+        }
+      ]
+    },
+    "error-set": {
+      "$comment": "error ParseError { Empty, BadDigit = 7, EACCES };",
+      "begin": "(?<!\\.|->)\\b(error)\\s+([A-Za-z_]\\w*)\\s*(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.type.error.yasc.c"
+        },
+        "2": {
+          "name": "entity.name.type.error.yasc.c"
+        },
+        "3": {
+          "name": "punctuation.section.block.begin.bracket.curly.c"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.bracket.curly.c"
+        }
+      },
+      "patterns": [
+        {
+          "include": "source.c#comments"
+        },
+        {
+          "match": "\\b[A-Za-z_]\\w*\\b",
+          "name": "constant.other.error.yasc.c"
+        },
+        {
+          "include": "source.c#numbers"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.delimiter.c"
+        },
+        {
+          "match": "=",
+          "name": "keyword.operator.assignment.c"
+        }
+      ]
+    },
+    "error-value": {
+      "$comment": "error.NAME",
+      "match": "(?<!\\.|->)\\b(error)(\\.)([A-Z]\\w*)",
+      "captures": {
+        "1": {
+          "name": "storage.type.error.yasc.c"
+        },
+        "2": {
+          "name": "punctuation.separator.dot-access.c"
+        },
+        "3": {
+          "name": "constant.other.error.yasc.c"
+        }
+      }
+    },
+    "error-type": {
+      "$comment": "error ParseError pe, error any (any error), error ParseError on a line of its own",
+      "match": "(?<!\\.|->)\\b(error)\\b(?=\\s+[A-Za-z_])(?:\\s+([A-Za-z_]\\w*)(?=\\s*(?:[A-Za-z_*]|$)))?",
+      "captures": {
+        "1": {
+          "name": "storage.type.error.yasc.c"
+        },
+        "2": {
+          "name": "entity.name.type.error.yasc.c"
+        }
+      }
+    },
+    "error-builtin": {
+      "match": "(?<!\\.|->)\\b(error_name|error_from|move|borrow)\\b(?=\\s*\\()",
+      "name": "support.function.yasc.c"
+    },
+    "error-union": {
+      "$comment": "!T, a T or an error: '!' before a type (no expression puts one there), or before NAME NAME( -- a function returning !typedef_t",
+      "patterns": [
+        {
+          "match": "!(?=\\s*(?:void|char|short|int|long|float|double|signed|unsigned|_Bool|bool|struct|union|enum|const|volatile|u?int(?:8|16|32|64|ptr)_t|s?size_t)\\b)",
+          "name": "storage.modifier.errunion.yasc.c"
+        },
+        {
+          "match": "!(?=\\s*(?!sizeof\\b|defined\\b|return\\b)[A-Za-z_]\\w*(?:\\s*\\*\\s*(?:(?:owned|view|maybe)\\b\\s*)*)*\\s+[A-Za-z_]\\w*\\s*\\()",
+          "name": "storage.modifier.errunion.yasc.c"
+        }
+      ]
+    }
+  }
+}

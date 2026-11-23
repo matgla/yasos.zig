@@ -3,6 +3,7 @@ import ast
 import importlib.util
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 import sys
@@ -507,7 +508,7 @@ def test_remote_connect_script_survives_bash():
     captured = {}
     original = remote_smoke_tui.run_remote_tty_script
     try:
-        remote_smoke_tui.run_remote_tty_script = lambda config, script: captured.setdefault("script", script)
+        remote_smoke_tui.run_remote_tty_script = lambda config, script, *a, **k: captured.setdefault("script", script)
         remote_smoke_tui.run_remote_connect({"serial_device": "/dev/ttyACM0"})
     finally:
         remote_smoke_tui.run_remote_tty_script = original
@@ -557,11 +558,51 @@ def test_connect_with_record_goes_through_the_recorder(tmp_path, monkeypatch):
                         lambda cmd, path, **kw: seen.update(cmd=cmd, path=path) or 0)
     monkeypatch.setattr(remote_smoke_tui, "run_remote_tty_script",
                         lambda *a: pytest.fail("the plain console ran instead"))
+    monkeypatch.setattr(remote_smoke_tui, "ensure_remote_rig_tool", lambda config: None)
     config = {"serial_device": "/dev/ttyACM0", "ssh_port": 22, "ssh_identity_file": "",
-              "ssh_target": "pi"}
+              "ssh_target": "pi", "remote_repo_path": "~/yasos_remote_smoke"}
     remote_smoke_tui.run_remote_connect(config, record=tmp_path / "s.cast")
     assert seen["path"] == tmp_path / "s.cast"
     assert seen["cmd"][:2] == ["ssh", "-t"] and "miniterm" in seen["cmd"][-1]
+
+
+def _board_config(**overrides):
+    config = {"ssh_port": 22, "ssh_identity_file": "", "ssh_target": "pi",
+              "remote_repo_path": "~/yasos_remote_smoke", "board": "pimoroni_pico_plus2_and_vga"}
+    config.update(overrides)
+    return config
+
+
+def test_remote_board_prefix_holds_the_configured_board(monkeypatch):
+    monkeypatch.setattr(remote_smoke_tui, "ensure_remote_rig_tool", lambda config: None)
+    prefix = remote_smoke_tui.remote_board_prefix(_board_config(rig_board="b"), "reset")
+    line = " ".join(prefix)
+    assert line.startswith('python3 "$HOME"/yasos_remote_smoke/scripts/rig/boards.py run ')
+    assert "--board b" in line and "--pool dev" in line
+    assert "--type pimoroni_pico_plus2_and_vga" in line
+    assert "--keeps-state" in line and prefix[-1] == "--"
+    # Without a board: auto. A command that may flash unrecorded drops the records.
+    prefix = remote_smoke_tui.remote_board_prefix(_board_config(), "rescue", keeps_state=False)
+    assert "--board auto" in " ".join(prefix) and "--keeps-state" not in prefix
+
+
+def test_tty_board_command_keeps_the_whole_script_under_the_lock(monkeypatch):
+    """ssh joins its arguments into one line: the script must be one quoted word,
+    or everything after its first line would run in the login shell, unlocked."""
+    monkeypatch.setattr(remote_smoke_tui, "ensure_remote_rig_tool", lambda config: None)
+    script = "set -euo pipefail\necho one\necho 'two'\n"
+    cmd = remote_smoke_tui.remote_tty_board_command(_board_config(), script, "console")
+    run = cmd.index("run")
+    assert cmd[run + 1:].count("--") >= 1 and cmd[-3:-1] == ["bash", "-lc"]
+    assert shlex.split(cmd[-1]) == [script]
+
+
+def test_smoke_script_uses_the_boards_probe_uart_power_and_records():
+    script = _smoke_script()
+    assert 'artifact_state_dir="${YASOS_BOARD_STATE:-$remote_work_dir/.artifact-state}"' in script
+    assert "serial_device=${serial_device:-${SERIAL_DEVICE:-}}" in script
+    assert '"$(cat "$dev/serial" 2>/dev/null)" != "$YASOS_PROBE_SERIAL"' in script
+    assert "rig_power_ports=$YASOS_POWER_PORTS" in script
 
 
 @pytest.fixture

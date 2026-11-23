@@ -93,10 +93,11 @@ ZIG="$FORK_ZIG" "$HERE/build_compiler_rt.sh" "$ZIG_SRC" "$CC" "$WORK/compiler_rt
 
 echo "zig: compiling zig.c with $CC $ZIG_OPT"
 # -ffunction-sections: the link's --hot-text picks functions by their sections.
-"$CC" $ZIG_OPT -w -c "$WORK/zigc/bin/zig.c" -o "$WORK/zig.o" -ffunction-sections \
+# -ccompat: regular C (tcc is safe by default -- yasc, C23 -- otherwise).
+"$CC" -ccompat $ZIG_OPT -w -c "$WORK/zigc/bin/zig.c" -o "$WORK/zig.o" -ffunction-sections \
     -I "$ZIG_SRC/lib" -include "$HERE/zig_c_prelude.h" -fvisibility=hidden \
     -Dlseek=yz_lseek64 -Dftruncate=yz_ftruncate64
-"$CC" -O2 -c "$HERE/yasos_compat.c" -o "$WORK/compat.o" -fvisibility=hidden
+"$CC" -ccompat -O2 -c "$HERE/yasos_compat.c" -o "$WORK/compat.o" -fvisibility=hidden
 
 # The stack is reserved in full at exec (16 MB made the process 21 MB instead of 5).
 # Deepest stack use of the device compiler, scanned for the lowest written word below
@@ -136,9 +137,9 @@ mkdir -p "$CARD_DIR$LIB_ON_CARD/tcc/yasos"
 # Built again for programs the device links: there the soft-float helpers
 # (__aeabi_*) bind to a shared library, so calls must keep their R9 reload
 # (-fno-module-local-calls).  The device zig itself keeps the faster copies.
-"$CC" -O2 -fno-module-local-calls -c "$HERE/yasos_compat.c" -o "$CARD_DIR$LIB_ON_CARD/tcc/yasos/yasos_compat.o" \
+"$CC" -ccompat -O2 -fno-module-local-calls -c "$HERE/yasos_compat.c" -o "$CARD_DIR$LIB_ON_CARD/tcc/yasos/yasos_compat.o" \
     -fvisibility=hidden
-"$CC" -O2 -fno-module-local-calls -c "$WORK/compiler_rt/compiler_rt_tcc.c" \
+"$CC" -ccompat -O2 -fno-module-local-calls -c "$WORK/compiler_rt/compiler_rt_tcc.c" \
     -o "$CARD_DIR$LIB_ON_CARD/tcc/yasos/compiler_rt.o" -ffunction-sections \
     -I "$ZIG_SRC/lib" -include "$HERE/zig_c_prelude.h" -fvisibility=hidden -w
 

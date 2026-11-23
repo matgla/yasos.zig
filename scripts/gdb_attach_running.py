@@ -15,7 +15,7 @@ repo, kernel, serial_dev, gdb_script, cmd, port = sys.argv[1:7]
 # 1. openocd: attach WITHOUT reset (init only), leave gdbserver up.
 oocd = subprocess.Popen(
     ["openocd", "-f", "interface/cmsis-dap.cfg", "-f", "target/rp2350.cfg",
-     "-c", "adapter speed 20000", "-c", "init",
+     "-c", "adapter speed 16000", "-c", "init",
      "-c", f"gdb_port {port}", "-c", "halt"],
     stdout=open("/tmp/oocd_attach.log", "w"), stderr=subprocess.STDOUT)
 time.sleep(2)

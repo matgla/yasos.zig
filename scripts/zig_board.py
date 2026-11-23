@@ -30,7 +30,10 @@ as a manifest delta (only what changed; 822 files, 4 MiB compressed, ~2.5 min th
 time) and points /var/lib/zig, where the compiler looks, at it.  Everything on the rig
 runs under the board lock, through scripts/rig/tinycc_board.sh's flash-and-run wrapper:
 images are checked by sha256 before and after the flash.  Reads the rig from
-.cache/remote_smoke_runner.json (remote_smoke_tui.py --reconfigure).
+.cache/remote_smoke_runner.json (remote_smoke_tui.py --reconfigure).  A rig with several
+boards (scripts/rig/boards.py): --rig-board NAME, else the config's rig_board, else the
+board these calls used last (its card has the lib and the trees), else the first free one;
+--rig-board auto picks afresh.
 """
 import argparse
 import json
@@ -90,6 +93,8 @@ def main():
     ap.add_argument("--exclude", action="append", default=[], help="top-level entry of --src to leave out")
     ap.add_argument("--silence", type=float, default=3600)
     ap.add_argument("--out", help="pull: host directory the files land in")
+    ap.add_argument("--rig-board", metavar="NAME", help="which rig board (default: the config's rig_board, "
+                    "else the one used last; auto: the first free)")
     a = ap.parse_args()
     if a.serve:
         return serve(a)
@@ -97,13 +102,15 @@ def main():
     cfg = json.loads((REPO / ".cache/remote_smoke_runner.json").read_text())
     target, port = cfg["ssh_target"], str(cfg.get("ssh_port", 22))
     remote = cfg.get("remote_repo_path", "~/yasos_remote_smoke")
+    board = a.rig_board or str(cfg.get("rig_board") or "").strip()
+    board = "" if board == "auto" and not a.rig_board else board
 
     def ssh(c):
         return subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", "-p", port, target, c],
                               stdin=subprocess.DEVNULL, text=True).returncode
 
     def scp(srcs, dst):
-        subprocess.run(["scp", "-q", "-P", port, *map(str, srcs), f"{target}:{dst}"], check=True)
+        subprocess.run(["scp", "-q", "-r", "-P", port, *map(str, srcs), f"{target}:{dst}"], check=True)
 
     ssh(f"mkdir -p {D}/py {D}/rig {D}/img {D}/payload")
     scp([Path(__file__), REPO / "scripts/yasos_device.py"], f"{D}/py/")
@@ -111,7 +118,8 @@ def main():
     w = REPO / ".cache/zig_board/zig_board.sh"
     w.parent.mkdir(parents=True, exist_ok=True)
     w.write_text(wrap)
-    scp([REPO / "scripts/rig/reflash.sh", REPO / "scripts/rig/boot_check.py", w], f"{D}/rig/")
+    scp([REPO / "scripts/rig/reflash.sh", REPO / "scripts/rig/boot_check.py", w,
+         REPO / "scripts/rig/boards.py", REPO / "scripts/rig/openocd"], f"{D}/rig/")
     flash = ["NOFLASH", "-", "-"]
     if a.flash:
         rootfs, kernel = REPO / "rootfs.img", REPO / "zig-out/bin/yasos_kernel"
@@ -142,7 +150,8 @@ def main():
         extra = [a.command, "--silence", str(a.silence)]
     words = ["bash", f"$HOME/{D}/rig/zig_board.sh", f"$HOME/{D}", "3000", *flash, "--serve", a.action, *extra]
     quoted = " ".join(x if x.startswith("$HOME") else shlex.quote(x) for x in words)
-    rc = ssh(f"YASOS_RIG_REMOTE={remote} {quoted}")
+    env = f"YASOS_BOARD={shlex.quote(board)} " if board else ""
+    rc = ssh(f"{env}YASOS_RIG_REMOTE={remote} {quoted}")
     if a.action == "pull" and rc == 0:
         Path(a.out).mkdir(parents=True, exist_ok=True)
         subprocess.run(["scp", "-q", "-P", port, f"{target}:{D}/pulled/*", str(a.out)], check=True)

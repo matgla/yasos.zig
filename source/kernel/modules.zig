@@ -833,7 +833,7 @@ fn format_module(module: *const yasld.Module, buffer: []u8, depth: usize) usize 
     written += append_section(buffer[written..], name, ".text", @intFromPtr(text.ptr), text.len);
     written += append_section(buffer[written..], name, ".plt", @intFromPtr(plt.ptr), plt.len);
     // The shared .rodata in the image, where a debugger finds the constants
-    // below const_rodata_length (docs/ydb_plan.md); only when there is some.
+    // below const_rodata_length (apps/ydb/docs/plan.md); only when there is some.
     const rodata = module.get_rodata();
     if (rodata.len != 0) written += append_section(buffer[written..], name, ".rodata", @intFromPtr(rodata.ptr), rodata.len);
     written += append_section(buffer[written..], name, ".data", @intFromPtr(data.ptr), data.len);

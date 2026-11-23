@@ -133,7 +133,7 @@ def test_write_to_a_pipe_reports_why_it_failed(request):
             redirect = ">" if index == 0 else ">>"
             session.write_command(f"echo '{line}' {redirect} /tmp/pipe_errors.c")
             session.read_until_prompt()
-        session.write_command("tcc /tmp/pipe_errors.c -o /tmp/pipe_errors")
+        session.write_command("tcc -ccompat /tmp/pipe_errors.c -o /tmp/pipe_errors")
         assert "error" not in session.read_until_prompt()
         session.write_command("/tmp/pipe_errors")
         output = session.read_until_prompt()

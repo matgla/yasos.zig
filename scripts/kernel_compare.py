@@ -201,7 +201,7 @@ ZIG_CHAIN = ("mkdir -p /tmp/zig-cache /tmp/zighome"
              " /tmp/work/hello.zig --zig-lib-dir /mnt/lib/zig"
              " --cache-dir /tmp/zig-cache -femit-bin=/tmp/work/hello_zig.c"
              " && sha256sum /tmp/work/hello_zig.c"
-             " && tcc -c -I/mnt/lib/zig -include /mnt/lib/zig/zig_c_prelude.h"
+             " && tcc -ccompat -c -I/mnt/lib/zig -include /mnt/lib/zig/zig_c_prelude.h"
              " /tmp/work/hello_zig.c -o /tmp/work/hello_zig.o")
 
 # The battery, run against every kernel.  Fields:
@@ -223,10 +223,10 @@ WORKLOADS = [
     {"name": "ps", "cmd": "ps", "rc_only": True},
     {"name": "core-sort", "cmd": "sort /tmp/work/corpus.txt > /tmp/work/sorted.txt"},
     {"name": "core-grep", "cmd": "grep -c the /tmp/work/corpus.txt"},
-    {"name": "tcc-hello-c-O0", "cmd": "tcc -c -O0 /tmp/work/hello.c -o /tmp/work/hello0.o"},
-    {"name": "tcc-hello-c-O2", "cmd": "tcc -c -O2 /tmp/work/hello.c -o /tmp/work/hello2.o"},
-    {"name": "tcc-bench-c-O2", "cmd": "tcc -c -O2 /tmp/work/bench.c -o /tmp/work/bench.o"},
-    {"name": "tcc-hello-run", "cmd": "tcc /tmp/work/hello.c -o /tmp/work/hello && /tmp/work/hello"},
+    {"name": "tcc-hello-c-O0", "cmd": "tcc -ccompat -c -O0 /tmp/work/hello.c -o /tmp/work/hello0.o"},
+    {"name": "tcc-hello-c-O2", "cmd": "tcc -ccompat -c -O2 /tmp/work/hello.c -o /tmp/work/hello2.o"},
+    {"name": "tcc-bench-c-O2", "cmd": "tcc -ccompat -c -O2 /tmp/work/bench.c -o /tmp/work/bench.o"},
+    {"name": "tcc-hello-run", "cmd": "tcc -ccompat /tmp/work/hello.c -o /tmp/work/hello && /tmp/work/hello"},
     {"name": "zig-version", "cmd": "zig version", "needs": "zig", "silence": 60},
     {"name": "zig-obj-tcc", "cmd": ZIG_CHAIN, "needs": "zig", "silence": 1800},
 ]

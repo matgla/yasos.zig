@@ -56,6 +56,66 @@ const log = std.log.scoped(.@"fs/ext4");
 /// scripts/stack_overflow_sweep.py and /proc/faultstat.
 pub var lock: kernel.sync.RankedMutex(.fs) = .{ .stack_needed = 2048 };
 
+/// Small write() calls are gathered per open file (Ext4File) and handed to
+/// lwext4 as one: an ext4_fwrite costs about 1.4 ms on the board whatever its
+/// length (extent lookup, block cache, inode update, all in PSRAM), so a
+/// reader of the tty writing a line at a time put 45 KB/s on the card, a
+/// tenth of the console's line rate, and the receive ring overflowed.
+///
+/// Like a page cache, the bytes have to be there for everyone else at once:
+/// every entry point except a file's own write() first hands the gathered
+/// bytes of every file to lwext4 (`lock_settled`), so another handle, a stat,
+/// a rename or a directory listing never sees a file without its latest
+/// writes. The list is under `lock`.
+pub const PendingWrites = struct {
+    /// Hands the bytes to lwext4 and takes the entry off the list.
+    flush: *const fn (*PendingWrites) void,
+    next: ?*PendingWrites = null,
+    queued: bool = false,
+};
+
+var pending_head: ?*PendingWrites = null;
+
+/// The caller holds `lock`.
+pub fn queue_pending(entry: *PendingWrites) void {
+    if (entry.queued) return;
+    entry.next = pending_head;
+    pending_head = entry;
+    entry.queued = true;
+}
+
+/// The caller holds `lock`.
+pub fn unqueue_pending(entry: *PendingWrites) void {
+    if (!entry.queued) return;
+    var link = &pending_head;
+    while (link.*) |current| : (link = &current.next) {
+        if (current == entry) {
+            link.* = current.next;
+            break;
+        }
+    }
+    entry.next = null;
+    entry.queued = false;
+}
+
+/// Hand every file's gathered bytes but `except`'s to lwext4. The caller
+/// holds `lock`.
+pub fn settle_pending(except: ?*PendingWrites) void {
+    var cursor = pending_head;
+    while (cursor) |entry| {
+        const next = entry.next;
+        if (entry != except) entry.flush(entry);
+        cursor = next;
+    }
+}
+
+/// `lock`, then every gathered write handed to lwext4: what each entry point
+/// but a file's own write() takes.
+pub fn lock_settled() void {
+    lock.lock();
+    settle_pending(null);
+}
+
 /// CONFIG_EXT4_MOUNTPOINTS_COUNT in build.zig.
 pub const max_volumes = 4;
 var slot_in_use: [max_volumes]bool = @splat(false);
@@ -340,7 +400,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     _volume: *Volume,
 
     pub fn init(allocator: std.mem.Allocator, device: kernel.fs.IFile) !Ext4Fs {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         c_allocator = allocator;
         lwext4.ext4_set_clock(&wall_clock_seconds);
@@ -414,7 +474,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn mount(self: *Self) i32 {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const volume = self._volume;
         if (volume.mounted) return 0;
@@ -432,14 +492,14 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn umount(self: *Self) i32 {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         return self.umount_locked();
     }
 
     /// Dirty blocks in lwext4's cache, should a write-back hold be open.
     pub fn sync(self: *Self) i32 {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         if (!self._volume.mounted) return 0;
         return if (lwext4.ext4_cache_flush(self.mount_point()) == 0) 0 else -1;
@@ -456,7 +516,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn delete(self: *Self) void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         _ = self.umount_locked();
         const volume = self._volume;
@@ -496,7 +556,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn create(self: *Self, path: []const u8, mode: i32) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -511,7 +571,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn mkdir(self: *Self, path: []const u8, mode: i32) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -537,7 +597,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     /// unlink(2) and rmdir(2): lwext4's ext4_dir_rm deletes a whole tree, so an
     /// occupied directory is refused here first, as POSIX has it.
     pub fn unlink(self: *Self, path: []const u8) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -553,7 +613,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn get(self: *Self, path: []const u8) anyerror!kernel.fs.Node {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -568,7 +628,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn link(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const old_full = try self.full_path(old_path);
         defer self._allocator.free(old_full);
@@ -580,7 +640,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     /// rename(2): an existing destination is replaced, as POSIX asks --
     /// lwext4 itself refuses one. A directory may only replace an empty one.
     pub fn rename(self: *Self, old_path: []const u8, new_path: []const u8) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const old_full = try self.full_path(old_path);
         defer self._allocator.free(old_full);
@@ -603,7 +663,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     /// the whole question -- except execute, which the mode bits answer.
     pub fn access(self: *Self, path: []const u8, mode: i32, flags: i32) anyerror!void {
         _ = flags;
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -618,7 +678,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     /// A fresh ext4 over the whole device: 1 KiB blocks, no journal -- what
     /// mkfs.ext4 makes. Unmounts first; mount again to use it.
     pub fn format(self: *Self) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         _ = self.umount_locked();
         const fs = try self._allocator.create(lwext4.struct_ext4_fs);
@@ -631,7 +691,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -661,7 +721,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
 
     pub fn utimens(self: *Self, path: []const u8, times: kernel.fs.TimeStamps, follow_links: bool) anyerror!void {
         _ = follow_links;
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -671,7 +731,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn readlink(self: *Self, path: []const u8, buffer: []u8) anyerror!usize {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -687,7 +747,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn symlink(self: *Self, target: []const u8, linkpath: []const u8) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(linkpath);
         defer self._allocator.free(full);
@@ -708,7 +768,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn chmod(self: *Self, path: []const u8, mode: u32, follow_links: bool) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -718,7 +778,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn chown(self: *Self, path: []const u8, uid: u32, gid: u32, follow_links: bool) anyerror!void {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         const full = try self.full_path(path);
         defer self._allocator.free(full);
@@ -737,7 +797,7 @@ pub const Ext4Fs = oop.DeriveFromBase(kernel.fs.IFileSystem, struct {
     }
 
     pub fn statvfs(self: *Self) anyerror!kernel.fs.FsStats {
-        lock.lock();
+        lock_settled();
         defer lock.unlock();
         var stats: lwext4.struct_ext4_mount_stats = undefined;
         try check(lwext4.ext4_mount_point_stats(self.mount_point(), &stats));

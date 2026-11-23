@@ -48,8 +48,16 @@ The base is a frame with ribs (`base_floor = "ring"`, the default), like the lan
 trays, so air comes in from below. Each connector cut-out has a bridge over it:
 a lintel 5 mm deep inside the wall, carried at both ends by pillars that stand on
 the frame. PrusaSlicer prints it as bridge infill rather than wall hanging in the
-air. The vents are 12 mm windows every 20 mm with 45° pointed tops, so they need no
-bridge (`vent_w`, `vent_pitch`). The original 3 mm slots every 8 mm cost about
+air. Lintels longer than 30 mm also get a 1.2 mm break-away prop under the middle,
+with one layer (0.2 mm) of air under the bridge; snap it off after printing
+(`lintel_props`). Print with no slicer supports, and keep the profile's bridge angle on
+auto: a fixed 90° lays the lines of a lintel spanning X across the wall, with nothing
+under either end. The vents are 12 mm windows every 20 mm with 45° pointed tops, so they need no
+bridge (`vent_w`, `vent_pitch`). The lid's walls have 16 mm plain rectangular windows instead
+(`lid_vent_w`, `lid_vent_flat`): the bridge over each is short, and the 4 mm piers save
+perimeters. Its floor is 3 mm (`lid_t`). Sliced at 0.25 mm with lightning infill (it
+only holds up the pocket floors; the lid carries little), the lid takes 2 h 13 min
+instead of 2 h 55 min at 0.2 mm with grid infill. The original 3 mm slots every 8 mm cost about
 12 min per lane tray and 29 min on the lid, because every slot adds short
 perimeters on every layer. On the 0.2 mm SPEED profile in PLA, with
 the first layer at 2000 mm/s² instead of 500, the base takes 2 h 46 min. Most of

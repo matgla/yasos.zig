@@ -51,7 +51,7 @@ def test_pool_hint_scan_keeps_metadata_outside_loop(tmp_path):
     lib_dir = re.search(r'\.lib_dir = "([^"]+)"', zig_env)[1]
     obj = tmp_path / "scan.o"
     subprocess.run([
-        str(compiler), "-O2", "-fno-pic", "-mno-sb-relative-got",
+        str(compiler), "-ccompat", "-O2", "-fno-pic", "-mno-sb-relative-got",
         "-fno-module-local-calls", "-I", lib_dir,
         "-c", str(generated), "-o", str(obj),
     ], check=True, capture_output=True, text=True)

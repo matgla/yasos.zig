@@ -8,6 +8,7 @@ part = "none";
 case_alpha = 0.35;
 show = "all";   // [all, clash]: clash = only what cables and plugs share with printed parts
 enclosed = false;   // open frame for the view; the clash check must run with -D enclosed=true
+lintel_props = false;   // the break-away props come off after printing
 
 function seglen(p, i) = norm(p[i + 1] - p[i]);
 function pathlen(p) = [for (i = [0 : len(p) - 2]) 1] * [for (i = [0 : len(p) - 2]) seglen(p, i)];

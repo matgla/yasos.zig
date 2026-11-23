@@ -1,0 +1,148 @@
+{
+  "about": "tcc's safe default over our C, per directory: warnings and errors may only go down. scripts/safe_mode_ratchet.py checks (CI smoke), --update keeps a new floor, --add DIR starts counting a directory; 'flags' are a directory's extra compiler options (from its Makefile).",
+  "dirs": {
+    "apps/ccat": {
+      "errors": 7,
+      "warnings": 4
+    },
+    "apps/coreutils": {
+      "errors": 4,
+      "warnings": 0
+    },
+    "apps/fbdemo": {
+      "errors": 1,
+      "warnings": 7
+    },
+    "apps/fdisk": {
+      "errors": 56,
+      "warnings": 13
+    },
+    "apps/fpbench": {
+      "errors": 2,
+      "warnings": 0
+    },
+    "apps/hello_world": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "apps/hexdump": {
+      "errors": 2,
+      "warnings": 2
+    },
+    "apps/longjump_tester": {
+      "errors": 4,
+      "warnings": 0
+    },
+    "apps/mkfs": {
+      "errors": 49,
+      "warnings": 13
+    },
+    "apps/more": {
+      "errors": 4,
+      "warnings": 0
+    },
+    "apps/pioasm": {
+      "errors": 231,
+      "warnings": 25
+    },
+    "apps/prun": {
+      "errors": 16,
+      "warnings": 7
+    },
+    "apps/ptracetest": {
+      "errors": 19,
+      "warnings": 5
+    },
+    "apps/rzsz": {
+      "errors": 30,
+      "warnings": 16
+    },
+    "apps/sdbench": {
+      "errors": 8,
+      "warnings": 13
+    },
+    "apps/sha": {
+      "errors": 8,
+      "warnings": 4
+    },
+    "apps/strip": {
+      "errors": 7,
+      "warnings": 0
+    },
+    "apps/syscallbench": {
+      "errors": 1,
+      "warnings": 2
+    },
+    "apps/time": {
+      "errors": 16,
+      "warnings": 5
+    },
+    "apps/yaffdump": {
+      "errors": 115,
+      "warnings": 17
+    },
+    "apps/yasdisk": {
+      "errors": 58,
+      "warnings": 41
+    },
+    "apps/yasvi": {
+      "errors": 2124,
+      "warnings": 526
+    },
+    "apps/zig": {
+      "errors": 51,
+      "warnings": 4
+    },
+    "libs/libc": {
+      "errors": 1775,
+      "warnings": 371
+    },
+    "libs/libdl": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "libs/libm": {
+      "errors": 3,
+      "warnings": 0
+    },
+    "libs/pthread": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "libs/termcap": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "libs/yasos_curses": {
+      "errors": 59,
+      "warnings": 18
+    }
+  },
+  "flags": {
+    "apps/mkfs": [
+      "-Iapps/mkfs/build/ff",
+      "-Ilibs/littlefs",
+      "-Ilibs/lwext4/include",
+      "-DCONFIG_USE_DEFAULT_CFG=1",
+      "-DCONFIG_DEBUG_PRINTF=0",
+      "-DCONFIG_DEBUG_ASSERT=0",
+      "-DCONFIG_JOURNALING_ENABLE=0",
+      "-DCONFIG_XATTR_ENABLE=0",
+      "-DCONFIG_EXTENTS_ENABLE=1",
+      "-DCONFIG_HAVE_OWN_OFLAGS=0",
+      "-DCONFIG_HAVE_OWN_ERRNO=0",
+      "-DCONFIG_BLOCK_DEV_ENABLE_STATS=0",
+      "-DCONFIG_BLOCK_DEV_CACHE_SIZE=8",
+      "-DCONFIG_EXT4_BLOCKDEVS_COUNT=1",
+      "-DCONFIG_EXT4_MOUNTPOINTS_COUNT=1",
+      "-DLFS_NO_INTRINSICS",
+      "-DLFS_NO_WARN"
+    ],
+    "apps/strip": [
+      "-Ilibs/tinycc/source/obj"
+    ],
+    "apps/yaffdump": [
+      "-Ilibs/tinycc/source/obj"
+    ]
+  }
+}

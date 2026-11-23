@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import contextlib
 import curses
 import hashlib
@@ -11,6 +12,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import re
 import subprocess
 import sys
@@ -297,6 +299,7 @@ BOARD_PROFILES = {
         interface_cfg="interface/cmsis-dap.cfg",
         target_cfg="target/rp2350.cfg",
         rootfs_address="0x10120000",
+        console_baudrate=6000000,
     ),
     "mspc_v2": BoardProfile(
         key="mspc_v2",
@@ -370,8 +373,10 @@ def normalize_smoke_tcc_opt_levels(value: Any) -> str:
 # YASOS_SMOKE_CONSOLE_BAUDRATE (tests/smoke/framework/session.py) -- a mismatch
 # does not fail loudly, it just turns the console into garbage.
 #
-# 3 Mbaud is the target PL011's ceiling: clk_peri/(16*divisor) with clk_peri at
-# 48 MHz and the divisor bottoming out at 1. It is exact, unlike 921600.
+# 3 Mbaud is the target PL011's ceiling while clk_peri is PLL_USB's 48 MHz. The
+# Pico Plus 2 runs 6 Mbaud (its profile above): clk_peri from PLL_SYS, and the
+# rig's probes on the DMA build of debugprobe (stock firmware drops board->host
+# bytes at 3 Mbaud already). See CONFIG_CONSOLE_BAUDRATE in Kconfig.
 #
 # This was 460800 until the rig's debug probe was reflashed off debugprobe
 # 2.0.1, which predates the v2.2.1/v2.2.2 UART-TX fixes; at 921600 that firmware
@@ -385,7 +390,7 @@ DEFAULT_CONFIG = {
     "ssh_target": "",
     "ssh_port": 22,
     "ssh_identity_file": "",
-    "openocd_adapter_speed": 20000,
+    "openocd_adapter_speed": 16000,
     "remote_repo_path": "~/yasos_remote_smoke",
     "serial_device": "",
     "optimize": "ReleaseFast",
@@ -396,6 +401,10 @@ DEFAULT_CONFIG = {
     "pytest_args": "tests/smoke",
     "uhubctl_hub": "",
     "uhubctl_port": "",
+    # The board on the rig (scripts/rig/boards.py): a registered name, or "auto"
+    # for the first free board of pool dev -- the one that is only yours before
+    # the one CI shares. With no registry on the rig, the single board.
+    "rig_board": "auto",
     # Numbered run directories kept on the remote (logs/1, logs/2, ...); 0 keeps
     # all of them. The local mirror is never pruned.
     "keep_runs": 20,
@@ -469,9 +478,9 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         merged["ssh_port"] = 22
     try:
-        merged["openocd_adapter_speed"] = int(merged.get("openocd_adapter_speed", 20000))
+        merged["openocd_adapter_speed"] = int(merged.get("openocd_adapter_speed", 16000))
     except (TypeError, ValueError):
-        merged["openocd_adapter_speed"] = 20000
+        merged["openocd_adapter_speed"] = 16000
     try:
         merged["test_retries"] = int(merged.get("test_retries", 1))
     except (TypeError, ValueError):
@@ -488,6 +497,7 @@ def merge_config(data: dict[str, Any] | None) -> dict[str, Any]:
         "yes",
         "on",
     } if not isinstance(merged.get("with_gcc_torture"), bool) else bool(merged.get("with_gcc_torture"))
+    merged["rig_board"] = str(merged.get("rig_board") or "").strip() or "auto"
     merged.setdefault("uhubctl_hub", "")
     merged.setdefault("uhubctl_port", "")
     # The port field may carry several ports (e.g. "1,2" for the debug probe
@@ -693,6 +703,7 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
         status = "F5/r run, F2/s save, Enter edit, arrows move, q quit"
         fields = [
             ("Board", "board"),
+            ("Rig board (auto)", "rig_board"),
             ("SSH target", "ssh_target"),
             ("SSH port", "ssh_port"),
             ("SSH identity", "ssh_identity_file"),
@@ -818,7 +829,7 @@ def run_tui(initial_config: dict[str, Any]) -> dict[str, Any] | None:
                     if selected_key == "ssh_port":
                         default_value = "22"
                     elif selected_key == "openocd_adapter_speed":
-                        default_value = "20000"
+                        default_value = "16000"
                     elif selected_key == "keep_runs":
                         default_value = str(DEFAULT_CONFIG["keep_runs"])
                     else:
@@ -1162,9 +1173,90 @@ def ssh_tty_base(config: dict[str, Any]) -> list[str]:
     return command
 
 
-def run_remote_tty_script(config: dict[str, Any], script: str) -> None:
-    cmd = ssh_tty_base(config) + ["bash", "-lc", script]
-    run_interactive_command(cmd)
+def run_remote_tty_script(config: dict[str, Any], script: str, what: str,
+                          keeps_state: bool = True) -> None:
+    """Run SCRIPT on the board host in a tty, holding the board (remote_board_prefix)."""
+    run_interactive_command(remote_tty_board_command(config, script, what, keeps_state))
+
+
+def remote_tty_board_command(config: dict[str, Any], script: str, what: str,
+                             keeps_state: bool = True) -> list[str]:
+    # One quoted argument: ssh joins its arguments into one shell line, and an
+    # unquoted script would run line by line in the login shell, outside the lock.
+    return (ssh_tty_base(config) + remote_board_prefix(config, what, keeps_state=keeps_state)
+            + ["bash", "-lc", shlex.quote(script)])
+
+
+# --- Boards on the rig -------------------------------------------------------
+#
+# The rig can carry several boards, each on its own Debug Probe, registered in
+# scripts/rig/boards.py's registry on the Pi. Everything here that touches a
+# board runs under `boards.py run`: it waits for the board's lock (CI and other
+# sessions hold it too), and runs with that board's probe serial, UART, power
+# ports and state directory in the environment, which the remote scripts below
+# prefer over "the first probe on the bus". With no registry on the rig,
+# boards.py takes the old single-board lock and changes nothing else.
+
+RIG_TOOL_PATHS = ["scripts/rig/boards.py", "scripts/rig/openocd/interface/cmsis-dap.cfg"]
+RIG_BOARD_WAIT_SECONDS = 7200
+_rig_tool_synced: set[str] = set()
+
+
+def remote_path_token(path: str) -> str:
+    """PATH for a remote shell line: quoted, with a leading ~ left to expand."""
+    if path == "~":
+        return '"$HOME"'
+    if path.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
+def ensure_remote_rig_tool(config: dict[str, Any]) -> None:
+    """Put this checkout's boards.py on the board host (once per process).
+
+    Commands such as --connect or --reset sync nothing else first, and a mirror
+    from before the registry has no boards.py at all."""
+    key = f"{config['ssh_target']}:{config['ssh_port']}:{config['remote_repo_path']}"
+    if key in _rig_tool_synced:
+        return
+    sync_remote_repo_subset(config, RIG_TOOL_PATHS)
+    _rig_tool_synced.add(key)
+
+
+def remote_board_prefix(config: dict[str, Any], what: str, *, keeps_state: bool = True) -> list[str]:
+    """`boards.py run ... --` for a remote command line, already shell-quoted.
+
+    keeps_state: the command records what it flashes in $YASOS_BOARD_STATE (or
+    flashes nothing). A command that may change the flash without recording it
+    passes False, so the board's records are dropped and the next run flashes.
+    """
+    ensure_remote_rig_tool(config)
+    board = BOARD_PROFILES[config.get("board", DEFAULT_CONFIG["board"])]
+    tool = remote_path_token(str(config["remote_repo_path"]).rstrip("/") + "/scripts/rig/boards.py")
+    prefix = [
+        "python3", tool, "run",
+        "--board", shlex.quote(str(config.get("rig_board") or "auto")),
+        "--pool", "dev",
+        "--type", shlex.quote(board.key),
+        "--wait", str(int(config.get("rig_board_wait", RIG_BOARD_WAIT_SECONDS))),
+        "--what", shlex.quote(f"remote_smoke_tui {what} ({getpass.getuser()}@{socket.gethostname()})"),
+    ]
+    if keeps_state:
+        prefix.append("--keeps-state")
+    return prefix + ["--"]
+
+
+def rig_boards_command(config: dict[str, Any], arguments: list[str]) -> None:
+    """Run boards.py on the rig with these arguments (the script goes over stdin)."""
+    script = (REPO_ROOT / "scripts" / "rig" / "boards.py").read_text()
+    # ssh joins its arguments into one shell line: quote each.
+    run_command(ssh_base(config) + ["python3", "-"] + [shlex.quote(a) for a in arguments],
+                input_text=script)
+
+
+def list_rig_boards(config: dict[str, Any]) -> None:
+    """The rig's registry and who holds each board."""
+    rig_boards_command(config, ["list"])
 
 
 def scp_base(config: dict[str, Any]) -> list[str]:
@@ -1785,6 +1877,7 @@ target_cfg=$4
 adapter_speed=$5
 rootfs_address=$6
 serial_device=$7
+serial_device=${serial_device:-${SERIAL_DEVICE:-}}  # the board's UART (boards.py run)
 remote_kernel=$8
 remote_rootfs=$9
 flash_only=${10}
@@ -1835,6 +1928,10 @@ detect_uhubctl_device() {
         local v
         v=$(cat "$dev/idVendor" 2>/dev/null) || continue
         if [[ "$v" == "$vid" ]]; then
+            # This board's probe on a multi-board rig (scripts/rig/boards.py).
+            if [[ -n "${YASOS_PROBE_SERIAL:-}" && "$(cat "$dev/serial" 2>/dev/null)" != "$YASOS_PROBE_SERIAL" ]]; then
+                continue
+            fi
             local devname
             devname=$(basename "$dev")
             # devname is e.g. "3-1.2" → parent hub "3-1", port "2"
@@ -1911,6 +2008,14 @@ resolve_uhubctl() {
     fi
 }
 
+# A registered board's power ports (boards.py run) replace the auto-detection,
+# which would find the first probe on the bus, maybe another board's.
+rig_power_ports=""
+if [[ -n "${YASOS_POWER_PORTS:-}" && ( -z "$uhubctl_hub" || "$uhubctl_hub" == "auto" ) ]]; then
+    rig_power_ports=$YASOS_POWER_PORTS
+    uhubctl_hub=""
+fi
+
 resolve_uhubctl
 
 uhubctl_cmd() {
@@ -1937,6 +2042,10 @@ sysfs_usb_reset() {
         local v
         v=$(cat "$dev/idVendor" 2>/dev/null) || continue
         if [[ "$v" == "$vid" ]]; then
+            # This board's probe on a multi-board rig (scripts/rig/boards.py).
+            if [[ -n "${YASOS_PROBE_SERIAL:-}" && "$(cat "$dev/serial" 2>/dev/null)" != "$YASOS_PROBE_SERIAL" ]]; then
+                continue
+            fi
             devname=$(basename "$dev")
             break
         fi
@@ -1974,7 +2083,7 @@ sysfs_usb_reset() {
     sleep 3
 
     for _wait in $(seq 1 20); do
-        if ls /dev/ttyACM* >/dev/null 2>&1; then
+        if { if [[ -n "${SERIAL_DEVICE:-}" ]]; then [[ -e "$SERIAL_DEVICE" ]]; else ls /dev/ttyACM* >/dev/null 2>&1; fi; }; then
             echo "Debug probe re-enumerated successfully." >&2
             return 0
         fi
@@ -1985,6 +2094,29 @@ sysfs_usb_reset() {
 }
 
 usb_power_reset() {
+    if [[ -n "$rig_power_ports" ]] && uhubctl_cmd --version >/dev/null 2>&1; then
+        echo "Power-cycling board ${YASOS_BOARD:-?} (uhubctl $rig_power_ports)..." >&2
+        local hp
+        for hp in $rig_power_ports; do
+            uhubctl_cmd -l "${hp%:*}" -p "${hp##*:}" -a off -r 100 2>/dev/null || true
+        done
+        sleep 3
+        for hp in $rig_power_ports; do
+            for _attempt in 1 2 3; do
+                uhubctl_cmd -l "${hp%:*}" -p "${hp##*:}" -a on -r 100 2>/dev/null && break
+                sleep 2
+            done
+        done
+        sleep 3
+        for _wait in $(seq 1 15); do
+            if { if [[ -n "${SERIAL_DEVICE:-}" ]]; then [[ -e "$SERIAL_DEVICE" ]]; else ls /dev/ttyACM* >/dev/null 2>&1; fi; }; then
+                break
+            fi
+            sleep 1
+        done
+        sleep 1
+        return 0
+    fi
     if [[ -n "$uhubctl_hub" ]] && uhubctl_cmd --version >/dev/null 2>&1; then
         local port_args=()
         if [[ -n "$uhubctl_port" ]]; then
@@ -2007,7 +2139,7 @@ usb_power_reset() {
         # Wait for the debug probe to re-enumerate on the bus.
         echo "Waiting for debug probe to re-enumerate..." >&2
         for _wait in $(seq 1 15); do
-            if ls /dev/ttyACM* >/dev/null 2>&1; then
+            if { if [[ -n "${SERIAL_DEVICE:-}" ]]; then [[ -e "$SERIAL_DEVICE" ]]; else ls /dev/ttyACM* >/dev/null 2>&1; fi; }; then
                 break
             fi
             sleep 1
@@ -2066,7 +2198,10 @@ openocd_mass_erase() {
 
 mkdir -p "$remote_work_dir"
 
-artifact_state_dir="$remote_work_dir/.artifact-state"
+# What the board holds. Per board on a multi-board rig (boards.py run sets
+# YASOS_BOARD_STATE, shared with scripts/rig/ and dropped when a job that does
+# not keep it -- CI -- takes the board); else the work dir's.
+artifact_state_dir="${YASOS_BOARD_STATE:-$remote_work_dir/.artifact-state}"
 kernel_sha_file="$artifact_state_dir/kernel.sha256"
 rootfs_sha_file="$artifact_state_dir/rootfs.sha256"
 mkdir -p "$artifact_state_dir"
@@ -2153,10 +2288,19 @@ TCL
     write_flash_tcl > "$flash_tcl"
 
     flash_ok=0
-    # The first attempt runs at the configured speed. Programming bursts a lot
-    # of CMSIS-DAP traffic, and on older probe firmware 20000 kHz desynced the
-    # probe under that load ("CMSIS-DAP command mismatch"), so the ladder is
-    # configured -> 8000 -> 4000 -> lower. It steps down only when an attempt
+    # The first attempt runs at the configured speed, capped at 16000 kHz. At
+    # 20000 kHz, through the old JST adapter, the erase and write went through but
+    # `program ... verify` failed every time: "target was in unknown state when
+    # halt was requested", then "error executing cortex_m crc algorithm" and a
+    # failed read in the partition table at 0x100000xx; the 8000 kHz retry
+    # verified OK. Since 2026-11-20 the probes (debugprobe v2.3.1) are wired
+    # straight to the boards: SWD is clean up to 30000 kHz and flash + verify
+    # passes at 16000 on both lanes; transfers stop getting faster above ~16000
+    # (USB bound). Erase and write are bound by the flash chip, so the clock
+    # changes little there, while a failed attempt costs a rescue and a full
+    # re-erase and rewrite. Older probe firmware also desynced at 20000 kHz under
+    # programming load ("CMSIS-DAP command mismatch"), so the ladder is
+    # min(configured, 16000) -> 8000 -> 4000 -> lower. It steps down only when an attempt
     # failed in a way
     # speed can cure: a link error, or an unexplained one (a wedged QSPI flashes
     # more reliably slow). An attempt that was killed, or that could not open
@@ -2165,6 +2309,9 @@ TCL
     # count towards the power-cycle and mass-erase escalation. Backing off on
     # those is what once left a run flashing 15 MB at 2000 kHz.
     flash_speed=$adapter_speed
+    if (( flash_speed > 16000 )); then
+        flash_speed=16000
+    fi
     flash_log="$artifact_state_dir/flash-attempt.log"
     link_failures=0
     for flash_attempt in 1 2 3 4; do
@@ -2511,7 +2658,8 @@ exit "$pytest_status"
         "1" if reflash else "0",
         *pytest_args,
     ]
-    cmd = ssh_base(config) + [
+    what = "flash" if flash_only else f"smoke run {run_id}"
+    cmd = ssh_base(config) + remote_board_prefix(config, what, keeps_state=True) + [
         "bash", "-s", "--",
         *[shlex.quote(a) for a in remote_args],
     ]
@@ -2606,7 +2754,7 @@ sleep 1
 
 openocd -f "$interface_cfg" -f "$target_cfg" -c "adapter speed $adapter_speed" -c "init" -c "reset halt" -c "reset run" -c "exit"
 """
-    cmd = ssh_base(config) + [
+    cmd = ssh_base(config) + remote_board_prefix(config, "reset") + [
         "bash",
         "-s",
         "--",
@@ -2650,7 +2798,7 @@ openocd -f "$interface_cfg" -f "$target_cfg" \
 
 echo "Flash erased; target halted. Reflash with: remote_smoke_tui.py --force" >&2
 """
-    cmd = ssh_base(config) + [
+    cmd = ssh_base(config) + remote_board_prefix(config, "rescue (mass erase)", keeps_state=False) + [
         "bash",
         "-s",
         "--",
@@ -2799,6 +2947,7 @@ def run_remote_connect(config: dict[str, Any], record: Path | None = None) -> No
     script = rf"""set -euo pipefail
 serial_device={shlex.quote(serial_device)}
 baud={shlex.quote(baud)}
+serial_device=${{serial_device:-${{SERIAL_DEVICE:-}}}}  # the board's UART (boards.py run)
 if [[ -z "$serial_device" ]]; then
     serial_device=$(python3 -c "
 import serial.tools.list_ports
@@ -2823,9 +2972,9 @@ stty icrnl 2>/dev/null || true
 exec python3 -m serial.tools.miniterm --raw --eol LF "$serial_device" "$baud"
 """
     if record is None:
-        run_remote_tty_script(config, script)
+        run_remote_tty_script(config, script, "console")
         return
-    cmd = ssh_tty_base(config) + ["bash", "-lc", script]
+    cmd = remote_tty_board_command(config, script, "console (recorded)")
     print(_dim("\n$ ") + _cmd(command_string(cmd)))
     status = record_tty_session(cmd, record, title=f"yasos console {config.get('board', '')}".strip())
     print(f"\nSession written to {record}")
@@ -2852,6 +3001,10 @@ detect_usb_device() {
         local v
         v=$(cat "$dev/idVendor" 2>/dev/null) || continue
         if [[ "$v" == "$vid" ]]; then
+            # This board's probe on a multi-board rig (scripts/rig/boards.py).
+            if [[ -n "${YASOS_PROBE_SERIAL:-}" && "$(cat "$dev/serial" 2>/dev/null)" != "$YASOS_PROBE_SERIAL" ]]; then
+                continue
+            fi
             local devname
             devname=$(basename "$dev")
             if [[ "$devname" == *.* ]]; then
@@ -2879,6 +3032,10 @@ sysfs_usb_reset() {
         local v
         v=$(cat "$dev/idVendor" 2>/dev/null) || continue
         if [[ "$v" == "$vid" ]]; then
+            # This board's probe on a multi-board rig (scripts/rig/boards.py).
+            if [[ -n "${YASOS_PROBE_SERIAL:-}" && "$(cat "$dev/serial" 2>/dev/null)" != "$YASOS_PROBE_SERIAL" ]]; then
+                continue
+            fi
             devname=$(basename "$dev")
             break
         fi
@@ -2914,7 +3071,7 @@ sysfs_usb_reset() {
     sleep 3
 
     for _wait in $(seq 1 20); do
-        if ls /dev/ttyACM* >/dev/null 2>&1; then
+        if { if [[ -n "${SERIAL_DEVICE:-}" ]]; then [[ -e "$SERIAL_DEVICE" ]]; else ls /dev/ttyACM* >/dev/null 2>&1; fi; }; then
             echo "Debug probe re-enumerated successfully."
             return 0
         fi
@@ -2928,6 +3085,24 @@ uhubctl_bin=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)
 use_uhubctl=0
 if [[ -x "$uhubctl_bin" ]]; then
     use_uhubctl=1
+fi
+
+if [[ "$uhubctl_hub" == "auto" && -n "${YASOS_POWER_PORTS:-}" ]] && (( use_uhubctl )); then
+    # A registered board (boards.py run): its own power ports, not the first probe's.
+    echo "Power-cycling board ${YASOS_BOARD:-?} via uhubctl ($YASOS_POWER_PORTS)..."
+    for hp in $YASOS_POWER_PORTS; do
+        sudo "$uhubctl_bin" -l "${hp%:*}" -p "${hp##*:}" -a off -r 100 || true
+    done
+    sleep 3
+    for hp in $YASOS_POWER_PORTS; do
+        for _attempt in 1 2 3; do
+            sudo "$uhubctl_bin" -l "${hp%:*}" -p "${hp##*:}" -a on -r 100 2>/dev/null && break
+            sleep 2
+        done
+    done
+    sleep 3
+    echo "Power-cycle complete."
+    exit 0
 fi
 
 if [[ "$uhubctl_hub" == "auto" ]]; then
@@ -2987,7 +3162,7 @@ else
     sysfs_usb_reset
 fi
 """
-    cmd = ssh_base(config) + [
+    cmd = ssh_base(config) + remote_board_prefix(config, "power reset") + [
         "bash",
         "-s",
         "--",
@@ -3142,7 +3317,7 @@ gdb_args+=( -ex "target extended-remote :3333" )
 
 "${{gdb_args[@]}}"
 """
-    run_remote_tty_script(config, remote_script)
+    run_remote_tty_script(config, remote_script, "gdb")
 
 
 def run_remote_gdb_live(
@@ -3246,6 +3421,7 @@ cleanup() {{
 trap cleanup EXIT INT TERM
 
 # -- Detect serial device if not specified --
+serial_device=${{serial_device:-${{SERIAL_DEVICE:-}}}}  # the board's UART (boards.py run)
 if [[ -z "$serial_device" ]]; then
     serial_device=$(python3 -c "
 import serial.tools.list_ports
@@ -3340,7 +3516,7 @@ fi
 
 "${{gdb_args[@]}}"
 """
-    run_remote_tty_script(config, remote_script)
+    run_remote_tty_script(config, remote_script, "gdb live")
 
 
 def run_remote_gdb_debug(
@@ -3449,7 +3625,7 @@ result = subprocess.run(
     ["openocd",
      "-f", "interface/cmsis-dap.cfg",
      "-f", "target/rp2350.cfg",
-     "-c", "adapter speed 20000",
+     "-c", "adapter speed 16000",
      "-c", "init",
      "-c", "reset halt",
      "-c", "reset run",
@@ -3537,6 +3713,7 @@ cleanup() {{
 trap cleanup EXIT INT TERM
 
 # -- Detect serial device if not specified --
+serial_device=${{serial_device:-${{SERIAL_DEVICE:-}}}}  # the board's UART (boards.py run)
 if [[ -z "$serial_device" ]]; then
     serial_device=$(python3 -c "
 import serial.tools.list_ports
@@ -3649,7 +3826,7 @@ fi
 
 "${{gdb_args[@]}}"
 """
-    run_remote_tty_script(config, remote_script)
+    run_remote_tty_script(config, remote_script, "gdb debug")
 
 
 def list_boards() -> None:
@@ -3903,6 +4080,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-kernel-flash", action="store_true", help="Upload and flash only the kernel artifact without rebuilding. Skips rootfs entirely.")
     parser.add_argument("--color", "--colour", dest="color", choices=("auto", "always", "never"), default="auto", help="Colour the runner's output and the remote suite's (default auto: on when stdout is a terminal, off through a pipe; NO_COLOR and FORCE_COLOR are honoured). 'always' is what a recorded run wants when the output is teed or piped -- it also turns on pytest --color=yes remotely, so PASSED/FAILED are green/red over ssh.")
     parser.add_argument("--list-boards", action="store_true", help="Print supported board identifiers and exit.")
+    parser.add_argument("--rig-board", default=None, metavar="NAME", help="The board on the rig for this run only (default: the cached 'Rig board' field, 'auto'): a name from the rig's registry (scripts/rig/boards.py, see --list-rig-boards), or 'auto' for the first free board of pool dev of this board type -- the one only you use before the one CI shares. Every command waits for the board's lock, so it never runs over a CI job on the same board.")
+    parser.add_argument("--list-rig-boards", action="store_true", help="Print the boards registered on the rig, their probes and who holds each, and exit.")
+    parser.add_argument("--reserve-rig-board", default=None, metavar="NAME", help="Reserve this rig board for your own work and exit: CI stops taking it (a CI job already on it finishes) and 'auto' picks it first. Ends after --reserve-hours or with --release-rig-board.")
+    parser.add_argument("--reserve-hours", type=float, default=24.0, metavar="H", help="How long --reserve-rig-board holds the board (default 24; 0 = until released).")
+    parser.add_argument("--release-rig-board", default=None, metavar="NAME", help="End a rig board's reservation, so CI may use it again, and exit.")
     parser.add_argument("--list-tests", action="store_true", help="Print available pytest nodeids for the smoke suite and exit. Honors --tests, --pytest-args, -k, and --with-gcc-torture.")
     return parser.parse_args(fold_smoke_tcc_opt_level_args(sys.argv[1:]))
 
@@ -3951,6 +4133,20 @@ def main() -> int:
         else:
             config = validate_config(cached)
             save_cache(config)
+
+        if args.rig_board is not None:
+            config["rig_board"] = args.rig_board.strip() or "auto"
+        if args.list_rig_boards:
+            list_rig_boards(config)
+            return 0
+        if args.reserve_rig_board or args.release_rig_board:
+            if args.release_rig_board:
+                rig_boards_command(config, ["release", args.release_rig_board])
+            if args.reserve_rig_board:
+                rig_boards_command(config, ["reserve", args.reserve_rig_board,
+                                            "--hours", str(args.reserve_hours)])
+            list_rig_boards(config)
+            return 0
 
         if args.connect or args.record:
             record = None

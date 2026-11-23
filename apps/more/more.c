@@ -173,12 +173,30 @@ static size_t line_len(int i) {
     return end - start;
 }
 
-/* Screen rows a line takes when the terminal wraps it (tabs to 8). */
+/* Length of the CSI escape (ESC [ ... final byte) at s[0..n), or 0. */
+static size_t csi_len(const char *s, size_t n) {
+    if (n < 2 || s[0] != 0x1b || s[1] != '[') return 0;
+    for (size_t k = 2; k < n; ++k)
+        if (s[k] >= 0x40 && s[k] <= 0x7e) return k + 1;
+    return 0;
+}
+
+/* Screen rows a line takes when the terminal wraps it (tabs to 8; colour
+   escapes such as mdcat's take no columns, nor do UTF-8 continuations). */
 static int line_rows(int i) {
     size_t n = line_len(i);
     const char *s = text + line_at[i];
     int width = 0;
-    for (size_t k = 0; k < n; ++k) width = (s[k] == '\t') ? (width / 8 + 1) * 8 : width + 1;
+    for (size_t k = 0; k < n; ++k) {
+        size_t esc = csi_len(s + k, n - k);
+        if (esc) {
+            k += esc - 1;
+        } else if (s[k] == '\t') {
+            width = (width / 8 + 1) * 8;
+        } else if (((unsigned char)s[k] & 0xC0) != 0x80) {
+            ++width;
+        }
+    }
     return width <= cols ? 1 : (width + cols - 1) / cols;
 }
 
@@ -228,6 +246,14 @@ static void show_line(int i) {
         out(clean + pos + hit, m);
         outs("\033[0m");
         pos += hit + m;
+        /* back to the colour the line had (a coloured file, e.g. mdcat's) */
+        size_t sgr = 0, sgr_len = 0;
+        for (size_t k = 0; k < pos; ++k) {
+            size_t e = csi_len(clean + k, used - k);
+            if (e && clean[k + e - 1] == 'm') sgr = k, sgr_len = e;
+            if (e) k += e - 1;
+        }
+        if (sgr_len) out(clean + sgr, sgr_len);
     }
     outs("\r\n");
 }

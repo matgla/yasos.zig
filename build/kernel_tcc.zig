@@ -122,9 +122,11 @@ const Ctx = struct {
 
     /// A compile.  -DYASLIBC_REAL_BOOL: yaslibc's <stdbool.h> gives tcc-built
     /// userspace `unsigned char` for bool; the kernel's C needs _Bool, as
-    /// clang compiles it (libs/libc/stdbool.h says why).
+    /// clang compiles it (libs/libc/stdbool.h says why).  -ccompat: tcc is
+    /// safe by default (yasc, unsafe C as errors); the Zig C backend's output
+    /// and the runtime are regular C.
     fn base(ctx: *Ctx, opt: []const u8) Cmd {
-        return ctx.cmd(&.{ opt, "-fno-pic", "-ffunction-sections", "-fdata-sections", "-DYASLIBC_REAL_BOOL" });
+        return ctx.cmd(&.{ "-ccompat", opt, "-fno-pic", "-ffunction-sections", "-fdata-sections", "-DYASLIBC_REAL_BOOL" });
     }
 
     fn depfile(ctx: *Ctx, c: Cmd) void {

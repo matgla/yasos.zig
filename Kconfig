@@ -121,17 +121,24 @@ menu "Console"
 config CONFIG_CONSOLE_BAUDRATE
   int "Serial console baud rate"
   default 3000000
-  range 9600 3000000
+  range 9600 8000000
   help
     Line rate of the serial console (uart0). The host has to be listening at
     the same rate: scripts/remote_smoke_tui.py takes it from the board profile
     and exports it to the smoke suite as YASOS_SMOKE_CONSOLE_BAUDRATE. A
     mismatch does not fail loudly, it just turns the console into garbage.
 
-    3000000 is the RP2350 PL011 ceiling (48 MHz clk_peri / 16) and is exact.
-    Other rates exact from 48 MHz: 2000000, 1500000, 1000000. 115200 carries
-    about 0.08% error, well inside what any UART tolerates. Drop it when the
-    link itself is a suspect.
+    Up to 3000000 the RP2350 runs the UART from PLL_USB (48 MHz clk_peri / 16),
+    exact at 3000000, 2000000, 1500000 and 1000000; 115200 carries about 0.08%
+    error, well inside what any UART tolerates. Drop it when the link itself
+    is a suspect.
+
+    Above 3000000 clk_peri comes from PLL_SYS divided to about 150 MHz
+    (startup/crt.zig; the build fails if the rate is more than 1% off).
+    6000000 is what the rig runs. It needs a debug probe that keeps up: stock
+    debugprobe firmware drops board->host bytes already at 3000000 (its UART
+    RX is polled); the rig's probes run the DMA build from the uart-rx-dma
+    branch. The probe's own UART stops at 7812500 (125 MHz / 16).
 
 config CONFIG_CONSOLE_ONLCR
   bool "Translate NL to CRLF on console output (ONLCR)"
