@@ -270,7 +270,8 @@ jobs:
       # hanging until the job timeout.
       - name: Run hardware smoke (-O0/-O1/-O2, incl. gcc-torture, no rebuild)
         run: |
-          python3 scripts/rig/boards.py run --pool ci --wait 7200 \
+          # The sources go to /root/ci: only a board with an SD card holds them.
+          python3 scripts/rig/boards.py run --pool ci --need sdcard --wait 7200 \
               --what "yasos.zig CI run_smoke_tests_packaged run ${{ github.run_id }}" -- \
               make run_smoke_tests_packaged SMOKE_OPT_LEVELS=-O0,-O1,-O2 || {
             rc=$?

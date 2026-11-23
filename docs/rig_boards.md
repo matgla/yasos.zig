@@ -8,7 +8,7 @@ with that board's probe, UART and power ports, and never touches another board.
 
 | Board  | Probe              | Pools      | Features | Lock                              |
 |--------|--------------------|------------|----------|-----------------------------------|
-| a (lane A) | `E665B83887652F2E` | `ci`,`dev` | (no card) | `/var/lock/rp2350-board.lock` (the one tools without the registry take) |
+| a (lane A) | `E665B83887652F2E` | `ci`,`dev` | `sdcard` | `/var/lock/rp2350-board.lock` (the one tools without the registry take) |
 | b (lane B) | `E665B83887763E2E` | `ci`,`dev` | `sdcard` | `/var/lock/yasos-board-b.lock`    |
 
 Both boards serve CI and your own work. CI tries `a` first and your runs try
@@ -78,10 +78,15 @@ boards.py run --pool ci --need sdcard -- make run_selfhost_packaged ...
 boards.py register b --force --feature sdcard   # what b has (repeat; --feature '' clears)
 ```
 
+A card with another layout (a Raspberry Pi OS card, say) is no better than none:
+without the YASVAR/YASHOME labels `/var` and `/home` fall back to RAM too (`cat
+/proc/mounts` shows `ramfs ... x-fallback`); `cardreformat` on the board fixes it
+(docs/storage.md).
+
 `--need` skips boards without the feature; a board named with `--board` that
-lacks it is an error. CI's `hardware_selfhost` (`/root/selfhost-ci`) and
-`hardware_zig_kernel` (`/root/kfull`) need `sdcard`; `hardware_smoke` runs on
-either board.
+lacks it is an error. All three CI board jobs need `sdcard`: `hardware_smoke`
+(the test sources in `/root/ci`), `hardware_selfhost` (`/root/selfhost-ci`) and
+`hardware_zig_kernel` (`/root/kfull`).
 
 `run` execs `CMD` while holding the lock and sets `YASOS_BOARD`,
 `YASOS_PROBE_SERIAL`, `SERIAL_DEVICE` (the board's

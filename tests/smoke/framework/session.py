@@ -597,7 +597,10 @@ class Session:
         if needs_reset:
             self._reset_and_wait_for_prompt()
 
-        self.write_command("cd /")
+        # NO_COLOR: tcc colours its diagnostics when stderr is a terminal, which
+        # the console is; the tests compare plain text.  A test about colours
+        # asks with -fdiagnostics-color=always, which wins over NO_COLOR.
+        self.write_command("export NO_COLOR=1; cd /")
         self.wait_for_prompt_except_logs()
 
     def _reset_and_wait_for_prompt(self):

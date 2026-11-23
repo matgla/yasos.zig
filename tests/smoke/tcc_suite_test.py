@@ -202,6 +202,12 @@ is_xfail_o1_test = _gcc_conftest.is_xfail_o1_test
 # hit a property of this hardware -- mostly resource exhaustion, plus the DCP's
 # lack of subnormal support at the bottom of the table.
 NATIVE_TARGET_SKIP_TESTS = {
+    # yasc modules: the modules are compiled first (.ymi interfaces, headers),
+    # then the program -- a build step this harness has no place for; the host
+    # suite runs them at every level (test_qemu.py test_yasc_modules_*).
+    "yasc_module_main": "yasc modules: built in two steps (host suite: test_yasc_modules_run)",
+    "yasc_methods_mod_main": "yasc modules: built in two steps (host suite: test_yasc_methods_module_run)",
+    "yasc_module_c_main": "yasc modules: built in two steps (host suite: test_yasc_modules_c_caller)",
     "849_tu_modref_memcpy_result_indirect_call": "inline asm .word of a symbol in .text: YAFF rejects R_ARM_ABS32 outside data",
     "bug_asm_label_static_toplevel_asm": "top-level asm .word of a symbol in .text: YAFF rejects R_ARM_ABS32 outside data",
     # the host test builds abi_hfa_b.c with arm-none-eabi-gcc; no gcc on the device
@@ -959,6 +965,9 @@ IR_MULTI_FILE_SOURCES = {
     # test_qemu.py test_regpair_extern_inline_gnu89 / test_regpair_asm_global_in_body
     "bug_regpair_extern_inline.c": ("bug_regpair_extern_inline.c", "bug_regpair_extern_inline+.c"),
     "bug_regpair_asm_global_in_body.c": ("bug_regpair_asm_global_in_body.c", "bug_regpair_asm_global_in_body+.c"),
+    # yasc error sets across units (test_qemu.py, docs/plans/yasc_errors.md)
+    "yasc_errors.c": ("yasc_errors.c", "yasc_errors+abi.c"),
+    "yasc_error_name.c": ("yasc_error_name.c", "yasc_error_name+b.c"),
 }
 
 
@@ -966,6 +975,8 @@ IR_MULTI_FILE_SOURCES = {
 IR_EXTRA_CFLAGS = {
     # the GNU extern inline semantics the test exercises need gnu89 inline
     "bug_regpair_extern_inline.c": ("-fgnu89-inline",),
+    # the hooks it counts exist only with the flag (test_instrument_functions.py)
+    "bug_instrument_functions_exit.c": ("-finstrument-functions",),
 }
 
 
