@@ -56,7 +56,7 @@ TCL
 # A flash that stops half way leaves the board holding neither image.
 rm -f "$ST/kernel.sha256" "$ST/rootfs.sha256"
 # Both cores: a running core 1 writes into the work area being programmed from (AGENTS.md).
-openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 16000" -c init -c "reset halt" -c "source $TCL" -c exit 2>&1 | grep -vE "^(Open On|Licensed|For bug|\s+http|Info : (CMSIS|Using|SWCLK|Hardware|Listening|starting)|cortex_m|0$)"
+openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 5000" -c init -c "reset halt" -c "source $TCL" -c exit 2>&1 | grep -vE "^(Open On|Licensed|For bug|\s+http|Info : (CMSIS|Using|SWCLK|Hardware|Listening|starting)|cortex_m|0$)"
 rc=${PIPESTATUS[0]}
 echo "openocd rc=$rc"
 [ $rc = 0 ] || exit $rc

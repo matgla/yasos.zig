@@ -10,7 +10,7 @@ if not port:
 s = serial.Serial(port, int(os.environ.get("YASOS_SMOKE_CONSOLE_BAUDRATE", "6000000")), timeout=0.2)  # CONFIG_CONSOLE_BAUDRATE
 s.reset_input_buffer()
 subprocess.run(['openocd','-f','interface/cmsis-dap.cfg','-f','target/rp2350-rescue.cfg','-c','adapter speed 5000','-c','init','-c','exit'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(1)
-r = subprocess.run(['openocd','-c','set USE_CORE 0','-f','interface/cmsis-dap.cfg','-f','target/rp2350.cfg','-c','adapter speed 16000','-c','init','-c','reset run','-c','exit'],
+r = subprocess.run(['openocd','-c','set USE_CORE 0','-f','interface/cmsis-dap.cfg','-f','target/rp2350.cfg','-c','adapter speed 5000','-c','init','-c','reset run','-c','exit'],
                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 print('reset rc', r.returncode)
 if r.returncode: print(r.stdout[-700:]); sys.exit(4)

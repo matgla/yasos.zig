@@ -47,7 +47,7 @@ rescue_dp() {
 # reset that loses the DP -- means "program it", as before this check.
 board_has_images() {
     timeout "${HW_FLASH_CHECK_TIMEOUT:-60}" \
-    openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 16000" \
+    openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 5000" \
         -c init -c "reset init" -c "rp2xxx rom_api_call IF" -c "rp2xxx rom_api_call EX" \
         -c "rp2xxx rom_api_call FC" -c "rp2xxx rom_api_call CX" \
         -c "verify_image_checksum rootfs.img 0x1c120000 bin" \
@@ -58,6 +58,11 @@ if [ "${HW_FLASH_FORCE:-0}" != 1 ] && board_has_images; then
     echo ">> Board already holds this rootfs.img + yasos_kernel (verified); reset only"
     exit 0
 fi
+# SWD at 5 MHz, here and in flash_rp2350.cfg: at 16 MHz lane B's board (direct-wired
+# probe) fails memory reads ("Failed to read memory", SWD WAIT) whenever the on-target
+# crc algorithm times out and openocd verifies over SWD -- every time on that board.
+# Programming is bound by the flash chip and the SWD verify by latency, so the faster
+# clock bought nothing.
 echo ">> Flashing rootfs.img + yasos_kernel (no rebuild)"
 if ! openocd -f flash_rp2350.cfg; then
     echo ">> Initial flash failed; rescuing DP and retrying once" >&2
