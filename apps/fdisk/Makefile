@@ -9,6 +9,9 @@ CC ?= armv8m-tcc
 HOST_CC ?= gcc
 
 CFLAGS = $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden -I../../rootfs/usr/include -L../../rootfs/lib -I.
+# tcc is safe by default (yasc, -Wall, unsafe C as errors); this code is
+# regular C until it is ported, so -ccompat whenever CC is a tcc.
+CFLAGS += $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-ccompat)
 CFLAGS += $(ROOTFS_OPT_CFLAGS)
 LDFLAGS = $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden -L../../rootfs/lib
 

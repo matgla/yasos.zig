@@ -102,7 +102,7 @@ def main() -> int:
         default=None,
         help="tty on the board host (default: from the cache, else /dev/ttyACM0)",
     )
-    parser.add_argument("--baud", type=int, default=3000000, help="console baud rate")
+    parser.add_argument("--baud", type=int, default=6000000, help="console baud rate (CONFIG_CONSOLE_BAUDRATE)")
     parser.add_argument(
         "--arms", default="soft,hwlib,hwstatic,inline", help="comma-separated arms to run"
     )

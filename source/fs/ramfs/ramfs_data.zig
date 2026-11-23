@@ -55,6 +55,14 @@ fn next_inode() u32 {
 /// Bytes written per call while padding a spilled body out to a new length.
 const pad_chunk = 64;
 
+/// Why a write to a spilled body failed: a backing file that says (-errno, a
+/// RamFs /var when there is no card) is believed, so a full heap is ENOSPC;
+/// anything else is EIO.
+fn body_write_error(written: isize) anyerror {
+    if (written < -1) return kernel.errno.from_errno(@intCast(@min(-written, std.math.maxInt(u16))));
+    return kernel.errno.ErrnoSet.InputOutputError;
+}
+
 /// Capacity granularity for a tiered body. Matches the default arena page size
 /// (CONFIG_TMPFS_PAGE_SIZE); a mismatch only costs a little slack.
 const growth_granularity = 256;
@@ -89,6 +97,21 @@ const SpilledBody = struct {
     file: kernel.fs.IFile,
     length: usize,
     id: u32,
+    /// Where the body's handle stands, when known. A seek is skipped when it
+    /// is already there: on ext4 every seek hands over the bytes the file has
+    /// gathered (ext4fs.PendingWrites), so seeking before each append turned a
+    /// line-at-a-time writer into one card write per line.
+    cursor: ?usize = null,
+
+    /// Put the handle at `position`. The caller owns the body.
+    fn seek_to(body: *SpilledBody, position: usize) !void {
+        if (body.cursor) |cursor| {
+            if (cursor == position) return;
+        }
+        body.cursor = null;
+        _ = try body.file.interface.seek(@intCast(position), c.SEEK_SET);
+        body.cursor = position;
+    }
 };
 
 const Storage = union(enum) {
@@ -191,7 +214,7 @@ pub const RamFsData = struct {
                 return @intCast(count);
             },
             .spilled => |*body| {
-                _ = body.file.interface.seek(@intCast(position), c.SEEK_SET) catch return -1;
+                body.seek_to(position) catch return -1;
                 var done: usize = 0;
                 while (done < count) {
                     const read_bytes = body.file.interface.read(buffer[done..count]);
@@ -200,6 +223,7 @@ pub const RamFsData = struct {
                     }
                     done += @intCast(read_bytes);
                 }
+                body.cursor = if (done == count) position + done else null;
                 return @intCast(done);
             },
         }
@@ -310,16 +334,17 @@ pub const RamFsData = struct {
             try self.resize_spilled(position, 0);
         }
         var body = &self.storage.spilled;
-        _ = body.file.interface.seek(@intCast(position), c.SEEK_SET) catch
-            return kernel.errno.ErrnoSet.InputOutputError;
+        body.seek_to(position) catch return kernel.errno.ErrnoSet.InputOutputError;
         var done: usize = 0;
         while (done < bytes.len) {
             const written = body.file.interface.write(bytes[done..]);
             if (written <= 0) {
-                return kernel.errno.ErrnoSet.InputOutputError;
+                body.cursor = null;
+                return body_write_error(written);
             }
             done += @intCast(written);
         }
+        body.cursor = position + done;
         if (position + done > body.length) {
             body.length = position + done;
         }
@@ -332,22 +357,24 @@ pub const RamFsData = struct {
             return;
         }
         if (length < body.length) {
+            body.cursor = null;
             try body.file.interface.truncate(length);
             body.length = length;
             return;
         }
-        _ = body.file.interface.seek(@intCast(body.length), c.SEEK_SET) catch
-            return kernel.errno.ErrnoSet.InputOutputError;
+        body.seek_to(body.length) catch return kernel.errno.ErrnoSet.InputOutputError;
         var padding: [pad_chunk]u8 = undefined;
         @memset(&padding, fill);
         var left = length - body.length;
         while (left > 0) {
             const written = body.file.interface.write(padding[0..@min(left, padding.len)]);
             if (written <= 0) {
-                return kernel.errno.ErrnoSet.InputOutputError;
+                body.cursor = null;
+                return body_write_error(written);
             }
             left -= @intCast(written);
         }
+        body.cursor = length;
         body.length = length;
     }
 
@@ -373,13 +400,13 @@ pub const RamFsData = struct {
         while (done < body_length) {
             const written = file.interface.write(body[done..]);
             if (written <= 0) {
-                return kernel.errno.ErrnoSet.InputOutputError;
+                return body_write_error(written);
             }
             done += @intCast(written);
         }
 
         var previous = self.storage.ram;
-        self.storage = .{ .spilled = .{ .file = file, .length = body_length, .id = id } };
+        self.storage = .{ .spilled = .{ .file = file, .length = body_length, .id = id, .cursor = body_length } };
         previous.deinit(self._allocator);
         tier.account_spill(body_length);
         log.debug("ramfs: spilled {d} bytes of inode {d} to body {d}", .{ body_length, self.inode, id });

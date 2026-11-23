@@ -123,7 +123,7 @@ def _build(session, source, name):
         redirect = ">" if index == 0 else ">>"
         session.write_command(f"echo '{line}' {redirect} /tmp/{name}.c")
         session.read_until_prompt()
-    session.write_command(f"tcc -O0 /tmp/{name}.c -o /tmp/{name}")
+    session.write_command(f"tcc -ccompat -O0 /tmp/{name}.c -o /tmp/{name}")
     session.read_until_prompt()
 
 

@@ -107,9 +107,12 @@ pub const RamFsFile = interface.DeriveFromBase(IFile, struct {
         return length;
     }
 
+    /// A failure comes back as -errno (ENOSPC for a full /tmp), which
+    /// `sys_write` hands to the caller; 0 would read as "wrote nothing" and
+    /// leave errno at whatever failed last (it used to surface as EINVAL).
     pub fn write(self: *Self, data: []const u8) isize {
-        const written = self._data.write_at(@intCast(self._position), data) catch {
-            return 0;
+        const written = self._data.write_at(@intCast(self._position), data) catch |err| {
+            return -@as(isize, kernel.errno.to_errno(err));
         };
         self._position += @as(isize, @intCast(written));
         return @intCast(written);

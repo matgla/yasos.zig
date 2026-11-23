@@ -18,7 +18,7 @@ def test_memset_128_byte_loop(tmp_path):
         pytest.skip("requires the built ARM cross compiler and objdump")
     obj = tmp_path / "string.o"
     subprocess.run([
-        str(compiler), "-O2", "-mcpu=cortex-m33", "-mthumb", "-fno-pic",
+        str(compiler), "-ccompat", "-O2", "-mcpu=cortex-m33", "-mthumb", "-fno-pic",
         "-mno-sb-relative-got", "-fno-module-local-calls", "-ffunction-sections",
         "-c", str(ROOT / "libs/libc/string.c"), "-o", str(obj),
     ], check=True, capture_output=True, text=True)

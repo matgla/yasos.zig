@@ -77,7 +77,7 @@ ring     = 10;     // frame width
 corner_r = 5;
 plate_t  = 3;      // lane / service tray thickness
 base_t   = 4;      // base (holds nut traps)
-lid_t    = 4;
+lid_t    = 3;
 post_d   = 10;
 rod_d    = 3.4;    // M3 clearance (screws, or threaded rod)
 /* how the tiers hold together:
@@ -338,19 +338,27 @@ module nut_traps(top_z) {   // hex pockets, top_z = 0: from below, else from abo
         cylinder(d = nut_af / cos(30) + 0.4, h = nut_h + 0.02, $fn = 6);
 }
 // outer walls from the tray top to the next tray, vents, connector cut-outs
-// a vertical slot with a 45-degree pointed top: needs no bridge
-module vent_x(w, d, hv) {   // spans x, through y
+// a vertical slot with a 45-degree pointed top (needs no bridge), or a plain rectangle
+// of the same height (flat: a short bridge across the slot, fewer perimeter turns)
+module vent_x(w, d, hv, flat = false) {   // spans x, through y
     translate([0, d, 0]) rotate([90, 0, 0]) linear_extrude(d)
-        polygon([[0, 0], [w, 0], [w, hv], [w / 2, hv + w / 2], [0, hv]]);
+        polygon(flat ? [[0, 0], [w, 0], [w, hv + w / 2], [0, hv + w / 2]]
+                     : [[0, 0], [w, 0], [w, hv], [w / 2, hv + w / 2], [0, hv]]);
 }
-module vent_y(w, d, hv) {   // spans y, through x
-    translate([d, 0, 0]) rotate([0, 0, 90]) vent_x(w, d, hv);
+module vent_y(w, d, hv, flat = false) {   // spans y, through x
+    translate([d, 0, 0]) rotate([0, 0, 90]) vent_x(w, d, hv, flat);
 }
-function near_cut(side, pos, cuts) =
-    len([for (c = cuts) if (c[0] == side && pos > c[1] - lintel_pw - vent_w - 1 && pos < c[2] + lintel_pw + 1) 1]) > 0;
+function near_cut(side, pos, cuts, vw = vent_w) =
+    len([for (c = cuts) if (c[0] == side && pos > c[1] - lintel_pw - vw - 1 && pos < c[2] + lintel_pw + 1) 1]) > 0;
 lintel_d  = 5;     // lintel depth inside the wall: the bridge is wall_t + lintel_d wide
 lintel_t  = 1.8;
 lintel_pw = 5;     // width of the pillars carrying each end of the lintel
+// break-away prop under the middle of a long lintel: a thin rib with one layer of air
+// under the bridge, snapped off after printing (it would stand in the plug opening)
+lintel_props    = true;
+lintel_prop_min = 30;    // spans longer than this get a prop
+lintel_prop_w   = 1.2;   // rib thickness along the wall
+lintel_prop_gap = 0.2;   // air under the bridge = one layer
 // a bridge over each cut-out: a lintel inside the wall on two pillars standing on the frame
 module lintels(t, h, cuts) {
     for (c = cuts) if (c[4] < h - 0.5) {
@@ -364,14 +372,20 @@ module lintels(t, h, cuts) {
             y = c[0] == "F" ? oy0 + wall_t - 0.01 : oy1 - wall_t - ld + 0.01;
             translate([a0, y, z1]) cube([span, ld, lt]);
             for (x = [a0, a1 - lintel_pw]) translate([x, y, t - 0.01]) cube([lintel_pw, ld, z1 - t + lt]);
+            if (lintel_props && c[2] - c[1] > lintel_prop_min)
+                translate([(c[1] + c[2] - lintel_prop_w) / 2, c[0] == "F" ? oy0 + 0.3 : y, t - 0.01])
+                    cube([lintel_prop_w, ld + wall_t - 0.3, z1 - lintel_prop_gap - t + 0.01]);
         } else {
             x = c[0] == "L" ? ox0 + wall_t - 0.01 : ox1 - wall_t - ld + 0.01;
             translate([x, a0, z1]) cube([ld, span, lt]);
             for (y = [a0, a1 - lintel_pw]) translate([x, y, t - 0.01]) cube([ld, lintel_pw, z1 - t + lt]);
+            if (lintel_props && c[2] - c[1] > lintel_prop_min)
+                translate([c[0] == "L" ? ox0 + 0.3 : x, (c[1] + c[2] - lintel_prop_w) / 2, t - 0.01])
+                    cube([ld + wall_t - 0.3, lintel_prop_w, z1 - lintel_prop_gap - t + 0.01]);
         }
     }
 }
-module walls(t, h, cuts) {
+module walls(t, h, cuts, vw = vent_w, flat = false) {
     if (enclosed) union() { lintels(t, h, cuts); difference() {
         translate([0, 0, t - 0.01]) difference() {
             outline(h + 0.01);
@@ -386,14 +400,14 @@ module walls(t, h, cuts) {
             if (c[0] == "L") translate([ox0 - 1, a0, z0]) cube([wall_t + 2, a1 - a0, z1 - z0]);
             if (c[0] == "R") translate([ox1 - wall_t - 1, a0, z0]) cube([wall_t + 2, a1 - a0, z1 - z0]);
         }
-        vh = h - 14 - (vent_w - 3) / 2;                  // vent slots, 45-degree tops
+        vh = h - 14 - (vw - 3) / 2;                      // vent slots
         if (vh > 4 && vent_pitch > 0) {
-            for (x = [ox0 + ring + 4 : vent_pitch : ox1 - ring - 3 - vent_w], sd = ["F", "B"])
-                if (!near_cut(sd, x, cuts))
-                    translate([x, sd == "F" ? oy0 - 1 : oy1 - wall_t - 1, t + 6]) vent_x(vent_w, wall_t + 2, vh);
-            for (y = [oy0 + ring + 4 : vent_pitch : oy1 - ring - 3 - vent_w], sd = ["L", "R"])
-                if (!near_cut(sd, y, cuts))
-                    translate([sd == "L" ? ox0 - 1 : ox1 - wall_t - 1, y, t + 6]) vent_y(vent_w, wall_t + 2, vh);
+            for (x = [ox0 + ring + 4 : vent_pitch : ox1 - ring - 3 - vw], sd = ["F", "B"])
+                if (!near_cut(sd, x, cuts, vw))
+                    translate([x, sd == "F" ? oy0 - 1 : oy1 - wall_t - 1, t + 6]) vent_x(vw, wall_t + 2, vh, flat);
+            for (y = [oy0 + ring + 4 : vent_pitch : oy1 - ring - 3 - vw], sd = ["L", "R"])
+                if (!near_cut(sd, y, cuts, vw))
+                    translate([sd == "L" ? ox0 - 1 : ox1 - wall_t - 1, y, t + 6]) vent_y(vw, wall_t + 2, vh, flat);
         }
     } }
 }
@@ -549,7 +563,7 @@ module lid() {
                 lane_crossbars(lid_t);
                 if (probe_reel) for (i = [0, 1]) at_probe(i) translate([0, 0, -0.01]) linear_extrude(lid_t + 0.02) reel_2d(cw, cl, 2);
             } else outline(lid_t);
-            if (top_closed) { posts_up(lid_t, h_top); walls(lid_t, h_top, []); }
+            if (top_closed) { posts_up(lid_t, h_top); walls(lid_t, h_top, [], lid_vent_w, lid_vent_flat); }
             if (probe_reel) for (i = [0, 1]) at_probe(i) reel(cw, cl);
             // on a spool the pocket starts on the flare top: its corners stay inside the flare
             for (i = [0, 1]) let(z0 = probe_reel ? zc - 0.01 : 0, fl = probe_reel ? 0.01 : lid_t)
@@ -642,6 +656,8 @@ module probe_cover_labelled(i) {
 }
 
 lid_open_floor = true;
+lid_vent_w    = 16;     // the lid's wall windows: wider, 4 mm piers
+lid_vent_flat = true;   // plain rectangles; the bridge over each is only 16 mm
 roof_vent = [10, 16];   // roof slot width, pitch
 // roof over the enclosed top: vents, M3 x 10 from the top into the lid's nut blocks
 module roof() {

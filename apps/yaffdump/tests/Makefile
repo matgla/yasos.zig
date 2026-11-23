@@ -10,6 +10,9 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -std=c11 -I. -I.. -I../../../libs/tinycc/source/obj
+# tcc is safe by default (yasc, -Wall, unsafe C as errors); this code is
+# regular C until it is ported, so -ccompat whenever CC is a tcc.
+CFLAGS += $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-ccompat)
 LDFLAGS =
 
 ifeq ($(CC), gcc)

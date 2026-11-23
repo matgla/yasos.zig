@@ -78,6 +78,15 @@ pub const Tier = struct {
     live_bodies: kernel.sync.Atomic(u32) = .init(0),
     detached: kernel.sync.Atomic(bool) = .init(false),
 
+    /// The spill directory is RAM too (a /var that fell back to a RamFs), so
+    /// spilling buys room, not persistence: a body stays in the arena for as
+    /// long as the arena can hold it, and goes to `directory` only once it
+    /// cannot. That keeps an arena bigger than the kernel heap (an524, 64 MB)
+    /// from handing its files to the smaller heap, and still lets a small one
+    /// (rp2350, 128 KB) borrow the heap -- whose RamFs refuses with ENOSPC well
+    /// before the heap runs dry -- rather than fail /tmp at 128 KB.
+    prefer_arena: kernel.sync.Atomic(bool) = .init(false),
+
     pub fn init(backing: *kernel.fs.IFileSystem, directory: []const u8, max_file_bytes: usize) Tier {
         return .{
             .backing = backing,
@@ -167,11 +176,17 @@ pub const Tier = struct {
     }
 
     /// Whether a body due to spill stays in the arena instead: only while
-    /// detached, and only while the arena -- never the kernel heap, which is
-    /// what a tier without one allocates from -- has room above its reserve.
+    /// detached or while the spill directory is RAM (`prefer_arena`), and only
+    /// while the arena -- never the kernel heap, which is what a tier without
+    /// one allocates from -- has room above its reserve.
     pub fn keeps_in_arena(self: *const Tier, grows: bool) bool {
-        if (!self.detached.load(.seq_cst) or self.arena == null) return false;
+        if (self.arena == null) return false;
+        if (!self.detached.load(.seq_cst) and !self.prefer_arena.load(.seq_cst)) return false;
         return !(grows and self.arena_is_low());
+    }
+
+    pub fn set_prefer_arena(self: *Tier, prefer: bool) void {
+        self.prefer_arena.store(prefer, .seq_cst);
     }
 
     pub fn reattach(self: *Tier) void {

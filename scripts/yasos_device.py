@@ -529,6 +529,14 @@ def uart_push(session, host_dir: Path, target_dir: str) -> dict:
         new_state[path] = host[path]
     for path in remove:
         new_state.pop(path, None)
+    # A conflict keeps its old base: taking the board's copy as the base would
+    # make the next pull see "unchanged on the board" (no <file>.target) and
+    # the next push overwrite the board's edit.
+    for path in report["conflicts"]:
+        if path in base:
+            new_state[path] = base[path]
+        else:
+            new_state.pop(path, None)
     _save_state(state, new_state)
     return report
 

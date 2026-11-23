@@ -1,5 +1,8 @@
 CC = gcc
 CFLAGS = -Wall -pedantic -g -std=c11 -I../include
+# tcc is safe by default (yasc, -Wall, unsafe C as errors); this code is
+# regular C until it is ported, so -ccompat whenever CC is a tcc.
+CFLAGS += $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-ccompat)
 
 SRCS = $(wildcard *.c)
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))

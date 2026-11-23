@@ -112,6 +112,13 @@ config CONFIG_APP_CCAT
   bool "ccat: cat with C syntax colours"
   default y
 
+config CONFIG_APP_MDCAT
+  bool "mdcat: Markdown in the terminal"
+  default y
+  help
+    Renders Markdown with colours: headings, lists, tables, code. mdcat -p
+    pages the result through more.
+
 config CONFIG_APP_HEXDUMP
   bool "hexdump"
   default y

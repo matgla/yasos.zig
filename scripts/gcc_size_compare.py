@@ -201,8 +201,8 @@ def main():
                 got = {}
                 gflags = to_gcc(flags) + GCC_ABI + ["-isystem", GCC_INC,
                                                     "-I", ROOTFS_INC]
-                for who, cc, extra, lvl in (("tcc0", TCC, flags, ["-O0"]),
-                                            ("tcc", TCC, flags, OPT),
+                for who, cc, extra, lvl in (("tcc0", TCC, ["-ccompat"] + flags, ["-O0"]),
+                                            ("tcc", TCC, ["-ccompat"] + flags, OPT),
                                             ("gcc", GCC, gflags, OPT),
                                             # tcc aliases -Os to -O2, so gcc at
                                             # -Os is the size bound tcc has no

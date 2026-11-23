@@ -15,7 +15,7 @@ LG=$(arm-none-eabi-gcc $GF -print-libgcc-file-name)
 arm-none-eabi-gcc $GF -O2 -c "$HERE/drv.c" -o "$OUT/drv.o"
 arm-none-eabi-gcc $GF -c "$P/boot.S" -o "$OUT/boot.o"
 arm-none-eabi-gcc $GF -O2 -I$TROOT/include -c "$BS" -o "$OUT/bs_gcc.o"
-"$TCC" -O2 $GF $NLINC -c "$BS" -o "$OUT/bs_tcc.o"
+"$TCC" -ccompat -O2 $GF $NLINC -c "$BS" -o "$OUT/bs_tcc.o"
 for a in gcc tcc; do
   arm-none-eabi-ld -T "$P/link.ld" -o "$OUT/$a.elf" "$OUT/boot.o" "$OUT/drv.o" "$OUT/bs_$a.o" "$NL" "$LG" 2>&1 | grep -v warning || true
   qemu-system-arm -machine mps2-an505 -cpu cortex-m33 -kernel "$OUT/$a.elf" -nographic -semihosting -monitor none -serial null -d exec -accel tcg,one-insn-per-tb=on -D "$OUT/exec_$a.log"

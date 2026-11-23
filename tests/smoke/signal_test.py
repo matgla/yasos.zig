@@ -59,7 +59,7 @@ def test_ctrl_c_ends_a_program_spinning_in_user_code(request):
     session = request.node.stash[session_key]
     _run(session, "rm -rf /tmp/sigtest; mkdir -p /tmp/sigtest")
     _run(session, "echo 'int main(void) { volatile unsigned n = 0; for (;;) ++n; }' > /tmp/sigtest/spin.c")
-    out = _run(session, "tcc /tmp/sigtest/spin.c -o /tmp/sigtest/spin && echo BUILD_OK")
+    out = _run(session, "tcc -ccompat /tmp/sigtest/spin.c -o /tmp/sigtest/spin && echo BUILD_OK")
     assert "BUILD_OK" in out, out
     elapsed, status = _interrupt(session, "/tmp/sigtest/spin")
     assert elapsed < 10, elapsed

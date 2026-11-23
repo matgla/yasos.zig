@@ -69,8 +69,8 @@ def test_hot_text_program_behaves_as_linked_plainly(request):
     write_lines(session, "/tmp/hot.c", SOURCE.splitlines())
     write_lines(session, "/tmp/hot.txt", HOT)
     flags = "-O1 -ffunction-sections"
-    assert "error" not in run(session, f"tcc {flags} /tmp/hot.c -o /tmp/plain")
-    assert "error" not in run(session, f"tcc {flags} -Wl,--hot-text=/tmp/hot.txt /tmp/hot.c -o /tmp/hotp")
+    assert "error" not in run(session, f"tcc -ccompat {flags} /tmp/hot.c -o /tmp/plain")
+    assert "error" not in run(session, f"tcc -ccompat {flags} -Wl,--hot-text=/tmp/hot.txt /tmp/hot.c -o /tmp/hotp")
     for program in ("/tmp/plain", "/tmp/hotp", "/tmp/hotp"):  # twice: a second load of one image
         text = output_of(session, program)
         for line in EXPECTED:

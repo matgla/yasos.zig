@@ -10,14 +10,33 @@ shift 5
 HERE=$(cd "$(dirname "$0")" && pwd)
 REMOTE=${YASOS_RIG_REMOTE:-$HOME/yasos_remote_smoke}
 W=$REMOTE/workdir
-exec 9>/var/lock/rp2350-board.lock
-flock -w 3000 9 || { echo NOLOCK; exit 99; }
+# The board: boards.py beside this script (YASOS_BOARD, else the first free board of pool
+# dev; without a registry the single legacy board lock).  NOLOCK = not taken in 3000 s.
+if [ -z "${YASOS_BOARD_LOCK_HELD:-}" ]; then
+  export YASOS_RIG_HELD_MARK=$D/.board-held.$$
+  rm -f "$YASOS_RIG_HELD_MARK"
+  python3 "$HERE/boards.py" run --keeps-state --wait 3000 --what "run_selfhost $D" -- \
+    bash "$0" "$D" "$RS" "$KS" "$DEST" "$MODE" "$@"
+  rc=$?
+  # Never got the board: busy (99) or no such board (2, boards.py says why above).
+  [ $rc != 0 ] && [ ! -e "$YASOS_RIG_HELD_MARK" ] && echo "NOLOCK rc=$rc"
+  rm -f "$YASOS_RIG_HELD_MARK"
+  exit $rc
+fi
+[ -n "${YASOS_RIG_HELD_MARK:-}" ] && : > "$YASOS_RIG_HELD_MARK"
+# Per board: the images it is flashed from and what it holds (reflash.sh derives the same).
+IMG=$W
+if [ -n "${YASOS_BOARD_STATE:-}" ] && [ -n "${YASOS_BOARD:-}" ]; then
+  IMG=$W/board-$YASOS_BOARD
+  echo "board $YASOS_BOARD"
+fi
+mkdir -p "$IMG"
 check() {
-  [ "$(sha256sum < "$W/rootfs.img" | cut -d' ' -f1)" = "$RS" ] &&
-    [ "$(sha256sum < "$W/yasos_kernel" | cut -d' ' -f1)" = "$KS" ] || { echo "IMAGE CHANGED $1"; exit 8; }
+  [ "$(sha256sum < "$IMG/rootfs.img" | cut -d' ' -f1)" = "$RS" ] &&
+    [ "$(sha256sum < "$IMG/yasos_kernel" | cut -d' ' -f1)" = "$KS" ] || { echo "IMAGE CHANGED $1"; exit 8; }
 }
-cp "$D/img/rootfs.img" "$W/rootfs.img.new" && mv "$W/rootfs.img.new" "$W/rootfs.img"
-cp "$D/img/yasos_kernel" "$W/yasos_kernel.new" && mv "$W/yasos_kernel.new" "$W/yasos_kernel"
+cp "$D/img/rootfs.img" "$IMG/rootfs.img.new" && mv "$IMG/rootfs.img.new" "$IMG/rootfs.img"
+cp "$D/img/yasos_kernel" "$IMG/yasos_kernel.new" && mv "$IMG/yasos_kernel.new" "$IMG/yasos_kernel"
 check before
 mkdir -p "$D/logs"
 bash "$HERE/reflash.sh" "$RS" "$KS" > "$D/logs/reflash.log" 2>&1

@@ -803,7 +803,8 @@ def _restore_default_stack_size(session):
 RETURNS_PATTERN = re.compile(r"^\[returns (\d+)\]$")
 TAG_PATTERN = re.compile(r"^\[([a-zA-Z_][a-zA-Z0-9_]*(?:=[^\]]+)?)\]$")
 SHA256_LINE_PATTERN = re.compile(r"^(?P<digest>[0-9a-f]{64})(?:\s+.+)?$", re.IGNORECASE)
-LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
+# #embed "file" (C23) is a dependency like #include "file": its data goes up too.
+LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*(?:include|embed)\s+"([^"]+)"', re.MULTILINE)
 EXIT_MARKER_PREFIX = "__EXIT_STATUS__:"
 COMPILE_MARKER_PREFIX = "__COMPILE_STATUS__:"
 # Expected output above this many bytes is captured to a file on the device and
@@ -1263,7 +1264,7 @@ SHARD_BUCKETS = 32
 # Directories under a corpus root that hold build output rather than test
 # sources; scanning them for includes costs seconds and finds nothing relevant.
 _SHARD_SCAN_SKIP_DIRS = {"qemu", "build", "libs", "newlib_build", ".git"}
-_QUOTED_INCLUDE_RE = re.compile(r'#\s*include\s+"([^"]+)"')
+_QUOTED_INCLUDE_RE = re.compile(r'#\s*(?:include|embed)\s+"([^"]+)"')  # an #embed path is relative too
 _shardable_cache: dict[str, frozenset] = {}
 
 
@@ -2409,7 +2410,7 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
         session.write_command(
             f"{stack_raise}"
             f"{os.environ.get('YASOS_TCC_ENV_PREFIX', '')}"
-            f"tcc {bench_flag}{compile_mode_flag}{extra_cflags}{compile_args} -o {shlex.quote(output_binary)}; "
+            f"tcc -ccompat {bench_flag}{compile_mode_flag}{extra_cflags}{compile_args} -o {shlex.quote(output_binary)}; "
             f"compile_status=$?; "
             f"{stack_restore}"
             f"if [ $compile_status -eq 0 ] && [ ! -e {shlex.quote(output_binary)} ]; then compile_status=254; fi; "

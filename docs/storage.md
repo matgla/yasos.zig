@@ -98,7 +98,16 @@ PSRAM the arena is `temp_ram`, as the linker script has it.
 Without a card (QEMU, or a board with the slot empty), `/var` and `/home` are
 RAM fallbacks, `/root` is bound into the RAM `/home`, `/boot` is the empty
 romfs directory, and there is no swap. The kernel log goes to
-`/var/log/kernel.log` only when `/var` is real storage.
+`/var/log/kernel.log` only when `/var` is real storage. A /tmp file stays in the
+arena while it fits and only then spills to the RAM `/var/tmp`, which lives on
+the kernel heap: on the Pico Plus 2 that makes about 300 KB of /tmp in all, and a
+write past it fails with ENOSPC (`Tier.prefer_arena`, `source/fs/ramfs/`).
+
+Small writes to an ext4 file are gathered per open file (2 KB) and reach lwext4
+in chunks aligned to 2 KB of the file; every other ext4 operation, from any
+handle, hands them over first, so nothing sees a file without its latest bytes
+(`ext4fs.PendingWrites`). A write the card refused after write() had returned is
+reported by the next write or fsync.
 
 ## At run time
 

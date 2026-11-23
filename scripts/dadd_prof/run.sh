@@ -20,7 +20,7 @@ CF="-O2 -I$FP/../.. -I$FP/../../../include"
 mkdir -p "$OUT/gccobj" "$OUT/tccobj"
 for f in fadd fmul fdiv fcmp dadd dmul ddiv dconv dcmp conv conv64; do
     arm-none-eabi-gcc $GF $CF -Wall -Wextra -c "$FP/$f.c" -o "$OUT/gccobj/$f.o"
-    "$TCC" $CF -c "$FP/$f.c" -o "$OUT/tccobj/$f.o"
+    "$TCC" -ccompat $CF -c "$FP/$f.c" -o "$OUT/tccobj/$f.o"
 done
 for f in f2d_stub fcmp_asm dcmp_asm; do
     arm-none-eabi-gcc $GF $CF -c "$FP/$f.S" -o "$OUT/gccobj/$f.o"

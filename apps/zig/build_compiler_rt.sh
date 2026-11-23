@@ -45,5 +45,5 @@ python3 "$HERE/strip_naked_asm.py" "$WORK/compiler_rt.c" "$WORK/compiler_rt_tcc.
 # ~1000 instructions a call.
 # -ffunction-sections: the device zig's --hot-text list names its atomics, among the
 # hottest code of a compile.
-"$TCC" -O2 -c "$WORK/compiler_rt_tcc.c" -o "$OUT" -ffunction-sections \
+"$TCC" -ccompat -O2 -c "$WORK/compiler_rt_tcc.c" -o "$OUT" -ffunction-sections \
     -I "$ZIG_SRC/lib" -include "$HERE/zig_c_prelude.h" -fvisibility=hidden

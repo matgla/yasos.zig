@@ -22,6 +22,12 @@
 # vendor with $1 or YASOS_SMOKE_PROBE_VID; off-time with
 # YASOS_SMOKE_POWER_OFF_SECONDS. Exit 0 once cycled, 2 if the probe can't be
 # located (caller keeps the original reset error), 3 if both methods fail.
+#
+# On a rig with several boards (scripts/rig/boards.py run sets these):
+# YASOS_PROBE_SERIAL picks this board's probe instead of the first one with the
+# vendor id, YASOS_POWER_PORTS ("hub:port ...", e.g. the probe's port and the
+# board's own) are the uhubctl ports cut together, and SERIAL_DEVICE is the UART
+# waited for -- never another board's.
 
 set -u
 
@@ -33,17 +39,20 @@ if [[ ! "$OFF_SECONDS" =~ ^[0-9]+$ ]] || (( OFF_SECONDS < 5 )); then
     OFF_SECONDS=5
 fi
 
-# Locate the probe's sysfs device by vendor id.
+# Locate the probe's sysfs device: by serial on a multi-board rig, else by vendor id.
+PROBE_SERIAL="${YASOS_PROBE_SERIAL:-}"
 devname=""
 for dev in /sys/bus/usb/devices/*/; do
     [[ -f "$dev/idVendor" ]] || continue
-    if [[ "$(cat "$dev/idVendor" 2>/dev/null)" == "$VID" ]]; then
-        devname=$(basename "$dev")
-        break
+    [[ "$(cat "$dev/idVendor" 2>/dev/null)" == "$VID" ]] || continue
+    if [[ -n "$PROBE_SERIAL" && "$(cat "$dev/serial" 2>/dev/null)" != "$PROBE_SERIAL" ]]; then
+        continue
     fi
+    devname=$(basename "$dev")
+    break
 done
 if [[ -z "$devname" ]]; then
-    echo "power_reset_target: no USB device with vendor $VID found; skipping power reset" >&2
+    echo "power_reset_target: no USB device with vendor $VID${PROBE_SERIAL:+ and serial $PROBE_SERIAL} found; skipping power reset" >&2
     exit 2
 fi
 
@@ -58,12 +67,21 @@ while [[ "$top_port" == *.* ]]; do
     top_port="${top_port%.*}"
 done
 
+serial_present() {
+    # This board's UART when it is pinned, else any probe UART.
+    if [[ -n "${SERIAL_DEVICE:-}" ]]; then
+        [[ -e "$SERIAL_DEVICE" ]]
+    else
+        ls /dev/ttyACM* >/dev/null 2>&1
+    fi
+}
+
 wait_for_serial() {
     # Wait for the debug-probe CDC port to come back before returning; session.py
     # then reopens the serial handle (the /dev node may have changed). Returns 0
     # regardless -- _reopen_serial is the authority on whether serial recovered.
     for _wait in $(seq 1 30); do
-        if ls /dev/ttyACM* >/dev/null 2>&1; then
+        if serial_present; then
             echo "power_reset_target: serial re-enumerated." >&2
             sleep 1
             return 0
@@ -76,7 +94,26 @@ wait_for_serial() {
 
 # --- Primary: RPi root-hub per-port VBUS cut (Pi 5 ppps) ---
 uhubctl_bin=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)
-if [[ -x "$uhubctl_bin" ]]; then
+# The registered ports of this board: every one goes off, then every one on.
+if [[ -x "$uhubctl_bin" && -n "${YASOS_POWER_PORTS:-}" ]]; then
+    echo "power_reset_target: port-power cycle via uhubctl (${YASOS_POWER_PORTS}, ${OFF_SECONDS}s off)..." >&2
+    cut_ok=1
+    for hp in $YASOS_POWER_PORTS; do
+        sudo "$uhubctl_bin" -l "${hp%:*}" -p "${hp##*:}" -a off -r 100 >&2 2>&1 || cut_ok=0
+    done
+    if (( cut_ok )); then
+        sleep "$OFF_SECONDS"
+        for hp in $YASOS_POWER_PORTS; do
+            for _attempt in 1 2 3; do
+                sudo "$uhubctl_bin" -l "${hp%:*}" -p "${hp##*:}" -a on -r 100 >&2 2>&1 && break
+                sleep 1
+            done
+        done
+        wait_for_serial
+        exit 0
+    fi
+    echo "power_reset_target: uhubctl port-power failed; falling back to hub unbind..." >&2
+elif [[ -x "$uhubctl_bin" ]]; then
     echo "power_reset_target: port-power cycle via uhubctl (hub $bus port $root_port, ${OFF_SECONDS}s off)..." >&2
     if sudo "$uhubctl_bin" -l "$bus" -p "$root_port" -a off -r 100 >&2 2>&1; then
         sleep "$OFF_SECONDS"

@@ -601,7 +601,7 @@ def test_batching_and_concurrency(request):
     compile_workload = Workload(
         "compile",
         [
-            f"/bin/tcc -O0 -c {SOURCE} -o {WORK_DIR}/{job}.o"
+            f"/bin/tcc -ccompat -O0 -c {SOURCE} -o {WORK_DIR}/{job}.o"
             for job in range(COMPILE_JOBS)
         ],
         [f"{WORK_DIR}/{job}.o" for job in range(COMPILE_JOBS)],
@@ -609,7 +609,7 @@ def test_batching_and_concurrency(request):
     compile_small_workload = Workload(
         "compile-small",
         [
-            f"/bin/tcc -O0 -c {SMALL_SOURCE} -o {WORK_DIR}/{job}.o"
+            f"/bin/tcc -ccompat -O0 -c {SMALL_SOURCE} -o {WORK_DIR}/{job}.o"
             for job in range(COMPILE_JOBS)
         ],
         [f"{WORK_DIR}/{job}.o" for job in range(COMPILE_JOBS)],
@@ -625,7 +625,7 @@ def test_batching_and_concurrency(request):
         _run(session, f"rm -f {COMPUTE_SOURCE} {COMPUTE_BINARY}")
         _write_file(session, COMPUTE_SOURCE, COMPUTE_SOURCE_LINES)
         build = " ".join(
-            _run(session, f"/bin/tcc -O0 {COMPUTE_SOURCE} -o {COMPUTE_BINARY}")
+            _run(session, f"/bin/tcc -ccompat -O0 {COMPUTE_SOURCE} -o {COMPUTE_BINARY}")
         )
         _run(session, f"rm -f {COMPUTE_SOURCE}")
         listing = " ".join(_run(session, f"ls {COMPUTE_BINARY}"))
@@ -646,7 +646,7 @@ def test_batching_and_concurrency(request):
         """Compile the io job. Same check as the compute job, same reason."""
         _run(session, f"rm -f {IO_SOURCE} {IO_BINARY}")
         _write_file(session, IO_SOURCE, IO_SOURCE_LINES)
-        build = " ".join(_run(session, f"/bin/tcc -O0 {IO_SOURCE} -o {IO_BINARY}"))
+        build = " ".join(_run(session, f"/bin/tcc -ccompat -O0 {IO_SOURCE} -o {IO_BINARY}"))
         _run(session, f"rm -f {IO_SOURCE}")
         listing = " ".join(_run(session, f"ls {IO_BINARY}"))
         if IO_BINARY not in listing or "No such" in listing:
@@ -665,7 +665,7 @@ def test_batching_and_concurrency(request):
     mixed_workload = Workload(
         "mixed",
         [
-            f"/bin/tcc -O0 -c {SOURCE} -o {WORK_DIR}/0.o",
+            f"/bin/tcc -ccompat -O0 -c {SOURCE} -o {WORK_DIR}/0.o",
             f"{COMPUTE_BINARY} {COMPUTE_ITERATIONS}",
         ],
         [f"{WORK_DIR}/0.o"],
@@ -675,7 +675,7 @@ def test_batching_and_concurrency(request):
     mixed_io_workload = Workload(
         "mixed-io",
         [
-            f"/bin/tcc -O0 -c {SOURCE} -o {WORK_DIR}/0.o",
+            f"/bin/tcc -ccompat -O0 -c {SOURCE} -o {WORK_DIR}/0.o",
             f"{IO_BINARY} {IO_WRITES}",
             f"/bin/rm -f {WORK_DIR}/stale.o",
         ],

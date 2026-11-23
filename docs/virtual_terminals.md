@@ -26,7 +26,7 @@ constrained embedded OS.
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Physical UART (uart0 @ 3 Mbaud)            │
+│  Physical UART (uart0 @ 6 Mbaud)            │
 │  /dev/uart0, /dev/stdin, /dev/stdout,       │
 │  /dev/stderr                                │
 └─────────────────────────────────────────────┘

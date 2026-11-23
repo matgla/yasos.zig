@@ -1,3 +1,5 @@
+import os
+
 import serial
 import serial.tools.list_ports
 
@@ -7,6 +9,19 @@ def allowed_probes_list():
     ]
 
 def detect_probe_serial_port():
+    """The debug probe's UART.
+
+    On a rig with several boards (scripts/rig/boards.py), YASOS_PROBE_SERIAL names
+    the probe of the board this run holds: only that probe's port is returned, so a
+    re-detection after a power cycle never lands on the other board's UART.
+    """
+    wanted = (os.environ.get("YASOS_PROBE_SERIAL") or "").strip()
+    if wanted:
+        for port in serial.tools.list_ports.comports(include_links=False):
+            if (port.serial_number or "") == wanted:
+                return port.device
+        return None
+
     # Imported lazily so QEMU-mode runs (which never probe hardware) don't
     # require libudev/pyudev to be installed.
     import pyudev

@@ -12,6 +12,9 @@ CC ?= armv8m-tcc
 YAFF_INCLUDE = ../../libs/tinycc/source/obj
 
 CFLAGS = $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden -I$(YAFF_INCLUDE)
+# tcc is safe by default (yasc, -Wall, unsafe C as errors); this code is
+# regular C until it is ported, so -ccompat whenever CC is a tcc.
+CFLAGS += $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-ccompat)
 LDFLAGS = $(ROOTFS_DEBUG_CFLAGS) -fvisibility=hidden
 
 ifeq ($(CC), armv8m-tcc)

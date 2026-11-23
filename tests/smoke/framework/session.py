@@ -161,18 +161,18 @@ BOOT_TIMEOUT = float(os.environ.get("YASOS_SMOKE_BOOT_TIMEOUT", "15"))
 
 # Must match the target's CONFIG_CONSOLE_BAUDRATE (menuconfig: Console). The
 # remote runner exports the board profile's rate (console_baudrate in
-# scripts/remote_smoke_tui.py); 3000000 is only the fallback for runs that do
-# not set it. A mismatch does not fail loudly, it just turns the console into
-# garbage.
+# scripts/remote_smoke_tui.py); 6000000, the Pico Plus 2's rate, is only the
+# fallback for runs that do not set it (CI's hardware jobs). A mismatch does
+# not fail loudly, it just turns the console into garbage.
 #
-# 3 Mbaud is the target PL011's ceiling: clk_peri/(16*divisor) with clk_peri at
-# 48 MHz and the divisor bottoming out at 1. It is exact, unlike 921600.
-#
-# This was 460800 until the rig's debug probe was reflashed off debugprobe
-# 2.0.1, which predates the v2.2.1/v2.2.2 UART-TX fixes; at 921600 that firmware
-# was measured dropping 32-48 bytes out of roughly every fourth bulk-transfer
-# burst; see docs/remote_smoke_speedup_plan.md.
-CONSOLE_BAUDRATE = int(os.environ.get("YASOS_SMOKE_CONSOLE_BAUDRATE", "3000000"))
+# 6 Mbaud since 2026-11-20: the board takes clk_peri from PLL_SYS (133 MHz) for
+# it, and the rig's probes run the DMA build of debugprobe (branch uart-rx-dma).
+# Stock debugprobe polls its UART and dropped ~10% of board->host bytes already
+# at 3 Mbaud; with it, set YASOS_SMOKE_CONSOLE_BAUDRATE and the board back to
+# 3000000. History: 460800 until debugprobe 2.0.1 was replaced (it dropped
+# bursts at 921600, see docs/remote_smoke_speedup_plan.md), then 3 Mbaud, the
+# PL011 ceiling from PLL_USB's 48 MHz.
+CONSOLE_BAUDRATE = int(os.environ.get("YASOS_SMOKE_CONSOLE_BAUDRATE", "6000000"))
 
 class Session:
     serial_port = None

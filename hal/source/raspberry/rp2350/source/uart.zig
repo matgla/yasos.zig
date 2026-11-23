@@ -42,7 +42,7 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         // Sized to the largest burst a reader can be handed at once. The
         // original 512 was sized for a shell command line; zmodem sends 1 KiB
         // sub-packets, which arrive as one uninterrupted burst and can reach
-        // ~2 KiB on the wire once every byte needs ZDLE escaping. 4096 covers
+        // ~2 KiB on the wire once every byte needs ZDLE escaping. 6 KB covers
         // that with margin, so a reader that is momentarily slower than the
         // line -- raw mode with VMIN=1 returns as soon as the ring runs dry, so
         // it pays a syscall per byte or two while it keeps up -- cannot lose
@@ -53,8 +53,9 @@ pub fn Uart(comptime index: usize, comptime pins: interface.uart.Pins) type {
         // whenever the RX interrupt is masked for longer than the FIFO can
         // cover (see on_uart_rx_irq).
         //
-        // 4 KB of it from `set_rx_storage`, in PSRAM on the boards that have it.
-        // Until then a little in SRAM, as the interrupt is live before that memory.
+        // 6 KB of it from `set_rx_storage` (source/main.zig), in SRAM unless the
+        // kernel heap cannot spare it. Until then 256 bytes here, as the interrupt
+        // is live before that memory.
         var rx_boot_storage: [256]u8 = undefined;
         var rx_buffer: common.utils.MovableRingBuffer(u8) = common.utils.MovableRingBuffer(u8).init(&rx_boot_storage);
         var is_initialized: bool = false;

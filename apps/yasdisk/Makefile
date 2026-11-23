@@ -5,6 +5,9 @@
 
 CC ?= armv8m-tcc
 CFLAGS = -g -fvisibility=hidden -Wall -Wextra
+# tcc is safe by default (yasc, -Wall, unsafe C as errors); this code is
+# regular C until it is ported, so -ccompat whenever CC is a tcc.
+CFLAGS += $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-ccompat)
 LDFLAGS = -g -fvisibility=hidden
 
 SRCS = main.c mbr.c ui.c

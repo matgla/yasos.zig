@@ -47,7 +47,7 @@ rescue_dp() {
 # reset that loses the DP -- means "program it", as before this check.
 board_has_images() {
     timeout "${HW_FLASH_CHECK_TIMEOUT:-60}" \
-    openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 5000" \
+    openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 16000" \
         -c init -c "reset init" -c "rp2xxx rom_api_call IF" -c "rp2xxx rom_api_call EX" \
         -c "rp2xxx rom_api_call FC" -c "rp2xxx rom_api_call CX" \
         -c "verify_image_checksum rootfs.img 0x1c120000 bin" \

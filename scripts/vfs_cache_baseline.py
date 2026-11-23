@@ -77,7 +77,7 @@ def capture(kernel, out, backend):
         include = f"-I{dest}/include " if backend == "ext4" else ""
         for label in ("first", "again"):
             results[f"compile-{label}"] = measure(guest, f"{backend}/compile-{label}",
-                f"tcc -bench -O2 {include}{dest}/hello.c -o {dest}/hello")
+                f"tcc -ccompat -bench -O2 {include}{dest}/hello.c -o {dest}/hello")
         for label in ("first", "again"):
             results[f"spawn-{label}"] = measure(guest, f"{backend}/spawn-{label}", f"{dest}/hello")
         # Regression check: bytes written through the filesystem remain visible

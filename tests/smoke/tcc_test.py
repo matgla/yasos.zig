@@ -27,7 +27,7 @@ def test_compile_hello_world_with_usage_tracking(request):
         if i == 1:
             session.write_command("cat /proc/leakstart")
             session.wait_for_prompt()
-        session.write_command("tcc /usr/hello_world.c -o " + output_file)
+        session.write_command("tcc -ccompat /usr/hello_world.c -o " + output_file)
         data = session.wait_for_prompt(timeout=5)
         # Dump leaks after second iteration
         if i == 1:

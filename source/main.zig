@@ -176,15 +176,18 @@ fn release_tmp_spill() anyerror!void {
 }
 
 fn reattach_tmp_spill() void {
-    // Spilling only pays when the directory is real storage. A RAM /var (the
-    // x-fallback when there is no card) would take the bodies onto the kernel
-    // heap, which is smaller than the arena: a 12.7 MB file the 64 MB an524
-    // arena holds failed there with ENOMEM. Stay detached instead -- a body due
-    // to spill then stays in the arena while it has room (Tier.keeps_in_arena).
-    if (!spill_pays(tmp_memory_pool != null, mounter.is_persistent(tmp_tier.?.directory))) return;
+    // Spilling early only pays when the directory is real storage. A RAM /var
+    // (the x-fallback when there is no card) puts the bodies on the kernel
+    // heap: on an524 that is smaller than the arena (a 12.7 MB file the 64 MB
+    // arena holds failed there with ENOMEM), on the rp2350 it is 50 times the
+    // 128 KB arena. So with a RAM /var a body stays in the arena while it fits
+    // and moves to the heap only when it does not (Tier.prefer_arena); staying
+    // detached instead failed every /tmp write past 128 KB on a board without
+    // a card.
     mounter.mkdir_parents(tmp_tier.?.directory) catch |err| {
         kernel.log.warn("/tmp: can't create spill directory {s}: {s}", .{ tmp_tier.?.directory, @errorName(err) });
     };
+    tmp_tier.?.set_prefer_arena(!spill_pays(tmp_memory_pool != null, mounter.is_persistent(tmp_tier.?.directory)));
     tmp_tier.?.reattach();
 }
 
@@ -308,11 +311,12 @@ fn make_tmp_filesystem(kernel_allocator: std.mem.Allocator, requested_spill: []c
             .free_bytes = &tmp_arena_free_bytes,
         }, tmpfs.arena_reserve);
     }
-    // /var is mounted before /tmp (etc/fstab); when it came up as RAM, start
-    // detached so nothing spills onto the kernel heap (see reattach_tmp_spill).
+    // /var is mounted before /tmp (etc/fstab); when it came up as RAM, files
+    // stay in the arena until it is full and only then go to the heap there
+    // (see reattach_tmp_spill).
     if (!spill_pays(maybe_arena != null, mounter.is_persistent(spill_directory))) {
-        tmp_tier.?.detach() catch unreachable; // no body exists yet
-        kernel.log.info("/tmp: {s} is not storage; files stay in the arena", .{spill_directory});
+        tmp_tier.?.set_prefer_arena(true);
+        kernel.log.info("/tmp: {s} is not storage; files leave the arena only when it is full", .{spill_directory});
     }
 
     return try (try RamFs.InstanceType.init_tiered(allocator, &tmp_tier.?)).interface.new(allocator);
@@ -715,8 +719,13 @@ pub export fn main() void {
         // Past this, memory that is not SRAM for whatever can do without it.
         const slow_allocator = kernel.memory.heap.slow.install(allocator);
         // The console's receive ring: the interrupt is already filling a small one.
+        // In SRAM: the RX interrupt writes it a byte at a time and PSRAM is slow
+        // to reach. 6 KB is 10 ms of line at 6 Mbaud, room for a reader to come
+        // round; the slow heap only when SRAM cannot spare it.
         if (@TypeOf(board.uart.uart0).movable_rx) {
-            const rx_storage = slow_allocator.alloc(u8, 4096) catch @panic("no memory for the console's receive ring");
+            const rx_ring_size = 6 * 1024;
+            const rx_storage = allocator.alloc(u8, rx_ring_size) catch
+                slow_allocator.alloc(u8, rx_ring_size) catch @panic("no memory for the console's receive ring");
             board.uart.uart0.set_rx_storage(rx_storage);
         }
         splashscreen();

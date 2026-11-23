@@ -117,7 +117,7 @@ def _compile_and_run(session, source, name):
             f"/tmp is full while writing /tmp/{name}.c -- something earlier in "
             f"the run left files behind:\n{out}"
         )
-    session.write_command(f"tcc -O0 /tmp/{name}.c -o /tmp/{name}")
+    session.write_command(f"tcc -ccompat -O0 /tmp/{name}.c -o /tmp/{name}")
     session.read_until_prompt()
     session.write_command(f"/tmp/{name}")
     output = session.read_until_prompt()

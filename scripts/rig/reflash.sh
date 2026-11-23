@@ -6,12 +6,20 @@
 # The hashes are checked at the start only and write_image reads the files later, so
 # whoever calls this must keep them from changing: run_selfhost.sh checks again after.
 set -u
-HERE=$(cd "$(dirname "$0")" && pwd); REMOTE=${YASOS_RIG_REMOTE:-$HOME/yasos_remote_smoke}; W=$REMOTE/workdir; R=$W/rootfs.img; K=$W/yasos_kernel; ADDR=$((0x10120000))
+HERE=$(cd "$(dirname "$0")" && pwd); REMOTE=${YASOS_RIG_REMOTE:-$HOME/yasos_remote_smoke}; W=$REMOTE/workdir; ADDR=$((0x10120000))
+# Per board (boards.py run): the images in workdir/board-NAME, what the board holds in its
+# YASOS_BOARD_STATE (remote_smoke_tui.py reads the same files).  Single board: the workdir.
+if [ -n "${YASOS_BOARD_STATE:-}" ] && [ -n "${YASOS_BOARD:-}" ]; then
+  IMG=$W/board-$YASOS_BOARD; ST=$YASOS_BOARD_STATE; TCL=/tmp/yasos_reflash-$YASOS_BOARD.tcl
+else
+  IMG=$W; ST=$W/.artifact-state; TCL=/tmp/yasos_reflash.tcl
+fi
+R=$IMG/rootfs.img; K=$IMG/yasos_kernel
 # The romfs is 1 MiB into partition 1 (flash offset 0x20000); the kernel ELF loads at
 # 0x20000 and carries the partition table for offset 0 (hal/source/raspberry/rp2350/partitions).
 [ "$(sha256sum < $R | cut -d' ' -f1)" = "$1" ] || { echo "rootfs sha mismatch"; exit 8; }
 [ "$(sha256sum < $K | cut -d' ' -f1)" = "$2" ] || { echo "kernel sha mismatch"; exit 8; }
-TCL=/tmp/yasos_reflash.tcl; SZ=$(stat -c %s $R); CH=$((64*1024))
+SZ=$(stat -c %s $R); CH=$((64*1024))
 {
 cat <<'TCL'
 set retries 0
@@ -45,10 +53,12 @@ TCL
   echo "program $K verify"
   echo 'echo [format "STEP kernel flashed+verified in %.1fs" [expr {([ms]-$t0)/1000.0}]]'
 } > $TCL
+# A flash that stops half way leaves the board holding neither image.
+rm -f "$ST/kernel.sha256" "$ST/rootfs.sha256"
 # Both cores: a running core 1 writes into the work area being programmed from (AGENTS.md).
-openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 8000" -c init -c "reset halt" -c "source $TCL" -c exit 2>&1 | grep -vE "^(Open On|Licensed|For bug|\s+http|Info : (CMSIS|Using|SWCLK|Hardware|Listening|starting)|cortex_m|0$)"
+openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 16000" -c init -c "reset halt" -c "source $TCL" -c exit 2>&1 | grep -vE "^(Open On|Licensed|For bug|\s+http|Info : (CMSIS|Using|SWCLK|Hardware|Listening|starting)|cortex_m|0$)"
 rc=${PIPESTATUS[0]}
 echo "openocd rc=$rc"
 [ $rc = 0 ] || exit $rc
-mkdir -p $W/.artifact-state; echo "$2" > $W/.artifact-state/kernel.sha256; echo "$1" > $W/.artifact-state/rootfs.sha256
+mkdir -p "$ST"; echo "$2" > "$ST/kernel.sha256"; echo "$1" > "$ST/rootfs.sha256"
 cd "$REMOTE" && workdir/venv/bin/python "$HERE/boot_check.py"

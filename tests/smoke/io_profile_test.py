@@ -406,7 +406,7 @@ def test_profile_tcc_small_compile(request):
         pytest.skip(f"could not stage a source to compile: {written}")
 
     print("\nPer-process profile (kernel-measured):")
-    _measure(session, "tcc -O0 hello.c", f"tcc {source} -o /root/ci/io_profile_hello", timeout=60)
+    _measure(session, "tcc -O0 hello.c", f"tcc -ccompat {source} -o /root/ci/io_profile_hello", timeout=60)
     _measure(session, "the compiled binary", "/root/ci/io_profile_hello", timeout=30)
 
     session.write_command(f"rm -f {source} /root/ci/io_profile_hello")

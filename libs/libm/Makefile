@@ -1,6 +1,9 @@
 # Command-line CC still overrides this, but plain `make` should use TinyCC.
 CC = tcc
 CFLAGS = -std=c11 -Wall -gdwarf -fpic -pedantic -nostdlib -nostdinc -I. -I../../rootfs/usr/include -L../../rootfs/lib -Iinclude
+# tcc is safe by default (yasc, -Wall, unsafe C as errors); this code is
+# regular C until it is ported, so -ccompat whenever CC is a tcc.
+CFLAGS += $(if $(findstring tcc,$(notdir $(firstword $(CC)))),-ccompat)
 CFLAGS += $(ROOTFS_OPT_CFLAGS)
 LDFLAGS_STATIC = -Wl,-Ttext=0x0 -Wl,-section-alignment=0x4 -nostdlib -Wl,-oformat=yaff
 # -nostdlib skips standard libs (libc, etc.) but tcc still auto-links

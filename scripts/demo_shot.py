@@ -19,7 +19,7 @@ screen apps (`vi` = apps/yasvi over libs/yasos_curses) render normally.
 Three properties of this link shape the whole design, all of them established
 elsewhere in the tree:
 
-* The console is 3 Mbaud (``CONSOLE_BAUDRATE``, tests/smoke/framework/session.py,
+* The console is 6 Mbaud (``CONSOLE_BAUDRATE``, tests/smoke/framework/session.py,
   matched to source/kernel/drivers/uart/uart_driver.zig) and **the debug probe
   drops the occasional host->target byte**.  A drop mid-take is a typo on
   camera, so every character typed at the shell is checked against its echo and
@@ -90,7 +90,7 @@ import time
 
 # Matched to source/kernel/drivers/uart/uart_driver.zig; see the note on
 # CONSOLE_BAUDRATE in tests/smoke/framework/session.py.
-BAUD = 3000000
+BAUD = 6000000
 PORT = "/dev/ttyACM0"
 
 # Two CI runners share this board; the convention is a flock on this path.
@@ -719,7 +719,7 @@ def shot_hello(b, args):
     """
     b.command("cat /usr/hello_world.c")
     b.beat(2.5)                      # the viewer reads the program
-    b.command("tcc /usr/hello_world.c -o /tmp/hello", timeout=120)
+    b.command("tcc -ccompat /usr/hello_world.c -o /tmp/hello", timeout=120)
     b.beat(1.0)
 
     b.type("/tmp/hello")
@@ -788,7 +788,7 @@ def shot_vi(b, args):
     program, art = PROGRAMS[args.program]
     write_in_vi(b, args, "/tmp/demo.c", program)
 
-    b.command("tcc /tmp/demo.c -o /tmp/demo", timeout=120)
+    b.command("tcc -ccompat /tmp/demo.c -o /tmp/demo", timeout=120)
     b.beat(0.8)
     out = b.command("/tmp/demo")
     b.check(f"demo drew the {args.program}", block_in(out, art),
@@ -894,7 +894,7 @@ def shot_width(b, args):
     program = div10_source().splitlines()
     write_in_vi(b, args, "/tmp/div10.c", program)
 
-    b.command("tcc -O2 /tmp/div10.c -o /tmp/div10", timeout=300)
+    b.command("tcc -ccompat -O2 /tmp/div10.c -o /tmp/div10", timeout=300)
     b.beat(1.0)
 
     want = div10_checksum()
@@ -998,7 +998,7 @@ def shot_fpbench(b, args):
 #: and the rig board has no SD card: a write that went to one would put the
 #: filesystem in the window as well.
 XIP_READ = "cat /proc/xip"
-XIP_CMD = "time tcc /usr/hello_world.c -o /tmp/hello"
+XIP_CMD = "time tcc -ccompat /usr/hello_world.c -o /tmp/hello"
 
 #: One typed line per repeat, with both counter reads *inside it*.
 #:
@@ -1218,7 +1218,7 @@ def shot_ir(b, args):
     So this beat is either a host insert or a purpose-built device tcc; it is
     deliberately not part of `full`.
     """
-    b.command("tcc -dump-ir /tmp/demo.c -o /tmp/demo", timeout=120)
+    b.command("tcc -ccompat -dump-ir /tmp/demo.c -o /tmp/demo", timeout=120)
     b.check("the device tcc dumped IR", "IR BEFORE" in b.window,
             "no dump: this tcc is built without CONFIG_TCC_DEBUG")
     b.beat(3.0)
@@ -1272,7 +1272,7 @@ TESTS_CAT = "pr93402.c"
 #: `if` so the shape of the thing being typed is readable while it is typed.
 #: Note there is no `2>/dev/null` anywhere in this take -- /dev/null on this
 #: board is on a read-only filesystem and the redirect fails the command.
-TESTS_LOOP = ('for f in *.c; do tcc -O2 $f -o /tmp/t && /tmp/t '
+TESTS_LOOP = ('for f in *.c; do tcc -ccompat -O2 $f -o /tmp/t && /tmp/t '
               '&& echo "PASS $f" || echo "FAIL $f"; done')
 
 _TESTS_PASS_RE = re.compile(r"^PASS (\S+\.c)$", re.M)
@@ -1318,7 +1318,7 @@ def shot_tests(b, args):
             f"{args.tests_cat} does not look like an execute test")
     b.beat(3.5)                      # the viewer reads the program
 
-    b.command(f"tcc -O2 {args.tests_cat} -o /tmp/t", timeout=180)
+    b.command(f"tcc -ccompat -O2 {args.tests_cat} -o /tmp/t", timeout=180)
     b.beat(1.0)
     ran = b.command("/tmp/t; echo rc=$?", timeout=120)
     b.check("the test passed on the board", "rc=0" in ran,
@@ -1360,7 +1360,7 @@ def shot_full(b, args):
 #: rather than `hello_world`: it is the workload every fault in this project has
 #: ever come out of, and it runs long enough that a halt lands somewhere
 #: interesting rather than in the idle loop.
-RIG_CMD = "tcc /usr/hello_world.c -o /tmp/hello"
+RIG_CMD = "tcc -ccompat /usr/hello_world.c -o /tmp/hello"
 
 #: gdb's prompt, for the stretch of the take where gdb is the thing being typed
 #: at.  `Board.at()` swaps it back afterwards.
@@ -1654,7 +1654,7 @@ def shot_crosstcc(b, args):
                     "apps/ccat landed, or fall back to `cat`")
             b.beat(4.0)              # the viewer reads the program
 
-            b.command(f"tcc -O2 {args.tests_cat} -o /tmp/t", timeout=180)
+            b.command(f"tcc -ccompat -O2 {args.tests_cat} -o /tmp/t", timeout=180)
             b.beat(1.2)
             # The exit code is the test protocol, not a flourish: a
             # gcc.c-torture execute test calls `abort()` when it disagrees with

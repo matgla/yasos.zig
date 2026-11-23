@@ -28,7 +28,7 @@ const kernel_tcc = @import("build/kernel_tcc.zig");
 fn prepare_venv(b: *std.Build) *std.Build.Step.Run {
     const create_venv_args = [_][]const u8{ "python3", "-m", "venv", "yasos_venv" };
     const create_venv_command = b.addSystemCommand(&create_venv_args);
-    const install_requirements_args = [_][]const u8{ "./yasos_venv/bin/pip", "install", "-r", "kconfiglib/requirements.txt" };
+    const install_requirements_args = [_][]const u8{ "./yasos_venv/bin/pip", "install", "-r", "kconfiglib/requirements.txt", "-r", "scripts/requirements.txt" };
     const install_requirements_args_command = b.addSystemCommand(&install_requirements_args);
     install_requirements_args_command.step.dependOn(&create_venv_command.step);
     return install_requirements_args_command;

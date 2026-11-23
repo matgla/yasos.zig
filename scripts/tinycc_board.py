@@ -33,7 +33,9 @@ file changed on both sides comes back beside yours as <file>.target.
 
 By default the board is the rig's (.cache/remote_smoke_runner.json), taken under its lock
 so that sessions queue, and left running whatever firmware it has; --flash installs this
-checkout's rootfs.img and kernel first. --serial DEV uses a probe on this PC. --qemu boots
+checkout's rootfs.img and kernel first. A rig with several boards (scripts/rig/boards.py):
+--rig-board NAME, else the config's rig_board, else the board this label used last (its
+card has the tree), else the first free one; --rig-board auto picks afresh. --serial DEV uses a probe on this PC. --qemu boots
 this checkout's an524 kernel instead: nothing survives the boot, so `all` (a push and a
 make in one boot) is the command that makes sense there.
 """
@@ -248,6 +250,7 @@ class Rig:
         self.port = str(config.get("ssh_port", 22))
         self.remote = config.get("remote_repo_path", "~/yasos_remote_smoke")
         self.dir = f"tinycc_board/{args.label}"
+        self.board = rig_board(args.rig_board, config)
         self.flashed = False
 
     def ssh(self, command, capture=False):
@@ -256,14 +259,15 @@ class Rig:
                               stdin=subprocess.DEVNULL, capture_output=capture, text=True)
 
     def copy(self, sources, dest):
-        subprocess.run(["scp", "-q", "-P", self.port, *map(str, sources), f"{self.target}:{dest}"], check=True)
+        subprocess.run(["scp", "-q", "-r", "-P", self.port, *map(str, sources), f"{self.target}:{dest}"], check=True)
 
     def prepare(self):
         d = self.dir
         if self.ssh(f"mkdir -p {d}/py {d}/rig {d}/img {d}/payload").returncode:
             sys.exit(f"cannot reach the rig {self.target}")
         self.copy([HERE / "tinycc_board.py", HERE / "yasos_device.py"], f"{d}/py/")
-        self.copy([HERE / "rig/reflash.sh", HERE / "rig/boot_check.py", HERE / "rig/tinycc_board.sh"], f"{d}/rig/")
+        self.copy([HERE / "rig/reflash.sh", HERE / "rig/boot_check.py", HERE / "rig/tinycc_board.sh",
+                   HERE / "rig/boards.py", HERE / "rig/openocd"], f"{d}/rig/")
 
     def flash_args(self):
         if self.args.flash and not self.flashed:
@@ -283,7 +287,10 @@ class Rig:
             elif value not in (False, None, ""):
                 words.append(f"--{key}={value}")
         quoted = " ".join(w if w.startswith("$HOME") else shlex.quote(w) for w in words)
-        return self.ssh(f"YASOS_RIG_REMOTE={self.remote} {quoted}", capture=capture)
+        board = f"YASOS_BOARD={shlex.quote(self.board)} " if self.board else ""
+        if self.board == "auto":
+            self.board = ""  # the next calls keep to the board this one takes
+        return self.ssh(f"{board}YASOS_RIG_REMOTE={self.remote} {quoted}", capture=capture)
 
     def call(self, action, **extra):
         return self.remote_call(action, **extra).returncode
@@ -310,6 +317,15 @@ class Rig:
         if rc == 0:
             rc = subprocess.run(["scp", "-q", "-r", "-P", self.port, f"{self.target}:{d}/files/.", str(out)]).returncode
         return rc
+
+
+def rig_board(option, config) -> str:
+    """YASOS_BOARD for the rig (scripts/rig/boards.py): --rig-board, else the config's
+    rig_board; "" leaves it to the wrapper (the board last used, else the first free)."""
+    if option:
+        return option
+    value = str(config.get("rig_board") or "").strip()
+    return "" if value == "auto" else value
 
 
 # ---- pull ----
@@ -365,6 +381,8 @@ def main(argv=None) -> int:
     parser.add_argument("--flash", action="store_true", help="rig: flash this checkout's images first")
     parser.add_argument("--label", default=REPO.name, help="rig and cache directory for this checkout (default: %(default)s)")
     parser.add_argument("--lock-wait", type=int, default=3000, help="rig: seconds to wait for the board (default: %(default)s)")
+    parser.add_argument("--rig-board", metavar="NAME", help="rig: which board (scripts/rig/boards.py; default: the config's "
+                        "rig_board, else the one this label used last; auto: the first free)")
     parser.add_argument("--serial", help="a probe on this PC instead of the rig")
     parser.add_argument("--qemu", action="store_true", help="an an524 kernel in QEMU instead of a board")
     parser.add_argument("--kernel", type=Path, help="--qemu: the kernel (default: zig-out/bin/yasos_kernel)")

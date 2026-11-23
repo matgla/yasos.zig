@@ -37,7 +37,7 @@ LG=$(arm-none-eabi-gcc $GF -print-libgcc-file-name)
 arm-none-eabi-gcc $GF -O2 -DLITTLE_ENDIAN -I"$SHA" -fno-builtin -c "$HERE/drv.c" -o "$OUT/drv.o"
 arm-none-eabi-gcc $GF -c "$P/boot.S" -o "$OUT/boot.o"
 arm-none-eabi-gcc $GF -O2 -DLITTLE_ENDIAN -DFILE=void -I"$SHA" -c "$OUT/sha_nostdio.c" -o "$OUT/sha_gcc.o"
-"$TCC" -O2 $GF -DLITTLE_ENDIAN -DFILE=void -I"$SHA" $NLINC -c "$OUT/sha_nostdio.c" -o "$OUT/sha_tcc.o"
+"$TCC" -ccompat -O2 $GF -DLITTLE_ENDIAN -DFILE=void -I"$SHA" $NLINC -c "$OUT/sha_nostdio.c" -o "$OUT/sha_tcc.o"
 for a in gcc tcc; do
     arm-none-eabi-ld -T "$P/link.ld" -o "$OUT/$a.elf" "$OUT/boot.o" "$OUT/drv.o" "$OUT/sha_$a.o" "$LG"
     qemu-system-arm -machine mps2-an505 -cpu cortex-m33 -kernel "$OUT/$a.elf" \

@@ -45,7 +45,7 @@ def test_zig_build_obj_emits_c_and_tcc_compiles_it(request):
             f"-mcpu=cortex_m33 -OReleaseSmall {work}/probe.zig "
             f"--zig-lib-dir $ZL --cache-dir {work}/cache "
             f"-femit-bin={work}/probe.c && test -s {work}/probe.c "
-            f"&& tcc -c -I$ZL -include $ZL/zig_c_prelude.h "
+            f"&& tcc -ccompat -c -I$ZL -include $ZL/zig_c_prelude.h "
             f"{work}/probe.c -o {work}/probe.o && test -s {work}/probe.o; "
             "echo ZIG_BUILDOBJ_RC=$?"
         )
