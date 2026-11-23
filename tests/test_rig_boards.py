@@ -123,6 +123,23 @@ def test_type_filter(rig):
     assert wrong.returncode == 2 and "mspc_v2" in wrong.stderr
 
 
+def test_need_picks_only_boards_with_the_feature(rig):
+    _registered(rig)
+    rig("register", "b", "--force", "--pool", "ci", "--pool", "dev", "--feature", "sdcard")
+    # CI tries a first, but a has no card.
+    assert "YASOS_BOARD=a" in rig("env", "--pool", "ci").stdout
+    assert "YASOS_BOARD=b" in rig("env", "--pool", "ci", "--need", "sdcard").stdout
+    ran = rig("run", "--pool", "ci", "--need", "sdcard", "--", "sh", "-c", "echo $YASOS_BOARD")
+    assert ran.stdout.strip() == "b"
+    named = rig("run", "--board", "a", "--need", "sdcard", "--", "true", check=False)
+    assert named.returncode == 2 and "no sdcard" in named.stderr
+    listed = json.loads(rig("list", "--json").stdout)["boards"]
+    assert {r["name"]: r["features"] for r in listed} == {"a": [], "b": ["sdcard"]}
+    rig("register", "b", "--force", "--feature", "")
+    none = rig("env", "--pool", "ci", "--need", "sdcard", check=False)
+    assert none.returncode == 2 and "with sdcard" in none.stderr
+
+
 def test_without_a_registry_the_legacy_lock_is_taken(rig):
     out = rig("run", "--", "sh", "-c", "echo $YASOS_BOARD_LOCK_HELD ${YASOS_PROBE_SERIAL:-none}").stdout
     assert out.split() == [str(rig.tmp / "legacy.lock"), "none"]

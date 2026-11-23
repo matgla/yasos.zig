@@ -15,6 +15,8 @@ and UART:
     boards.py release b                    CI may use it again
     boards.py run --pool ci -- make ...    the first free board of a pool
     boards.py run --board b -- CMD         that board, waiting while it is busy
+    boards.py register b --force --feature sdcard
+    boards.py run --pool ci --need sdcard -- CMD   only boards that have an SD card
     boards.py env b                        its environment, as shell exports
     boards.py install                      yasos-board in ~/.local/bin, for checkouts
                                            of other repositories (matgla/tinycc)
@@ -45,6 +47,11 @@ boards with fewer pools come first, so personal work lands on a dedicated board 
 falls back to a shared one only while the dedicated one is busy.  Among equals, `ci`
 tries boards in registry order and every other pool in reverse, so with two shared
 boards CI and personal work start on different ones.
+
+Features say what a board has that some jobs need: `sdcard` = a card in the slot, so
+/root, /var and /home are on it (without one they are a few hundred KB of RAM, and a
+job that sends megabytes there fails with ENOSPC).  `run --need FEATURE` picks only
+boards that have it; a board named explicitly without it is an error.
 
 A reservation (`reserve NAME`) takes a board out of every pool but `dev` until it is
 released or expires (24 h by default, `--hours 0` = until released): CI stops picking
@@ -312,10 +319,14 @@ def board_env(name: str, board: dict, probes: dict[str, dict], count: int) -> di
 
 
 def candidates(boards: dict[str, dict], board: str | None, pool: str,
-               board_type: str | None = None) -> list[str]:
+               board_type: str | None = None, needs: list[str] | None = None) -> list[str]:
     """Board names to try, in order.  An explicit name is the only candidate."""
     def type_of(name: str) -> str:
         return boards[name].get("type", DEFAULT_TYPE)
+
+    def missing(name: str) -> list[str]:
+        have = boards[name].get("features") or []
+        return [f for f in (needs or []) if f not in have]
 
     if board and board != "auto":
         if board not in boards:
@@ -323,12 +334,16 @@ def candidates(boards: dict[str, dict], board: str | None, pool: str,
             raise BoardError(f"no board '{board}' in {registry_path()} ({known})")
         if board_type and type_of(board) != board_type:
             raise BoardError(f"board '{board}' is a {type_of(board)}, not a {board_type}")
+        if missing(board):
+            raise BoardError(f"board '{board}' has no {', '.join(missing(board))} "
+                             f"(boards.py register {board} --force --feature ...)")
         return [board]
     order = list(boards)
     names = [n for n in order if pool in (boards[n].get("pools") or [])
-             and (not board_type or type_of(n) == board_type)]
+             and (not board_type or type_of(n) == board_type) and not missing(n)]
     if not names:
-        what = f"pool '{pool}'" + (f" of type {board_type}" if board_type else "")
+        what = (f"pool '{pool}'" + (f" of type {board_type}" if board_type else "")
+                + (f" with {', '.join(needs)}" if needs else ""))
         raise BoardError(f"no board in {what} ({registry_path()})")
     if pool != "dev":
         # Reserved boards are personal work's until released.
@@ -444,6 +459,12 @@ def cmd_register(args: argparse.Namespace) -> int:
     if args.pool:
         board["pools"] = sorted(set(args.pool), key=args.pool.index)
     board.setdefault("pools", ["dev"])
+    if args.feature is not None:
+        features = [f for f in args.feature if f]
+        if features:
+            board["features"] = sorted(set(features), key=features.index)
+        else:
+            board.pop("features", None)
     if args.power:
         board["power"] = args.power
     elif "power" not in board and serial in probes:
@@ -459,6 +480,7 @@ def cmd_register(args: argparse.Namespace) -> int:
     save_registry(data)
     where = "attached" if serial in probes else "NOT attached now"
     print(f"board {args.name}: probe {serial} ({where}), pools {','.join(board['pools'])}, "
+          f"features {','.join(board.get('features') or []) or 'none'}, "
           f"lock {lock_path(args.name, board)}")
     refresh_installed_fallback(data)
     return 0
@@ -487,6 +509,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             "name": name,
             "type": board.get("type", DEFAULT_TYPE),
             "pools": board.get("pools") or [],
+            "features": board.get("features") or [],
             "probe": serial,
             "attached": serial in probes,
             "tty": (probes.get(serial) or {}).get("tty", ""),
@@ -511,6 +534,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         print(f"{row['name']:<8} {','.join(row['pools']):<10} {row['type']:<28} "
               f"probe {row['probe']} {'attached' if row['attached'] else 'NOT ATTACHED'}"
               f"{'  ' + row['note'] if row['note'] else ''}")
+        if row["features"]:
+            print(f"{'':<8} has {', '.join(row['features'])}")
         print(f"{'':<8} {row['state']}")
         if row["reserved"]:
             print(f"{'':<8} {describe_reservation(row['reserved'])}")
@@ -569,7 +594,8 @@ def resolve(args: argparse.Namespace) -> tuple[dict[str, dict], list[str]] | Non
         return None
     board = args.board or os.environ.get("YASOS_BOARD", "").strip() or None
     return data["boards"], candidates(data["boards"], board, args.pool or "dev",
-                                      getattr(args, "type", None))
+                                      getattr(args, "type", None),
+                                      getattr(args, "need", None))
 
 
 def repicker(args: argparse.Namespace):
@@ -757,6 +783,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--power", action="append", metavar="HUB:PORT",
                    help="uhubctl port that powers it (repeat; default the probe's port)")
     p.add_argument("--lock", help=f"lock file (default {LOCK_DIR}/yasos-board-NAME.lock; '' resets)")
+    p.add_argument("--feature", action="append",
+                   help="what the board has, e.g. sdcard (repeat; replaces the list; '' clears it)")
     p.add_argument("--note")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_register)
@@ -799,6 +827,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.add_argument("--pool", help="pool to pick from with auto (default dev)")
         p.add_argument("--type", help="only boards of this profile (auto skips others, "
                                       "a named board of another type is an error)")
+        p.add_argument("--need", action="append", metavar="FEATURE",
+                       help="only boards with this feature, e.g. sdcard (repeat)")
         p.set_defaults(func=func)
 
     p = sub.add_parser("install", help="yasos-board in ~/.local/bin for other checkouts")

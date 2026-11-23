@@ -6,10 +6,10 @@ is which board and who may use it. Every job that touches a board takes the
 board through `scripts/rig/boards.py`: it waits for the board's lock, then runs
 with that board's probe, UART and power ports, and never touches another board.
 
-| Board  | Probe              | Pools      | Lock                              |
-|--------|--------------------|------------|-----------------------------------|
-| a (lane A) | `E665B83887652F2E` | `ci`,`dev` | `/var/lock/rp2350-board.lock` (the one tools without the registry take) |
-| b (lane B) | `E665B83887763E2E` | `ci`,`dev` | `/var/lock/yasos-board-b.lock`    |
+| Board  | Probe              | Pools      | Features | Lock                              |
+|--------|--------------------|------------|----------|-----------------------------------|
+| a (lane A) | `E665B83887652F2E` | `ci`,`dev` | (no card) | `/var/lock/rp2350-board.lock` (the one tools without the registry take) |
+| b (lane B) | `E665B83887763E2E` | `ci`,`dev` | `sdcard` | `/var/lock/yasos-board-b.lock`    |
 
 Both boards serve CI and your own work. CI tries `a` first and your runs try
 `b` first, so they meet only when both are busy. For a longer stretch of your
@@ -24,7 +24,8 @@ cd ~/yasos_remote_smoke                   # any checkout with scripts/rig/boards
 python3 scripts/rig/boards.py scan        # probes on the bus: serial, USB port, UART
 python3 scripts/rig/boards.py register a --probe <SERIAL_A> --pool ci --pool dev \
     --lock /var/lock/rp2350-board.lock --note "lane A"
-python3 scripts/rig/boards.py register b --probe <SERIAL_B> --pool ci --pool dev --note "lane B"
+python3 scripts/rig/boards.py register b --probe <SERIAL_B> --pool ci --pool dev \
+    --feature sdcard --note "lane B"
 python3 scripts/rig/boards.py install     # yasos-board in ~/.local/bin (optional, see below)
 python3 scripts/rig/boards.py list
 ```
@@ -65,6 +66,22 @@ already on it finishes first), and `--board auto` picks it before any other
 board, so the TUI's default lands on it. A board named explicitly is taken
 reserved or not. With every CI board reserved, CI jobs wait (up to their
 `--wait`) and print why. `list` shows who reserved what and for how long.
+
+## Features: jobs that need an SD card
+
+Without a card, `/root`, `/var` and `/home` are RAM -- a few hundred KB on the
+Pico Plus 2 -- so a job that sends megabytes there fails (`rz could not write`,
+ENOSPC). Such jobs ask for the card:
+
+```bash
+boards.py run --pool ci --need sdcard -- make run_selfhost_packaged ...
+boards.py register b --force --feature sdcard   # what b has (repeat; --feature '' clears)
+```
+
+`--need` skips boards without the feature; a board named with `--board` that
+lacks it is an error. CI's `hardware_selfhost` (`/root/selfhost-ci`) and
+`hardware_zig_kernel` (`/root/kfull`) need `sdcard`; `hardware_smoke` runs on
+either board.
 
 `run` execs `CMD` while holding the lock and sets `YASOS_BOARD`,
 `YASOS_PROBE_SERIAL`, `SERIAL_DEVICE` (the board's

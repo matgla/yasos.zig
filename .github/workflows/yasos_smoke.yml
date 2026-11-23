@@ -327,7 +327,8 @@ jobs:
       # The board and its lock, as in hardware_smoke.
       - name: tcc self-host on the board (stage 2 + fixpoint)
         run: |
-          python3 scripts/rig/boards.py run --pool ci --wait 7200 \
+          # The payload goes to /root: only a board with an SD card holds it.
+          python3 scripts/rig/boards.py run --pool ci --need sdcard --wait 7200 \
               --what "yasos.zig CI run_selfhost_packaged run ${{ github.run_id }}" -- \
               make run_selfhost_packaged SELFHOST_PAYLOAD=selfhost_payload || {
             rc=$?
@@ -368,7 +369,8 @@ jobs:
         run: ./scripts/stage_hw_package.sh artifact
       - name: Kernel built on the board (zig render, zigfix, tcc, link)
         run: |
-          python3 scripts/rig/boards.py run --pool ci --wait 7200 \
+          # The payload goes to /root: only a board with an SD card holds it.
+          python3 scripts/rig/boards.py run --pool ci --need sdcard --wait 7200 \
               --what "yasos.zig CI run_zig_kernel_packaged run ${{ github.run_id }}" -- \
               make run_zig_kernel_packaged ZIG_KERNEL_PACKAGE=zig_kernel_package || {
             rc=$?
