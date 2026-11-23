@@ -94,8 +94,8 @@
       "warnings": 4
     },
     "libs/libc": {
-      "errors": 1775,
-      "warnings": 371
+      "errors": 1894,
+      "warnings": 380
     },
     "libs/libdl": {
       "errors": 0,
