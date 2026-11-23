@@ -719,13 +719,15 @@ pub export fn main() void {
         // Past this, memory that is not SRAM for whatever can do without it.
         const slow_allocator = kernel.memory.heap.slow.install(allocator);
         // The console's receive ring: the interrupt is already filling a small one.
-        // In SRAM: the RX interrupt writes it a byte at a time and PSRAM is slow
-        // to reach. 6 KB is 10 ms of line at 6 Mbaud, room for a reader to come
-        // round; the slow heap only when SRAM cannot spare it.
+        // 6 KB is 10 ms of line at 6 Mbaud, room for a reader to come round.  On
+        // the slow heap: the kernel heap is ~16-19 KB on the PSRAM boards and the
+        // ring took a third of it (kernel_heap_test's 8 KB headroom failed with a
+        // card mounted); the RX interrupt's byte stores go through the XIP cache.
+        // The kernel heap only where there is no slow heap.
         if (@TypeOf(board.uart.uart0).movable_rx) {
             const rx_ring_size = 6 * 1024;
-            const rx_storage = allocator.alloc(u8, rx_ring_size) catch
-                slow_allocator.alloc(u8, rx_ring_size) catch @panic("no memory for the console's receive ring");
+            const rx_storage = slow_allocator.alloc(u8, rx_ring_size) catch
+                allocator.alloc(u8, rx_ring_size) catch @panic("no memory for the console's receive ring");
             board.uart.uart0.set_rx_storage(rx_storage);
         }
         splashscreen();
