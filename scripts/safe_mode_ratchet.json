@@ -2,108 +2,108 @@
   "about": "tcc's safe default over our C, per directory: warnings and errors may only go down. scripts/safe_mode_ratchet.py checks (CI smoke), --update keeps a new floor, --add DIR starts counting a directory; 'flags' are a directory's extra compiler options (from its Makefile).",
   "dirs": {
     "apps/ccat": {
-      "errors": 7,
-      "warnings": 4
+      "errors": 12,
+      "warnings": 2
     },
     "apps/coreutils": {
       "errors": 4,
       "warnings": 0
     },
     "apps/fbdemo": {
-      "errors": 1,
-      "warnings": 7
+      "errors": 11,
+      "warnings": 3
     },
     "apps/fdisk": {
-      "errors": 56,
-      "warnings": 13
+      "errors": 104,
+      "warnings": 3
     },
     "apps/fpbench": {
-      "errors": 2,
-      "warnings": 0
+      "errors": 4,
+      "warnings": 1
     },
     "apps/hello_world": {
       "errors": 0,
       "warnings": 0
     },
     "apps/hexdump": {
-      "errors": 2,
-      "warnings": 2
+      "errors": 4,
+      "warnings": 1
     },
     "apps/longjump_tester": {
       "errors": 4,
       "warnings": 0
     },
     "apps/mkfs": {
-      "errors": 49,
-      "warnings": 13
+      "errors": 71,
+      "warnings": 28
     },
     "apps/more": {
       "errors": 4,
-      "warnings": 0
-    },
-    "apps/pioasm": {
-      "errors": 231,
-      "warnings": 25
-    },
-    "apps/prun": {
-      "errors": 16,
       "warnings": 7
     },
+    "apps/pioasm": {
+      "errors": 331,
+      "warnings": 19
+    },
+    "apps/prun": {
+      "errors": 24,
+      "warnings": 8
+    },
     "apps/ptracetest": {
-      "errors": 19,
-      "warnings": 5
+      "errors": 34,
+      "warnings": 4
     },
     "apps/rzsz": {
-      "errors": 30,
-      "warnings": 16
+      "errors": 55,
+      "warnings": 35
     },
     "apps/sdbench": {
-      "errors": 8,
-      "warnings": 13
+      "errors": 23,
+      "warnings": 1
     },
     "apps/sha": {
-      "errors": 8,
-      "warnings": 4
+      "errors": 26,
+      "warnings": 29
     },
     "apps/strip": {
       "errors": 7,
-      "warnings": 0
+      "warnings": 5
     },
     "apps/syscallbench": {
-      "errors": 1,
+      "errors": 4,
       "warnings": 2
     },
     "apps/time": {
-      "errors": 16,
-      "warnings": 5
+      "errors": 23,
+      "warnings": 14
     },
     "apps/yaffdump": {
-      "errors": 115,
-      "warnings": 17
+      "errors": 159,
+      "warnings": 167
     },
     "apps/yasdisk": {
-      "errors": 58,
-      "warnings": 41
+      "errors": 134,
+      "warnings": 63
     },
     "apps/yasvi": {
-      "errors": 2124,
-      "warnings": 526
+      "errors": 3683,
+      "warnings": 2382
     },
     "apps/zig": {
-      "errors": 51,
-      "warnings": 4
+      "errors": 53,
+      "warnings": 97
     },
     "libs/libc": {
-      "errors": 1775,
-      "warnings": 371
+      "errors": 2572,
+      "warnings": 1445
     },
     "libs/libdl": {
       "errors": 0,
       "warnings": 0
     },
     "libs/libm": {
-      "errors": 3,
-      "warnings": 0
+      "errors": 13,
+      "warnings": 25
     },
     "libs/pthread": {
       "errors": 0,
@@ -114,8 +114,8 @@
       "warnings": 0
     },
     "libs/yasos_curses": {
-      "errors": 59,
-      "warnings": 18
+      "errors": 108,
+      "warnings": 55
     }
   },
   "flags": {

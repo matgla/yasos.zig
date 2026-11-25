@@ -109,6 +109,16 @@ jobs:
             | tee -a "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      # libc's unit tests against libc as tcc builds it for the target: the
+      # cross the smoke run left in libs/tinycc/bin builds the whole libc, the
+      # tests run bare-metal on QEMU (mps2-an505, the toolchain's newlib) at
+      # -O0..-Os. The only run of the yasc sources' tests (gcc cannot build
+      # libgen.c or assert.c); see libs/libc/tests/qemu_suite.sh.
+      - name: libc unit tests on QEMU
+        if: always()
+        shell: bash
+        run: make -C libs/libc/tests qemu
+
       - name: Collect decode bundle (firmware + rootfs + symbol ELFs)
         if: failure()
         shell: bash

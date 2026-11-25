@@ -7,7 +7,16 @@
       "include": "#module"
     },
     {
+      "include": "#qualifier-with-list"
+    },
+    {
       "include": "#qualifier-after-star"
+    },
+    {
+      "include": "#qualifier-in-brackets"
+    },
+    {
+      "include": "#qualifier-after-type"
     },
     {
       "include": "#qualifier-before-type"
@@ -16,10 +25,16 @@
       "include": "#statement"
     },
     {
+      "include": "#unsafe"
+    },
+    {
       "include": "#try"
     },
     {
       "include": "#catch"
+    },
+    {
+      "include": "#unreachable"
     },
     {
       "include": "#error-set"
@@ -35,6 +50,24 @@
     },
     {
       "include": "#error-union"
+    },
+    {
+      "include": "#slice-type"
+    },
+    {
+      "include": "#slice-colon"
+    },
+    {
+      "include": "#tagged-union"
+    },
+    {
+      "include": "#register-field"
+    },
+    {
+      "include": "#c23"
+    },
+    {
+      "include": "#at-builtin"
     }
   ],
   "repository": {
@@ -63,18 +96,27 @@
       ]
     },
     "qualifier-after-star": {
-      "$comment": "owned / view / maybe qualify a pointer: they follow its '*' (or another of them): char * owned maybe p, f(char * view)",
-      "match": "(?<=\\*|\\* |\\*  |\\*\\t|\\bowned |\\bview |\\bmaybe )(owned|view|maybe)\\b(?=\\s*(?:[A-Za-z_*),]|$))",
+      "$comment": "owned / view / maybe qualify a pointer: they follow its '*' (or another qualifier): char * owned maybe p, const char * view * view argv, f(char * view), FILE * owned(fclose) maybe f",
+      "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes)\\s*\\([^()]*\\)\\s*)(owned|view|maybe)\\b(?=\\s*(?:[A-Za-z_*),]|$))",
       "name": "storage.modifier.yasc.c"
     },
     "qualifier-before-type": {
-      "$comment": "out / drop come before a parameter's type: out int * view n, drop struct s * owned p",
-      "match": "(?<!\\.|->)\\b(out|drop)\\b(?=\\s+[A-Za-z_])",
+      "$comment": "out / inout / in / drop come before a parameter's type: out int * view n, inout FILE * view f, drop struct s * owned p",
+      "match": "(?<!\\.|->)\\b(out|inout|in|drop)\\b(?=\\s+[A-Za-z_])",
       "name": "storage.modifier.yasc.c"
     },
     "statement": {
       "match": "(?<!\\.|->)\\b(defer|errdefer)\\b(?=\\s*(?:[A-Za-z_*{(]|$))",
       "name": "keyword.control.defer.yasc.c"
+    },
+    "unreachable": {
+      "$comment": "unreachable is an expression of its own: unreachable;, default: unreachable;, f() catch unreachable -- first on its line, after ; { } : ), else or catch, and before ; , ) or }; not a name being declared (int unreachable;), called or assigned",
+      "match": "(?:^|(?<=[;{}:)])|(?<=\\belse|\\bcatch)(?=\\s))\\s*\\b(unreachable)\\b(?=\\s*[;,)}])",
+      "captures": {
+        "1": {
+          "name": "keyword.control.unreachable.yasc.c"
+        }
+      }
     },
     "try": {
       "match": "(?<!\\.|->)\\btry\\b(?=\\s*[A-Za-z_(*&])",
@@ -216,10 +258,121 @@
           "name": "storage.modifier.errunion.yasc.c"
         },
         {
-          "match": "!(?=\\s*(?!sizeof\\b|defined\\b|return\\b)[A-Za-z_]\\w*(?:\\s*\\*\\s*(?:(?:owned|view|maybe)\\b\\s*)*)*\\s+[A-Za-z_]\\w*\\s*\\()",
+          "match": "!(?=\\s*(?!sizeof\\b|defined\\b|return\\b)[A-Za-z_]\\w*(?:\\s*\\*\\s*(?:(?:owned|view|maybe)\\b\\s*|(?:owned|borrows|takes)\\s*\\([^()]*\\)\\s*)*)*\\s+[A-Za-z_]\\w*\\s*\\()",
           "name": "storage.modifier.errunion.yasc.c"
         }
       ]
+    },
+    "qualifier-with-list": {
+      "$comment": "owned(dealloc) / borrows(x, ...) / takes(p): after a '*' or another qualifier, or after a type when the declaration goes on: FILE * owned(fclose) maybe f, int owned(close) maybe fd, regex_t owned(regfree) re, struct tokenizer borrows(text) {",
+      "patterns": [
+        {
+          "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes)\\s*\\([^()]*\\)\\s*)(?<!\\.|->)\\b(owned|borrows|takes)\\s*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.yasc.c"
+            }
+          }
+        },
+        {
+          "match": "(?<=\\b[A-Za-z_]\\w*\\s+)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+)(?<![.>]\\s*\\b\\w+\\s+)\\b(owned|borrows)\\s*(?=\\([^()]*\\)\\s*(?:[A-Za-z_*{]|$))",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.yasc.c"
+            }
+          }
+        }
+      ]
+    },
+    "qualifier-after-type": {
+      "$comment": "int handles: int view fd, pid_t view p -- after a type name, before the declared name",
+      "match": "(?<=\\b[A-Za-z_]\\w*\\s+)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+)(?<![.>]\\s*\\b\\w+\\s+)\\b(view|maybe)\\b(?=\\s+[A-Za-z_])",
+      "name": "storage.modifier.yasc.c"
+    },
+    "unsafe": {
+      "$comment": "unsafe { ... } and unsafe(expr): the strict lifetime errors are not said there",
+      "match": "(?<!\\.|->)\\bunsafe\\b(?=\\s*[{(])",
+      "name": "keyword.control.unsafe.yasc.c"
+    },
+    "tagged-union": {
+      "$comment": "long i when(V_INT); in a tagged union union(k) { ... }: after a member declarator",
+      "match": "(?<=[\\w\\]]\\s+)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+)\\b(when)\\b(?=\\s*\\()",
+      "captures": {
+        "1": {
+          "name": "storage.modifier.when.yasc.c"
+        }
+      }
+    },
+    "register-field": {
+      "$comment": "register fields: uint32_t irq:1 w1c; volatile uint32_t id ro; -- after a member's declarator: a name after a type (not int ro; struct s ro; return ro;), *p, a bit-field width or an array",
+      "match": "(?:(?<=\\]\\s+)|(?<=:\\s*\\d\\w*\\s+)|(?<=\\*\\s*[A-Za-z_]\\w*\\s+)|(?<=\\b[A-Za-z_]\\w*\\s+[A-Za-z_]\\w*\\s+)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+[A-Za-z_]\\w*\\s+))(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default|void|char|short|int|long|float|double|signed|unsigned|_Bool|bool|u?int(?:8|16|32|64|ptr)_t|s?size_t)\\s+)\\b(ro|wo|w1c)\\b(?=\\s*[;,])",
+      "captures": {
+        "1": {
+          "name": "storage.modifier.register.yasc.c"
+        }
+      }
+    },
+    "c23": {
+      "$comment": "C23 / GNU words tcc takes that VSCode's C grammar does not know",
+      "patterns": [
+        {
+          "match": "(?<!\\.|->)\\bconstexpr\\b",
+          "name": "storage.modifier.constexpr.yasc.c"
+        },
+        {
+          "match": "(?<!\\.|->)\\bnullptr\\b",
+          "name": "constant.language.nullptr.yasc.c"
+        },
+        {
+          "match": "(?<!\\.|->)\\b(?:typeof_unqual|typeof|__typeof__|__typeof|alignof)\\b(?=\\s*\\()",
+          "name": "keyword.operator.typeof.yasc.c"
+        },
+        {
+          "match": "(?<!\\.|->)\\b__auto_type\\b",
+          "name": "storage.type.auto.yasc.c"
+        }
+      ]
+    },
+    "qualifier-in-brackets": {
+      "$comment": "a parameter array's outermost brackets qualify the pointer it becomes, as C99's a[const]: char * view argv[owned], int a[maybe 4], char * view a[view restrict]",
+      "match": "(?<=\\b[A-Za-z_]\\w*\\s*\\[(?:\\s*(?:owned|view|maybe|restrict|const|volatile|static)\\b)*\\s*)(owned|view|maybe)\\b(?=[\\s\\w]*\\])",
+      "name": "storage.modifier.yasc.c"
+    },
+    "at-builtin": {
+      "comment": "@min / @max: tinycc's short builtins, in plain C files too",
+      "match": "(@)(min|max)\\b(?=\\s*\\()",
+      "name": "support.function.builtin.yasc.c",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.builtin.yasc.c"
+        }
+      }
+    },
+    "slice-type": {
+      "$comment": "[]T / [:0]T / [][]T: a slice prefix goes before the type, as !T. A '[' that follows a name, ')' or ']' indexes (int a[] __attribute__((x))), except after a storage-class word (static []const char s)",
+      "patterns": [
+        {
+          "match": "(?<![\\w)\\]\\\"']\\s*)((?:\\[\\s*(?::\\s*0\\s*)?\\]\\s*)+)(?=[A-Za-z_])",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.slice.yasc.c"
+            }
+          }
+        },
+        {
+          "match": "(?<=\\b(?:static|extern|register|typedef|inline|auto|constexpr|_Thread_local|thread_local)\\s+)((?:\\[\\s*(?::\\s*0\\s*)?\\]\\s*)+)(?=[A-Za-z_])",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.slice.yasc.c"
+            }
+          }
+        }
+      ]
+    },
+    "slice-colon": {
+      "$comment": "x[a:b], x[a:], x[:b], x[a:b:0]: a ':' inside one pair of brackets with no '?' there (a[c ? 1 : 2] is a conditional) no quote (case '[': ... ']') and not '::' ([[gnu::unused]])",
+      "match": "(?<=\\[[^\\[\\]?;{}'\\\"]*)(?<!:)(:)(?!:)(?=[^\\[\\]?;{}'\\\"]*\\])",
+      "name": "keyword.operator.slice.yasc.c"
     }
   }
 }

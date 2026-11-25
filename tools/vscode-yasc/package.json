@@ -1,12 +1,14 @@
 {
   "name": "yasc-syntax",
-  "displayName": "yasc (tinycc C dialect) syntax",
-  "description": "Highlights tinycc's yasc dialect in C files: owned/view/maybe/out/drop, defer/errdefer, error sets, !T, try/catch, modules",
-  "version": "0.2.0",
+  "displayName": "yasc (tinycc C dialect)",
+  "description": "tinycc's yasc dialect in C files: highlighting (owned/view/maybe/in/inout/out/drop, owned(dealloc)/borrows/takes, unsafe, defer/errdefer, unreachable, error sets, !T, try/catch, modules, tagged unions, register fields, @min/@max), tcc's diagnostics, IntelliSense settings for the C/C++ extension",
+  "version": "0.5.0",
   "publisher": "yasos",
   "license": "GPL-3.0-or-later",
   "engines": { "vscode": "^1.60.0" },
-  "categories": ["Programming Languages"],
+  "categories": ["Programming Languages", "Linters"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:c", "workspaceContains:scripts/safe_mode_ratchet.json"],
   "contributes": {
     "grammars": [
       {
@@ -14,6 +16,72 @@
         "path": "./syntaxes/yasc.tmLanguage.json",
         "injectTo": ["source.c"]
       }
-    ]
+    ],
+    "commands": [
+      { "command": "yasc.checkFile", "title": "yasc: Check this file with tcc" }
+    ],
+    "configuration": {
+      "title": "yasc",
+      "properties": {
+        "yasc.compiler": {
+          "type": "string",
+          "default": "libs/tinycc/bin/armv8m-tcc",
+          "description": "tcc that checks yasc files, relative to the workspace folder (build_rootfs.sh leaves the cross here)."
+        },
+        "yasc.ratchetConfig": {
+          "type": "string",
+          "default": "scripts/safe_mode_ratchet.json",
+          "description": "The directories counted by scripts/safe_mode_ratchet.py are yasc, with their 'flags'."
+        },
+        "yasc.files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["libs/tinycc/examples/yasc/**"],
+          "description": "More yasc files (globs relative to the workspace folder). A .c file with '#pragma yasc' is yasc anyway."
+        },
+        "yasc.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "More tcc options for the check (e.g. -ccompat, -DFOO)."
+        },
+        "yasc.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check yasc .c files with 'tcc -fsyntax-only' (the safe default: yasc, -Wall, -Wlifetime)."
+        },
+        "yasc.diagnostics.onType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check while typing (unsaved text goes to tcc on stdin), not only on open and save."
+        },
+        "yasc.diagnostics.delay": {
+          "type": "number",
+          "default": 600,
+          "description": "Milliseconds after the last keystroke before checking."
+        },
+        "yasc.diagnostics.timeout": {
+          "type": "number",
+          "default": 30,
+          "description": "Seconds before a check is given up."
+        },
+        "yasc.intellisense.standard": {
+          "type": "string",
+          "enum": ["c11", "c17", "c23", "gnu11", "gnu17", "gnu23"],
+          "default": "gnu17",
+          "description": "The C standard IntelliSense parses yasc files as. tcc is C23, but IntelliSense's C23 mode reports a self-referencing struct as redeclared ('does not declare the same type', 3799)."
+        },
+        "yasc.intellisense.hideErrors": {
+          "type": "boolean",
+          "default": true,
+          "description": "In yasc .c files that tcc checks, show the C/C++ extension's errors only on lines where tcc reports an error too: IntelliSense parses plain C and cannot read @min/@max, slices ([]T, p[a:b], s.len), catch, !T. Its warnings and hints stay."
+        },
+        "yasc.intellisense.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Give the C/C++ extension tcc's include paths and macros for yasc files and erase the yasc words it cannot parse (needs C_Cpp.default.configurationProvider = yasos.yasc-syntax)."
+        }
+      }
+    }
   }
 }
