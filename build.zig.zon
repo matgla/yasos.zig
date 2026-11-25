@@ -1,6 +1,6 @@
 .{
     .name = .yasos,
-    .version = "0.9.0",
+    .version = "0.11.0",
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .yasos_hal = .{ .path = "hal" },
