@@ -69,11 +69,14 @@ jobs:
       # 2026-11-23: 1800000 -> 2050000. The safe default's checks (yasc, the
       # flow checks, gcc's -Wall/-Wextra set, object sizes, error recovery,
       # JSON/SARIF, UBSan/stack protector) took the device tcc to 1992288.
+      # 2026-11-25: 2050000 -> 2200000. Rounds 5 and 6 (yasc slices,
+      # in/inout/out, enforced initialization, unreachable, compiler fortify,
+      # static bounds, @min/@max) took it to 2134792.
       - name: tcc .text size gate
         if: always()
         shell: bash
         run: |
-          BUDGET=2050000
+          BUDGET=2200000
           ELF=libs/tinycc/bin/armv8m-tcc.elf
           # Also covers the known "build_rootfs.sh exits 0 when make failed" trap:
           # without this, a missing ELF would silently skip the gate.
