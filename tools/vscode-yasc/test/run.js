@@ -27,6 +27,8 @@ const ERROR = 'storage.type.error.yasc.c';
 const ERRSET = 'entity.name.type.error.yasc.c';
 const ERRNAME = 'constant.other.error.yasc.c';
 const BUILTIN = 'support.function.yasc.c';
+const MOVE = 'keyword.operator.expression.move.yasc.c';
+const BORROW = 'keyword.operator.expression.borrow.yasc.c';
 const BANG = 'storage.modifier.errunion.yasc.c';
 const IMPORT = 'keyword.control.import.yasc.c';
 const MODNAME = 'entity.name.namespace.yasc.c';
@@ -38,6 +40,11 @@ const ATBUILTIN = 'support.function.builtin.yasc.c';
 const SLICE = 'storage.modifier.slice.yasc.c';
 const SLICEOP = 'keyword.operator.slice.yasc.c';
 const UNREACHABLE = 'keyword.control.unreachable.yasc.c';
+const CAST = 'keyword.operator.cast.yasc.c';
+const UNSAFECAST = 'keyword.operator.cast.unsafe.yasc.c';
+const PERM = 'storage.modifier.cast.yasc.c';
+const CASTOPEN = 'punctuation.definition.cast.begin.yasc.c';
+const CASTCLOSE = 'punctuation.definition.cast.end.yasc.c';
 
 // [source lines, [[line, needle, expected scope or null], ...]]: needle's
 // first word (or its first character when it does not start with a word), at
@@ -73,6 +80,16 @@ const cases = [
     [6, 'view,', QUALIFIER], [6, 'view)', QUALIFIER],
     [1, 'const', 'c:storage.modifier.c'], [1, 'char', 'c:storage.type.built-in.primitive.c'],
     [0, 'comment', 'c:comment.block.c'],
+  ]],
+  ['move / borrow are operators, not calls', [
+    'void f(DIR * owned dir)',
+    '{',
+    '  memset(borrow(dir), 0, sizeof(*dir));',
+    '  return g(move(dir), p->move(1), q.borrow (2));',
+    '}',
+  ], [
+    [2, 'borrow', BORROW], [2, 'memset', 'c:entity.name.function.c'], [2, 'sizeof', 'c:keyword.operator.sizeof.c'],
+    [3, 'move(dir)', MOVE], [3, 'move(1)', null], [3, 'borrow', null],
   ]],
   ['the words as names', [
     'int out;',
@@ -144,7 +161,7 @@ const cases = [
     [13, 'catch', CATCH], [14, 'catch', CATCH], [14, 'e|', CAPTURE],
     [15, 'error_name', BUILTIN],
     [17, 'catch', CATCH], [17, 'err|', CAPTURE],
-    [18, 'error_from', BUILTIN], [18, 'move', BUILTIN], [18, 'borrow', BUILTIN], [18, 'move(1)', null],
+    [18, 'error_from', BUILTIN], [18, 'move', MOVE], [18, 'borrow', BORROW], [18, 'move(1)', null],
     [19, '!', null], [19, '!=', null], [19, '!x', null],
     [20, 'error', null], [20, 'error =', null], [20, 'error;', null],
     [20, 'try', null], [20, 'catch', null],
@@ -259,6 +276,24 @@ const cases = [
     [6, 'unreachable', null], [7, 'unreachable', null], [8, 'unreachable', null], [9, 'unreachable', null],
     [9, 'unreachable;', null], [10, 'unreachable', null],
   ]],
+  ['cast<...> / unsafe_cast<...>', [
+    'uint16_t port = cast<int(uint16_t)>(n); float f = cast< float (double) >(d);',
+    'auto de = cast<ptr(struct dirent *), align>(dir->buf + pos);',
+    'char * view hit = unsafe_cast<qual(char *)>(s); x = cast<align(4)>(p);',
+    'if (cast < as && trunc > 1) return cast(int, x); s.cast = p->unsafe_cast;',
+    'y = cast<trunc(uint8_t)>(f(a, int(b)) > 0);',
+  ], [
+    [0, 'cast<int', CAST], [0, '<int', CASTOPEN], [0, 'int(uint16_t)', PERM],
+    [0, 'uint16_t)', 'c:storage.type.built-in.c'], [0, '>(n)', CASTCLOSE],
+    [0, 'cast< float', CAST], [0, 'float (double)', PERM], [0, 'double', 'c:storage.type.built-in.primitive.c'],
+    [0, ' >(d)', null], [0, '>(d)', CASTCLOSE], [0, 'float f', null],
+    [1, 'cast', CAST], [1, 'ptr', PERM], [1, 'align', PERM], [1, 'dirent', null], [1, '>(dir', CASTCLOSE],
+    [1, '->buf', null],
+    [2, 'unsafe_cast', UNSAFECAST], [2, 'qual', PERM], [2, 'align(4)', PERM], [2, '>(s)', CASTCLOSE],
+    [3, 'cast <', null], [3, '< as', null], [3, 'as &&', null], [3, 'trunc >', null], [3, '> 1', null],
+    [3, 'cast(int', null], [3, 'int, x', null], [3, 'cast =', null], [3, 'unsafe_cast;', null],
+    [4, 'trunc', PERM], [4, 'int(b)', null], [4, '> 0', null],
+  ]],
   ['register fields', [
     'struct uart_regs {',
     '  volatile uint32_t data wo;',
@@ -278,11 +313,14 @@ const cases = [
   ['C23 and GNU words', [
     'constexpr int z = 1; int * p = nullptr; typeof(x) y; __typeof__(y) w; __auto_type q = 1;',
     'int a = alignof(int); s.constexpr = x->nullptr;',
+    'auto v = borrow(p); const auto n = 3; auto int k; s.auto = x->auto;',
   ], [
     [0, 'constexpr', 'storage.modifier.constexpr.yasc.c'], [0, 'nullptr', 'constant.language.nullptr.yasc.c'],
     [0, 'typeof', 'keyword.operator.typeof.yasc.c'], [0, '__typeof__', 'keyword.operator.typeof.yasc.c'],
     [0, '__auto_type', 'storage.type.auto.yasc.c'], [1, 'alignof', 'keyword.operator.typeof.yasc.c'],
     [1, 'constexpr', null], [1, 'nullptr', null],
+    [2, 'auto', 'storage.type.auto.yasc.c'], [2, 'auto n', 'storage.type.auto.yasc.c'],
+    [2, 'auto int', 'storage.type.auto.yasc.c'], [2, 'auto =', null], [2, 'auto;', null],
   ]],
   ['@min and @max', [
     'size_t n = @min(buflen, PATH_MAX);',

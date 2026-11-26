@@ -46,8 +46,7 @@ function project(root) {
 }
 
 function compilerPath(root) {
-  const c = cfg(vscode.Uri.file(root)).get('compiler') || 'libs/tinycc/bin/armv8m-tcc';
-  return path.resolve(root, c.replace(/^\$\{workspaceFolder\}/, root));
+  return tcc.pickCompiler(root, cfg(vscode.Uri.file(root)).get('compiler'));
 }
 
 // {root, project, info} for a yasc file, else null.
@@ -117,8 +116,16 @@ function toDiagnostics(doc, root, stderr, code) {
   return diags;
 }
 
+// A yasc .c or .h file: a header is checked alone too, so that its
+// IntelliSense errors (`owned(dealloc)`...) are filtered like a .c file's.
+// VSCode may open a .h as C++.
+function checkable(doc) {
+  if (!/\.[ch]$/.test(doc.uri.fsPath)) return false;
+  return doc.languageId === 'c' || (doc.languageId === 'cpp' && /\.h$/.test(doc.uri.fsPath));
+}
+
 function check(doc) {
-  if (doc.languageId !== 'c' || !/\.c$/.test(doc.uri.fsPath)) return;
+  if (!checkable(doc)) return;
   const c = cfg(doc.uri);
   if (!c.get('diagnostics.enable')) return;
   const found = lookup(doc.uri, doc.getText());
@@ -168,16 +175,16 @@ function forgetErrors(uri) {
   if (tccErrorLines.delete(uri.toString()) && filter) filter.refresh(uri);
 }
 
-// For squiggles.install: tcc's error lines in an open yasc .c file that tcc
-// checks (empty until its first check), null for any other file.
+// For squiggles.install: tcc's error lines in an open yasc .c or .h file that
+// tcc checks (empty until its first check), null for any other file.
 const NO_LINES = new Set();
 function errorLinesFor(uri) {
-  if (uri.scheme !== 'file' || !/\.c$/.test(uri.fsPath)) return null;
+  if (uri.scheme !== 'file' || !/\.[ch]$/.test(uri.fsPath)) return null;
   const c = cfg(uri);
   if (!c.get('intellisense.hideErrors') || !c.get('diagnostics.enable')) return null;
   const key = uri.toString();
   const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === key);
-  if (!doc || doc.languageId !== 'c') return null;
+  if (!doc || !checkable(doc)) return null;
   const found = lookup(uri, doc.getText());
   if (!found || !fs.existsSync(compilerPath(found.root))) return null;
   return tccErrorLines.get(key) || NO_LINES;
@@ -229,6 +236,36 @@ function configurationFor(found, file, extensionPath) {
   };
 }
 
+// The tag parser's settings (workspace symbols, go to definition in another
+// file) for a workspace folder with yasc files, else null.  Without one the
+// C/C++ extension waits for the provider to time out, then falls back to the
+// default browse path plus the host compiler's headers (/usr/include, the
+// wrong libc for the target), and resolving every #include of the folder
+// through that keeps its server busy for minutes while IntelliSense requests
+// wait on it.  The folder itself (C_Cpp.files.exclude still applies) and
+// tcc's system headers; no compiler, so no host headers.
+function browseConfigurationFor(root) {
+  if (cfg(vscode.Uri.file(root)).get('intellisense.enable') === false) return null;
+  const p = project(root);
+  if (!p.dirs.length && !p.globs.length) return null;
+  const ci = infoFor(compilerPath(root));
+  const inside = (d) => !path.relative(root, d).startsWith('..');
+  return {
+    browsePath: [root].concat(ci.includes.filter((d) => !inside(d))),
+    compilerPath: '',
+    compilerArgs: [],
+    standard: cfg(vscode.Uri.file(root)).get('intellisense.standard') || 'gnu17',
+  };
+}
+
+function firstBrowseConfiguration() {
+  for (const f of vscode.workspace.workspaceFolders || []) {
+    const c = browseConfigurationFor(f.uri.fsPath);
+    if (c) return c;
+  }
+  return null;
+}
+
 async function registerProvider(context) {
   const ext = vscode.extensions.getExtension('ms-vscode.cpptools');
   if (!ext) return null;
@@ -249,10 +286,13 @@ async function registerProvider(context) {
       }
       return items;
     },
-    canProvideBrowseConfiguration: async () => false,
-    provideBrowseConfiguration: async () => null,
-    canProvideBrowseConfigurationsPerFolder: async () => false,
-    provideFolderBrowseConfiguration: async () => null,
+    canProvideBrowseConfiguration: async () => !!firstBrowseConfiguration(),
+    provideBrowseConfiguration: async () => firstBrowseConfiguration(),
+    canProvideBrowseConfigurationsPerFolder: async () => true,
+    provideFolderBrowseConfiguration: async (uri) => {
+      const root = folderOf(uri) || uri.fsPath;
+      return browseConfigurationFor(root);
+    },
     dispose: () => {},
   };
   api.registerCustomConfigurationProvider(provider);
@@ -286,14 +326,29 @@ async function activate(context) {
     projects.clear();
     compilerInfo.clear();
     if (filter) filter.refreshAll();
-    if (cpptools) cpptools.api.didChangeCustomConfiguration(cpptools.provider);
+    if (cpptools) {
+      cpptools.api.didChangeCustomConfiguration(cpptools.provider);
+      cpptools.api.didChangeCustomBrowseConfiguration(cpptools.provider);
+    }
     vscode.workspace.textDocuments.forEach(check);
   };
 
+  // Only the compiler and ratchet file each folder uses: the same names in
+  // other checkouts inside the folder (.cache worktrees rebuilt by other
+  // sessions) must not reset IntelliSense, which re-reads every file's
+  // configuration.
+  const watched = (uri) => (vscode.workspace.workspaceFolders || []).some((f) => {
+    const root = f.uri.fsPath;
+    const ratchet = path.resolve(root, cfg(f.uri).get('ratchetConfig') || 'scripts/safe_mode_ratchet.json');
+    return uri.fsPath === compilerPath(root) || uri.fsPath === ratchet;
+  });
+  const onWatched = (uri) => {
+    if (watched(uri)) reset();
+  };
   const watcher = vscode.workspace.createFileSystemWatcher('**/{safe_mode_ratchet.json,armv8m-tcc}');
-  watcher.onDidChange(reset);
-  watcher.onDidCreate(reset);
-  watcher.onDidDelete(reset);
+  watcher.onDidChange(onWatched);
+  watcher.onDidCreate(onWatched);
+  watcher.onDidDelete(onWatched);
   context.subscriptions.push(
     watcher,
     vscode.workspace.onDidOpenTextDocument(check),

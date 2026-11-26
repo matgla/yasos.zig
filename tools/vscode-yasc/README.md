@@ -23,6 +23,10 @@ Highlights tinycc's **yasc** dialect of C in ordinary `.c`/`.h` files
   `struct tokenizer borrows(text) { ... }`, an out parameter's target
   (`out char * borrows(s) * view maybe end`)
 - `unsafe { ... }`, `unsafe(expr)`
+- casts: `cast<int(uint16_t)>(n)`, `cast<ptr(struct dirent *), align>(p)`,
+  `unsafe_cast<qual(char *)>(s)` -- the word, its `<` `>` and the permissions
+  (`as int trunc bits float enum ptr align addr qual fn`); the type inside
+  stays C
 - tagged unions: `union(k) { long i when(V_INT); ... } u;`
 - register fields: `uint32_t irq:1 w1c;`, `volatile uint32_t id ro;`, `... wo;`
 - modules: `module a.b;`, `import a.b;`, `export DECL`
@@ -43,7 +47,10 @@ the language stays `c` and the C/C++ extension's IntelliSense keeps working.
   `module` must start a line, `unreachable` must stand alone (first on its
   line, after `;` `{` `}` `:` `)`, `else` or `catch`, and before `;` `,` `)`
   or `}`: `int unreachable;` and `unreachable()` stay names),
-  `!` must be followed by a type, `when(` must
+  `!` must be followed by a type, `cast`/`unsafe_cast` must be followed by
+  `<` and a permission (`cast < 3` compares a variable; a permission is one
+  only in that list, before `(`, `,` or `>`, so `cast<int(int)>` keeps the
+  second `int` a type), `when(` must
   follow a member's name, `ro`/`wo`/`w1c` must follow a member's declarator
   (`int ro;`, `struct s ro;`, `return ro;` stay names), `owned(...)` /
   `borrows(...)` after a type must be followed by the declaration, and none of
@@ -60,7 +67,11 @@ the language stays `c` and the C/C++ extension's IntelliSense keeps working.
   `storage.modifier.export.yasc.c`, `keyword.control.unsafe.yasc.c`,
   `storage.modifier.when.yasc.c`, `storage.modifier.register.yasc.c`,
   `storage.modifier.slice.yasc.c` (`[]`, `[:0]`), `keyword.operator.slice.yasc.c`
-  (a slice's `:`).
+  (a slice's `:`), `keyword.operator.cast.yasc.c` /
+  `keyword.operator.cast.unsafe.yasc.c` (a theme can flag `unsafe_cast`),
+  `storage.modifier.cast.yasc.c` (permissions),
+  `punctuation.definition.cast.{begin,end}.yasc.c` (`<` `>`). A cast is
+  highlighted on one line only.
 - A slice prefix is a `[]` / `[:0]` before a type name that does not follow a
   name, `)`, `]` or a quote (that is `int a[] __attribute__((x))`), except a
   storage-class word (`static []char s`). A slice's `:` is one inside a single
@@ -87,8 +98,8 @@ The extension fixes that in two parts:
   (the unsaved text goes to tcc on stdin after `#line 1 "<file>"`). tcc gives
   no columns: a message that names `'x'` underlines `x`, others the line. A
   `note:` is attached to the message before it; a message from a header shows
-  at the `#include` that leads to it. Headers are not checked alone (the
-  `sys/yasc/*.h` fragments do not compile alone).
+  at the `#include` that leads to it. A yasc header is checked alone the
+  same way (the `sys/yasc/*.h` fragments compile alone).
 - **IntelliSense for yasc files**: a configuration provider for the C/C++
   extension gives yasc files tcc's include paths (`armv8m-tcc -vv`: the
   rootfs headers) and macros (`-dM`, without `__YASC__`, so headers show their
@@ -99,16 +110,26 @@ The extension fixes that in two parts:
   configuration. It needs
   `"C_Cpp.default.configurationProvider": "yasos.yasc-syntax"` in the
   workspace settings (the extension offers to set it once).
+- **Go to definition, workspace symbols**: the provider also gives the tag
+  parser its settings for a folder with yasc files: the folder and tcc's
+  system headers, no compiler (no host `/usr/include`). Without them the
+  C/C++ extension waits for the provider to time out and falls back to
+  resolving every `#include` of the folder against the whole tree plus the
+  host headers, which kept its server busy for many minutes on this
+  repository while completion and go to definition waited. Keep large
+  copies of foreign trees out with `C_Cpp.files.exclude` (newlib under
+  `libs/tinycc/tests/ir_tests/qemu/*/libs`, Python venvs, `sdcard`,
+  `rootfs/usr/share`).
 - **IntelliSense errors only where tcc agrees**: what no macro can erase --
-  `@min(a, b)`/`@max` ('unrecognized token' at the `@`), slices (`[]const
+  `@min(a, b)`/`@max` ('unrecognized token' at the `@`), `cast<...>(x)`, slices (`[]const
   char s`, `p[0:n]`, then every `s` is 'undefined'), `owned(dealloc)`,
   `out`, `catch`, `error`, `!T`, `union(k)`, methods, modules -- IntelliSense
   marks as errors, and EDG's `#pragma diag_suppress` cannot silence them. In
-  a yasc `.c` file that tcc checks, a C/C++ error stays only on a line where
+  a yasc `.c` or `.h` file that tcc checks, a C/C++ error stays only on a line where
   tcc reports an error too; IntelliSense's warnings and hints stay -- except
   its "never used" hints (EDG 177/550/869) for a name that appears on a line
   whose error is hidden: `size_t len; ... []char s = path[0:len];` is a use
-  IntelliSense could not read -- headers and other files are left alone
+  IntelliSense could not read -- other files are left alone
   (`yasc.intellisense.hideErrors`). It wraps
   the extension host's shared `DiagnosticCollection` class to see the C/C++
   extension's `C/C++: IntelliSense` collection (`squiggles.js`): VSCode has
@@ -123,7 +144,10 @@ Settings: `yasc.compiler`, `yasc.extraArgs`, `yasc.diagnostics.enable`,
 `yasc.intellisense.standard` (default `gnu17`:
 IntelliSense's C23 mode calls a self-referencing struct a redeclaration);
 command `yasc: Check this file with tcc`;
-log in the `yasc` output channel. The cross has to exist (`./build_rootfs.sh`).
+log in the `yasc` output channel. The cross has to exist: with `yasc.compiler`
+empty (the default) the check uses the newer of `libs/tinycc/bin/armv8m-tcc`
+(`./build_rootfs.sh`) and `libs/tinycc/armv8m-tcc` (`make -C libs/tinycc
+cross`) that runs on this machine, so a tcc fix shows after either build.
 
 ```bash
 ./install.sh                # build yasc-syntax.vsix and `code --install-extension` it

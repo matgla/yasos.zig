@@ -57,8 +57,40 @@ test('compiler info', () => {
   const vv = 'tcc version 0.9.28rc (ARM YasOS)\ninstall: /x\ninclude:\n  /r/usr/include\n  /x/include\nlibraries:\n  /r/usr/lib\n';
   assert.deepStrictEqual(tcc.parseIncludeDirs(vv), ['/r/usr/include', '/x/include']);
   const dm = '#define __TINYC__ 928\n#define __YASC__ 1\n#define __STDC_VERSION__ 202311L\n' +
-    '#define __has_feature(x) 0\n#define __thumb__ 1\n#define __ARMEL__\n';
-  assert.deepStrictEqual(tcc.parsePredefs(dm), ['__TINYC__=928', '__thumb__=1', '__ARMEL__']);
+    '#define __has_feature(x) 0\n#define __thumb__ 1\n#define __ARMEL__\n' +
+    '#define __FLT_MAX__ <float>\n#define __LDBL_MIN__ <long double>\n#define __FLT_DIG__ 6\n' +
+    '#define __PRETTY_FUNCTION__ __FUNCTION__\n#define __BASE_FILE__ "-"\n';
+  assert.deepStrictEqual(tcc.parsePredefs(dm), ['__TINYC__=928', '__thumb__=1', '__ARMEL__', '__FLT_DIG__=6']);
+});
+
+test('the compiler: a setting, else the newest cross this machine runs', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yasc-cc-'));
+  const elf = (rel, machine, when) => {
+    const f = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const h = Buffer.alloc(64);
+    h.writeUInt32BE(0x7f454c46, 0);
+    h[4] = 2;
+    h.writeUInt16LE(machine, 18);
+    fs.writeFileSync(f, h);
+    fs.utimesSync(f, when, when);
+    return f;
+  };
+  try {
+    const bin = path.join(dir, 'libs/tinycc/bin/armv8m-tcc');
+    assert.strictEqual(tcc.pickCompiler(dir, ''), bin); // none built
+    elf('libs/tinycc/bin/armv8m-tcc', 62, 1000);
+    const cross = elf('libs/tinycc/armv8m-tcc', 62, 2000);
+    if (process.arch === 'x64') {
+      assert.strictEqual(tcc.pickCompiler(dir, ''), cross); // make cross is newer
+      elf('libs/tinycc/armv8m-tcc', 40, 3000); // build_rootfs.sh's native ARM tcc
+      assert.strictEqual(tcc.pickCompiler(dir, undefined), bin);
+    }
+    assert.strictEqual(tcc.pickCompiler(dir, '${workspaceFolder}/x/tcc'), path.join(dir, 'x/tcc'));
+    assert.strictEqual(tcc.pickCompiler(dir, 'y/tcc'), path.join(dir, 'y/tcc'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('which files are yasc', () => {
@@ -182,6 +214,23 @@ if (fs.existsSync(exe)) {
     assert(d.every((x) => x.file === file), r.stderr);
     assert(d.some((x) => x.line === 1 && x.severity === 'error' && /plain pointer/.test(x.message)), r.stderr);
     assert(d.some((x) => x.line === 2 && /uninitialized/.test(x.message)), r.stderr);
+  });
+  // A yasc header is checked alone (its IntelliSense errors are filtered by
+  // tcc's lines): the libc yasc headers must compile alone without a message,
+  // or `void *owned(dlclose) dlopen(...)` keeps IntelliSense's "expected a ';'".
+  test('a real check: yasc headers compile alone', () => {
+    const p = tcc.loadProject(root);
+    const dir = path.join(root, 'libs/libc/yasc');
+    for (const name of ['dlfcn.h', 'stdio.h', 'stdlib.h', 'string.h', 'unistd.h']) {
+      const file = path.join(dir, name);
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file, 'utf8');
+      const info = tcc.classify(p, file, text);
+      assert(info, file);
+      const r = cp.spawnSync(exe, tcc.checkArgs(p, file, info), { cwd: root, input: tcc.stdinFor(file, text), encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, file + ': ' + r.stderr);
+      assert.deepStrictEqual(tcc.parseOutput(r.stderr, root), [], file + ': ' + r.stderr);
+    }
   });
 } else {
   console.log('skip a real check (no ' + exe + ')');

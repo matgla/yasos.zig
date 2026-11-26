@@ -156,20 +156,66 @@ function parseIncludeDirs(vv) {
 // `tcc -dM -E -`: object-like macros as NAME=VALUE for IntelliSense.  Not
 // `__YASC__`: the headers' yasc declarations sit under it, and IntelliSense
 // reads their plain C ones.  Not the function-like builtins nor __STDC*
-// (IntelliSense has its own).
+// (IntelliSense has its own), nor what IntelliSense defines itself
+// (__PRETTY_FUNCTION__, __BASE_FILE__: tcc says "-" reading stdin), nor the
+// values tcc prints as a placeholder (`__FLT_MAX__ <float>`: not C, and
+// IntelliSense knows them).
+const OWN_PREDEFS = new Set(['__YASC__', '__PRETTY_FUNCTION__', '__FUNCTION__', '__BASE_FILE__']);
 function parsePredefs(text) {
   const defs = [];
   for (const line of text.split(/\r?\n/)) {
     const m = /^#define\s+([A-Za-z_]\w*)(\s+(.*))?$/.exec(line);
     if (!m) continue;
     const name = m[1];
-    if (name === '__YASC__' || name.startsWith('__STDC') || name.startsWith('__has_')) continue;
+    if (OWN_PREDEFS.has(name) || name.startsWith('__STDC') || name.startsWith('__has_')) continue;
+    if (m[3] !== undefined && /^<.*>$/.test(m[3].trim())) continue;
     defs.push(m[3] !== undefined ? `${name}=${m[3]}` : name);
   }
   return defs;
 }
 
+// The crosses a checkout has: build_rootfs.sh's, and `make cross`'s in
+// libs/tinycc (after build_rootfs.sh that one is the native ARM tcc).
+const COMPILERS = ['libs/tinycc/bin/armv8m-tcc', 'libs/tinycc/armv8m-tcc'];
+
+// An ELF this machine runs: its class and machine are node's own.
+function hostRunnable(file) {
+  const want = { x64: [2, 62], arm64: [2, 183], ia32: [1, 3], arm: [1, 40] }[process.arch];
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const h = Buffer.alloc(20);
+    if (fs.readSync(fd, h, 0, 20, 0) < 20 || h.readUInt32BE(0) !== 0x7f454c46) return false;
+    return !want || (h[4] === want[0] && h[18] + 256 * h[19] === want[1]);
+  } catch (e) {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+// The compiler that checks yasc files: SETTING (relative to ROOT,
+// ${workspaceFolder} allowed) when given, else the newest cross of COMPILERS
+// this machine runs -- a fix to tcc shows after `make cross` as after
+// build_rootfs.sh.  The first candidate when none is there.
+function pickCompiler(root, setting) {
+  if (setting) return path.resolve(root, setting.replace(/^\$\{workspaceFolder\}/, root));
+  let best = null, bestTime = -1;
+  for (const c of COMPILERS) {
+    const f = path.join(root, c);
+    let st;
+    try {
+      st = fs.statSync(f);
+    } catch (e) {
+      continue;
+    }
+    if (st.isFile() && st.mtimeMs > bestTime && hostRunnable(f)) best = f, bestTime = st.mtimeMs;
+  }
+  return best || path.join(root, COMPILERS[0]);
+}
+
 module.exports = {
+  pickCompiler,
   globToRegex,
   loadProject,
   classify,

@@ -25,6 +25,9 @@
       "include": "#statement"
     },
     {
+      "include": "#cast"
+    },
+    {
       "include": "#unsafe"
     },
     {
@@ -47,6 +50,9 @@
     },
     {
       "include": "#error-builtin"
+    },
+    {
+      "include": "#ownership-operator"
     },
     {
       "include": "#error-union"
@@ -97,7 +103,7 @@
     },
     "qualifier-after-star": {
       "$comment": "owned / view / maybe qualify a pointer: they follow its '*' (or another qualifier): char * owned maybe p, const char * view * view argv, f(char * view), FILE * owned(fclose) maybe f",
-      "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes)\\s*\\([^()]*\\)\\s*)(owned|view|maybe)\\b(?=\\s*(?:[A-Za-z_*),]|$))",
+      "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes|c_api)\\s*\\([^()]*\\)\\s*)(owned|view|maybe)\\b(?=\\s*(?:[A-Za-z_*),]|$))",
       "name": "storage.modifier.yasc.c"
     },
     "qualifier-before-type": {
@@ -247,8 +253,20 @@
       }
     },
     "error-builtin": {
-      "match": "(?<!\\.|->)\\b(error_name|error_from|move|borrow)\\b(?=\\s*\\()",
+      "match": "(?<!\\.|->)\\b(error_name|error_from)\\b(?=\\s*\\()",
       "name": "support.function.yasc.c"
+    },
+    "ownership-operator": {
+      "$comment": "move(x) / borrow(x): operators like sizeof, not calls -- support.function would color them as any function name",
+      "match": "(?<!\\.|->)\\b(?:(move)|(borrow))\\b(?=\\s*\\()",
+      "captures": {
+        "1": {
+          "name": "keyword.operator.expression.move.yasc.c"
+        },
+        "2": {
+          "name": "keyword.operator.expression.borrow.yasc.c"
+        }
+      }
     },
     "error-union": {
       "$comment": "!T, a T or an error: '!' before a type (no expression puts one there), or before NAME NAME( -- a function returning !typedef_t",
@@ -258,7 +276,7 @@
           "name": "storage.modifier.errunion.yasc.c"
         },
         {
-          "match": "!(?=\\s*(?!sizeof\\b|defined\\b|return\\b)[A-Za-z_]\\w*(?:\\s*\\*\\s*(?:(?:owned|view|maybe)\\b\\s*|(?:owned|borrows|takes)\\s*\\([^()]*\\)\\s*)*)*\\s+[A-Za-z_]\\w*\\s*\\()",
+          "match": "!(?=\\s*(?!sizeof\\b|defined\\b|return\\b)[A-Za-z_]\\w*(?:\\s*\\*\\s*(?:(?:owned|view|maybe)\\b\\s*|(?:owned|borrows|takes|c_api)\\s*\\([^()]*\\)\\s*)*)*\\s+[A-Za-z_]\\w*\\s*\\()",
           "name": "storage.modifier.errunion.yasc.c"
         }
       ]
@@ -267,7 +285,7 @@
       "$comment": "owned(dealloc) / borrows(x, ...) / takes(p): after a '*' or another qualifier, or after a type when the declaration goes on: FILE * owned(fclose) maybe f, int owned(close) maybe fd, regex_t owned(regfree) re, struct tokenizer borrows(text) {",
       "patterns": [
         {
-          "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes)\\s*\\([^()]*\\)\\s*)(?<!\\.|->)\\b(owned|borrows|takes)\\s*(?=\\()",
+          "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes|c_api)\\s*\\([^()]*\\)\\s*)(?<!\\.|->)\\b(owned|borrows|takes|c_api)\\s*(?=\\()",
           "captures": {
             "1": {
               "name": "storage.modifier.yasc.c"
@@ -328,7 +346,7 @@
           "name": "keyword.operator.typeof.yasc.c"
         },
         {
-          "match": "(?<!\\.|->)\\b__auto_type\\b",
+          "match": "(?<!\\.|->)\\b(?:__auto_type|auto)\\b",
           "name": "storage.type.auto.yasc.c"
         }
       ]
@@ -373,6 +391,33 @@
       "$comment": "x[a:b], x[a:], x[:b], x[a:b:0]: a ':' inside one pair of brackets with no '?' there (a[c ? 1 : 2] is a conditional) no quote (case '[': ... ']') and not '::' ([[gnu::unused]])",
       "match": "(?<=\\[[^\\[\\]?;{}'\\\"]*)(?<!:)(:)(?!:)(?=[^\\[\\]?;{}'\\\"]*\\])",
       "name": "keyword.operator.slice.yasc.c"
+    },
+    "cast": {
+      "$comment": "cast<PERMISSION(TYPE), MODIFIER, ...>(EXPR) and unsafe_cast<...>(EXPR): the word, its '<' '>' and the permissions (int/float/enum there are permissions, the type in their parentheses stays C). Only when a permission follows the '<': cast < 3 compares a variable; one line only",
+      "patterns": [
+        {
+          "match": "(?<!\\.|->)\\b(?:(unsafe_cast)|(cast))\\s*(<)(?=\\s*(?:as|int|trunc|bits|float|enum|ptr|align|addr|qual|const|fn)\\s*[(,>])",
+          "captures": {
+            "1": {
+              "name": "keyword.operator.cast.unsafe.yasc.c"
+            },
+            "2": {
+              "name": "keyword.operator.cast.yasc.c"
+            },
+            "3": {
+              "name": "punctuation.definition.cast.begin.yasc.c"
+            }
+          }
+        },
+        {
+          "match": "(?<=\\b(?:unsafe_)?cast\\s*<\\s*|\\b(?:unsafe_)?cast\\s*<[^<>;{}\\\"']*,\\s*)(?:as|int|trunc|bits|float|enum|ptr|align|addr|qual|const|fn)\\b(?=\\s*[(,>])",
+          "name": "storage.modifier.cast.yasc.c"
+        },
+        {
+          "match": "(?<=\\b(?:unsafe_)?cast\\s*<\\s*(?:as|int|trunc|bits|float|enum|ptr|align|addr|qual|const|fn)\\s*(?:[(,][^<>;{}\\\"']*)?)(?<!-)>",
+          "name": "punctuation.definition.cast.end.yasc.c"
+        }
+      ]
     }
   }
 }

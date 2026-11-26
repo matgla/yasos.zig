@@ -1,8 +1,8 @@
 {
   "name": "yasc-syntax",
   "displayName": "yasc (tinycc C dialect)",
-  "description": "tinycc's yasc dialect in C files: highlighting (owned/view/maybe/in/inout/out/drop, owned(dealloc)/borrows/takes, unsafe, defer/errdefer, unreachable, error sets, !T, try/catch, modules, tagged unions, register fields, @min/@max), tcc's diagnostics, IntelliSense settings for the C/C++ extension",
-  "version": "0.5.0",
+  "description": "tinycc's yasc dialect in C files: highlighting (owned/view/maybe/in/inout/out/drop, owned(dealloc)/borrows/takes, unsafe, cast<>/unsafe_cast<>, defer/errdefer, unreachable, error sets, !T, try/catch, modules, tagged unions, register fields, @min/@max), tcc's diagnostics, IntelliSense settings for the C/C++ extension",
+  "version": "0.5.2",
   "publisher": "yasos",
   "license": "GPL-3.0-or-later",
   "engines": { "vscode": "^1.60.0" },
@@ -25,8 +25,8 @@
       "properties": {
         "yasc.compiler": {
           "type": "string",
-          "default": "libs/tinycc/bin/armv8m-tcc",
-          "description": "tcc that checks yasc files, relative to the workspace folder (build_rootfs.sh leaves the cross here)."
+          "default": "",
+          "description": "tcc that checks yasc files, relative to the workspace folder. Empty: the newer of libs/tinycc/bin/armv8m-tcc (build_rootfs.sh's cross) and libs/tinycc/armv8m-tcc (make cross), whichever runs on this machine."
         },
         "yasc.ratchetConfig": {
           "type": "string",
@@ -48,7 +48,7 @@
         "yasc.diagnostics.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Check yasc .c files with 'tcc -fsyntax-only' (the safe default: yasc, -Wall, -Wlifetime)."
+          "description": "Check yasc .c and .h files with 'tcc -fsyntax-only' (the safe default: yasc, -Wall, -Wlifetime)."
         },
         "yasc.diagnostics.onType": {
           "type": "boolean",
@@ -74,7 +74,7 @@
         "yasc.intellisense.hideErrors": {
           "type": "boolean",
           "default": true,
-          "description": "In yasc .c files that tcc checks, show the C/C++ extension's errors only on lines where tcc reports an error too: IntelliSense parses plain C and cannot read @min/@max, slices ([]T, p[a:b], s.len), catch, !T. Its warnings and hints stay."
+          "description": "In yasc .c and .h files that tcc checks, show the C/C++ extension's errors only on lines where tcc reports an error too: IntelliSense parses plain C and cannot read @min/@max, slices ([]T, p[a:b], s.len), catch, !T. Its warnings and hints stay."
         },
         "yasc.intellisense.enable": {
           "type": "boolean",

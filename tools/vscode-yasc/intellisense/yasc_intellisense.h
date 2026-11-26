@@ -5,7 +5,8 @@
  *
  * Left as they are, because a macro cannot erase them without breaking
  * regular uses of the same word, or cannot touch them at all: `@min`/`@max`,
- * slices (`[]T`, `p[a:b]`), `owned(dealloc)` (`owned` is erased, the
+ * `cast<...>(x)`/`unsafe_cast<...>(x)`, slices (`[]T`, `p[a:b]`),
+ * `owned(dealloc)` (`owned` is erased, the
  * parenthesis stays), `out`, `in`, `catch`, `error`, `!T`, `union(k)`, `ro`/`wo`/
  * `w1c`, methods in struct bodies, `module`/`import`/`export`.  The errors
  * IntelliSense gives for them are hidden by squiggles.js where tcc accepts
@@ -22,6 +23,7 @@
 #define writeonly
 #define borrows(...)
 #define takes(...)
+#define c_api(...) /* the C type: yasc reads the declaration's own */
 #define when(...)
 
 /* before a parameter's type */
