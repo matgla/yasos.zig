@@ -702,7 +702,10 @@ pub fn executable_prefers_slow_memory(path: []const u8) bool {
     return yasld.header_prefers_slow_memory(&header);
 }
 
-pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t) !*yasld.Module {
+/// dlopen of PATH for `pid`. An image the process already has open is the
+/// same module with one more reference (POSIX: one copy however often, and by
+/// whatever path, it is opened); RTLD_GLOBAL once makes it global for good.
+pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t, global: bool) !*yasld.Module {
     loader_lock.lock();
     defer loader_lock.unlock();
     // Same window as load_executable: from the lookup, not from the relocation.
@@ -731,6 +734,11 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
             const size = std.math.cast(usize, f.interface.size()) orelse return kernel.errno.ErrnoSet.ExecFormatError;
             if (size < yasld.header_size or @intFromPtr(header_address) % 4 != 0) return kernel.errno.ErrnoSet.ExecFormatError;
             const bytes: [*]align(4) const u8 = @ptrCast(@alignCast(header_address));
+            if (open_library_locked(pid, @intFromPtr(bytes))) |open| {
+                open.dl_references += 1;
+                open.dl_global = open.dl_global or global;
+                return open;
+            }
             const image = bytes[0..yasld.image_length(bytes[0..@min(size, yasld.image_length_prefix)], size)];
             const library = loader.*.load_library(image, process_allocator, node.immutable_backing) catch |err| {
                 log.err("loading library '{s}' failed: {s}", .{ path, @errorName(err) });
@@ -746,6 +754,8 @@ pub fn load_shared_library(path: []const u8, process_allocator: std.mem.Allocato
             if (maybe_list) |list| {
                 list.append(&library.list_node);
             }
+            library.dl_references = 1;
+            library.dl_global = global;
             return library;
         } else {
             log.err("yasld is not initialized", .{});
@@ -896,32 +906,124 @@ pub fn format_maps(pid: c.pid_t, buffer: []u8) usize {
     return written;
 }
 
-/// Is `library` a handle this process actually holds? dlclose/dlsym receive the
-/// handle straight from userspace; without this, `release_shared_library` would
-/// unlink an attacker-chosen address, which is an arbitrary write. The
-/// per-process list is a handful of entries, so a linear scan is enough.
-pub fn owns_shared_library(pid: c.pid_t, library: *const yasld.Module) bool {
-    const list = libraries_list.getPtr(pid) orelse return false;
+/// The module `pid` already has open from the image at IMAGE, if any.
+fn open_library_locked(pid: c.pid_t, image: usize) ?*yasld.Module {
+    loader_lock.assert_held();
+    const list = libraries_list.getPtr(pid) orelse return null;
     var maybe_node = list.first;
     while (maybe_node) |node| : (maybe_node = node.next) {
         const module: *yasld.Module = @alignCast(@fieldParentPtr("list_node", node));
-        if (module == library) return true;
+        if (module.image != 0 and module.image == image) return module;
     }
-    return false;
+    return null;
 }
 
+/// dlclose: one reference fewer; the last one takes the module apart -- all
+/// of it (its dependencies, data, thunks), as the process's exit would.
 pub fn release_shared_library(pid: c.pid_t, library: *yasld.Module) void {
     loader_lock.lock();
     defer loader_lock.unlock();
+    release_shared_library_locked(pid, library);
+}
+
+fn release_shared_library_locked(pid: c.pid_t, library: *yasld.Module) void {
+    loader_lock.assert_held();
     const maybe_list = libraries_list.getPtr(pid);
     if (maybe_list) |list| {
-        list.remove(&library.list_node);
-        if (yasld.get_loader()) |loader| {
-            loader.*.unload_module(library);
+        if (library.dl_references > 1) {
+            library.dl_references -= 1;
+            return;
         }
+        list.remove(&library.list_node);
+        library.destroy();
         if (list.first == null) {
             _ = libraries_list.remove(pid);
         }
+    }
+}
+
+/// What a dlopen handle names for `pid`: the program (dlopen(NULL), and
+/// RTLD_DEFAULT, which is null), one of its open libraries, or nothing --
+/// a handle comes straight from userspace, so it is checked every time:
+/// trusting it would unlink, or look symbols up in, an address the caller
+/// chose.
+const DlTarget = union(enum) {
+    program: *yasld.Module,
+    library: *yasld.Module,
+};
+
+fn dl_target_locked(pid: c.pid_t, handle: ?*anyopaque) ?DlTarget {
+    loader_lock.assert_held();
+    const program: ?*yasld.Module = if (executable_for_pid_locked(pid)) |exec| exec.module else null;
+    const h = handle orelse return if (program) |p| .{ .program = p } else null;
+    if (program) |p| if (@intFromPtr(p) == @intFromPtr(h)) return .{ .program = p };
+    const list = libraries_list.getPtr(pid) orelse return null;
+    var maybe_node = list.first;
+    while (maybe_node) |node| : (maybe_node = node.next) {
+        const module: *yasld.Module = @alignCast(@fieldParentPtr("list_node", node));
+        if (@intFromPtr(module) == @intFromPtr(h)) return .{ .library = module };
+    }
+    return null;
+}
+
+/// dlopen by NAME: a name with a '/' in it is a path; a bare one is looked
+/// up in /lib, then /usr/lib (POSIX leaves that search to the system).
+pub fn open_dl_library(name: []const u8, process_allocator: std.mem.Allocator, pid: c.pid_t, global: bool) !*yasld.Module {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return load_shared_library(name, process_allocator, pid, global);
+    var path_buf: [256]u8 = undefined;
+    for ([_][]const u8{ "/lib/", "/usr/lib/" }) |dir| {
+        const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ dir, name }) catch return kernel.errno.ErrnoSet.NameTooLong;
+        return load_shared_library(path, process_allocator, pid, global) catch |err| {
+            if (err == kernel.errno.ErrnoSet.NoEntry) continue;
+            return err;
+        };
+    }
+    return kernel.errno.ErrnoSet.NoEntry;
+}
+
+/// dlopen(NULL): the program's handle; the global symbols are the program,
+/// its dependencies and every library opened with RTLD_GLOBAL.
+pub fn global_handle(pid: c.pid_t) !*anyopaque {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    const exec = executable_for_pid_locked(pid) orelse return kernel.errno.ErrnoSet.NoEntry;
+    return exec.module;
+}
+
+/// dlsym. NoEntry when the symbol is not there, InvalidArgument when the
+/// handle names nothing this process has open.
+pub fn find_dl_symbol(pid: c.pid_t, handle: ?*anyopaque, name: []const u8) !usize {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    const target = dl_target_locked(pid, handle) orelse return kernel.errno.ErrnoSet.InvalidArgument;
+    switch (target) {
+        .library => |library| return (try library.dl_symbol(name)) orelse kernel.errno.ErrnoSet.NoEntry,
+        .program => |program| {
+            if (try program.dl_symbol(name)) |address| return address;
+            const list = libraries_list.getPtr(pid) orelse return kernel.errno.ErrnoSet.NoEntry;
+            var maybe_node = list.first;
+            while (maybe_node) |node| : (maybe_node = node.next) {
+                const module: *yasld.Module = @alignCast(@fieldParentPtr("list_node", node));
+                if (!module.dl_global) continue;
+                // The thunk is the program's: it outlives the library's
+                // dlclose, which POSIX leaves undefined to call anyway.
+                if (try module.dl_symbol(name)) |address| return address;
+            }
+            return kernel.errno.ErrnoSet.NoEntry;
+        },
+    }
+}
+
+/// dlclose. The program's handle closes to nothing; one that names nothing
+/// open is InvalidArgument.
+pub fn close_dl_handle(pid: c.pid_t, handle: ?*anyopaque) !void {
+    loader_lock.lock();
+    defer loader_lock.unlock();
+    if (handle == null) return kernel.errno.ErrnoSet.InvalidArgument;
+    const target = dl_target_locked(pid, handle) orelse return kernel.errno.ErrnoSet.InvalidArgument;
+    switch (target) {
+        .program => {},
+        .library => |library| release_shared_library_locked(pid, library),
     }
 }
 
@@ -1170,7 +1272,7 @@ test "Modules.ShouldLoadSharedLibrariesFromFileSystem" {
         .willReturn(file_node);
 
     const pid: c.pid_t = 123;
-    const lib = try load_shared_library("/test_lib", std.testing.allocator, pid);
+    const lib = try load_shared_library("/test_lib", std.testing.allocator, pid, false);
 
     try std.testing.expect(get_executable_for_pid(pid) == null);
     try std.testing.expect(libraries_list.getPtr(pid) != null);
@@ -1178,6 +1280,75 @@ test "Modules.ShouldLoadSharedLibrariesFromFileSystem" {
     release_shared_library(pid, lib);
 
     try std.testing.expect(get_executable_for_pid(pid) == null);
+    try std.testing.expect(libraries_list.getPtr(pid) == null);
+}
+
+test "Modules.DlcloseKeepsALibraryWhileReferencesAreLeft" {
+    var fs_mock = try create_vfs_for_test(std.testing.allocator);
+    defer fs.vfs_deinit();
+    init(std.testing.allocator, std.testing.allocator);
+    defer deinit();
+
+    var file_mock = try create_filemock(std.testing.allocator);
+    const file_node = kernel.fs.Node.create_file(file_mock.get_interface());
+    _ = fs_mock
+        .expectCall("get")
+        .withArgs(.{"test_lib"})
+        .willReturn(file_node);
+
+    const pid: c.pid_t = 123;
+    const lib = try load_shared_library("/test_lib", std.testing.allocator, pid, true);
+    try std.testing.expectEqual(@as(u32, 1), lib.dl_references);
+    try std.testing.expect(lib.dl_global);
+
+    // The real loader keys a module by its image; a dlopen of the same image
+    // finds it instead of loading a second copy.
+    lib.image = @intFromPtr(&test_mapped_address);
+    loader_lock.lock();
+    const found = open_library_locked(pid, @intFromPtr(&test_mapped_address));
+    const other = open_library_locked(pid, @intFromPtr(&test_mapped_address) + 4);
+    loader_lock.unlock();
+    try std.testing.expectEqual(@as(?*yasld.Module, lib), found);
+    try std.testing.expectEqual(@as(?*yasld.Module, null), other);
+
+    // Opened twice: the first dlclose leaves it open, the second takes it apart.
+    lib.dl_references = 2;
+    try close_dl_handle(pid, lib);
+    try std.testing.expectEqual(@as(usize, 1), libraries_list.getPtr(pid).?.len());
+    try std.testing.expectEqual(@as(u32, 1), lib.dl_references);
+    try close_dl_handle(pid, lib);
+    try std.testing.expect(libraries_list.getPtr(pid) == null);
+}
+
+test "Modules.DlHandlesThatAreNotOpenAreRefused" {
+    var fs_mock = try create_vfs_for_test(std.testing.allocator);
+    defer fs.vfs_deinit();
+    init(std.testing.allocator, std.testing.allocator);
+    defer deinit();
+
+    var file_mock = try create_filemock(std.testing.allocator);
+    const file_node = kernel.fs.Node.create_file(file_mock.get_interface());
+    _ = fs_mock
+        .expectCall("get")
+        .withArgs(.{"test_lib"})
+        .willReturn(file_node);
+
+    const pid: c.pid_t = 123;
+    const lib = try load_shared_library("/test_lib", std.testing.allocator, pid, false);
+    var not_a_handle: u32 = 0;
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, close_dl_handle(pid, null));
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, close_dl_handle(pid, &not_a_handle));
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, find_dl_symbol(pid, &not_a_handle, "f"));
+    // Another process's handle is not open here either.
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, close_dl_handle(pid + 1, lib));
+    // No program for this pid: no global handle, and RTLD_DEFAULT names nothing.
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, global_handle(pid));
+    try std.testing.expectError(kernel.errno.ErrnoSet.InvalidArgument, find_dl_symbol(pid, null, "f"));
+    try std.testing.expectEqual(@as(usize, 1), libraries_list.getPtr(pid).?.len());
+
+    try std.testing.expectError(kernel.errno.ErrnoSet.NoEntry, find_dl_symbol(pid, lib, "missing"));
+    try close_dl_handle(pid, lib);
     try std.testing.expect(libraries_list.getPtr(pid) == null);
 }
 
@@ -1214,8 +1385,8 @@ test "Modules.ShouldHandleExecutableDependantOnSharedLibraries" {
 
     const pid: c.pid_t = 123;
     _ = try load_executable("/test_executable", std.testing.allocator, pid);
-    _ = try load_shared_library("/libdependency1.so", std.testing.allocator, pid);
-    _ = try load_shared_library("/libdependency2.so", std.testing.allocator, pid);
+    _ = try load_shared_library("/libdependency1.so", std.testing.allocator, pid, false);
+    _ = try load_shared_library("/libdependency2.so", std.testing.allocator, pid, false);
 
     try std.testing.expect(get_executable_for_pid(pid) != null);
     const libs = libraries_list.getPtr(pid);
@@ -1329,7 +1500,7 @@ test "Modules.ShouldFailIfDirectoryProvidedInsteadOfFile" {
 
     const pid: c.pid_t = 123;
     try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, load_executable("/test_executable", std.testing.allocator, pid));
-    try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, load_shared_library("/test_executable", std.testing.allocator, pid));
+    try std.testing.expectError(kernel.errno.ErrnoSet.IsADirectory, load_shared_library("/test_executable", std.testing.allocator, pid, false));
 }
 
 test "Modules.ShouldFailIfDynamicLoaderUninitialized" {
@@ -1356,7 +1527,7 @@ test "Modules.ShouldFailIfDynamicLoaderUninitialized" {
     const pid: c.pid_t = 123;
     yasld.loader_deinit();
     try std.testing.expectError(kernel.errno.ErrnoSet.NotPermitted, load_executable("/test_executable", std.testing.allocator, pid));
-    try std.testing.expectError(kernel.errno.ErrnoSet.NotPermitted, load_shared_library("/test_executable", std.testing.allocator, pid));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NotPermitted, load_shared_library("/test_executable", std.testing.allocator, pid, false));
 }
 
 const DirectoryIteratorMock = @import("fs/tests/directory_mock.zig").DirectoryIteratorMock;
@@ -1848,7 +2019,7 @@ test "Modules.UnmappedDlopenReturnsAnErrorWithoutPanicking" {
     var file = try FileMock.create(std.testing.allocator);
     _ = file.expectCall("ioctl").willReturn(0);
     _ = mock.expectCall("get").withArgs(.{"unmapped"}).willReturn(kernel.fs.Node.create_file(file.get_interface()));
-    try std.testing.expectError(kernel.errno.ErrnoSet.NotImplemented, load_shared_library("/unmapped", std.testing.allocator, 123));
+    try std.testing.expectError(kernel.errno.ErrnoSet.NotImplemented, load_shared_library("/unmapped", std.testing.allocator, 123, false));
 }
 
 test "Modules.RamImageKeepsWholeCodeGranules" {

@@ -50,6 +50,9 @@ pub const SymbolEntry = struct {
     in_region: bool = false,
     /// `address` is in the owner's --hot-text block.
     in_hot: bool = false,
+    /// `address` is code (Code or Init section): a pointer to it handed to
+    /// another module has to go through a thunk that switches r9.
+    is_code: bool = false,
 };
 
 /// An exported symbol's runtime address, and whether it lives in the
@@ -58,6 +61,16 @@ pub const LocalSymbol = struct {
     address: usize,
     in_region: bool,
     in_hot: bool = false,
+    is_code: bool = false,
+};
+
+/// Thunks for the functions dlsym hands out (`Module.dl_symbol`): a block at
+/// a time, never moved while the module lives, freed with it.
+const dl_thunks_per_block = 32;
+const DlThunks = struct {
+    next: ?*DlThunks,
+    used: usize,
+    slots: [dl_thunks_per_block][thunk_size]u8 align(4),
 };
 
 extern const indirect_call_thunk_template_size: usize;
@@ -382,6 +395,12 @@ pub const Module = struct {
     exact_thumb: bool = false,
     hot_text_offset: u32 = 0,
     hot_text_length: u32 = 0,
+    // dlopen bookkeeping, kept by the kernel under its loader lock
+    // (source/kernel/modules.zig): how many dlopen calls this module answers
+    // (one copy, counted), and whether one of them said RTLD_GLOBAL.
+    dl_references: u32 = 0,
+    dl_global: bool = false,
+    dl_thunks: ?*DlThunks = null,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -485,6 +504,12 @@ pub const Module = struct {
             loader.*.unload_module(self);
         }
 
+        var thunks = self.dl_thunks;
+        while (thunks) |block| {
+            thunks = block.next;
+            thunk_allocator_of(self.process_allocator).destroy(block);
+        }
+
         if (self.unique_data) |data| {
             data.destroy();
         }
@@ -556,7 +581,7 @@ pub const Module = struct {
                 if ((section == .Code or section == .Init) and !self.exact_thumb and (address & 1 == 0)) {
                     address |= 1;
                 }
-                return .{ .address = address, .in_hot = self.section_in_hot(section, symbol.offset), .in_region = self.section_in_region(section, symbol.offset) };
+                return .{ .address = address, .in_hot = self.section_in_hot(section, symbol.offset), .in_region = self.section_in_region(section, symbol.offset), .is_code = section == .Code or section == .Init };
             }
             // var it = shared_data.exported_symbols.iter();
             // while (it) |symbol| : (it = symbol.next()) {
@@ -580,6 +605,7 @@ pub const Module = struct {
                         .owner = 0,
                         .in_region = symbol.in_region,
                         .in_hot = symbol.in_hot,
+                        .is_code = symbol.is_code,
                     };
                 }
             }
@@ -602,6 +628,7 @@ pub const Module = struct {
                             .owner = owner,
                             .in_region = symbol.in_region,
                             .in_hot = symbol.in_hot,
+                            .is_code = symbol.is_code,
                         };
                     }
                 }
@@ -609,6 +636,39 @@ pub const Module = struct {
         }
 
         return null;
+    }
+
+    /// dlsym: NAME's address in this module or its dependencies, null when
+    /// neither exports it. A data object's own address; a function's through
+    /// a thunk that switches r9 to the GOT of the module that defines it --
+    /// the caller runs with its own r9, and a raw code address would read the
+    /// caller's GOT for the library's globals. One thunk per function, kept
+    /// (and found again) until this module is destroyed.
+    pub fn dl_symbol(self: *Module, name: []const u8) !?usize {
+        const entry = self.find_symbol(name) orelse return null;
+        if (!entry.is_code) return entry.address;
+        var block = self.dl_thunks;
+        while (block) |b| : (block = b.next) {
+            for (b.slots[0..b.used]) |*slot| {
+                const r9 = std.mem.readInt(usize, slot[thunk_r9_offset..][0..@sizeOf(usize)], .little);
+                const target = std.mem.readInt(usize, slot[thunk_fn_offset..][0..@sizeOf(usize)], .little);
+                if (r9 == entry.target_got_address and target == entry.address) return @intFromPtr(slot) | 1;
+            }
+        }
+        var head = self.dl_thunks;
+        if (head == null or head.?.used == dl_thunks_per_block) {
+            const fresh = try thunk_allocator_of(self.process_allocator).create(DlThunks);
+            fresh.next = self.dl_thunks;
+            fresh.used = 0;
+            self.dl_thunks = fresh;
+            head = fresh;
+        }
+        const slot = &head.?.slots[head.?.used];
+        @memcpy(slot, thunk_code());
+        std.mem.writeInt(usize, slot[thunk_r9_offset..][0..@sizeOf(usize)], entry.target_got_address, .little);
+        std.mem.writeInt(usize, slot[thunk_fn_offset..][0..@sizeOf(usize)], entry.address, .little);
+        head.?.used += 1;
+        return @intFromPtr(slot) | 1;
     }
 
     const ModuleError = error{

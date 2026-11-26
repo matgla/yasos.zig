@@ -1706,49 +1706,50 @@ pub fn sys_mprotect(arg: *const anyopaque) !i32 {
     return -1;
 }
 
+/// dlopen. Errors are the cause (ENOENT, EISDIR, ENOEXEC, ENOMEM, EINVAL
+/// for the mode...): libc turns them into dlerror()'s message.
 pub fn sys_dlopen(arg: *const anyopaque) !i32 {
     const context: *const c.dlopen_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
+    // POSIX: exactly one of RTLD_LAZY and RTLD_NOW (both bind at load here),
+    // RTLD_GLOBAL or not; this system defines no other bit.
+    const mode = context.flags;
+    const binding = mode & (c.RTLD_LAZY | c.RTLD_NOW);
+    if (binding != c.RTLD_LAZY and binding != c.RTLD_NOW) return ErrnoSet.InvalidArgument;
+    if (mode & ~@as(c_int, c.RTLD_LAZY | c.RTLD_NOW | c.RTLD_GLOBAL) != 0) return ErrnoSet.InvalidArgument;
+    const result_out = try user_out(?*anyopaque, context.result);
+    if (context.path == null) {
+        result_out.* = try dynamic_loader.global_handle(process.pid);
+        return 0;
+    }
     var path_storage: [max_user_path]u8 = undefined;
     const path = try user_string(&path_storage, context.path);
-    const result_out = try user_out(?*anyopaque, context.result);
-    const library = dynamic_loader.load_shared_library(path, process.get_process_memory_allocator(), process.pid) catch {
-        // log.print("dlopen: failed to load library: {s}\n", .{@errorName(err)});
-        return -1;
-    };
+    const library = try dynamic_loader.open_dl_library(path, process.get_process_memory_allocator(), process.pid, mode & c.RTLD_GLOBAL != 0);
     result_out.* = library;
     return 0;
 }
 
+/// dlclose. EINVAL for a handle this process does not have open: it comes
+/// straight from userspace, and releasing an unowned one would unlink a list
+/// node at an address the caller chose.
 pub fn sys_dlclose(arg: *const anyopaque) !i32 {
     const context: *const c.dlclose_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    const library: *yasld.Module = @ptrCast(@alignCast(context.handle orelse return ErrnoSet.InvalidArgument));
-    // The handle comes straight from userspace; releasing an unowned one
-    // unlinks a list node at an attacker-chosen address.
-    if (untrusted_caller() and !dynamic_loader.owns_shared_library(process.pid, library)) {
-        return ErrnoSet.InvalidArgument;
-    }
-    dynamic_loader.release_shared_library(process.pid, library);
+    try dynamic_loader.close_dl_handle(process.pid, context.handle);
     return 0;
 }
 
+/// dlsym. ENOENT when the symbol is not there, EINVAL for a handle that is
+/// not open; a null handle is RTLD_DEFAULT.
 pub fn sys_dlsym(arg: *const anyopaque) !i32 {
     const context: *const c.dlsym_context = @ptrCast(@alignCast(arg));
     const process = process_manager.instance.get_current_process();
-    const library: *yasld.Module = @ptrCast(@alignCast(context.handle orelse return ErrnoSet.InvalidArgument));
-    if (untrusted_caller() and !dynamic_loader.owns_shared_library(process.pid, library)) {
-        return ErrnoSet.InvalidArgument;
-    }
     var symbol_storage: [max_user_path]u8 = undefined;
     const symbol_name = try user_string(&symbol_storage, context.symbol);
     const result_out = try user_out(?*anyopaque, context.result);
-    const maybe_symbol = library.find_symbol(symbol_name);
-    if (maybe_symbol) |symbol| {
-        result_out.* = @ptrFromInt(symbol.address);
-        return 0;
-    }
-    return -1;
+    const address = try dynamic_loader.find_dl_symbol(process.pid, context.handle, symbol_name);
+    result_out.* = @ptrFromInt(address);
+    return 0;
 }
 
 pub fn sys_getuid(arg: *const anyopaque) !i32 {

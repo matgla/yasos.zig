@@ -32,3 +32,4 @@
 #include <libs/libc/sys/ptrace.h>
 #include <libs/libc/sys/reboot.h>
 #include <libs/libc/signal.h>
+#include <libs/libc/dlfcn.h>

@@ -51,6 +51,10 @@ pub const Module = struct {
     // source/kernel/process_manager.zig compiles against this host-test stub.
     stack_size: u32 = 0xFFFFFFFF,
     heap_size: u32 = 0xFFFFFFFF,
+    // Mirrors the real Module's dlopen bookkeeping (source/kernel/modules.zig).
+    image: usize = 0,
+    dl_references: u32 = 0,
+    dl_global: bool = false,
 
     pub fn create(allocator: std.mem.Allocator, process_allocator: std.mem.Allocator, xip: bool) !*Module {
         const module = try allocator.create(Module);
@@ -105,6 +109,12 @@ pub const Module = struct {
     pub fn get_got(self: *const Module) []const u8 {
         _ = self;
         return empty_section[0..];
+    }
+
+    pub fn dl_symbol(self: *Module, name: []const u8) !?usize {
+        _ = self;
+        _ = name;
+        return null;
     }
 
     pub fn find_symbol(self: *Module, name: []const u8) ?SymbolEntry {

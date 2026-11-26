@@ -83,6 +83,10 @@ config CONFIG_APP_PTRACETEST
   bool "ptracetest: ptrace(2) checks"
   default y
 
+config CONFIG_APP_DLTEST
+  bool "dltest: dlopen(3) checks and the library they open"
+  default y
+
 config CONFIG_APP_PIOASM
   bool "pioasm: RP2350 PIO assembler"
   default y

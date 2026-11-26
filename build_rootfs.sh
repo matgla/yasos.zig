@@ -291,6 +291,7 @@ if $CLEAR; then
   rm -rf apps/yaffdump/tests/build
   rm -rf apps/strip/build apps/strip/build-host apps/strip/tests/build
   rm -rf apps/ptracetest/build
+  rm -rf apps/dltest/build
   rm -rf apps/time/build
   rm -rf libs/libm/build
   rm -rf apps/yasvi/build
@@ -1105,6 +1106,7 @@ build_app mdcat build_makefile
 build_app yaffdump build_makefile
 build_app strip build_makefile
 build_app ptracetest build_makefile
+build_app dltest build_makefile
 build_app time build_makefile
 build_app yasvi build_makefile
 build_app mkfs build_makefile
