@@ -29,7 +29,7 @@
 // collects that into the RAM region it copies at boot.
 .section .time_critical, "ax", %progbits
 
-#include "libs/libc/sys/syscall_ids.h"
+#include "libs/libc/include/sys/syscall_ids.h"
 
 // ─── DCP (RP2350 double coprocessor, CP4) context ───────────────────────────
 //

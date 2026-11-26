@@ -103,7 +103,7 @@ Non-goals for now: IPv6, routing/forwarding/NAT, Wi-Fi access-point mode, passwo
   full (`YASOS_SYSCALL_COUNT` is 64 and asserted equal to the enum); one slot instead of a
   dozen keeps it small and gives the whole family one slow-path (blocking) classification.
   Ops: `socket bind listen accept connect sendto recvfrom shutdown getsockopt setsockopt
-  getsockname getpeername getaddrinfo`. Per-op context structs live in `libs/libc/sys/syscall.h`
+  getsockname getpeername getaddrinfo`. Per-op context structs live in `libs/libc/include/sys/syscall.h`
   like the others; `sys_ioctl`'s pointer checks (`check_ioctl_arg`) grow `FIONBIO`/`FIONREAD`
   for sockets.
 - **Socket options** needed by dropbear and nc: `SO_REUSEADDR`, `SO_KEEPALIVE`, `SO_ERROR`,
@@ -225,7 +225,7 @@ by a `wifictl` tool through ioctls on `/dev/wlan0`.
    entry point (for `netd`), and `block_on` with a deadline. The timed wait can later replace
    the 2 ms re-poll loop in `sys_poll` (`syscall_handlers.zig:595`) with real wakeups.
 2. **lwIP library + `netd` + net lock + netif registry** (`source/kernel/net/`).
-3. **`SocketFile` + `sys_socketcall`** (`libs/libc/sys/syscall.h`, `syscall_ids.h`,
+3. **`SocketFile` + `sys_socketcall`** (`libs/libc/include/sys/syscall.h`, `syscall_ids.h`,
    `SyscallFactory` in `source/kernel/interrupts/system_call.zig`).
 4. **Exec-time fd hygiene:** confirm `FD_CLOEXEC` is honoured by `execve`; add it if not.
 5. **tty module** shared by UART, VT, PTY; **ptmx/pts driver**; sessions, `setsid`, `TIOCSCTTY`,

@@ -82,7 +82,7 @@ const vfork_fpu_frame_bytes: usize = 32 * @sizeOf(u32);
 /// and `save_vfork_stack` refuses rather than overrun if that is ever too tight.
 const vfork_stack_slack: usize = 256;
 
-/// `WNOHANG` from `libs/libc/sys/wait.h`. Spelled out because it is a macro
+/// `WNOHANG` from `libs/libc/include/sys/wait.h`. Spelled out because it is a macro
 /// there, so it does not survive into the imported declarations.
 const wnohang: i32 = 0x1;
 

@@ -518,7 +518,7 @@ build_cross_compiler()
   # reorg) — dropping only armv8m-arch/armv8m-ir would reuse the other stage's
   # objects and fail the link with "unrecognized file type".
   rm -rf armv8m-arch armv8m-ir armv8m-source armv8m-*.o *.o
-  make -j$JOBS AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc INC-armv8m="$YASOS_SYSINCLUDES"
+  make -j$JOBS AR="$HOST_AR" CROSS_FLAGS=-I$SCRIPT_DIR/libs/libc/include INC-armv8m="$YASOS_SYSINCLUDES"
   if [ $? -ne 0 ]; then
     exit -1;
   fi

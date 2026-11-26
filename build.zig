@@ -310,13 +310,13 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     kernel_tests.root_module.addImport("c", c_for_tests);
-    c_for_tests.addIncludePath(b.path("libs/libc"));
+    c_for_tests.addIncludePath(b.path("libs/libc/include"));
     const stdlib_headers_for_tests = b.addTranslateC(.{
-        .root_source_file = b.path("libs/libc/stdlib.h"),
+        .root_source_file = b.path("libs/libc/include/stdlib.h"),
         .target = target,
         .optimize = optimize,
     });
-    stdlib_headers_for_tests.addIncludePath(b.path("libs/libc"));
+    stdlib_headers_for_tests.addIncludePath(b.path("libs/libc/include"));
     c_for_tests.addImport("c_headers", stdlib_headers_for_tests.createModule());
 
     const generate_defconfig_for_tests = generate_config(b, "configs/host_defconfig", "config/tests");
@@ -383,7 +383,7 @@ pub fn build(b: *std.Build) !void {
 
     hal_for_tests.addImport("libc_imports", libc_imports_for_tests);
     libc_imports_for_tests.addIncludePath(b.path("."));
-    libc_imports_for_tests.addIncludePath(b.path("libs/libc"));
+    libc_imports_for_tests.addIncludePath(b.path("libs/libc/include"));
 
     const libc_headers_for_tests = b.addTranslateC(.{
         .root_source_file = b.path("source/libc_imports.h"),
@@ -391,7 +391,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     libc_headers_for_tests.addIncludePath(b.path("."));
-    libc_headers_for_tests.addIncludePath(b.path("libs/libc"));
+    libc_headers_for_tests.addIncludePath(b.path("libs/libc/include"));
     libc_imports_for_tests.addImport("c_headers", libc_headers_for_tests.createModule());
 
     kernel_tests.root_module.addImport("libc_imports", libc_imports_for_tests);
@@ -409,7 +409,7 @@ pub fn build(b: *std.Build) !void {
     run_tests_step.dependOn(&run_hal_tests.step);
 
     kernel_tests.root_module.addIncludePath(b.path("."));
-    kernel_tests.root_module.addIncludePath(b.path("libs/libc"));
+    kernel_tests.root_module.addIncludePath(b.path("libs/libc/include"));
     fs_tests.root_module.addIncludePath(b.path("."));
     arch_tests.root_module.addIncludePath(b.path("."));
 
@@ -526,7 +526,7 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             });
             libc_imports_module.addIncludePath(b.path("."));
-            libc_imports_module.addIncludePath(b.path("libs/libc"));
+            libc_imports_module.addIncludePath(b.path("libs/libc/include"));
             libc_imports_module.addIncludePath(b.path("rootfs/usr/include"));
             const cimports_module = b.addModule("cimports", .{
                 .root_source_file = b.path("source/cimports.zig"),
@@ -544,18 +544,18 @@ pub fn build(b: *std.Build) !void {
                 .link_libc = false,
             });
             libc_headers.addIncludePath(b.path("."));
-            libc_headers.addIncludePath(b.path("libs/libc"));
+            libc_headers.addIncludePath(b.path("libs/libc/include"));
             libc_headers.addIncludePath(b.path("rootfs/usr/include"));
             libc_imports_module.addImport("c_headers", libc_headers.createModule());
 
             const stdlib_headers = b.addTranslateC(.{
-                .root_source_file = b.path("libs/libc/stdlib.h"),
+                .root_source_file = b.path("libs/libc/include/stdlib.h"),
                 .target = kernel_target,
                 .optimize = optimize,
                 .link_libc = false,
             });
             stdlib_headers.addIncludePath(b.path("."));
-            stdlib_headers.addIncludePath(b.path("libs/libc"));
+            stdlib_headers.addIncludePath(b.path("libs/libc/include"));
             cimports_module.addImport("c_headers", stdlib_headers.createModule());
 
             kernel_module.addImport("libc_imports", libc_imports_module);
@@ -570,7 +570,7 @@ pub fn build(b: *std.Build) !void {
                 .root_source_file = b.path(b.fmt("source/arch/{s}/arch.zig", .{config.cpu_arch})),
             });
             arch_module.addIncludePath(b.path("."));
-            arch_module.addIncludePath(b.path("libs/libc"));
+            arch_module.addIncludePath(b.path("libs/libc/include"));
             arch_module.addImport("libc_imports", libc_imports_module);
 
             const hal_module = boardDep.artifact("yasos_kernel").root_module.import_table.get("hal").?;
@@ -634,11 +634,11 @@ pub fn build(b: *std.Build) !void {
             // yasos libc's headers and nothing else -- not the kernel's system
             // include paths, which may be a toolchain libc (newlib) whose
             // errno numbers and prototypes are not the kernel's.
-            lwext4_lib.root_module.addSystemIncludePath(b.path("libs/libc"));
+            lwext4_lib.root_module.addSystemIncludePath(b.path("libs/libc/include"));
             lwext4_lib.root_module.sanitize_c = .off;
             kernel_exec.root_module.linkLibrary(lwext4_lib);
             const lwext4_headers = lwext4.headers(b, optimize, kernel_target, false, lwext4_profiling);
-            lwext4_headers.addIncludePath(b.path("libs/libc"));
+            lwext4_headers.addIncludePath(b.path("libs/libc/include"));
             lwext4_headers.addIncludePath(b.path("."));
             kernel_exec.root_module.addImport("lwext4", lwext4_headers.createModule());
             const littlefs_headers = b.addTranslateC(.{
@@ -648,7 +648,7 @@ pub fn build(b: *std.Build) !void {
                 .link_libc = false,
             });
             littlefs_headers.addIncludePath(b.path("libs/littlefs"));
-            littlefs_headers.addIncludePath(b.path("libs/libc"));
+            littlefs_headers.addIncludePath(b.path("libs/libc/include"));
             littlefs_headers.addIncludePath(b.path("."));
             kernel_module.addImport("littlefs_headers", littlefs_headers.createModule());
 

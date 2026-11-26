@@ -220,7 +220,7 @@ if (fs.existsSync(exe)) {
   // or `void *owned(dlclose) dlopen(...)` keeps IntelliSense's "expected a ';'".
   test('a real check: yasc headers compile alone', () => {
     const p = tcc.loadProject(root);
-    const dir = path.join(root, 'libs/libc/yasc');
+    const dir = path.join(root, 'libs/libc/include/yasc');
     for (const name of ['dlfcn.h', 'stdio.h', 'stdlib.h', 'string.h', 'unistd.h']) {
       const file = path.join(dir, name);
       if (!fs.existsSync(file)) continue;

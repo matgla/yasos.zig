@@ -344,10 +344,10 @@ untouched** and no prebuilt binary's ABI moves. Everything composes over existin
 | `ptsname_r(fd, buf, len)` / `ptsname(fd)` | `ioctl(fd, TIOCGPTN, &n)` then format `/dev/pts/%d` |
 | `openpty(am, as, name, termp, winp)` | the standard composition of the five above, then `open()` the slave; applies `termp`/`winp` via ioctl |
 
-`libs/libc/pty.h` already exists and is **an empty 0-byte file** — it gets these
+`libs/libc/include/pty.h` already exists and is **an empty 0-byte file** — it gets these
 declarations; `pty.c` is new. The ioctl numbers are already defined: `TIOCGPTN`
-and `TIOCSPTLCK` at `libs/libc/sys/ioctl.h:45-46`, `TIOCSWINSZ` at
-`libs/libc/sys/ioctl.h:22`. New `.c` files are picked up by the wildcard in the
+and `TIOCSPTLCK` at `libs/libc/include/sys/ioctl.h:45-46`, `TIOCSWINSZ` at
+`libs/libc/include/sys/ioctl.h:22`. New `.c` files are picked up by the wildcard in the
 libc `Makefile`. Because the `name` argument is now backed by a path that
 genuinely exists, `openpty` can carry the real glibc signature with no caveats.
 
@@ -420,9 +420,9 @@ existing `nanosleep` caller does not belong in the same change as a new device.
 ### 2d. libc and the syscall
 
 Unlike the pty, this *is* a new syscall, so it takes the full checklist:
-`poll_context` and `sys_poll` appended to the enum in `libs/libc/sys/syscall.h`
+`poll_context` and `sys_poll` appended to the enum in `libs/libc/include/sys/syscall.h`
 (append only — renumbering breaks prebuilt binaries), `YASOS_SYSCALL_COUNT`
-59 → 60 in `libs/libc/sys/syscall_ids.h` (a compile-time typedef ties the two
+59 → 60 in `libs/libc/include/sys/syscall_ids.h` (a compile-time typedef ties the two
 together), the real `poll()` replacing the stub in `libs/libc/poll.c`, the
 dispatch arm and argument-size entry in
 `source/kernel/interrupts/system_call.zig`, and the handler. Keep it **out** of
