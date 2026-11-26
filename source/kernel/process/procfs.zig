@@ -205,14 +205,17 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         return kernel.errno.ErrnoSet.NoEntry;
     }
 
-    /// readlink(2) for the one symbolic link procfs has: /proc/<pid>/exe, with
-    /// /proc/self/exe meaning the caller's own.
+    /// readlink(2) for procfs's symbolic links: /proc/<pid>/exe and
+    /// /proc/<pid>/cwd (its working directory), with /proc/self/... meaning the
+    /// caller's own.
     ///
     /// This is how a Linux-shaped program finds its own binary --
     /// std.process.executablePathAlloc, which the Zig compiler calls before it
     /// will do anything else. Without it the caller gets the read-only
     /// filesystem's default answer, EINVAL ("not a symbolic link"), and can
-    /// only give up: `error: unable to find zig self exe path: NotLink`.
+    /// only give up: `error: unable to find zig self exe path: NotLink`. The cwd
+    /// link is how another program learns where a shell has cd'd to (yasvi's
+    /// :term panel completes file names from there).
     ///
     /// Truncation follows readlink(2): a buffer too short for the path gets as
     /// much as fits, and the returned count says how much that was.
@@ -223,7 +226,8 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
         const who = it.next() orelse return kernel.errno.ErrnoSet.InvalidArgument;
         const what = it.next() orelse return kernel.errno.ErrnoSet.InvalidArgument;
         if (it.next() != null) return kernel.errno.ErrnoSet.InvalidArgument;
-        if (!std.mem.eql(u8, what, "exe")) return kernel.errno.ErrnoSet.InvalidArgument;
+        const is_cwd = std.mem.eql(u8, what, "cwd");
+        if (!is_cwd and !std.mem.eql(u8, what, "exe")) return kernel.errno.ErrnoSet.InvalidArgument;
 
         const manager = &kernel.process.process_manager.instance;
         const process: *kernel.process.Process = if (std.mem.eql(u8, who, "self"))
@@ -233,13 +237,13 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
             break :blk manager.get_process_for_pid(pid) orelse return kernel.errno.ErrnoSet.NoEntry;
         };
 
-        const exe = process.get_executable_path() orelse return kernel.errno.ErrnoSet.NoEntry;
-        const n = @min(exe.len, buffer.len);
-        @memcpy(buffer[0..n], exe[0..n]);
+        const target = if (is_cwd) process.get_current_directory() else process.get_executable_path() orelse return kernel.errno.ErrnoSet.NoEntry;
+        const n = @min(target.len, buffer.len);
+        @memcpy(buffer[0..n], target[0..n]);
         return n;
     }
 
-    /// procfs holds exactly one kind of link (see `readlink`), which is enough
+    /// procfs holds links (see `readlink`), which is enough
     /// for the VFS to stop treating its paths as link-free.
     pub fn supports_symlinks(self: *const Self) bool {
         _ = self;
@@ -264,10 +268,10 @@ pub const ProcFs = interface.DeriveFromBase(ReadOnlyFileSystem, struct {
     pub fn stat(self: *Self, path: []const u8, data: *c.struct_stat, follow_links: bool) anyerror!void {
         _ = follow_links;
         initialize_stat_identity(data, path);
-        // The exe link has no node behind it -- it is answered by `readlink`
-        // alone -- so describe it here rather than letting the lookup below
-        // fail on a path that readlink(2) happily resolves.
-        if (std.mem.endsWith(u8, path, "/exe")) {
+        // The exe and cwd links have no node behind them -- they are answered
+        // by `readlink` alone -- so describe them here rather than letting the
+        // lookup below fail on a path that readlink(2) happily resolves.
+        if (std.mem.endsWith(u8, path, "/exe") or std.mem.endsWith(u8, path, "/cwd")) {
             return @call(.never_inline, stat_exe_link, .{ self, path, data });
         }
         var node = try self.get(path);

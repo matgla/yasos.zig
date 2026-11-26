@@ -241,6 +241,9 @@ NATIVE_TARGET_SKIP_TESTS = {
     # 16384 macro-expanded cleanup blocks need ~60MB of compiler heap (host
     # measurement); the whole on-target process pool is ~7MB → genuine OOM.
     "115_cleanup_macro_unroll": "compile-time OOM: needs ~60MB heap, target pool is 7MB",
+    # > 65536 calls in one function, to wrap the 16-bit call id: the device's
+    # small IR stops at 65536 operands first ("function too large", by design)
+    "bug_yf_call_id_wrap": "needs > 65536 IR operands in a function; the device's small IR holds 65536",
     # ---- RP2350 DCP: no subnormal support in the compare ----
     # Doubles are compared with the DCP's WXUP/WYUP/ADD0/RCMP sequence (exactly
     # what pico-sdk's dcp_dcmp_m emits), and WXUP flushes a subnormal to zero.
