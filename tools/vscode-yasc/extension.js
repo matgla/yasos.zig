@@ -6,12 +6,15 @@
 //    IntelliSense cannot parse (intellisense/yasc_intellisense.h).  Other
 //    files keep the C/C++ extension's own configuration;
 //  - IntelliSense errors in yasc files only where tcc agrees (squiggles.js):
-//    what a macro cannot erase (`@min`, slices, `catch`...) is not marked.
+//    what a macro cannot erase (`@min`, slices, `catch`...) is not marked;
+//  - formatting: `tcc -format` for files under a .tcc-format (Format
+//    Document, and on save), clang-format for other C files (Format Document).
 'use strict';
 const vscode = require('vscode');
 const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const tcc = require('./tcc');
 const squiggles = require('./squiggles');
 
@@ -25,6 +28,7 @@ const timers = new Map(); // document uri -> debounce timer
 const compilerInfo = new Map(); // compiler path -> {includes, defines}
 const tccErrorLines = new Map(); // document uri -> Set of 0-based lines with a tcc error
 let filter = null; // squiggles.install(): the C/C++ extension's errors in yasc files
+let shimRoot = null; // where gccShimFor() writes (the extension's global storage)
 
 function cfg(scope) {
   return vscode.workspace.getConfiguration('yasc', scope);
@@ -216,6 +220,18 @@ function infoFor(exe) {
   return info;
 }
 
+// FILE's text: the editor's buffer when it is open, else the file ('' when
+// it cannot be read).
+function textOf(file) {
+  const doc = vscode.workspace.textDocuments.find((d) => d.uri.scheme === 'file' && d.uri.fsPath === file);
+  if (doc) return doc.getText();
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    return '';
+  }
+}
+
 function configurationFor(found, file, extensionPath) {
   const c = cfg(vscode.Uri.file(file));
   const exe = compilerPath(found.root);
@@ -226,6 +242,7 @@ function configurationFor(found, file, extensionPath) {
     if (f.startsWith('-I')) includePath.push(path.resolve(found.root, f.slice(2)));
     else if (f.startsWith('-D')) defines.push(f.slice(2));
   }
+  defines.push(...tcc.paramWordDefines(textOf(file)));
   return {
     includePath: includePath.concat(ci.includes),
     defines,
@@ -243,7 +260,7 @@ function configurationFor(found, file, extensionPath) {
 // wrong libc for the target), and resolving every #include of the folder
 // through that keeps its server busy for minutes while IntelliSense requests
 // wait on it.  The folder itself (C_Cpp.files.exclude still applies) and
-// tcc's system headers; no compiler, so no host headers.
+// tcc's system headers, with gccShimFor() as the compiler, so no host headers.
 function browseConfigurationFor(root) {
   if (cfg(vscode.Uri.file(root)).get('intellisense.enable') === false) return null;
   const p = project(root);
@@ -252,10 +269,39 @@ function browseConfigurationFor(root) {
   const inside = (d) => !path.relative(root, d).startsWith('..');
   return {
     browsePath: [root].concat(ci.includes.filter((d) => !inside(d))),
-    compilerPath: '',
+    compilerPath: gccShimFor(root, ci),
     compilerArgs: [],
     standard: cfg(vscode.Uri.file(root)).get('intellisense.standard') || 'gnu17',
   };
+}
+
+// The compiler the workspace configuration names: a script that gives the
+// C/C++ extension tcc's system headers and macros (tcc.gccShim).  An empty
+// compilerPath makes it query the host's compiler instead, and its symbol
+// database then holds /usr/include: go to definition lands in the host's
+// time.h rather than the libc tcc checks with.  '' when it cannot be written.
+function gccShimFor(root, ci) {
+  if (!shimRoot || !ci.includes.length) return '';
+  const id = crypto.createHash('sha1').update(root).digest('hex').slice(0, 12);
+  const file = path.join(shimRoot, id, 'arm-none-eabi-gcc');
+  const text = tcc.gccShim(ci.includes, ci.defines);
+  try {
+    let old = null;
+    try {
+      old = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      // not written yet
+    }
+    if (old !== text) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file + '.new', text, { mode: 0o755 });
+      fs.renameSync(file + '.new', file);
+    }
+    return file;
+  } catch (e) {
+    output.appendLine(`yasc: cannot write ${file}: ${e.message}`);
+    return '';
+  }
 }
 
 function firstBrowseConfiguration() {
@@ -300,12 +346,143 @@ async function registerProvider(context) {
   return { api, provider };
 }
 
+// ---- formatting ---------------------------------------------------------
+
+let noFormatWarned = false;
+const clangFound = new Map(); // clang-format path -> runs here
+
+function clangRuns(exe) {
+  if (!clangFound.has(exe)) {
+    const r = cp.spawnSync(exe, ['--version'], { encoding: 'utf8', timeout: 5000 });
+    clangFound.set(exe, r.status === 0);
+    if (r.status !== 0) output.appendLine(`yasc: no ${exe} to format C files without a .tcc-format`);
+  }
+  return clangFound.get(exe);
+}
+
+// How DOC is formatted: {exe, args, cwd, tcc} -- tcc -format under a
+// .tcc-format, else clang-format (yasc.format.clangFormat, '' for none) --
+// or null.
+const YASC_SYNTAX = /\*\?|\*@\(|\[\?|\?(?:owned|view)\b|^\s*#\s*pragma\s+yasc\b/m;
+
+function formatterFor(doc) {
+  if (!checkable(doc) || doc.uri.scheme !== 'file') return null;
+  const c = cfg(doc.uri);
+  if (!c.get('format.enable')) return null;
+  const file = doc.uri.fsPath;
+  const root = folderOf(doc.uri) || path.dirname(file);
+  if (tcc.findFormatConfig(file)) {
+    const exe = compilerPath(root);
+    if (!fs.existsSync(exe)) {
+      output.appendLine(`yasc: no compiler at ${exe} to format with (./build_rootfs.sh builds it, or set yasc.compiler)`);
+      return null;
+    }
+    return { exe, args: tcc.formatArgs(file), cwd: root, tcc: true };
+  }
+  const clang = c.get('format.clangFormat');
+  if (!clang || !clangRuns(clang)) return null;
+  // clang-format reads `*?owned` as a conditional and knows no `*@(a, b)`:
+  // on yasc it writes `*? owned`, which tcc rejects
+  if (YASC_SYNTAX.test(doc.getText())) {
+    output.appendLine(`yasc: ${file} is yasc and has no .tcc-format above it: not formatted (clang-format would break its pointer words)`);
+    return null;
+  }
+  return { exe: clang, args: tcc.clangFormatArgs(file), cwd: path.dirname(file), tcc: false };
+}
+
+// The edits that format DOC ([] when it is formatted already or tcc cannot
+// format it: tcc says why, in the output channel).
+function formatEdits(doc, found) {
+  const text = doc.getText();
+  const version = doc.version;
+  return new Promise((resolve) => {
+    const child = cp.spawn(found.exe, found.args, { cwd: found.cwd });
+    let out = '', err = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (b) => (out += b));
+    child.stderr.on('data', (b) => (err += b));
+    const timer = setTimeout(() => child.kill(), 10000);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      output.appendLine(`yasc: ${found.exe}: ${e.message}`);
+      resolve([]);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        if (found.tcc && /invalid option/.test(err)) {
+          if (!noFormatWarned) {
+            noFormatWarned = true;
+            vscode.window.showWarningMessage(`yasc: ${found.exe} has no -format yet: rebuild it (make cross)`);
+          }
+        } else if (err) {
+          output.appendLine(err.replace(/\s+$/, ''));
+        }
+        resolve([]);
+        return;
+      }
+      if (doc.isClosed || doc.version !== version) return resolve([]);
+      const e = tcc.lineEdit(text, out);
+      resolve(e ? [vscode.TextEdit.replace(new vscode.Range(doc.positionAt(e.start), doc.positionAt(e.end)), e.text)] : []);
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(text);
+  });
+}
+
+async function formatNow(editor) {
+  const doc = editor.document;
+  const found = formatterFor(doc);
+  if (!found) {
+    vscode.window.showInformationMessage('yasc: nothing formats this file (no .tcc-format above it, no clang-format)');
+    return;
+  }
+  const edits = await formatEdits(doc, found);
+  if (!edits.length) return;
+  const we = new vscode.WorkspaceEdit();
+  we.set(doc.uri, edits);
+  await vscode.workspace.applyEdit(we);
+}
+
+function registerFormatting(context) {
+  const selector = [
+    { language: 'c', scheme: 'file' },
+    { language: 'cpp', scheme: 'file', pattern: '**/*.h' },
+  ];
+  context.subscriptions.push(
+    vscode.languages.registerDocumentFormattingEditProvider(selector, {
+      provideDocumentFormattingEdits(doc) {
+        const found = formatterFor(doc);
+        return found ? formatEdits(doc, found) : [];
+      },
+    }),
+    // On save without making tcc VSCode's default formatter: other C files
+    // keep theirs.  When it is the default and editor.formatOnSave is on,
+    // VSCode asks the provider above itself.
+    vscode.workspace.onWillSaveTextDocument((e) => {
+      const doc = e.document;
+      if (e.reason === vscode.TextDocumentSaveReason.AfterDelay) return;
+      if (!cfg(doc.uri).get('format.onSave')) return;
+      const editor = vscode.workspace.getConfiguration('editor', doc.uri);
+      if (editor.get('formatOnSave') && editor.get('defaultFormatter') === context.extension.id) return;
+      const found = formatterFor(doc);
+      if (found && found.tcc) e.waitUntil(formatEdits(doc, found));
+    }),
+    vscode.commands.registerCommand('yasc.formatFile', () => {
+      const ed = vscode.window.activeTextEditor;
+      if (ed) return formatNow(ed);
+    }),
+  );
+}
+
 // ---- activation -------------------------------------------------------
 
 async function activate(context) {
   collection = vscode.languages.createDiagnosticCollection('tcc');
   output = vscode.window.createOutputChannel('yasc');
   context.subscriptions.push(collection, output);
+  if (context.globalStorageUri) shimRoot = path.join(context.globalStorageUri.fsPath, 'gcc-shim');
   filter = squiggles.install(collection, errorLinesFor, vscode.DiagnosticSeverity.Error, (uri) => {
     const key = uri.toString();
     const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === key);
@@ -313,6 +490,7 @@ async function activate(context) {
   });
   if (filter) context.subscriptions.push(filter);
   else output.appendLine('yasc: cannot filter IntelliSense errors (unexpected DiagnosticCollection)');
+  registerFormatting(context);
 
   let cpptools = null;
   try {
@@ -322,13 +500,29 @@ async function activate(context) {
   }
   if (cpptools) context.subscriptions.push({ dispose: () => cpptools.api.dispose() });
 
-  const reset = () => {
+  // What the C/C++ extension was last given.  A rebuilt compiler (sessions
+  // rebuild the cross every few minutes) almost never changes it, and telling
+  // the extension anyway restarts its include scan of the whole workspace:
+  // go to definition then waits behind a scan that never finishes.
+  const fingerprint = () => JSON.stringify((vscode.workspace.workspaceFolders || []).map((f) => {
+    const root = f.uri.fsPath;
+    const p = project(root);
+    return [root, p.dirs, p.globs.map((g) => g.source), infoFor(compilerPath(root)), browseConfigurationFor(root)];
+  }));
+  let given = cpptools ? fingerprint() : null;
+
+  // FORCE: a settings change, which can change what fingerprint() leaves out.
+  const reset = (force) => {
     projects.clear();
     compilerInfo.clear();
     if (filter) filter.refreshAll();
     if (cpptools) {
-      cpptools.api.didChangeCustomConfiguration(cpptools.provider);
-      cpptools.api.didChangeCustomBrowseConfiguration(cpptools.provider);
+      const now = fingerprint();
+      if (force || now !== given) {
+        given = now;
+        cpptools.api.didChangeCustomConfiguration(cpptools.provider);
+        cpptools.api.didChangeCustomBrowseConfiguration(cpptools.provider);
+      }
     }
     vscode.workspace.textDocuments.forEach(check);
   };
@@ -342,8 +536,13 @@ async function activate(context) {
     const ratchet = path.resolve(root, cfg(f.uri).get('ratchetConfig') || 'scripts/safe_mode_ratchet.json');
     return uri.fsPath === compilerPath(root) || uri.fsPath === ratchet;
   });
+  // A link writes the compiler in several steps: wait until it is done, so
+  // a half-written file is not run for its include paths.
+  let settle = null;
   const onWatched = (uri) => {
-    if (watched(uri)) reset();
+    if (!watched(uri)) return;
+    clearTimeout(settle);
+    settle = setTimeout(() => reset(false), 3000);
   };
   const watcher = vscode.workspace.createFileSystemWatcher('**/{safe_mode_ratchet.json,armv8m-tcc}');
   watcher.onDidChange(onWatched);
@@ -351,6 +550,7 @@ async function activate(context) {
   watcher.onDidDelete(onWatched);
   context.subscriptions.push(
     watcher,
+    { dispose: () => clearTimeout(settle) },
     vscode.workspace.onDidOpenTextDocument(check),
     vscode.workspace.onDidSaveTextDocument(check),
     vscode.workspace.onDidChangeTextDocument((e) => {
@@ -363,7 +563,7 @@ async function activate(context) {
       if (child) child.kill();
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('yasc')) reset();
+      if (e.affectsConfiguration('yasc')) reset(true);
     }),
     vscode.commands.registerCommand('yasc.checkFile', () => {
       const ed = vscode.window.activeTextEditor;

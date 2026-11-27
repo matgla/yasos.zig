@@ -1,12 +1,12 @@
 {
   "name": "yasc-syntax",
   "displayName": "yasc (tinycc C dialect)",
-  "description": "tinycc's yasc dialect in C files: highlighting (owned/view/maybe/in/inout/out/drop, owned(dealloc)/borrows/takes, unsafe, cast<>/unsafe_cast<>, defer/errdefer, unreachable, error sets, !T, try/catch, modules, tagged unions, register fields, @min/@max), tcc's diagnostics, IntelliSense settings for the C/C++ extension",
-  "version": "0.5.2",
+  "description": "tinycc's yasc dialect in C files: highlighting (owned/view/maybe/in/inout/out/drop, owned(dealloc)/borrows/takes, unsafe, cast<>/unsafe_cast<>, defer/errdefer, unreachable, error sets, !T, try/catch, modules, tagged unions, register fields, @min/@max), tcc's diagnostics, formatting with tcc -format (on save too), IntelliSense settings for the C/C++ extension",
+  "version": "0.6.0",
   "publisher": "yasos",
   "license": "GPL-3.0-or-later",
   "engines": { "vscode": "^1.60.0" },
-  "categories": ["Programming Languages", "Linters"],
+  "categories": ["Programming Languages", "Linters", "Formatters"],
   "main": "./extension.js",
   "activationEvents": ["onLanguage:c", "workspaceContains:scripts/safe_mode_ratchet.json"],
   "contributes": {
@@ -18,7 +18,8 @@
       }
     ],
     "commands": [
-      { "command": "yasc.checkFile", "title": "yasc: Check this file with tcc" }
+      { "command": "yasc.checkFile", "title": "yasc: Check this file with tcc" },
+      { "command": "yasc.formatFile", "title": "yasc: Format this file with tcc" }
     ],
     "configuration": {
       "title": "yasc",
@@ -44,6 +45,21 @@
           "items": { "type": "string" },
           "default": [],
           "description": "More tcc options for the check (e.g. -ccompat, -DFOO)."
+        },
+        "yasc.format.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Format Document for C files: 'tcc -format' for those with a .tcc-format in their directory or above, clang-format (yasc.format.clangFormat) for the rest. Fast: no language server in between."
+        },
+        "yasc.format.onSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Format files under a .tcc-format with 'tcc -format' on save (not after an auto-save delay). Other C files are not formatted on save."
+        },
+        "yasc.format.clangFormat": {
+          "type": "string",
+          "default": "clang-format",
+          "description": "clang-format for C files with no .tcc-format above them (Format Document; it finds their .clang-format). Empty: those files are not formatted by this extension."
         },
         "yasc.diagnostics.enable": {
           "type": "boolean",

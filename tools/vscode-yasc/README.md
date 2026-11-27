@@ -4,12 +4,14 @@ Highlights tinycc's **yasc** dialect of C in ordinary `.c`/`.h` files
 (the tutorial: `libs/tinycc/examples/yasc/README.md`):
 
 - ownership: `owned`, `view`, `maybe` (after a `*`, and in a parameter
-  array's brackets: `char * view argv[owned]`), `in`, `inout`, `out`, `drop`
+  array's brackets: `char *view argv[owned]`), `in`, `inout`, `out`, `drop`
   (before a parameter's type; a view parameter's target is read-only unless
   it says `inout` or `out`). `readonly` is no yasc word any more (it was
-  `const T * view`): a name, as in C
+  `const T *view`): a name, as in C
 - `defer`, `errdefer`, `unreachable` (`unreachable;`, `default: unreachable;`,
   `f() catch unreachable`)
+- `= undefined` (`struct stat st = undefined;`: a local left unset on purpose),
+  coloured like `nullptr`
 - errors: `error Set { A, B = ENOENT };`, `error.NAME`, `error Set e`, `!T`
   return types, `try f()`, `f() catch X`, `catch |e| { ... }`,
   `error_name()`, `error_from()`
@@ -18,10 +20,10 @@ Highlights tinycc's **yasc** dialect of C in ordinary `.c`/`.h` files
   `static []const char names`, parameters), and the `:` of `x[a:b]`, `x[a:]`,
   `x[:b]`, `x[a:b:0]`
 - lifetimes: `owned(fclose)`, `borrows(x)` / `borrows(static)`, `takes(p)`
-  (after a `*` or another qualifier), int handles (`int owned(close) maybe
+  (after a `*` or another qualifier), int handles (`int ?owned(close)
   fd`, `int view fd`), owned objects (`regex_t owned(regfree) re`),
   `struct tokenizer borrows(text) { ... }`, an out parameter's target
-  (`out char * borrows(s) * view maybe end`)
+  (`out char *borrows(s) *?view end`)
 - `unsafe { ... }`, `unsafe(expr)`
 - casts: `cast<int(uint16_t)>(n)`, `cast<ptr(struct dirent *), align>(p)`,
   `unsafe_cast<qual(char *)>(s)` -- the word, its `<` `>` and the permissions
@@ -46,7 +48,9 @@ the language stays `c` and the C/C++ extension's IntelliSense keeps working.
   the end of an expression, `error.` must be followed by a capitalised name,
   `module` must start a line, `unreachable` must stand alone (first on its
   line, after `;` `{` `}` `:` `)`, `else` or `catch`, and before `;` `,` `)`
-  or `}`: `int unreachable;` and `unreachable()` stay names),
+  or `}`: `int unreachable;` and `unreachable()` stay names), `undefined`
+  must be a whole initializer (after a plain `=`, before `;` or `,`:
+  `x == undefined`, `x += undefined`, `f(undefined)` stay names),
   `!` must be followed by a type, `cast`/`unsafe_cast` must be followed by
   `<` and a permission (`cast < 3` compares a variable; a permission is one
   only in that list, before `(`, `,` or `>`, so `cast<int(int)>` keeps the
@@ -59,6 +63,7 @@ the language stays `c` and the C/C++ extension's IntelliSense keeps working.
   (`apps/yasvi/filetypes/c.c`).
 - Scopes: `storage.modifier.yasc.c` (qualifiers, coloured like `const`),
   `keyword.control.{defer,try,catch,unreachable,import}.yasc.c`,
+  `constant.language.undefined.yasc.c`,
   `storage.type.error.yasc.c`, `entity.name.type.error.yasc.c` (a set's
   name), `constant.other.error.yasc.c` (an error's name),
   `variable.parameter.capture.yasc.c` (`|e|`),
@@ -84,10 +89,36 @@ the language stays `c` and the C/C++ extension's IntelliSense keeps working.
   VSCode then drops the whole injection without a message. `test/run.js`
   fails on any rule that matches an empty string.
 
+## Formatting
+
+`tcc -format` (tinycc `docs/tcc_format.md`) lays out C and yasc the way
+clang-format's LLVM style does, for the words clang-format cannot read
+(`* borrows(s) maybe`, slices, `cast<>`, `catch |e|`, `@min`). The extension
+uses it for a `.c`/`.h` file that has a **`.tcc-format`** in its directory or
+above -- the opt-in: C files elsewhere keep whatever formats them now.
+
+- **On save** (`yasc.format.onSave`, not after an auto-save delay), without
+  making tcc VSCode's default formatter for other C files. With tcc as the
+  default formatter and `editor.formatOnSave` on, VSCode does it instead.
+- **Format Document** for every C file: `tcc -format` under a `.tcc-format`,
+  `clang-format` (`yasc.format.clangFormat`, finding the file's
+  `.clang-format`) elsewhere -- each run directly on the buffer, a few
+  milliseconds. The C/C++ extension's own Format Document goes through its
+  language server, which waits behind IntelliSense on a large workspace, and
+  VSCode cancels it when the cursor moves. To use this one:
+  `"[c]": { "editor.defaultFormatter": "yasos.yasc-syntax" }` in the
+  workspace settings. Also the command *yasc: Format this file with tcc*.
+- The buffer goes to `<yasc.compiler> -format -assume-filename=<file>` on
+  stdin, so the file's `.tcc-format` and `.tcc-format-ignore` apply; only the
+  lines that change are replaced. When tcc cannot format the text (an
+  unterminated comment) it says why in the *yasc* output channel and nothing
+  changes. A tcc built before `-format` existed gets one warning: rebuild it.
+- `yasc.format.enable` turns it off.
+
 ## Diagnostics and IntelliSense
 
 The C/C++ extension's IntelliSense parses regular C, so on its own it marks
-yasc as errors (`invalid storage class for a parameter` at `* view maybe`).
+yasc as errors (`invalid storage class for a parameter` at `*?view`).
 The extension fixes that in two parts:
 
 - **tcc's diagnostics** (source `tcc`): each yasc `.c` file goes through

@@ -198,7 +198,7 @@ static int choose_partition(int want_used, int default_index) {
   for (int i = 0; i < count; ++i) {
     char one[8];
     snprintf(one, sizeof(one), i ? ",%d" : "%d", candidates[i] + 1);
-    strcat(list, one);
+    strlcat(list, one, sizeof(list));
   }
   snprintf(prompt, sizeof(prompt), "Partition number (%s, default %d): ",
            list, default_index + 1);

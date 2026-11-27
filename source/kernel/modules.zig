@@ -952,7 +952,7 @@ const DlTarget = union(enum) {
     library: *yasld.Module,
 };
 
-fn dl_target_locked(pid: c.pid_t, handle: ?*anyopaque) ?DlTarget {
+fn dl_target_locked(pid: c.pid_t, handle: ?*const anyopaque) ?DlTarget {
     loader_lock.assert_held();
     const program: ?*yasld.Module = if (executable_for_pid_locked(pid)) |exec| exec.module else null;
     const h = handle orelse return if (program) |p| .{ .program = p } else null;
@@ -992,7 +992,7 @@ pub fn global_handle(pid: c.pid_t) !*anyopaque {
 
 /// dlsym. NoEntry when the symbol is not there, InvalidArgument when the
 /// handle names nothing this process has open.
-pub fn find_dl_symbol(pid: c.pid_t, handle: ?*anyopaque, name: []const u8) !usize {
+pub fn find_dl_symbol(pid: c.pid_t, handle: ?*const anyopaque, name: []const u8) !usize {
     loader_lock.lock();
     defer loader_lock.unlock();
     const target = dl_target_locked(pid, handle) orelse return kernel.errno.ErrnoSet.InvalidArgument;

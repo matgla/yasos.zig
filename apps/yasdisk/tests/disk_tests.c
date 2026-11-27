@@ -30,8 +30,8 @@
 // Helper to create a temporary file with given size
 static char* create_temp_file(size_t size) {
     static char template[] = "/tmp/yasdisk_test_XXXXXX";
-    char* path = malloc(strlen(template) + 1);
-    strcpy(path, template);
+    char* path = malloc(sizeof(template));
+    strlcpy(path, template, sizeof(template));
 
     int fd = mkstemp(path);
     if (fd < 0) {

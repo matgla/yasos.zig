@@ -30,12 +30,12 @@ int main(int argc, char *argv[]) {
   }
   if (argv[1][0] == '/') {
     // Absolute path
-    strcpy(buffer, argv[1]);
+    strlcpy(buffer, argv[1], sizeof(buffer));
   } else {
     // Relative path
     getcwd(buffer, sizeof(buffer));
-    strcat(buffer, "/");
-    strcat(buffer, argv[1]);
+    strlcat(buffer, "/", sizeof(buffer));
+    strlcat(buffer, argv[1], sizeof(buffer));
   }
   int fd = open(buffer, O_RDONLY);
   if (fd < 0) {

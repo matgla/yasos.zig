@@ -158,6 +158,11 @@ once — prefer that when a bug class repeats.
   `libs/tinycc/scripts/yaff_debug_to_elf.py` makes an ELF of it for gdb/readelf.
   `ptrace(2)` (stops, UDF #1 breakpoints, registers, memory, ATTACH to
   descendants; `apps/ptracetest` on the device) -- a traced exec runs from RAM.
+- **`tcc -format [-i|-n] FILES`** (tinycc `docs/tcc_format.md`) — lays out C and
+  yasc (clang-format's LLVM style, the yasc words understood), on the host and
+  the board. Opt-in per directory with `.tcc-format` (libc has one; vendored files
+  and line-sensitive fixtures in `.tcc-format-ignore`); the VSCode extension
+  formats those files on save. It re-lexes its output and refuses any token change.
 - **`scripts/md2txt.py IN.md [-o OUT.txt] [-w 78]`** — Markdown as ASCII text for the
   board's console (`more`): underlined headings, `+---+` tables with wrapped cells.
   pandoc via `pypandoc_binary` in `yasos_venv` (`scripts/requirements.txt`, installed by

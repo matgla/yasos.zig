@@ -214,7 +214,120 @@ function pickCompiler(root, setting) {
   return best || path.join(root, COMPILERS[0]);
 }
 
+// ---- formatting (tcc -format, docs/tcc_format.md in tinycc) ------------
+
+// The .tcc-format that applies to a file: in its directory or above, else
+// null.  A file is formatted only under one: the opt-in, so the C files of
+// other directories keep whatever formats them now.
+function findFormatConfig(absFile) {
+  let dir = path.dirname(absFile);
+  for (;;) {
+    const f = path.join(dir, '.tcc-format');
+    if (fs.existsSync(f)) return f;
+    const up = path.dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+}
+
+// tcc formats the buffer from stdin; the path finds the .tcc-format (and
+// .tcc-format-ignore) next to the file.
+function formatArgs(absFile) {
+  return ['-format', '-assume-filename=' + absFile];
+}
+
+// Files under no .tcc-format: clang-format itself, on stdin, finding the
+// .clang-format next to the file (what the C/C++ extension runs, without
+// waiting for its language server).
+function clangFormatArgs(absFile) {
+  return ['--assume-filename=' + absFile];
+}
+
+// The smallest whole-line replacement that turns OLD into NEW, as offsets
+// into OLD: {start, end, text}, or null when they are equal.  A formatter
+// that replaced everything would move the cursor and the folds.
+function lineEdit(oldText, newText) {
+  if (oldText === newText) return null;
+  const split = (t) => t.match(/[^\n]*\n|[^\n]+$/g) || [];
+  const a = split(oldText), b = split(newText);
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const start = a.slice(0, p).join('').length;
+  const end = oldText.length - a.slice(a.length - s).join('').length;
+  return { start, end, text: b.slice(p, b.length - s).join('') };
+}
+
+// A shell script that answers the C/C++ extension's compiler query as gcc
+// would (`-dM` macros on stdout, the `-v` search list on stderr), with tcc's
+// system include directories and macros.  Given no compiler, the extension
+// queries the host's own (clang, /usr/include) for the workspace's symbol
+// database, and go to definition lands in the host libc's headers.
+// INCLUDES: directories; DEFINES: NAME or NAME=VALUE (parsePredefs).
+function gccShim(includes, defines) {
+  const defs = defines.map((d) => {
+    const i = d.indexOf('=');
+    return i < 0 ? `#define ${d}` : `#define ${d.slice(0, i)} ${d.slice(i + 1)}`;
+  });
+  return [
+    '#!/bin/sh',
+    '# Written by the yasc VSCode extension: the C/C++ extension runs this as',
+    '# the workspace\'s compiler to learn its system headers and macros.',
+    'prev=',
+    'for a in "$@"; do',
+    '  case "$a" in',
+    '    -print-file-name=*|--print-file-name=*) echo "${a#*=}"; exit 0 ;;',
+    '  esac',
+    '  case "$prev" in',
+    '    -print-file-name|--print-file-name) echo "$a"; exit 0 ;;',
+    '  esac',
+    '  prev=$a',
+    'done',
+    "cat <<'YASC_DEFINES'",
+    ...defs,
+    'YASC_DEFINES',
+    "cat >&2 <<'YASC_SEARCH'",
+    'Target: arm-none-eabi',
+    '#include "..." search starts here:',
+    '#include <...> search starts here:',
+    ...includes.map((d) => ' ' + d),
+    'End of search list.',
+    'YASC_SEARCH',
+    '',
+  ].join('\n');
+}
+
+// The defines that erase yasc's parameter words `in` and `out` for
+// IntelliSense in a file with TEXT ('in=', 'out=').  Both are regular names
+// too (`FILE *in`, `struct timespec *out`), so yasc_intellisense.h cannot
+// erase them for every file; left in `static bool parse(out struct f *f)`,
+// IntelliSense drops the whole function, and no name in its body goes to its
+// definition.  A word is erased in a file that only uses it as a parameter
+// word: followed by a name (`out struct f`, `in const char *s`), never by
+// anything else (`out->x`, `*out)`, `s.out`, `goto out;`).
+function paramWordDefines(text) {
+  const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/g, ' ');
+  const defines = [];
+  for (const w of ['in', 'out']) {
+    let word = false;
+    let name = false;
+    for (const m of code.matchAll(new RegExp('\\b' + w + '\\b(\\s*)(.?)', 'g'))) {
+      if (m[1] && /[A-Za-z_]/.test(m[2])) word = true;
+      else name = true;
+    }
+    if (word && !name) defines.push(w + '=');
+  }
+  return defines;
+}
+
 module.exports = {
+  paramWordDefines,
+  gccShim,
+  findFormatConfig,
+  formatArgs,
+  clangFormatArgs,
+  lineEdit,
   pickCompiler,
   globToRegex,
   loadProject,

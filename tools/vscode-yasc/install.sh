@@ -18,7 +18,7 @@ manifest = f"""<?xml version="1.0" encoding="utf-8"?>
     <Identity Language="en-US" Id="{pkg['name']}" Version="{pkg['version']}" Publisher="{pkg['publisher']}"/>
     <DisplayName>{pkg['displayName']}</DisplayName>
     <Description xml:space="preserve">{pkg['description']}</Description>
-    <Categories>Programming Languages,Linters</Categories>
+    <Categories>Programming Languages,Linters,Formatters</Categories>
     <Properties>
       <Property Id="Microsoft.VisualStudio.Code.Engine" Value="{pkg['engines']['vscode']}"/>
     </Properties>

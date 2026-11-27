@@ -72,11 +72,16 @@ jobs:
       # 2026-11-25: 2050000 -> 2200000. Rounds 5 and 6 (yasc slices,
       # in/inout/out, enforced initialization, unreachable, compiler fortify,
       # static bounds, @min/@max) took it to 2134792.
+      # 2026-11-26: 2200000 -> 2250000. tcc -format (the C/yasc formatter,
+      # ~25 KB at -O1) on a tcc at 2174384.
+      # 2026-11-27: 2250000 -> 2300000. @src() and default arguments, fortify
+      # from sized parameters, the yasc view-by-default / in-const rules:
+      # 2256512.
       - name: tcc .text size gate
         if: always()
         shell: bash
         run: |
-          BUDGET=2200000
+          BUDGET=2300000
           ELF=libs/tinycc/bin/armv8m-tcc.elf
           # Also covers the known "build_rootfs.sh exits 0 when make failed" trap:
           # without this, a missing ELF would silently skip the gate.

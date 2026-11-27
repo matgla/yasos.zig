@@ -19,6 +19,9 @@
       "include": "#qualifier-after-type"
     },
     {
+      "include": "#unused-statement"
+    },
+    {
       "include": "#qualifier-before-type"
     },
     {
@@ -38,6 +41,9 @@
     },
     {
       "include": "#unreachable"
+    },
+    {
+      "include": "#undefined"
     },
     {
       "include": "#error-set"
@@ -102,14 +108,92 @@
       ]
     },
     "qualifier-after-star": {
-      "$comment": "owned / view / maybe qualify a pointer: they follow its '*' (or another qualifier): char * owned maybe p, const char * view * view argv, f(char * view), FILE * owned(fclose) maybe f",
-      "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes|c_api)\\s*\\([^()]*\\)\\s*)(owned|view|maybe)\\b(?=\\s*(?:[A-Za-z_*),]|$))",
-      "name": "storage.modifier.yasc.c"
+      "$comment": "a pointer's word goes against its '*', ? (may be null) first: char *?owned p, const char *view *view argv, f(char *view), FILE *?owned(fclose) f, char *?p; two or more in @( ): char *@(const, owned) p",
+      "patterns": [
+        {
+          "begin": "(?<=\\*)(\\?)?(@)(\\()",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.modifier.yasc.c"
+            },
+            "2": {
+              "name": "storage.modifier.yasc.c"
+            },
+            "3": {
+              "name": "punctuation.definition.qualifiers.begin.yasc.c"
+            }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.qualifiers.end.yasc.c"
+            }
+          },
+          "patterns": [
+            {
+              "match": "\\b(owned|borrows|takes|c_api)(?=\\()",
+              "captures": {
+                "1": {
+                  "name": "storage.modifier.yasc.c"
+                }
+              }
+            },
+            {
+              "begin": "\\(",
+              "end": "\\)",
+              "patterns": [
+                {
+                  "include": "source.c"
+                }
+              ]
+            },
+            {
+              "match": "\\b(owned|view)\\b",
+              "name": "storage.modifier.yasc.c"
+            },
+            {
+              "match": "\\b(const|restrict|volatile|_Atomic)\\b",
+              "name": "storage.modifier.c"
+            }
+          ]
+        },
+        {
+          "match": "(?<=\\*)(\\?)?(owned|view)\\b(?!\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.yasc.c"
+            },
+            "2": {
+              "name": "storage.modifier.yasc.c"
+            }
+          }
+        },
+        {
+          "match": "(?<=\\*)\\?",
+          "name": "storage.modifier.yasc.c"
+        }
+      ]
     },
     "qualifier-before-type": {
-      "$comment": "out / inout / in / drop come before a parameter's type: out int * view n, inout FILE * view f, drop struct s * owned p",
-      "match": "(?<!\\.|->)\\b(out|inout|in|drop)\\b(?=\\s+[A-Za-z_])",
-      "name": "storage.modifier.yasc.c"
+      "$comment": "out / inout / in / drop / unused where a parameter's declaration starts -- after ( or , (or first on a line: the parameters go on) or another of them -- with its type after them: out int *view n, inout FILE *view f, drop struct s *owned p, unused int arg; out / inout / drop also before an int handle's ?owned / view: int drop ?owned(close) fd. Names everywhere else, as the compiler reads them: out char *out, struct out x",
+      "match": "(?:^|(?<=[(,])|(?<=\\b(?:out|inout|in|drop|unused)\\s))\\s*\\b(out|inout|in|drop|unused)\\b(?=\\s+[A-Za-z_])|(?<!\\.|->)\\b(out|inout|drop)\\b(?=\\s+\\??(?:owned|view)\\b)",
+      "captures": {
+        "1": {
+          "name": "storage.modifier.yasc.c"
+        },
+        "2": {
+          "name": "storage.modifier.yasc.c"
+        }
+      }
+    },
+    "unused-statement": {
+      "$comment": "the statement unused(a, b); at a statement's start: unused(user, group); (x = unused(1) stays a call)",
+      "match": "(?:^|(?<=[;{}]))\\s*\\b(unused)\\b(?=\\s*\\()",
+      "captures": {
+        "1": {
+          "name": "keyword.control.defer.yasc.c"
+        }
+      }
     },
     "statement": {
       "match": "(?<!\\.|->)\\b(defer|errdefer)\\b(?=\\s*(?:[A-Za-z_*{(]|$))",
@@ -121,6 +205,15 @@
       "captures": {
         "1": {
           "name": "keyword.control.unreachable.yasc.c"
+        }
+      }
+    },
+    "undefined": {
+      "$comment": "`T x = undefined;`, `int a = undefined, b = 1;`: the whole initializer of a local, a value like nullptr -- after a plain = (not == != <= >= or a compound assignment) and before ; or ,; not `int undefined;`, `undefined;` or `f(undefined)`",
+      "match": "(?<![=!<>+\\-*/%&|^]=)(?<==)\\s*\\b(undefined)\\b(?=\\s*[;,])",
+      "captures": {
+        "1": {
+          "name": "constant.language.undefined.yasc.c"
         }
       }
     },
@@ -276,16 +369,16 @@
           "name": "storage.modifier.errunion.yasc.c"
         },
         {
-          "match": "!(?=\\s*(?!sizeof\\b|defined\\b|return\\b)[A-Za-z_]\\w*(?:\\s*\\*\\s*(?:(?:owned|view|maybe)\\b\\s*|(?:owned|borrows|takes|c_api)\\s*\\([^()]*\\)\\s*)*)*\\s+[A-Za-z_]\\w*\\s*\\()",
+          "match": "!(?=\\s*(?!sizeof\\b|defined\\b|return\\b)[A-Za-z_]\\w*(?:\\s*\\*\\??(?:(?:owned|view)\\b|(?:owned|borrows|takes|c_api)\\([^()]*\\)|@\\((?:[^()]|\\([^()]*\\))*\\))?)*\\s+[A-Za-z_]\\w*\\s*\\()",
           "name": "storage.modifier.errunion.yasc.c"
         }
       ]
     },
     "qualifier-with-list": {
-      "$comment": "owned(dealloc) / borrows(x, ...) / takes(p): after a '*' or another qualifier, or after a type when the declaration goes on: FILE * owned(fclose) maybe f, int owned(close) maybe fd, regex_t owned(regfree) re, struct tokenizer borrows(text) {",
+      "$comment": "owned(dealloc) / borrows(x, ...) / takes(p): against a '*' (after its ?), or after a type when the declaration goes on: FILE *?owned(fclose) f, int ?owned(close) fd, regex_t owned(regfree) re, struct tokenizer borrows(text) {",
       "patterns": [
         {
-          "match": "(?<=\\*\\s*|\\b(?:owned|view|maybe)\\s+|\\b(?:owned|borrows|takes|c_api)\\s*\\([^()]*\\)\\s*)(?<!\\.|->)\\b(owned|borrows|takes|c_api)\\s*(?=\\()",
+          "match": "(?<=\\*|\\*\\?)(?<!\\.|->)\\b(owned|borrows|takes|c_api)(?=\\()",
           "captures": {
             "1": {
               "name": "storage.modifier.yasc.c"
@@ -293,18 +386,22 @@
           }
         },
         {
-          "match": "(?<=\\b[A-Za-z_]\\w*\\s+)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+)(?<![.>]\\s*\\b\\w+\\s+)\\b(owned|borrows)\\s*(?=\\([^()]*\\)\\s*(?:[A-Za-z_*{]|$))",
+          "match": "(?<=\\b[A-Za-z_]\\w*\\s+|\\b[A-Za-z_]\\w*\\s+\\?)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+)(?<![.>]\\s*\\b\\w+\\s+)\\b(owned|borrows)\\s*(?=\\([^()]*\\)\\s*(?:[A-Za-z_*{]|$))",
           "captures": {
             "1": {
               "name": "storage.modifier.yasc.c"
             }
           }
+        },
+        {
+          "match": "(?<=[A-Za-z_0-9]\\s)\\?(?=(?:owned|view)\\b)",
+          "name": "storage.modifier.yasc.c"
         }
       ]
     },
     "qualifier-after-type": {
-      "$comment": "int handles: int view fd, pid_t view p -- after a type name, before the declared name",
-      "match": "(?<=\\b[A-Za-z_]\\w*\\s+)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+)(?<![.>]\\s*\\b\\w+\\s+)\\b(view|maybe)\\b(?=\\s+[A-Za-z_])",
+      "$comment": "int handles: int view fd, int ?view fd, pid_t view p -- after a type name, before the declared name",
+      "match": "(?<=\\b[A-Za-z_]\\w*\\s+|\\b[A-Za-z_]\\w*\\s+\\?)(?<!\\b(?:struct|union|enum|typedef|const|volatile|static|extern|register|inline|restrict|return|case|goto|else|do|sizeof|typeof|alignof|if|while|for|switch|break|continue|default)\\s+)(?<![.>]\\s*\\b\\w+\\s+)\\b(view)\\b(?=\\s+[A-Za-z_])",
       "name": "storage.modifier.yasc.c"
     },
     "unsafe": {
@@ -352,9 +449,17 @@
       ]
     },
     "qualifier-in-brackets": {
-      "$comment": "a parameter array's outermost brackets qualify the pointer it becomes, as C99's a[const]: char * view argv[owned], int a[maybe 4], char * view a[view restrict]",
-      "match": "(?<=\\b[A-Za-z_]\\w*\\s*\\[(?:\\s*(?:owned|view|maybe|restrict|const|volatile|static)\\b)*\\s*)(owned|view|maybe)\\b(?=[\\s\\w]*\\])",
-      "name": "storage.modifier.yasc.c"
+      "$comment": "a parameter array's outermost brackets qualify the pointer it becomes, as C99's a[const]: char *view argv[owned], int a[?4], char *view a[view restrict]",
+      "patterns": [
+        {
+          "match": "(?<=\\b[A-Za-z_]\\w*\\s*\\[(?:\\s*(?:\\?|owned|view|restrict|const|volatile|static)\\b)*\\s*)(owned|view)\\b(?=[\\s\\w:]*\\])",
+          "name": "storage.modifier.yasc.c"
+        },
+        {
+          "match": "(?<=\\b[A-Za-z_]\\w*\\s*\\[)\\?",
+          "name": "storage.modifier.yasc.c"
+        }
+      ]
     },
     "at-builtin": {
       "comment": "@min / @max: tinycc's short builtins, in plain C files too",

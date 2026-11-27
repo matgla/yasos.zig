@@ -118,7 +118,7 @@ static int resolve(const char *name)
         if (strlen(name) >= sizeof(program)) {
             return -1;
         }
-        strcpy(program, name);
+        strlcpy(program, name, sizeof(program));
         return access(program, F_OK) == 0 ? 0 : -1;
     }
 
@@ -133,7 +133,7 @@ static int resolve(const char *name)
         if (len > 0 && len + 1 + strlen(name) < sizeof(program)) {
             memcpy(program, dir, len);
             program[len] = '/';
-            strcpy(program + len + 1, name);
+            strlcpy(program + len + 1, name, sizeof(program) - len - 1);
             if (access(program, F_OK) == 0) {
                 return 0;
             }

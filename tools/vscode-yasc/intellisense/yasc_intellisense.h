@@ -7,7 +7,9 @@
  * regular uses of the same word, or cannot touch them at all: `@min`/`@max`,
  * `cast<...>(x)`/`unsafe_cast<...>(x)`, slices (`[]T`, `p[a:b]`),
  * `owned(dealloc)` (`owned` is erased, the
- * parenthesis stays), `out`, `in`, `catch`, `error`, `!T`, `union(k)`, `ro`/`wo`/
+ * parenthesis stays), `out` and `in` (the provider erases them with a define
+ * in a file that never uses them as names: tcc.paramWordDefines), `catch`,
+ * `error`, `!T`, `union(k)`, `ro`/`wo`/
  * `w1c`, methods in struct bodies, `module`/`import`/`export`.  The errors
  * IntelliSense gives for them are hidden by squiggles.js where tcc accepts
  * the line (`#pragma diag_suppress` cannot: they are not discretionary).  The headers

@@ -1764,6 +1764,47 @@ pub fn sys_geteuid(arg: *const anyopaque) !i32 {
     return 0;
 }
 
+// User and group ids are not kept yet: ENOSYS (libc covers getgid & co).
+pub fn sys_getgid(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
+pub fn sys_getegid(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
+pub fn sys_setgid(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
+pub fn sys_setegid(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
+pub fn sys_getgroups(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
+pub fn sys_setgroups(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
+pub fn sys_setuid(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
+pub fn sys_seteuid(arg: *const anyopaque) !i32 {
+    _ = arg;
+    return ErrnoSet.NotImplemented;
+}
+
 // Preemptible: the heap guards itself now -- `__malloc_lock` is a ranked
 // recursive spinlock and the allocator wrapper's accounting is under it too --
 // and the fd table this walks is per-process.

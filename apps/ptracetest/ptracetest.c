@@ -79,7 +79,7 @@ static uintptr_t text_base(pid_t pid) {
   unsigned long address = 0, size = 0;
   FILE *f;
   if (pid) snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
-  else strcpy(path, "/proc/self/maps");
+  else strlcpy(path, "/proc/self/maps", sizeof(path));
   f = fopen(path, "r");
   if (!f) return 0;
   while (fgets(line, sizeof(line), f)) {
@@ -284,7 +284,7 @@ int main(int argc, char **argv) {
 
   {
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
-    if (n <= 0) strcpy(self, "/usr/bin/ptracetest");
+    if (n <= 0) strlcpy(self, "/usr/bin/ptracetest", sizeof(self));
     else self[n] = 0;
   }
   test_breakpoint();

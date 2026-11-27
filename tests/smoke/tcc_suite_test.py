@@ -212,6 +212,8 @@ NATIVE_TARGET_SKIP_TESTS = {
     "bug_asm_label_static_toplevel_asm": "top-level asm .word of a symbol in .text: YAFF rejects R_ARM_ABS32 outside data",
     # the host test builds abi_hfa_b.c with arm-none-eabi-gcc; no gcc on the device
     "abi_hfa_main": "gcc-built companion object (HFA interop)",
+    # the host test builds yasc_src_gcc.c with arm-none-eabi-gcc (test_yasc_src_gcc_interop)
+    "yasc_src_gcc_main": "gcc-built companion object (yasc_src interop)",
     # naked asm returning in s0-s3: AAPCS-VFP only; device userspace is softfp
     "fp_hard_hfa_ret_regs_exec": "hard-float ABI test; device userspace is softfp",
     # cpsid/msr PRIMASK/BASEPRI are ignored (and mrs reads 0) in unprivileged thread mode
@@ -2472,10 +2474,13 @@ def compile_testcase(testcase, session, timing=None, current_item_id=None, temp_
             expected_lines, expected_exit_code = load_expect_file(testcase.name, testcase.source_dir if testcase.source_dir else None)
 
         source_basename = os.path.basename(testcase.name)
+        # a diagnostic names the source as `NAME:LINE:`; a program may print
+        # its own name and line (yasc_src.c's @src(), 46_grep.c) at run time
+        compile_line = re.compile(r"(^|[/\s])" + re.escape(source_basename) + r":\d+:")
         compile_expected_lines = []
         runtime_expected_lines = []
         for expected_line in expected_lines:
-            if source_basename in expected_line:
+            if compile_line.search(expected_line):
                 compile_expected_lines.append(expected_line)
             else:
                 runtime_expected_lines.append(expected_line)

@@ -174,11 +174,12 @@ static void label_plt_stubs(YaffFile *yaff, Labels *labels) {
       if (!symbol) {
         break;
       }
-      name = malloc(strlen(symbol->name) + 5);
+      size_t name_size = strlen(symbol->name) + 5;
+      name = malloc(name_size);
       if (!name) {
         break;
       }
-      sprintf(name, "%s@plt", symbol->name);
+      snprintf(name, name_size, "%s@plt", symbol->name);
       add_label(labels, plt->module_offset + offset, name, name);
       break;
     }
@@ -540,14 +541,14 @@ static void print_regions(const YaffFile *yaff) {
     if (!region->length) {
       continue;
     }
-    sprintf(module, "0x%x", region->module_offset);
+    snprintf(module, sizeof(module), "0x%x", region->module_offset);
     if (region->stored) {
-      sprintf(file, "0x%x", region->file_offset);
+      snprintf(file, sizeof(file), "0x%x", region->file_offset);
       if (region->file_offset + region->length > last) {
         last = region->file_offset + region->length;
       }
     } else {
-      sprintf(file, "-");
+      snprintf(file, sizeof(file), "-");
     }
     printf("  %-8s %10s %10s %10u\n", region->name, module, file, region->length);
   }

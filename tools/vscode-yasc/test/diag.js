@@ -32,10 +32,22 @@ test('globs', () => {
   assert(!tcc.globToRegex('a/*.c').test('a/b/c.c'));
 });
 
+test('in/out erased only where they are never names', () => {
+  assert.deepStrictEqual(tcc.paramWordDefines('static bool parse(inout char *line, out struct f *f);'), ['out=']);
+  assert.deepStrictEqual(tcc.paramWordDefines('int f(in const char *s, out size_t *n) { return 0; }'), ['in=', 'out=']);
+  // a name anywhere keeps the word: `out char *out`, `s.out`, `goto out`
+  assert.deepStrictEqual(tcc.paramWordDefines('int f(out char *out) { out[0] = 0; }'), []);
+  assert.deepStrictEqual(tcc.paramWordDefines('void f(out T *p) { s.out = 1; }'), []);
+  assert.deepStrictEqual(tcc.paramWordDefines('void f(out T *p) { goto out; out: ; }'), []);
+  // comments, strings and #include do not count
+  assert.deepStrictEqual(tcc.paramWordDefines('#include "x.h"\n/* out-> */ char *s = "in)";\nvoid f(out T *p);'), ['out=']);
+  assert.deepStrictEqual(tcc.paramWordDefines('int x;'), []);
+});
+
 test('messages, notes, include chains', () => {
   const err = [
     '/w/a.c:33: error: plain pointer in yasc: say owned or view for \'path\'',
-    '/w/a.c:33: note: the function only borrows \'path\' (line 37): write \'* view maybe\'',
+    '/w/a.c:33: note: the function only borrows \'path\' (line 37): write \'*?view\'',
     'In file included from /w/a.c:2:',
     'In file included from y.h:1:',
     'x.h:2: error: expression expected before \';\'',
@@ -200,6 +212,33 @@ test('IntelliSense "unused" for a name used where it cannot parse', () => {
   assert.strictEqual(squiggles.keep(diags, new Set([3]), ERROR, null).length, 5);
 });
 
+test('format: the smallest line edit', () => {
+  const apply = (o, e) => (e ? o.slice(0, e.start) + e.text + o.slice(e.end) : o);
+  const cases = [
+    ['a\nb\nc\n', 'a\nB\nc\n', { start: 2, end: 4, text: 'B\n' }],
+    ['a\nb\nc', 'a\nb\nc\n', null],
+    ['', 'x\n', null],
+    ['x\n', '', null],
+    ['a\nb\n', 'a\nb\nb\n', null],
+  ];
+  for (const [o, n, want] of cases) {
+    const e = tcc.lineEdit(o, n);
+    if (want) assert.deepStrictEqual(e, want);
+    assert.strictEqual(apply(o, e), n, JSON.stringify([o, n]));
+  }
+  assert.strictEqual(tcc.lineEdit('same\n', 'same\n'), null);
+});
+
+test('format: the .tcc-format above a file is the opt-in', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yasc-fmt-'));
+  fs.mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'a', '.tcc-format'), 'IndentWidth: 2\n');
+  assert.strictEqual(tcc.findFormatConfig(path.join(dir, 'a', 'b', 'x.c')), path.join(dir, 'a', '.tcc-format'));
+  assert.strictEqual(tcc.findFormatConfig(path.join(dir, 'y.c')), null);
+  assert.deepStrictEqual(tcc.formatArgs('/w/x.c'), ['-format', '-assume-filename=/w/x.c']);
+  fs.rmSync(dir, { recursive: true });
+});
+
 const exe = path.join(root, 'libs/tinycc/bin/armv8m-tcc');
 if (fs.existsSync(exe)) {
   test('a real check: unsaved text on stdin names the file', () => {
@@ -234,6 +273,33 @@ if (fs.existsSync(exe)) {
   });
 } else {
   console.log('skip a real check (no ' + exe + ')');
+}
+
+// clang-format on a buffer, for files under no .tcc-format.
+if (cp.spawnSync('clang-format', ['--version']).status === 0) {
+  test('a real clang-format: the repository .clang-format, the buffer on stdin', () => {
+    const file = path.join(root, 'apps', 'x.c');
+    const text = 'int  f( void ){return 0;}\n';
+    const r = cp.spawnSync('clang-format', tcc.clangFormatArgs(file), { input: text, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout.replace(/\n$/, ''), 'int f(void) {\n  return 0;\n}'.replace(/\n$/, ''));
+  });
+}
+
+// tcc -format on a buffer, when the cross has it (`make cross` in tinycc).
+const fmtExe = [path.join(root, 'libs/tinycc/bin/armv8m-tcc'), path.join(root, 'libs/tinycc/armv8m-tcc')]
+  .find((f) => fs.existsSync(f) && cp.spawnSync(f, ['-format', '-h'], { encoding: 'utf8' }).status === 0);
+if (fmtExe) {
+  test('a real format: the buffer on stdin, the edit applied', () => {
+    const text = 'int  f( void ){return 0;}\n';
+    const r = cp.spawnSync(fmtExe, tcc.formatArgs(path.join(os.tmpdir(), 'x.c')), { input: text, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, 'int f(void) {\n  return 0;\n}\n');
+    const e = tcc.lineEdit(text, r.stdout);
+    assert.strictEqual(text.slice(0, e.start) + e.text + text.slice(e.end), r.stdout);
+  });
+} else {
+  console.log('skip a real format (no tcc with -format)');
 }
 
 if (failed) {

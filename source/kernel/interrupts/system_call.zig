@@ -176,6 +176,14 @@ fn SyscallFactory(comptime index: usize) SyscallHandler {
             c.sys_sigaction => return handlers.sys_sigaction,
             c.sys_sync => return handlers.sys_sync,
             c.sys_reboot => return handlers.sys_reboot,
+            c.sys_getgid => return handlers.sys_getgid,
+            c.sys_getegid => return handlers.sys_getegid,
+            c.sys_setgid => return handlers.sys_setgid,
+            c.sys_setegid => return handlers.sys_setegid,
+            c.sys_getgroups => return handlers.sys_getgroups,
+            c.sys_setgroups => return handlers.sys_setgroups,
+            c.sys_setuid => return handlers.sys_setuid,
+            c.sys_seteuid => return handlers.sys_seteuid,
             else => return sys_unhandled_factory(index).handler,
         }
     }
@@ -287,6 +295,10 @@ fn syscall_arg_bytes(comptime index: usize) ?usize {
         c.sys_ptrace => @sizeOf(c.ptrace_context),
         c.sys_sigaction => @sizeOf(c.sigaction_context),
         c.sys_reboot => @sizeOf(c.reboot_context),
+        c.sys_setgid, c.sys_setegid => @sizeOf(c.setgid_context),
+        c.sys_getgroups => @sizeOf(c.getgroups_context),
+        c.sys_setgroups => @sizeOf(c.setgroups_context),
+        c.sys_setuid, c.sys_seteuid => @sizeOf(c.setuid_context),
         else => null,
     };
 }
@@ -590,6 +602,34 @@ test "SystemCall.VerifyLookupTable" {
     try std.testing.expectEqual(handlers.sys_prlimit, syscall_lookup_table[c.sys_prlimit]);
     try std.testing.expectEqual(handlers.sys_perf_dump, syscall_lookup_table[c.sys_perf_dump]);
     try std.testing.expectEqual(handlers.sys_poll, syscall_lookup_table[c.sys_poll]);
+    try std.testing.expectEqual(handlers.sys_getgid, syscall_lookup_table[c.sys_getgid]);
+    try std.testing.expectEqual(handlers.sys_getegid, syscall_lookup_table[c.sys_getegid]);
+    try std.testing.expectEqual(handlers.sys_setgid, syscall_lookup_table[c.sys_setgid]);
+    try std.testing.expectEqual(handlers.sys_setegid, syscall_lookup_table[c.sys_setegid]);
+    try std.testing.expectEqual(handlers.sys_getgroups, syscall_lookup_table[c.sys_getgroups]);
+    try std.testing.expectEqual(handlers.sys_setgroups, syscall_lookup_table[c.sys_setgroups]);
+    try std.testing.expectEqual(handlers.sys_setuid, syscall_lookup_table[c.sys_setuid]);
+    try std.testing.expectEqual(handlers.sys_seteuid, syscall_lookup_table[c.sys_seteuid]);
+}
+
+test "SystemCall.UserAndGroupIdCallsAnswerEnosys" {
+    const enosys = kernel.errno.ErrnoSet.NotImplemented;
+    var set: c.setgid_context = .{ .gid = 0 };
+    var get_list: c.getgroups_context = .{ .size = 0, .list = null };
+    var set_list: c.setgroups_context = .{ .size = 0, .list = null };
+    try std.testing.expectError(enosys, handlers.sys_getgid(&set));
+    try std.testing.expectError(enosys, handlers.sys_getegid(&set));
+    try std.testing.expectError(enosys, handlers.sys_setgid(&set));
+    try std.testing.expectError(enosys, handlers.sys_setegid(&set));
+    try std.testing.expectError(enosys, handlers.sys_getgroups(&get_list));
+    try std.testing.expectError(enosys, handlers.sys_setgroups(&set_list));
+    var set_user: c.setuid_context = .{ .uid = 0 };
+    try std.testing.expectError(enosys, handlers.sys_setuid(&set_user));
+    try std.testing.expectError(enosys, handlers.sys_seteuid(&set_user));
+    try std.testing.expectEqual(@as(?usize, @sizeOf(c.setuid_context)), syscall_arg_size_table[c.sys_setuid]);
+    try std.testing.expectEqual(@as(?usize, @sizeOf(c.setgid_context)), syscall_arg_size_table[c.sys_setgid]);
+    try std.testing.expectEqual(@as(?usize, @sizeOf(c.getgroups_context)), syscall_arg_size_table[c.sys_getgroups]);
+    try std.testing.expectEqual(@as(?usize, @sizeOf(c.setgroups_context)), syscall_arg_size_table[c.sys_setgroups]);
 }
 
 test "SystemCall.PollIsNotAFastSyscall" {
